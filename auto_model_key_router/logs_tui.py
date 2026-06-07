@@ -9,6 +9,7 @@ from rich.align import Align
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .formatting import percent, short_text
 from .tui import console, key_pressed, page_title, section_panel, shortcut_text
@@ -66,9 +67,14 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
 
 
 def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int) -> Group:
-    page_size = max(limit, 1)
+    page_size = log_page_size(limit) if page == "logs" else max(limit, 1)
     content = service_logs_renderable(log_file_path, page_size, log_offset) if page == "logs" else request_stats_renderable(database_path, stats_page, page_size)
     return Group(page_title("日志板块", "运行日志与调用统计"), log_tabs_renderable(page), content, log_help_text(page))
+
+
+def log_page_size(limit: int) -> int:
+    reserved_rows = 10
+    return max(1, min(max(limit, 1), console.size.height - reserved_rows))
 
 
 def log_tabs_renderable(page: str) -> Panel:
@@ -94,7 +100,7 @@ def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> 
     offset = min(max(offset, 0), max_offset)
     end = total - offset
     start = max(end - page_size, 0)
-    content = "\n".join(lines[start:end]) if lines[start:end] else "暂无运行日志"
+    content = Text("\n".join(lines[start:end]) if lines[start:end] else "暂无运行日志", no_wrap=True, overflow="ellipsis")
     title = "运行日志" if total == 0 else f"运行日志 第 {start + 1}-{end} 行 / 共 {total} 行"
     return section_panel(content, title, "blue")
 
@@ -106,7 +112,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int) -> G
     page_size = max(page_size, 1)
     page = max(page, 1)
     offset = (page - 1) * page_size
-    table = Table(title="调用统计", show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
+    table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     for name in ["时间", "模型", "Key", "状态", "成功", "重试", "输入", "输出", "总Tok", "缓存", "首字", "耗时"]:
         table.add_column(name)
     with sqlite3.connect(path) as connection:
@@ -138,7 +144,8 @@ def request_stats_renderable(database_path: str, page: int, page_size: int) -> G
         table.add_row(short_text(row["created_at"], 19), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", str(row["prompt_tokens"]), str(row["completion_tokens"]), str(row["total_tokens"]), str(row["cached_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
     if not rows:
         table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
-    return Group(section_panel(f"DB: [bold]{short_text(path, 56)}[/bold]\n[bold]{page}[/bold]/[bold]{max_page}[/bold] 页 · [bold]{page_size}[/bold]/页 · 共 [bold]{total}[/bold]", "调用统计", "cyan"), section_panel(request_stats_summary_renderable(summary, status_rows), "总览", "cyan"), section_panel(table, "请求明细", "blue"))
+    details_title = f"请求明细 · 第 {page}/{max_page} 页 · {page_size}/页 · 共 {total} 条"
+    return Group(section_panel(request_stats_summary_renderable(summary, status_rows), "总览", "cyan"), section_panel(table, details_title, "blue"))
 
 
 def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sqlite3.Row]) -> Table:
@@ -163,12 +170,12 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     table.add_column("值", justify="right")
     table.add_column("指标", style="cyan")
     table.add_column("值", justify="right")
-    table.add_row("总请求", str(requests), "成功率", percent(successes, requests))
-    table.add_row("成功/失败", f"{successes}/{failures}", "重试", f"{retries} ({percent(retries, requests)})")
-    table.add_row("输入/输出 Tok", f"{prompt_tokens}/{completion_tokens}", "总 Tok", str(total_tokens))
-    table.add_row("缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})")
-    table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "首字总耗时", f"{total_first_token_ms} ms")
-    table.add_row("平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "总耗时", f"{total_duration_ms} ms")
-    table.add_row("模型/Key 数", f"{summary['model_count']}/{summary['key_count']}", "状态码", short_text(status_codes, 36))
-    table.add_row("首条请求", short_text(summary["first_request_at"] or "-", 19), "最新请求", short_text(summary["latest_request_at"] or "-", 19))
+    table.add_column("指标", style="cyan")
+    table.add_column("值", justify="right")
+    table.add_row("总请求", str(requests), "成功率", percent(successes, requests), "成功/失败", f"{successes}/{failures}")
+    table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{prompt_tokens}/{completion_tokens}", "总 Tok", str(total_tokens))
+    table.add_row("缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "模型/Key 数", f"{summary['model_count']}/{summary['key_count']}")
+    table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "首字总耗时", f"{total_first_token_ms} ms", "状态码", short_text(status_codes, 36))
+    table.add_row("平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "总耗时", f"{total_duration_ms} ms", "首条请求", short_text(summary["first_request_at"] or "-", 19))
+    table.add_row("最新请求", short_text(summary["latest_request_at"] or "-", 19), "", "", "", "")
     return table

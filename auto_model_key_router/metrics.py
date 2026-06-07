@@ -4,9 +4,13 @@ import asyncio
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any
+
+
+BEIJING_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass
@@ -64,7 +68,7 @@ class MetricsStore:
         self.database_path = Path(database_path)
         if self.database_path.parent != Path(""):
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._started_at = datetime.now(UTC)
+        self._started_at = _now_beijing()
         self._lock = asyncio.Lock()
         self._connection = sqlite3.connect(self.database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
@@ -111,7 +115,7 @@ class MetricsStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    datetime.now(UTC).isoformat(),
+                    _now_beijing().isoformat(),
                     model_id,
                     request_model_id,
                     key_name,
@@ -219,6 +223,7 @@ class MetricsStore:
         self._ensure_column("cache_hit", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("first_token_ms", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("duration_ms", "INTEGER NOT NULL DEFAULT 0")
+        self._migrate_created_at_to_beijing()
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_model ON request_metrics(model_id)")
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_requested_model ON request_metrics(requested_model_id)")
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_key ON request_metrics(model_id, key_name)")
@@ -230,12 +235,33 @@ class MetricsStore:
         if name not in columns:
             self._connection.execute(f"ALTER TABLE request_metrics ADD COLUMN {name} {definition}")
 
+    def _migrate_created_at_to_beijing(self) -> None:
+        rows = self._connection.execute("SELECT id, created_at FROM request_metrics WHERE created_at LIKE '%+00:00' OR created_at LIKE '%Z'").fetchall()
+        for row in rows:
+            beijing_created_at = _to_beijing_iso(row["created_at"])
+            if beijing_created_at != row["created_at"]:
+                self._connection.execute("UPDATE request_metrics SET created_at = ? WHERE id = ?", (beijing_created_at, row["id"]))
+
 
 def extract_usage(data: Any) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     usage = data.get("usage")
     return usage if isinstance(usage, dict) else None
+
+
+def _now_beijing() -> datetime:
+    return datetime.now(BEIJING_TZ)
+
+
+def _to_beijing_iso(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        return value
+    return parsed.astimezone(BEIJING_TZ).isoformat()
 
 
 def _add_row(stats: UsageStats, row: sqlite3.Row) -> None:
