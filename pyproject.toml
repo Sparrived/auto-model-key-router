@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "auto-model-key-router"
-version = "0.1.0"
+version = "1.0.0"
 description = "A lightweight local OpenAI-compatible model API key router"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -9,6 +13,12 @@ dependencies = [
     "httpx>=0.27.0",
     "rich>=13.7.0",
     "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+release = [
+    "build>=1.2.0",
+    "twine>=5.0.0",
 ]
 
 [project.scripts]

@@ -11,13 +11,14 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from . import __version__
 from .config import RouterConfig
 from .key_pool import KeyPool
 from .metrics import MetricsStore, extract_usage
 
 
 def create_app(config: RouterConfig, config_path: str | Path | None = None) -> FastAPI:
-    app = FastAPI(title="Auto Model Key Router", version="0.1.0")
+    app = FastAPI(title="Auto Model Key Router", version=__version__)
     app.state.config = config
     app.state.config_path = str(Path(config_path).resolve()) if config_path is not None else ""
     app.state.local_api_key = config.local_api_key
