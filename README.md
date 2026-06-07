@@ -1,4 +1,4 @@
-Auto Model Key Router 是一个轻量的本地 OpenAI-compatible v1 API key 路由服务。它支持为同一个模型 ID 配置多个 API key，并以轮询方式把请求自动分配到可用 key；当上游返回认证、限流或服务错误时，会在配置的重试次数内切换到下一个 key。
+Auto Model Key Router 是一个轻量的本地 API key 路由服务。它支持为同一个模型 ID 配置多个 API key，并以轮询/优先级的方式把请求自动分配到可用 key；当上游返回认证、限流或服务错误时，会在配置的重试次数内切换到下一个 key。
 
 ## 功能
 
