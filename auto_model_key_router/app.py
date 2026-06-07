@@ -90,7 +90,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 return JSONResponse({"error": {"message": str(exc)}}, status_code=503)
 
             excluded.add(key.name)
-            upstream = _join_url(key.base_url, f"/v1/{path}")
+            upstream = _join_url(key.base_url, f"/v1/{_upstream_path(path, payload)}")
             headers = _upstream_headers(request, key.api_key)
             _debug_report("upstream-attempt", {"upstream": upstream, "model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "stream": _is_stream_request(payload)})
 
@@ -207,6 +207,7 @@ def _upstream_body(body: bytes, payload: dict[str, Any], model_id: str, stream: 
         return body
     upstream_payload = dict(payload)
     upstream_payload["model"] = model_id
+    upstream_payload = _adapt_message_payload(upstream_payload)
     if stream:
         stream_options = upstream_payload.get("stream_options")
         if not isinstance(stream_options, dict):
@@ -214,6 +215,116 @@ def _upstream_body(body: bytes, payload: dict[str, Any], model_id: str, stream: 
         stream_options["include_usage"] = True
         upstream_payload["stream_options"] = stream_options
     return json.dumps(upstream_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _upstream_path(path: str, payload: dict[str, Any]) -> str:
+    if path in {"messages", "responses"} and isinstance(payload, dict) and payload.get("model"):
+        return "chat/completions"
+    return path
+
+
+def _adapt_message_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if "messages" in payload:
+        return _normalize_chat_compat_parameters(_adapt_anthropic_messages_payload(payload))
+    if "input" in payload:
+        return _normalize_chat_compat_parameters(_adapt_responses_input_payload(payload))
+    return _normalize_chat_compat_parameters(payload)
+
+
+def _adapt_anthropic_messages_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+    adapted = dict(payload)
+    adapted_messages = [_adapt_message(message) for message in messages if isinstance(message, dict)]
+    system = adapted.pop("system", None)
+    if system:
+        adapted_messages = [{"role": "system", "content": _adapt_content(system)}, *adapted_messages]
+    adapted["messages"] = adapted_messages
+    return adapted
+
+
+def _adapt_responses_input_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    adapted = dict(payload)
+    messages = _responses_input_to_messages(adapted.pop("input"))
+    instructions = adapted.pop("instructions", None)
+    if instructions:
+        messages = [{"role": "system", "content": _adapt_content(instructions)}, *messages]
+    adapted["messages"] = messages
+    return adapted
+
+
+def _normalize_chat_compat_parameters(payload: dict[str, Any]) -> dict[str, Any]:
+    adapted = dict(payload)
+    if "max_output_tokens" in adapted and "max_tokens" not in adapted:
+        adapted["max_tokens"] = adapted.pop("max_output_tokens")
+    else:
+        adapted.pop("max_output_tokens", None)
+    if "stop_sequences" in adapted and "stop" not in adapted:
+        adapted["stop"] = adapted.pop("stop_sequences")
+    else:
+        adapted.pop("stop_sequences", None)
+    for key in ("anthropic_version", "metadata", "reasoning", "text", "truncation", "previous_response_id"):
+        adapted.pop(key, None)
+    return adapted
+
+
+def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        return [{"role": "user", "content": value}]
+    if not isinstance(value, list):
+        return [{"role": "user", "content": _adapt_content(value)}]
+    messages: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            role = str(item.get("role") or "user")
+            content = item.get("content", item.get("text", ""))
+            if item.get("type") == "message" or "role" in item or "content" in item:
+                messages.append({"role": role, "content": _adapt_content(content)})
+            else:
+                messages.append({"role": "user", "content": _adapt_content(item)})
+        else:
+            messages.append({"role": "user", "content": _adapt_content(item)})
+    return messages
+
+
+def _adapt_message(message: dict[str, Any]) -> dict[str, Any]:
+    adapted = dict(message)
+    adapted["content"] = _adapt_content(adapted.get("content", ""))
+    return adapted
+
+
+def _adapt_content(content: Any) -> Any:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return [_adapt_content_part(part) for part in content]
+    if isinstance(content, dict):
+        return [_adapt_content_part(content)]
+    return str(content)
+
+
+def _adapt_content_part(part: Any) -> Any:
+    if not isinstance(part, dict):
+        return {"type": "text", "text": str(part)}
+    part_type = part.get("type")
+    if part_type in {"text", "image_url"}:
+        return part
+    if part_type in {"input_text", "output_text"}:
+        return {"type": "text", "text": str(part.get("text", ""))}
+    if part_type == "image":
+        source = part.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            media_type = source.get("media_type") or "image/png"
+            data = source.get("data") or ""
+            return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
+    if part_type == "input_image":
+        image_url = part.get("image_url") or part.get("file_id") or ""
+        return {"type": "image_url", "image_url": {"url": str(image_url)}}
+    text = part.get("text")
+    if text is not None:
+        return {"type": "text", "text": str(text)}
+    return {"type": "text", "text": json.dumps(part, ensure_ascii=False, separators=(",", ":"))}
 
 
 def _join_url(base_url: str, path: str) -> str:

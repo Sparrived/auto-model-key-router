@@ -96,7 +96,6 @@ auto-model-key-router --config router-config.json
 - 交互式添加模型 / API key
 - 生成 / 重置本地 API key
 - 查看日志板块
-- 刷新配置
 - 退出
 
 Terminal UI 只负责配置与服务管理，不直接承载一次性的启动逻辑。需要直接启动本地服务时使用命令行入口：
@@ -125,7 +124,7 @@ auto-model-key-router --config router-config.json --stop
 auto-model-key-router --config router-config.json --install-service
 ```
 
-Windows 下会注册为开机自启动计划任务 `AutoModelKeyRouter` 并立即启动。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，同时尝试启用 linger 以支持用户未登录时启动。
+Windows 下会注册为用户登录时启动的计划任务 `AutoModelKeyRouter` 并立即启动。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，同时尝试启用 linger 以支持用户未登录时启动。
 
 也可以使用统一服务管理命令：
 
@@ -176,6 +175,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 本地服务会根据请求体中的 `model` 字段选择对应 key，并把请求转发到该 key 配置的上游 `/v1/chat/completions`。
+
+也兼容 Anthropic Messages 和 OpenAI Responses 风格的消息输入：
+
+- 请求 `/v1/messages` 时会把 Anthropic 顶层 `system` 转为 system message，并把 `content` 中的 `text`、base64 `image` 块转为 OpenAI-compatible 消息块后转发到上游 `/v1/chat/completions`。
+- 请求 `/v1/responses` 时会把 `instructions` 转为 system message，把 `input` 字符串或消息数组转为 `messages` 后转发到上游 `/v1/chat/completions`。
+- 请求 `/v1/chat/completions` 时也会兼容 Anthropic 风格的顶层 `system` 和 Responses 风格的 content part 类型。
 
 ## 本地鉴权
 
