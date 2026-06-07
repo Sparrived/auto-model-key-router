@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import uvicorn
@@ -33,11 +34,11 @@ _SERVICE_STATUS_CACHE_TTL = 2.0
 _service_status_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 
 MENU_OPTIONS = [
-    ("1", "管理系统服务 / 开机自启动"),
-    ("2", "管理模型 / API Key"),
-    ("3", "管理本地鉴权"),
-    ("4", "配置监听端口"),
-    ("5", "查看日志板块"),
+    ("1", "系统服务"),
+    ("2", "模型 Key"),
+    ("3", "本地鉴权"),
+    ("4", "监听端口"),
+    ("5", "日志板块"),
     ("6", "刷新配置"),
     ("0", "退出"),
 ]
@@ -198,7 +199,7 @@ def _render_option_menu(title: str, options: list[tuple[str, str]], selected: in
         renderables.append(content)
     renderables.extend([
         Panel(table, title=title),
-        "[dim]使用 ↑/↓ 选择，Enter 确认；也可以按数字快捷键。[/dim]",
+        "[dim]↑/↓ 选择，Enter 确认，数字快捷键[/dim]",
     ])
     return Group(*renderables)
 
@@ -229,7 +230,7 @@ def _render_terminal_ui(config_path: Path, config: RouterConfig, selected: int) 
         Align.center("[bold cyan]Auto Model Key Router[/bold cyan]"),
         *_config_renderables(config, config_path),
         Panel(menu, title="Terminal UI"),
-        "[dim]使用 ↑/↓ 选择，Enter 确认；也可以按数字快捷键。[/dim]",
+        "[dim]↑/↓ 选择，Enter 确认，数字快捷键[/dim]",
     )
 
 
@@ -327,7 +328,7 @@ def _start_service_background_result(config_path: Path, config: RouterConfig) ->
     )
     log_file.close()
     pid_file.write_text(str(process.pid), encoding="utf-8")
-    return Panel(f"后台服务已启动。\nPID: [bold]{process.pid}[/bold]\n地址: [bold]http://{config.host}:{config.port}[/bold]\n运行日志: [bold]{config.log_file_path}[/bold]", title="后台服务", border_style="green")
+    return Panel(f"后台服务已启动。\nPID: [bold]{process.pid}[/bold]\n地址: [bold]http://{config.host}:{config.port}[/bold]\n日志: [bold]{config.log_file_path}[/bold]", title="后台服务", border_style="green")
 
 
 def _start_service_foreground(config_path: Path, config: RouterConfig) -> None:
@@ -361,14 +362,14 @@ def _stop_background_service_result(config: RouterConfig) -> Panel:
             pid_file.unlink(missing_ok=True)
             return Panel(f"后台服务已停止。\nPID: [bold]{pid}[/bold]", title="后台服务", border_style="green")
         time.sleep(0.1)
-    return Panel(f"已发送停止信号，但进程仍可能在退出中。\nPID: [bold]{pid}[/bold]", title="后台服务", border_style="yellow")
+    return Panel(f"已发送停止信号，进程退出中。\nPID: [bold]{pid}[/bold]", title="后台服务", border_style="yellow")
 
 
 def _restart_service_after_config_change(path: Path, old_config: RouterConfig, new_config: RouterConfig) -> Any:
     pid = _read_pid(_pid_file_path(old_config))
     was_running = _is_service_healthy(old_config.host, old_config.port, use_cache=False) or bool(pid and _is_process_running(pid))
     if not was_running:
-        return Panel("服务当前未运行，配置已保存；下次启动时生效。", title="服务重启", border_style="yellow")
+        return Panel("配置已保存，下次启动生效。", title="服务重启", border_style="yellow")
     stop_result = _stop_background_service_result(old_config)
     start_result = _start_service_background_result(path, new_config)
     return Group(stop_result, start_result)
@@ -393,7 +394,7 @@ def _background_status_panel(config: RouterConfig, config_path: Path | None = No
         lines.append(f"运行配置: [bold]{running_config_path}[/bold]")
     if expected_config_path and running_config_path and Path(running_config_path) != Path(expected_config_path):
         lines.append(f"[yellow]当前 TUI 配置: {expected_config_path}[/yellow]")
-        lines.append("[yellow]运行中的服务使用了另一个配置文件，本地 API key 可能不一致。[/yellow]")
+        lines.append("[yellow]服务配置不同，Key 可能不一致。[/yellow]")
 
     running_fingerprint = str(health.get("local_api_key_fingerprint") or "")
     expected_fingerprint = _key_fingerprint(config.local_api_key)
@@ -402,7 +403,7 @@ def _background_status_panel(config: RouterConfig, config_path: Path | None = No
     if expected_fingerprint:
         lines.append(f"当前配置本地 key 指纹: [bold]{expected_fingerprint}[/bold]")
     if running_fingerprint and expected_fingerprint and running_fingerprint != expected_fingerprint:
-        lines.append("[yellow]运行中的服务仍在使用旧本地 API key，请重启/启动已注册服务后再请求。[/yellow]")
+        lines.append("[yellow]服务仍用旧 Key，请重启。[/yellow]")
     return Panel("\n".join(lines), title="后台服务", border_style="green", expand=False)
 
 
@@ -431,14 +432,14 @@ def _is_process_running(pid: int) -> bool:
 def _manage_system_service_interactively(config_path: Path) -> None:
     while True:
         choice = _select_option(
-            "系统服务 / 开机自启动",
+            "系统服务",
             [
-                ("1", "安装并启用开机自启动"),
-                ("2", "启动已注册服务"),
-                ("3", "停止已注册服务"),
-                ("4", "重启已注册服务"),
-                ("5", "查看服务状态"),
-                ("6", "卸载并取消开机自启动"),
+                ("1", "安装自启"),
+                ("2", "启动服务"),
+                ("3", "停止服务"),
+                ("4", "重启服务"),
+                ("5", "服务状态"),
+                ("6", "卸载自启"),
                 ("0", "返回"),
             ],
             selected=4,
@@ -477,15 +478,15 @@ def _manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
             f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground',
         ]
         return Group(
-            _registration_result(command, "Windows 开机自启动任务"),
-            _registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动已注册任务"),
+            _registration_result(command, "Windows 自启"),
+            _registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"),
         )
     if action == "uninstall":
         config = RouterConfig.load(config_path)
         return Group(
             _stop_background_service_result(config),
-            _registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止运行中任务"),
-            _registration_result(["schtasks", "/Delete", "/F", "/TN", task_name], "Windows 开机自启动任务"),
+            _registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"),
+            _registration_result(["schtasks", "/Delete", "/F", "/TN", task_name], "Windows 自启"),
         )
     commands = {
         "start": ["schtasks", "/Run", "/TN", task_name],
@@ -494,10 +495,10 @@ def _manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
     }
     if action == "restart":
         return Group(
-            _registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止已注册任务"),
-            _registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动已注册任务"),
+            _registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"),
+            _registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"),
         )
-    return _registration_result(commands[action], "Windows 开机自启动任务")
+    return _registration_result(commands[action], "Windows 自启")
 
 
 def _background_python_executable() -> Path:
@@ -587,18 +588,18 @@ def _render_config(config: RouterConfig, path: Path) -> None:
 
 
 def _config_renderables(config: RouterConfig, path: Path) -> tuple[Panel, Table]:
-    table = Table(title="模型路由配置", show_lines=False)
+    table = Table(title="路由配置", show_lines=False)
     table.add_column("模型 ID", style="cyan")
-    table.add_column("显示名称")
+    table.add_column("名称")
     table.add_column("路由模式")
-    table.add_column("Key 数量", justify="right", style="green")
-    table.add_column("上游地址")
+    table.add_column("Keys", justify="right", style="green")
+    table.add_column("上游")
 
     for model in config.models:
-        upstreams = sorted({key.base_url for key in model.keys})
+        upstreams = sorted({_compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
         routing_mode = "优先级" if model.routing_mode == "priority" else "分流"
-        table.add_row(model.id, display_names, routing_mode, str(len(model.keys)), "\n".join(upstreams))
+        table.add_row(_short_text(model.id, 28), _short_text(display_names, 24), routing_mode, str(len(model.keys)), "\n".join(upstreams))
 
     if not config.models:
         table.add_row("未配置", "-", "-", "0", "-")
@@ -651,15 +652,37 @@ def _key_fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
+def _short_text(value: Any, limit: int = 32) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:max(limit - 1, 1)]}…"
+
+
+def _compact_url(value: Any, limit: int = 32) -> str:
+    text = str(value or "-")
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return _short_text(text, limit)
+    if parsed.netloc:
+        compact = parsed.netloc
+        if parsed.path and parsed.path != "/":
+            compact = f"{compact}{parsed.path.rstrip('/')}"
+        return _short_text(compact, limit)
+    return _short_text(text, limit)
+
+
 def _manage_model_keys_interactively(path: Path) -> None:
     while True:
         choice = _select_option(
-            "模型 / API key 管理",
+            "模型 Key",
             [
-                ("1", "添加模型 / API key"),
+                ("1", "添加 Key"),
                 ("2", "编辑 API key"),
                 ("3", "删除 API key"),
-                ("4", "调整 API key 顺序"),
+                ("4", "Key 排序"),
+                ("5", "路由模式"),
                 ("0", "返回"),
             ],
         )
@@ -669,7 +692,7 @@ def _manage_model_keys_interactively(path: Path) -> None:
             _clear_terminal_history()
             result = _add_config_interactively(path, ask_continue=False)
             if result is not None:
-                _show_result_page("添加模型 / API key", result)
+                _show_result_page("添加 Key", result)
             continue
         if choice == "2":
             _clear_terminal_history()
@@ -687,7 +710,13 @@ def _manage_model_keys_interactively(path: Path) -> None:
             _clear_terminal_history()
             result = _reorder_api_keys_interactively(path)
             if result is not None:
-                _show_result_page("调整 API key 顺序", result)
+                _show_result_page("Key 排序", result)
+            continue
+        if choice == "5":
+            _clear_terminal_history()
+            result = _set_model_routing_mode_interactively(path)
+            if result is not None:
+                _show_result_page("路由模式", result)
             continue
 
 
@@ -791,9 +820,9 @@ def _reorder_api_keys_interactively(path: Path) -> None:
     models = data.get("models", [])
     selectable_models = [model for model in models if len(model.get("keys", [])) > 1]
     if not selectable_models:
-        return Panel("[yellow]没有可调整顺序的模型。至少需要同一模型下配置 2 个 API key。[/yellow]", title="调整 API key 顺序", border_style="yellow")
+        return Panel("[yellow]暂无可排序模型，需至少 2 个 Key。[/yellow]", title="Key 排序", border_style="yellow")
 
-    model_options = [(str(index + 1), f"{model['id']}（{len(model.get('keys', []))} 个 Key）") for index, model in enumerate(selectable_models)]
+    model_options = [(str(index + 1), f"{_short_text(model['id'], 28)} · {len(model.get('keys', []))} Key") for index, model in enumerate(selectable_models)]
     model_options.append(("0", "返回"))
     model_choice = _select_option("选择模型", model_options)
     if model_choice == "0":
@@ -806,7 +835,7 @@ def _reorder_api_keys_interactively(path: Path) -> None:
     while True:
         action, selected = _select_reorder_key_action(model, selected)
         if action == "cancel":
-            return Panel("[yellow]配置未变化。[/yellow]", title="调整 API key 顺序", border_style="yellow")
+            return Panel("[yellow]配置未变化。[/yellow]", title="Key 排序", border_style="yellow")
         if action == "save":
             new_config = RouterConfig.from_dict(data)
             path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -847,31 +876,78 @@ def _select_reorder_key_action(model: dict[str, Any], selected: int = 0) -> tupl
 
 
 def _render_key_order_menu(model: dict[str, Any], selected: int) -> Group:
-    table = Table(title=f"{model['id']} Key 顺序", show_header=False, box=None)
+    table = Table(title="Key 顺序", show_header=False, box=None)
     table.add_column("指示", justify="center")
     table.add_column("顺序", style="cyan", justify="right")
     table.add_column("Key")
-    table.add_column("上游地址")
+    table.add_column("上游")
     for index, key in enumerate(model.get("keys", [])):
-        name = str(key.get("name") or f"{model['id']}-{index + 1}")
-        base_url = str(key.get("base_url") or "-")
+        name = _short_text(key.get("name") or f"{model['id']}-{index + 1}", 28)
+        base_url = _compact_url(key.get("base_url") or "-", 28)
         if index == selected:
             table.add_row(">", f"[reverse]{index + 1}[/reverse]", f"[reverse]{name}[/reverse]", f"[reverse]{base_url}[/reverse]")
         else:
             table.add_row("", str(index + 1), name, base_url)
     return Group(
-        Panel(table, title="调整 API key 顺序"),
-        "[dim]↑/↓ 选择 Key；W 上移，S 下移；Enter 保存；Esc 取消。运行时会按该顺序轮询。[/dim]",
+        Panel(table, title=f"Key 排序 · {_short_text(model['id'], 24)}"),
+        "[dim]↑/↓ 选择，W/S 移动，Enter 保存，Esc 取消[/dim]",
     )
 
 
 def _key_order_text(model: dict[str, Any]) -> str:
-    lines = [f"模型: [bold]{model['id']}[/bold]", "当前顺序:"]
+    lines = [f"模型: [bold]{_short_text(model['id'], 32)}[/bold]", "当前顺序:"]
     for index, key in enumerate(model.get("keys", [])):
-        name = str(key.get("name") or f"{model['id']}-{index + 1}")
-        base_url = str(key.get("base_url") or "-")
-        lines.append(f"{index + 1}. {name}  ->  {base_url}")
+        name = _short_text(key.get("name") or f"{model['id']}-{index + 1}", 32)
+        base_url = _compact_url(key.get("base_url") or "-", 32)
+        lines.append(f"{index + 1}. {name} · {base_url}")
     return "\n".join(lines)
+
+
+def _set_model_routing_mode_interactively(path: Path) -> None:
+    data = _load_config_data(path)
+    models = data.get("models", [])
+    if not models:
+        return Panel("[yellow]还没有模型配置。[/yellow]", title="路由模式", border_style="yellow")
+
+    model_options = []
+    for index, model in enumerate(models):
+        routing_mode = str(model.get("routing_mode") or data.get("routing_mode") or "round_robin")
+        routing_mode_text = "优先级" if routing_mode == "priority" else "分流"
+        model_options.append((str(index + 1), f"{_short_text(model['id'], 28)} · {routing_mode_text}"))
+    model_options.append(("0", "返回"))
+    model_choice = _select_option("选择模型", model_options)
+    if model_choice == "0":
+        return
+
+    old_config = RouterConfig.from_dict(data)
+    model = models[int(model_choice) - 1]
+    current_mode = str(model.get("routing_mode") or data.get("routing_mode") or "round_robin")
+    mode_choice = _select_option(
+        "选择路由模式",
+        [
+            ("1", "分流：轮询"),
+            ("2", "优先级：按顺序"),
+            ("0", "返回"),
+        ],
+        selected=1 if current_mode == "priority" else 0,
+    )
+    if mode_choice == "0":
+        return Panel("[yellow]配置未变化。[/yellow]", title="路由模式", border_style="yellow")
+
+    new_mode = "priority" if mode_choice == "2" else "round_robin"
+    if new_mode == current_mode:
+        mode_text = "优先级" if new_mode == "priority" else "分流"
+        return Panel(f"模型 [bold]{_short_text(model['id'], 32)}[/bold] 已是 [bold]{mode_text}[/bold]。", title="路由模式", border_style="yellow")
+
+    model["routing_mode"] = new_mode
+    new_config = RouterConfig.from_dict(data)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    old_mode_text = "优先级" if current_mode == "priority" else "分流"
+    new_mode_text = "优先级" if new_mode == "priority" else "分流"
+    return Group(
+        Panel(f"已更新路由模式。\n模型: [bold]{_short_text(model['id'], 32)}[/bold]\n原模式: [bold]{old_mode_text}[/bold]\n新模式: [bold]{new_mode_text}[/bold]", title="路由模式", border_style="green"),
+        _restart_service_after_config_change(path, old_config, new_config),
+    )
 
 
 def _select_api_key(path: Path, title: str) -> tuple[dict[str, Any], dict[str, Any], int] | None:
@@ -881,7 +957,7 @@ def _select_api_key(path: Path, title: str) -> tuple[dict[str, Any], dict[str, A
     if not selectable_models:
         return None
 
-    model_options = [(str(index + 1), f"{model['id']}（{len(model.get('keys', []))} 个 Key）") for index, model in enumerate(selectable_models)]
+    model_options = [(str(index + 1), f"{_short_text(model['id'], 28)} · {len(model.get('keys', []))} Key") for index, model in enumerate(selectable_models)]
     model_options.append(("0", "返回"))
     model_choice = _select_option("选择模型", model_options)
     if model_choice == "0":
@@ -890,9 +966,9 @@ def _select_api_key(path: Path, title: str) -> tuple[dict[str, Any], dict[str, A
 
     key_options = []
     for index, key in enumerate(model.get("keys", [])):
-        name = str(key.get("name") or f"{model['id']}-{index + 1}")
-        base_url = str(key.get("base_url") or data.get("default_base_url") or "-")
-        key_options.append((str(index + 1), f"{name}  ->  {base_url}"))
+        name = _short_text(key.get("name") or f"{model['id']}-{index + 1}", 28)
+        base_url = _compact_url(key.get("base_url") or data.get("default_base_url") or "-", 28)
+        key_options.append((str(index + 1), f"{name} · {base_url}"))
     key_options.append(("0", "返回"))
     key_choice = _select_option(title, key_options)
     if key_choice == "0":
@@ -910,7 +986,7 @@ def _set_local_api_key_interactively(path: Path) -> None:
     new_config = RouterConfig.from_dict(data)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return Group(
-        Panel(f"已启用本地鉴权，并生成新密钥。\n\n[bold]{local_api_key}[/bold]\n\n客户端请求本地 v1 接口时需要传入：\nAuthorization: Bearer <key>", title="本地鉴权", border_style="green"),
+        Panel(f"已生成新密钥。\n\n[bold]{local_api_key}[/bold]\n\n请求时添加：\nAuthorization: Bearer <key>", title="本地鉴权", border_style="green"),
         _restart_service_after_config_change(path, old_config, new_config),
     )
 
@@ -1020,8 +1096,8 @@ def _log_tabs_renderable(page: str) -> Panel:
 
 def _log_help_text(page: str) -> str:
     if page == "logs":
-        return "[dim]实时更新；1/L 日志，2/S 统计；↑/↓ 逐行翻阅，PageUp/PageDown 翻页，Home/G 回到底部；q / Esc / 0 返回。[/dim]"
-    return "[dim]实时更新；1/L 日志，2/S 统计；←/→ 或 PageUp/PageDown 翻页查询；q / Esc / 0 返回。[/dim]"
+        return "[dim]1 日志，2 统计；↑/↓ 滚动；Pg 翻页；q 返回[/dim]"
+    return "[dim]1 日志，2 统计；←/→ 翻页；q 返回[/dim]"
 
 
 def _service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> Panel:
@@ -1039,7 +1115,7 @@ def _service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) ->
     lines = lines[start:end]
     content = "\n".join(lines) if lines else "暂无运行日志"
     if total == 0:
-        title = f"运行日志 {path}"
+        title = "运行日志"
     else:
         title = f"运行日志 第 {start + 1}-{end} 行 / 共 {total} 行"
     return Panel(content, title=title)
@@ -1062,10 +1138,10 @@ def _request_stats_renderable(database_path: str, page: int, page_size: int) -> 
     table.add_column("重试", justify="center")
     table.add_column("输入", justify="right")
     table.add_column("输出", justify="right")
-    table.add_column("总Tokens", justify="right")
-    table.add_column("缓存Tokens", justify="right")
-    table.add_column("首字(ms)", justify="right")
-    table.add_column("耗时(ms)", justify="right")
+    table.add_column("总Tok", justify="right")
+    table.add_column("缓存", justify="right")
+    table.add_column("首字", justify="right")
+    table.add_column("耗时", justify="right")
 
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
@@ -1090,9 +1166,9 @@ def _request_stats_renderable(database_path: str, page: int, page_size: int) -> 
 
     for row in rows:
         table.add_row(
-            row["created_at"],
-            row["model_id"],
-            row["key_name"],
+            _short_text(row["created_at"], 19),
+            _short_text(row["model_id"], 22),
+            _short_text(row["key_name"], 18),
             "-" if row["status_code"] is None else str(row["status_code"]),
             "是" if row["success"] else "否",
             "是" if row["retried"] else "否",
@@ -1108,7 +1184,7 @@ def _request_stats_renderable(database_path: str, page: int, page_size: int) -> 
         table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
 
     return Group(
-        Panel(f"统计数据库: [bold]{path}[/bold]\n第 [bold]{page}[/bold] / [bold]{max_page}[/bold] 页，每页 [bold]{page_size}[/bold] 条，共 [bold]{total}[/bold] 条。", title="调用统计"),
+        Panel(f"DB: [bold]{_short_text(path, 56)}[/bold]\n[bold]{page}[/bold]/[bold]{max_page}[/bold] 页 · [bold]{page_size}[/bold]/页 · 共 [bold]{total}[/bold]", title="调用统计"),
         table,
     )
 
