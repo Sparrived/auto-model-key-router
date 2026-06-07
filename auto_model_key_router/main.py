@@ -928,15 +928,15 @@ def _render_logs(database_path: str, log_file_path: str, limit: int) -> None:
 
 
 def _watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
-    with Live(_render_live_logs(database_path, log_file_path, limit), console=console, screen=True, refresh_per_second=1) as live:
+    with Live(_render_live_logs(database_path, log_file_path, limit), console=console, screen=True, auto_refresh=False) as live:
         while True:
-            live.update(_render_live_logs(database_path, log_file_path, limit))
             started = time.monotonic()
             while time.monotonic() - started < 1:
                 key = _key_pressed()
                 if key in {"q", "Q", "0", "cancel"}:
                     return
                 time.sleep(0.05)
+            live.update(_render_live_logs(database_path, log_file_path, limit), refresh=True)
 
 
 def _render_live_logs(database_path: str, log_file_path: str, limit: int) -> Group:
