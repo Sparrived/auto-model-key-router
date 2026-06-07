@@ -248,6 +248,18 @@ def _read_key() -> str:
             return "up"
         if code == "P":
             return "down"
+        if code == "K":
+            return "left"
+        if code == "M":
+            return "right"
+        if code == "I":
+            return "page_up"
+        if code == "Q":
+            return "page_down"
+        if code == "G":
+            return "home"
+        if code == "O":
+            return "end"
     if key == "\x1b":
         second = msvcrt.getwch()
         third = msvcrt.getwch() if second == "[" else ""
@@ -255,6 +267,10 @@ def _read_key() -> str:
             return "up"
         if third == "B":
             return "down"
+        if third == "D":
+            return "left"
+        if third == "C":
+            return "right"
     return key
 
 
@@ -923,53 +939,106 @@ def _find_model(models: list[dict[str, Any]], model_id: str) -> dict[str, Any] |
 
 
 def _render_logs(database_path: str, log_file_path: str, limit: int) -> None:
-    for renderable in _log_renderables(database_path, log_file_path, limit).renderables:
-        console.print(renderable)
+    console.print(_service_logs_renderable(log_file_path, max(limit, 1), 0))
+    console.print(_request_stats_renderable(database_path, 1, max(limit, 1)))
 
 
 def _watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
-    with Live(_render_live_logs(database_path, log_file_path, limit), console=console, screen=True, auto_refresh=False) as live:
+    page = "logs"
+    log_offset = 0
+    stats_page = 1
+    with Live(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), console=console, screen=True, auto_refresh=False) as live:
         while True:
             started = time.monotonic()
             while time.monotonic() - started < 1:
                 key = _key_pressed()
                 if key in {"q", "Q", "0", "cancel"}:
                     return
+                if key in {"1", "l", "L"}:
+                    page = "logs"
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
+                if key in {"2", "s", "S"}:
+                    page = "stats"
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
+                if page == "logs" and key in {"up", "page_up", "k", "K"}:
+                    log_offset += max(limit, 1) if key == "page_up" else 1
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
+                if page == "logs" and key in {"down", "page_down", "j", "J"}:
+                    log_offset = max(0, log_offset - (max(limit, 1) if key == "page_down" else 1))
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
+                if page == "logs" and key in {"home", "g", "G"}:
+                    log_offset = 0
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
+                if page == "stats" and key in {"left", "page_up", "up", "p", "P"}:
+                    stats_page = max(1, stats_page - 1)
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
+                if page == "stats" and key in {"right", "page_down", "down", "n", "N"}:
+                    stats_page += 1
+                    live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
+                    continue
                 time.sleep(0.05)
-            live.update(_render_live_logs(database_path, log_file_path, limit), refresh=True)
+            live.update(_render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page), refresh=True)
 
 
-def _render_live_logs(database_path: str, log_file_path: str, limit: int) -> Group:
+def _render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int) -> Group:
+    page_size = max(limit, 1)
+    content = _service_logs_renderable(log_file_path, page_size, log_offset) if page == "logs" else _request_stats_renderable(database_path, stats_page, page_size)
     return Group(
         Align.center("[bold cyan]日志板块[/bold cyan]"),
-        _log_renderables(database_path, log_file_path, limit),
-        "[dim]日志每秒自动刷新；按 q / Esc / 0 返回。[/dim]",
+        _log_tabs_renderable(page),
+        content,
+        _log_help_text(page),
     )
 
 
-def _log_renderables(database_path: str, log_file_path: str, limit: int) -> Group:
-    return Group(
-        _service_logs_renderable(log_file_path, limit),
-        _request_logs_renderable(database_path, limit),
-    )
+def _log_tabs_renderable(page: str) -> Panel:
+    logs_label = "[reverse]1 运行日志[/reverse]" if page == "logs" else "1 运行日志"
+    stats_label = "[reverse]2 调用统计[/reverse]" if page == "stats" else "2 调用统计"
+    return Panel(f"{logs_label}    {stats_label}", title="页面")
 
 
-def _service_logs_renderable(log_file_path: str, limit: int) -> Panel:
+def _log_help_text(page: str) -> str:
+    if page == "logs":
+        return "[dim]实时更新；1/L 日志，2/S 统计；↑/↓ 逐行翻阅，PageUp/PageDown 翻页，Home/G 回到底部；q / Esc / 0 返回。[/dim]"
+    return "[dim]实时更新；1/L 日志，2/S 统计；←/→ 或 PageUp/PageDown 翻页查询；q / Esc / 0 返回。[/dim]"
+
+
+def _service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> Panel:
     path = Path(log_file_path)
     if not path.exists():
         return Panel(f"[yellow]运行日志不存在: {path}[/yellow]", title="运行日志", border_style="yellow")
 
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(limit, 1):]
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(lines)
+    page_size = max(limit, 1)
+    max_offset = max(total - page_size, 0)
+    offset = min(max(offset, 0), max_offset)
+    end = total - offset
+    start = max(end - page_size, 0)
+    lines = lines[start:end]
     content = "\n".join(lines) if lines else "暂无运行日志"
-    return Panel(content, title=f"运行日志 最近 {limit} 行")
+    if total == 0:
+        title = f"运行日志 {path}"
+    else:
+        title = f"运行日志 第 {start + 1}-{end} 行 / 共 {total} 行"
+    return Panel(content, title=title)
 
 
-def _request_logs_renderable(database_path: str, limit: int) -> Group | Panel:
+def _request_stats_renderable(database_path: str, page: int, page_size: int) -> Group | Panel:
     path = Path(database_path)
     if not path.exists():
-        return Panel(f"[yellow]统计数据库不存在: {path}[/yellow]", title="请求日志", border_style="yellow")
+        return Panel(f"[yellow]统计数据库不存在: {path}[/yellow]", title="调用统计", border_style="yellow")
 
-    table = Table(title=f"最近 {limit} 条请求日志", show_lines=False)
+    page_size = max(page_size, 1)
+    page = max(page, 1)
+    offset = (page - 1) * page_size
+    table = Table(title="调用统计", show_lines=False)
     table.add_column("时间")
     table.add_column("模型", style="cyan")
     table.add_column("Key", style="green")
@@ -989,14 +1058,19 @@ def _request_logs_renderable(database_path: str, limit: int) -> Group | Panel:
         cached_tokens_expr = "cached_tokens" if "cached_tokens" in columns else "0 AS cached_tokens"
         first_token_ms_expr = "first_token_ms" if "first_token_ms" in columns else "0 AS first_token_ms"
         duration_ms_expr = "duration_ms" if "duration_ms" in columns else "0 AS duration_ms"
+        total = connection.execute("SELECT COUNT(*) AS total FROM request_metrics").fetchone()["total"]
+        max_page = max((total + page_size - 1) // page_size, 1)
+        page = min(page, max_page)
+        offset = (page - 1) * page_size
         rows = connection.execute(
             f"""
             SELECT created_at, model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens, {cached_tokens_expr}, {first_token_ms_expr}, {duration_ms_expr}
             FROM request_metrics
             ORDER BY id DESC
             LIMIT ?
+            OFFSET ?
             """,
-            (max(limit, 1),),
+            (page_size, offset),
         ).fetchall()
 
     for row in rows:
@@ -1019,7 +1093,7 @@ def _request_logs_renderable(database_path: str, limit: int) -> Group | Panel:
         table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
 
     return Group(
-        Panel(f"统计数据库: [bold]{path}[/bold]", title="请求日志"),
+        Panel(f"统计数据库: [bold]{path}[/bold]\n第 [bold]{page}[/bold] / [bold]{max_page}[/bold] 页，每页 [bold]{page_size}[/bold] 条，共 [bold]{total}[/bold] 条。", title="调用统计"),
         table,
     )
 
