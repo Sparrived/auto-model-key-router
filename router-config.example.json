@@ -1,0 +1,26 @@
+{
+  "host": "127.0.0.1",
+  "port": 8000,
+  "default_base_url": "https://api.openai.com",
+  "request_timeout": 60,
+  "max_retries": 2,
+  "metrics_db_path": "",
+  "log_file_path": "",
+  "local_api_key": "amkr-generated-local-api-key",
+  "models": [
+    {
+      "id": "gpt-4o-mini",
+      "aliases": ["gpt-4o-mini-display", "fast-mini"],
+      "keys": [
+        {
+          "name": "gpt-4o-mini-key-1",
+          "api_key": "sk-your-first-key"
+        },
+        {
+          "name": "gpt-4o-mini-key-2",
+          "api_key": "sk-your-second-key"
+        }
+      ]
+    }
+  ]
+}
