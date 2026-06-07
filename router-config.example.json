@@ -11,6 +11,7 @@
     {
       "id": "gpt-4o-mini",
       "aliases": ["gpt-4o-mini-display", "fast-mini"],
+      "routing_mode": "round_robin",
       "keys": [
         {
           "name": "gpt-4o-mini-key-1",

@@ -4,7 +4,7 @@ Auto Model Key Router 是一个轻量的本地 OpenAI-compatible v1 API key 路�
 
 - 支持 OpenAI-compatible `/v1/*` 请求转发
 - 支持同一模型 ID 配置多个 key
-- 支持按模型维度轮询负载分配
+- 支持按模型维度选择“分流”或“优先级”路由模式
 - 支持 key 失败后自动尝试下一个 key
 - 支持请求量、成功/失败、重试、状态码、Token 使用量和缓存命中统计
 - 支持 Rich CLI 展示配置摘要、交互式添加配置和日志板块
@@ -40,6 +40,7 @@ copy router-config.example.json router-config.json
     {
       "id": "gpt-4o-mini",
       "aliases": ["gpt-4o-mini-display", "fast-mini"],
+      "routing_mode": "round_robin",
       "keys": [
         { "name": "key-1", "api_key": "sk-your-first-key" },
         { "name": "key-2", "api_key": "sk-your-second-key" }
@@ -52,6 +53,11 @@ copy router-config.example.json router-config.json
 也可以为某个 key 单独配置 `base_url`，用于接入其他 OpenAI-compatible 上游。
 
 每个模型配置中的 `id` 是统一路由用的真实模型 ID；`aliases` 是额外显示名称或别名。客户端请求中使用 `id` 或任意 `aliases` 都会映射到同一个模型配置和同一组 key。
+
+`routing_mode` 支持两种模式：
+
+- `round_robin`：分流模式，按配置顺序轮询多个 key，把请求均匀分配到不同 key，这是默认模式。
+- `priority`：优先级模式，每次请求优先使用配置中排在最前面的 key；只有当前 key 请求失败且状态码可重试，才会按顺序尝试后面的 key。
 
 默认配置文件也会保存在同一个系统应用缓存目录中，文件名为 `router-config.json`。如果当前目录存在旧的 `router-config.json`，首次未指定 `--config` 启动时会自动复制到默认缓存目录。
 
@@ -119,7 +125,7 @@ auto-model-key-router --config router-config.json --stop
 auto-model-key-router --config router-config.json --install-service
 ```
 
-Windows 下会注册为开机自启动计划任务 `AutoModelKeyRouter`。Linux 下会注册为 systemd user service：`auto-model-key-router.service`，并尝试启用 linger 以支持用户未登录时启动。
+Windows 下会注册为开机自启动计划任务 `AutoModelKeyRouter` 并立即启动。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，同时尝试启用 linger 以支持用户未登录时启动。
 
 也可以使用统一服务管理命令：
 
@@ -128,10 +134,11 @@ auto-model-key-router --config router-config.json --service install
 auto-model-key-router --config router-config.json --service status
 auto-model-key-router --config router-config.json --service start
 auto-model-key-router --config router-config.json --service stop
+auto-model-key-router --config router-config.json --service restart
 auto-model-key-router --config router-config.json --service uninstall
 ```
 
-Terminal UI 中的“管理系统服务 / 开机自启动”会进入服务管理子菜单，可直接安装、卸载、启动、停止和查看状态。
+Terminal UI 中的“管理系统服务 / 开机自启动”会进入服务管理子菜单，可直接安装、卸载、启动、停止、重启和查看状态。
 
 只查看配置摘要：
 

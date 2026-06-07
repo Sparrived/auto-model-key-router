@@ -55,7 +55,7 @@ def main() -> None:
     parser.add_argument("--stop", action="store_true", help="停止后台服务")
     parser.add_argument("--status", action="store_true", help="查看后台服务状态")
     parser.add_argument("--install-service", action="store_true", help="注册为 Windows/Linux 内置服务")
-    parser.add_argument("--service", choices=["install", "uninstall", "start", "stop", "status"], help="管理 Windows/Linux 内置服务")
+    parser.add_argument("--service", choices=["install", "uninstall", "start", "stop", "restart", "status"], help="管理 Windows/Linux 内置服务")
     args = parser.parse_args()
 
     _clear_terminal_history()
@@ -436,17 +436,18 @@ def _manage_system_service_interactively(config_path: Path) -> None:
                 ("1", "安装并启用开机自启动"),
                 ("2", "启动已注册服务"),
                 ("3", "停止已注册服务"),
-                ("4", "查看服务状态"),
-                ("5", "卸载并取消开机自启动"),
+                ("4", "重启已注册服务"),
+                ("5", "查看服务状态"),
+                ("6", "卸载并取消开机自启动"),
                 ("0", "返回"),
             ],
-            selected=3,
+            selected=4,
         )
-        actions = {"1": "install", "2": "start", "3": "stop", "4": "status", "5": "uninstall"}
+        actions = {"1": "install", "2": "start", "3": "stop", "4": "restart", "5": "status", "6": "uninstall"}
         if choice == "0":
             return
         _clear_terminal_history()
-        result = _background_status_panel(RouterConfig.load(config_path), config_path) if choice == "4" else _manage_system_service(config_path, actions[choice])
+        result = _background_status_panel(RouterConfig.load(config_path), config_path) if choice == "5" else _manage_system_service(config_path, actions[choice])
         _show_result_page("系统服务", result)
 
 
@@ -475,7 +476,10 @@ def _manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
             "/TR",
             f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground',
         ]
-        return _registration_result(command, "Windows 开机自启动任务")
+        return Group(
+            _registration_result(command, "Windows 开机自启动任务"),
+            _registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动已注册任务"),
+        )
     if action == "uninstall":
         config = RouterConfig.load(config_path)
         return Group(
@@ -488,6 +492,11 @@ def _manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
         "stop": ["schtasks", "/End", "/TN", task_name],
         "status": ["schtasks", "/Query", "/TN", task_name, "/V", "/FO", "LIST"],
     }
+    if action == "restart":
+        return Group(
+            _registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止已注册任务"),
+            _registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动已注册任务"),
+        )
     return _registration_result(commands[action], "Windows 开机自启动任务")
 
 
@@ -537,6 +546,7 @@ def _manage_systemd_user_service(python: Path, config_path: Path, action: str) -
     commands = {
         "start": ["systemctl", "--user", "start", service_name],
         "stop": ["systemctl", "--user", "stop", service_name],
+        "restart": ["systemctl", "--user", "restart", service_name],
         "status": ["systemctl", "--user", "status", service_name, "--no-pager"],
     }
     if action == "uninstall":
@@ -580,16 +590,18 @@ def _config_renderables(config: RouterConfig, path: Path) -> tuple[Panel, Table]
     table = Table(title="模型路由配置", show_lines=False)
     table.add_column("模型 ID", style="cyan")
     table.add_column("显示名称")
+    table.add_column("路由模式")
     table.add_column("Key 数量", justify="right", style="green")
     table.add_column("上游地址")
 
     for model in config.models:
         upstreams = sorted({key.base_url for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
-        table.add_row(model.id, display_names, str(len(model.keys)), "\n".join(upstreams))
+        routing_mode = "优先级" if model.routing_mode == "priority" else "分流"
+        table.add_row(model.id, display_names, routing_mode, str(len(model.keys)), "\n".join(upstreams))
 
     if not config.models:
-        table.add_row("未配置", "-", "0", "-")
+        table.add_row("未配置", "-", "-", "0", "-")
 
     local_auth = "已启用" if config.local_api_key else "未启用"
     service_status = _service_status_text(config)
@@ -689,7 +701,7 @@ def _add_config_interactively(path: Path, ask_continue: bool = True) -> None:
     models = data.setdefault("models", [])
     model = _find_model(models, model_id)
     if model is None:
-        model = {"id": model_id, "aliases": [], "keys": []}
+        model = {"id": model_id, "aliases": [], "routing_mode": "round_robin", "keys": []}
         models.append(model)
         console.print(f"[green]已创建模型配置:[/green] {model_id}")
 
@@ -698,6 +710,9 @@ def _add_config_interactively(path: Path, ask_continue: bool = True) -> None:
         model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()]
     else:
         model["aliases"] = []
+
+    routing_mode = Prompt.ask("路由模式：priority=优先级，round_robin=分流", choices=["priority", "round_robin"], default=str(model.get("routing_mode") or "round_robin")).strip()
+    model["routing_mode"] = routing_mode
 
     keys = model.setdefault("keys", [])
     default_key_name = f"{model_id}-key-{len(keys) + 1}"
