@@ -12,7 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .formatting import percent, short_text
-from .tui import console, key_pressed, page_title, section_panel, shortcut_text
+from .tui import console, key_pressed, section_panel, shortcut_text
 
 
 def render_logs(database_path: str, log_file_path: str, limit: int) -> None:
@@ -69,7 +69,7 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
 def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int) -> Group:
     page_size = log_page_size(limit) if page == "logs" else max(limit, 1)
     content = service_logs_renderable(log_file_path, page_size, log_offset) if page == "logs" else request_stats_renderable(database_path, stats_page, page_size)
-    return Group(page_title("日志板块", "运行日志与调用统计"), log_tabs_renderable(page), content, log_help_text(page))
+    return Group(log_header_renderable(page), content, log_help_text(page))
 
 
 def log_page_size(limit: int) -> int:
@@ -77,10 +77,10 @@ def log_page_size(limit: int) -> int:
     return max(1, min(max(limit, 1), console.size.height - reserved_rows))
 
 
-def log_tabs_renderable(page: str) -> Panel:
+def log_header_renderable(page: str) -> Panel:
     logs_label = "[bold black on cyan] 1 运行日志 [/bold black on cyan]" if page == "logs" else "[dim]1[/dim] 运行日志"
     stats_label = "[bold black on cyan] 2 调用统计 [/bold black on cyan]" if page == "stats" else "[dim]2[/dim] 调用统计"
-    return section_panel(Align.center(f"{logs_label}    {stats_label}"), "页面", "cyan")
+    return section_panel(Align.center(f"{logs_label}    {stats_label}"), "日志板块", "cyan", "[dim]运行日志与调用统计[/dim]")
 
 
 def log_help_text(page: str) -> Align:
@@ -132,7 +132,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int) -> G
             COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM({cached_tokens_sum_expr}), 0) AS cached_tokens, COALESCE(SUM({cache_hit_sum_expr}), 0) AS cache_hits,
             COALESCE(SUM({first_token_ms_sum_expr}), 0) AS total_first_token_ms, COALESCE(ROUND(AVG({first_token_ms_sum_expr})), 0) AS avg_first_token_ms, COALESCE(MAX({first_token_ms_sum_expr}), 0) AS max_first_token_ms,
             COALESCE(SUM({duration_ms_sum_expr}), 0) AS total_duration_ms, COALESCE(ROUND(AVG({duration_ms_sum_expr})), 0) AS avg_duration_ms, COALESCE(MAX({duration_ms_sum_expr}), 0) AS max_duration_ms,
-            COUNT(DISTINCT model_id) AS model_count, COUNT(DISTINCT key_name) AS key_count, MIN(created_at) AS first_request_at, MAX(created_at) AS latest_request_at
+            COUNT(DISTINCT model_id) AS model_count, COUNT(DISTINCT key_name) AS key_count, MAX(created_at) AS latest_request_at
             FROM request_metrics
         """).fetchone()
         status_rows = connection.execute("SELECT status_code, COUNT(*) AS total FROM request_metrics WHERE status_code IS NOT NULL GROUP BY status_code ORDER BY status_code").fetchall()
@@ -176,6 +176,5 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{prompt_tokens}/{completion_tokens}", "总 Tok", str(total_tokens))
     table.add_row("缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "模型/Key 数", f"{summary['model_count']}/{summary['key_count']}")
     table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "首字总耗时", f"{total_first_token_ms} ms", "状态码", short_text(status_codes, 36))
-    table.add_row("平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "总耗时", f"{total_duration_ms} ms", "首条请求", short_text(summary["first_request_at"] or "-", 19))
-    table.add_row("最新请求", short_text(summary["latest_request_at"] or "-", 19), "", "", "", "")
+    table.add_row("平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "总耗时", f"{total_duration_ms} ms", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
     return table
