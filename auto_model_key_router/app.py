@@ -251,10 +251,9 @@ def _apply_reasoning_effort(payload: dict[str, Any], model_id: str, config: Rout
     if "reasoning_effort" not in adapted and isinstance(reasoning, dict) and reasoning.get("effort"):
         adapted["reasoning_effort"] = reasoning["effort"]
     if "reasoning_effort" not in adapted and config is not None:
-        for model in config.models:
-            if model.id == model_id and model.reasoning_effort:
-                adapted["reasoning_effort"] = model.reasoning_effort
-                break
+        reasoning_effort = config.reasoning_effort_by_model.get(model_id)
+        if reasoning_effort:
+            adapted["reasoning_effort"] = reasoning_effort
     return adapted
 
 

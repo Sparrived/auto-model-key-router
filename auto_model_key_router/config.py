@@ -4,7 +4,7 @@ import json
 import os
 import platform
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +112,14 @@ class RouterConfig:
     log_file_path: str
     local_api_key: str
     models: tuple[ModelConfig, ...]
+    reasoning_effort_by_model: dict[str, str] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "reasoning_effort_by_model",
+            {model.id: model.reasoning_effort for model in self.models if model.reasoning_effort},
+        )
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "RouterConfig":

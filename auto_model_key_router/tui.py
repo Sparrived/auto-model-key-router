@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-import msvcrt
 import sys
 from typing import Any
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 from rich import box
 from rich.align import Align
@@ -55,7 +61,9 @@ def render_option_menu(title: str, options: list[tuple[str, str]], selected: int
 
 
 def key_pressed() -> str | None:
-    if msvcrt.kbhit():
+    if sys.platform == "win32" and msvcrt.kbhit():
+        return read_key()
+    if sys.platform != "win32" and select.select([sys.stdin], [], [], 0)[0]:
         return read_key()
     return None
 
@@ -67,6 +75,8 @@ def confirm_choice(message: str, default: bool = False) -> bool:
 
 
 def read_key() -> str:
+    if sys.platform != "win32":
+        return read_posix_key()
     try:
         key = msvcrt.getwch()
     except KeyboardInterrupt:
@@ -105,6 +115,46 @@ def read_key() -> str:
         if third == "C":
             return "right"
     return key
+
+
+def read_posix_key() -> str:
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        key = sys.stdin.read(1)
+        if key == "\x03":
+            return "cancel"
+        if key in {"\r", "\n"}:
+            return "enter"
+        if key == "\x1b":
+            if select.select([sys.stdin], [], [], 0.05)[0]:
+                second = sys.stdin.read(1)
+                third = sys.stdin.read(1) if second == "[" and select.select([sys.stdin], [], [], 0.05)[0] else ""
+                if third == "A":
+                    return "up"
+                if third == "B":
+                    return "down"
+                if third == "D":
+                    return "left"
+                if third == "C":
+                    return "right"
+                if third == "5":
+                    sys.stdin.read(1)
+                    return "page_up"
+                if third == "6":
+                    sys.stdin.read(1)
+                    return "page_down"
+                if third == "H":
+                    return "home"
+                if third == "F":
+                    return "end"
+            return "cancel"
+        return key
+    except KeyboardInterrupt:
+        return "cancel"
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def select_option(title: str, options: list[tuple[str, str]], selected: int = 0, content: Any | None = None) -> str:

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-06-09
+
+### Changed
+- 优化模型推理强度查找逻辑，避免每次请求遍历模型配置。
+
+### Fixed
+- 修复 Linux 发布环境中 Terminal UI 顶层导入 Windows-only `msvcrt` 导致构建失败的问题。
+
 ## [1.1.0] - 2026-06-09
 
 ### Added
