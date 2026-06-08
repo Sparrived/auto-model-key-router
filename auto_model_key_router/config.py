@@ -176,8 +176,8 @@ class RouterConfig:
                 raise ValueError("模型 id 不能为空")
             if model.routing_mode not in {"priority", "round_robin"}:
                 raise ValueError(f"模型 {model.id} 的 routing_mode 必须是 priority 或 round_robin")
-            if model.reasoning_effort is not None and model.reasoning_effort not in {"minimal", "low", "medium", "high"}:
-                raise ValueError(f"模型 {model.id} 的 reasoning_effort 必须是 minimal、low、medium 或 high")
+            if model.reasoning_effort is not None and model.reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+                raise ValueError(f"模型 {model.id} 的 reasoning_effort 必须是 minimal、low、medium、high 或 xhigh")
             for name in (model.id, *model.aliases):
                 if name in model_names:
                     raise ValueError(f"模型名称重复: {name}")

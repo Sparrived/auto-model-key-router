@@ -1,15 +1,30 @@
 from __future__ import annotations
 
-import tempfile
 import json
+import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 import httpx
-from fastapi.testclient import TestClient
+from fastapi import FastAPI
 
 from auto_model_key_router.app import _probe_cooling_keys, create_app
 from auto_model_key_router.config import KeyConfig, ModelConfig, RouterConfig
+
+
+T = TypeVar("T")
+
+
+def run_client(app: FastAPI, action: Callable[[httpx.AsyncClient], Awaitable[T]]) -> T:
+    return anyio.run(_run_client, app, action)
+
+
+async def _run_client(app: FastAPI, action: Callable[[httpx.AsyncClient], Awaitable[T]]) -> T:
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            return await action(client)
 
 
 def make_config(tmp_path: Path, keys: tuple[KeyConfig, ...], local_api_key: str = "local-key", reasoning_effort: str | None = None) -> RouterConfig:
@@ -41,9 +56,12 @@ def test_metrics_requires_local_auth() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
 
-        with TestClient(create_app(config)) as client:
-            unauthorized = client.get("/metrics")
-            authorized = client.get("/metrics", headers={"Authorization": "Bearer local-key"})
+        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+            unauthorized = await client.get("/metrics")
+            authorized = await client.get("/metrics", headers={"Authorization": "Bearer local-key"})
+            return unauthorized, authorized
+
+        unauthorized, authorized = run_client(create_app(config), requests)
 
         assert unauthorized.status_code == 401
         assert authorized.status_code == 200
@@ -70,13 +88,16 @@ def test_retryable_response_cools_down_failed_key() -> None:
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-        with TestClient(app) as client:
-            response = client.post(
+        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+            response = await client.post(
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
                 json={"model": "alias-model", "messages": [{"role": "user", "content": "hi"}]},
             )
-            health = client.get("/health")
+            health = await client.get("/health")
+            return response, health
+
+        response, health = run_client(app, requests)
 
         assert response.status_code == 200
         assert calls == ["https://upstream-one.test/v1/chat/completions", "https://upstream-two.test/v1/chat/completions"]
@@ -101,13 +122,15 @@ def test_cooled_down_key_is_skipped_on_next_request() -> None:
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-        with TestClient(app) as client:
-            anyio.run(app.state.key_pool.mark_failure, "test-model", "key-1", 429, 120)
-            response = client.post(
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            await app.state.key_pool.mark_failure("test-model", "key-1", 429, 120)
+            return await client.post(
                 "/v1/chat/completions",
                 headers={"x-api-key": "local-key"},
                 json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
             )
+
+        response = run_client(app, requests)
 
         assert response.status_code == 200
         assert calls == ["https://upstream-two.test/v1/chat/completions"]
@@ -164,20 +187,22 @@ def test_config_reasoning_effort_is_forwarded() -> None:
             upstream_bodies.append(json.loads(request.content.decode("utf-8")))
             return httpx.Response(200, json={"id": "ok"})
 
-        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),), reasoning_effort="high")
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),), reasoning_effort="xhigh")
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-        with TestClient(app) as client:
-            response = client.post(
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
                 json={"model": "alias-model", "messages": [{"role": "user", "content": "hi"}]},
             )
 
+        response = run_client(app, requests)
+
         assert response.status_code == 200
         assert upstream_bodies[0]["model"] == "test-model"
-        assert upstream_bodies[0]["reasoning_effort"] == "high"
+        assert upstream_bodies[0]["reasoning_effort"] == "xhigh"
 
 
 def test_request_reasoning_effort_overrides_config() -> None:
@@ -192,12 +217,14 @@ def test_request_reasoning_effort_overrides_config() -> None:
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-        with TestClient(app) as client:
-            response = client.post(
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
                 "/v1/responses",
                 headers={"Authorization": "Bearer local-key"},
                 json={"model": "test-model", "input": "hi", "reasoning": {"effort": "low"}},
             )
+
+        response = run_client(app, requests)
 
         assert response.status_code == 200
         assert upstream_bodies[0]["reasoning_effort"] == "low"

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -21,7 +23,24 @@ from .metrics import MetricsStore, extract_usage
 
 
 def create_app(config: RouterConfig, config_path: str | Path | None = None) -> FastAPI:
-    app = FastAPI(title="Auto Model Key Router", version=__version__)
+    @asynccontextmanager
+    async def lifespan(lifespan_app: FastAPI) -> AsyncIterator[None]:
+        if lifespan_app.state.config.upstream_health_check_interval > 0:
+            lifespan_app.state.health_probe_task = asyncio.create_task(_health_probe_loop(lifespan_app.state))
+        try:
+            yield
+        finally:
+            task = getattr(lifespan_app.state, "health_probe_task", None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            await lifespan_app.state.http_client.aclose()
+            await lifespan_app.state.metrics.close()
+
+    app = FastAPI(title="Auto Model Key Router", version=__version__, lifespan=lifespan)
     app.state.config = config
     app.state.config_path = str(Path(config_path).resolve()) if config_path is not None else ""
     app.state.local_api_key = config.local_api_key
@@ -33,23 +52,6 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30),
     )
     app.state.health_probe_task = None
-
-    @app.on_event("startup")
-    async def startup() -> None:
-        if app.state.config.upstream_health_check_interval > 0:
-            app.state.health_probe_task = asyncio.create_task(_health_probe_loop(app.state))
-
-    @app.on_event("shutdown")
-    async def shutdown() -> None:
-        task = getattr(app.state, "health_probe_task", None)
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        await app.state.http_client.aclose()
-        await app.state.metrics.close()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

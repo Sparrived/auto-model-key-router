@@ -9,20 +9,23 @@ from rich.live import Live
 from rich.table import Table
 
 from .config import RouterConfig
-from .config_editor import manage_model_keys_interactively, set_host_interactively, set_local_api_key_interactively, set_port_interactively
+from .config_editor import manage_model_keys_interactively, set_listen_interactively, set_local_api_key_interactively
 from .formatting import compact_url, short_text
+from . import __version__
 from .logs_tui import watch_logs
 from .service import background_status_panel, is_service_healthy, manage_system_service
-from .tui import clear_terminal_history, console, menu_table, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, show_result_page
+from .tui import clear_terminal_history, confirm_choice, console, menu_table, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, show_result_page
+from .update import VersionCheckResult, check_latest_release, install_latest_release, render_update_notice, render_version_check_result
 
 
-MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听地址"), ("5", "监听端口"), ("6", "日志板块"), ("0", "退出")]
+MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听配置"), ("5", "日志板块"), ("6", "版本更新"), ("0", "退出")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
     selected = 0
+    update_result = check_latest_release(timeout=1.2)
     while True:
-        choice, selected = select_menu_option(config_path, config, selected)
+        choice, selected = select_menu_option(config_path, config, selected, update_result)
         if choice == "0":
             return
         if choice == "1":
@@ -39,34 +42,33 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             config = RouterConfig.load(config_path)
             continue
         if choice == "4":
-            result = run_submodule(lambda: set_host_interactively(config_path))
+            result = run_submodule(lambda: set_listen_interactively(config_path))
             if result is not None:
-                show_result_page("监听地址", result)
+                show_result_page("监听配置", result)
             config = RouterConfig.load(config_path)
             continue
         if choice == "5":
-            result = run_submodule(lambda: set_port_interactively(config_path))
-            if result is not None:
-                show_result_page("监听端口", result)
-            config = RouterConfig.load(config_path)
+            run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
             continue
         if choice == "6":
-            run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
+            result = run_submodule(lambda: manage_version_update_interactively(update_result))
+            if isinstance(result, VersionCheckResult):
+                update_result = result
 
 
-def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0) -> tuple[str, int]:
-    with Live(render_terminal_ui(config_path, config, selected), console=console, screen=True, auto_refresh=False) as live:
+def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0, update_result: VersionCheckResult | None = None) -> tuple[str, int]:
+    with Live(render_terminal_ui(config_path, config, selected, update_result), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":
                 return "0", next(index for index, option in enumerate(MENU_OPTIONS) if option[0] == "0")
             if key == "up":
                 selected = (selected - 1) % len(MENU_OPTIONS)
-                live.update(render_terminal_ui(config_path, config, selected), refresh=True)
+                live.update(render_terminal_ui(config_path, config, selected, update_result), refresh=True)
                 continue
             if key == "down":
                 selected = (selected + 1) % len(MENU_OPTIONS)
-                live.update(render_terminal_ui(config_path, config, selected), refresh=True)
+                live.update(render_terminal_ui(config_path, config, selected, update_result), refresh=True)
                 continue
             if key == "enter":
                 return MENU_OPTIONS[selected][0], selected
@@ -74,8 +76,13 @@ def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 
                 return key, next(index for index, option in enumerate(MENU_OPTIONS) if option[0] == key)
 
 
-def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int) -> Group:
-    return Group(page_title("Auto Model Key Router", "本地 OpenAI-Compatible 模型密钥路由器"), *config_renderables(config, config_path), section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
+def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, update_result: VersionCheckResult | None = None) -> Group:
+    update_notice = render_update_notice(update_result)
+    renderables = [page_title("Auto Model Key Router", f"OpenAI-Compatible 模型 API Key 路由控制台 · v{__version__}"), *config_renderables(config, config_path)]
+    if update_notice is not None:
+        renderables.append(update_notice)
+    renderables.extend([section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出")])
+    return Group(*renderables)
 
 
 def manage_system_service_interactively(config_path: Path) -> None:
@@ -87,6 +94,25 @@ def manage_system_service_interactively(config_path: Path) -> None:
         clear_terminal_history()
         result = background_status_panel(RouterConfig.load(config_path), config_path) if choice == "5" else manage_system_service(config_path, actions[choice])
         show_result_page("系统服务", result)
+
+
+def manage_version_update_interactively(update_result: VersionCheckResult | None = None) -> VersionCheckResult:
+    latest_result = update_result if update_result is not None and not update_result.error else check_latest_release(timeout=10.0)
+    while True:
+        choice = select_option("版本更新", [("1", "重新检查"), ("2", "手动更新"), ("0", "返回")], selected=0, content=render_version_check_result(latest_result))
+        if choice == "0":
+            return latest_result
+        if choice == "1":
+            latest_result = check_latest_release(timeout=10.0)
+            continue
+        if choice == "2":
+            if latest_result.error or not latest_result.update_available or not latest_result.latest_tag:
+                show_result_page("版本更新", render_version_check_result(latest_result))
+                continue
+            if confirm_choice(f"将通过 GitHub 安装 {latest_result.latest_tag}，更新完成后需要重启终端和服务。是否继续？"):
+                clear_terminal_history()
+                show_result_page("手动更新", install_latest_release(latest_result.latest_tag))
+                latest_result = check_latest_release(timeout=10.0)
 
 
 def render_config(config: RouterConfig, path: Path) -> None:

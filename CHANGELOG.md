@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-09
+
+### Added
+- 新增 GitHub Release 版本检查、Terminal UI 更新提示和手动更新入口。
+- 推理强度配置补充支持 `xhigh`。
+
 ## [1.1.1] - 2026-06-09
 
 ### Changed
@@ -13,7 +19,7 @@
 ## [1.1.0] - 2026-06-09
 
 ### Added
-- 新增模型级推理强度配置，支持 `minimal`、`low`、`medium`、`high`。
+- 新增模型级推理强度配置，支持 `minimal`、`low`、`medium`、`high`、`xhigh`。
 - 新增请求级推理强度透传与 Responses 风格 `reasoning.effort` 兼容转换。
 - 新增 Terminal UI 推理强度设置入口，并在配置概览中展示推理强度。
 - 新增 key 冷却状态持久化与上游健康探测恢复机制。

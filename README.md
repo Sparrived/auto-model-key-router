@@ -8,6 +8,7 @@ Auto Model Key Router 是一个轻量的本地 API key 路由服务。它支持�
 - 支持 key 失败后自动尝试下一个 key
 - 支持请求量、成功/失败、重试、状态码、Token 使用量和缓存命中统计
 - 支持 Rich CLI 展示配置摘要、交互式添加配置和日志板块
+- 支持通过 GitHub 检查新版本、更新提示和手动更新
 - 支持 `/health`、`/metrics` 和 `/v1/models` 本地接口
 
 ## 安装
@@ -97,6 +98,7 @@ auto-model-key-router --config router-config.json
 - 生成 / 重置本地 API key
 - 配置监听地址与端口
 - 查看日志板块
+- 检查版本更新
 - 退出
 
 Terminal UI 只负责配置与服务管理，不直接承载一次性的启动逻辑。需要直接启动本地服务时使用命令行入口：
@@ -152,7 +154,7 @@ auto-model-key-router --config router-config.json --show-config
 auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 ```
 
-也可以在 Terminal UI 中配置监听地址。默认只监听 `127.0.0.1`，配置为 `0.0.0.0` 时会接受所有可达网络的连接；如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。Terminal UI 首页会在检测到 `0.0.0.0` 时显示显眼风险提示。
+也可以在 Terminal UI 中通过“监听配置”统一配置监听地址与端口。默认只监听 `127.0.0.1`，配置为 `0.0.0.0` 时会接受所有可达网络的连接；如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。Terminal UI 首页会在检测到 `0.0.0.0` 时显示显眼风险提示。
 
 如果配置文件没有模型，直接启动服务时会自动进入交互式配置，依次输入模型 ID、Key 名称、上游 `base_url` 和 API key。
 
@@ -167,6 +169,20 @@ auto-model-key-router --config router-config.json --show-logs
 ```bash
 auto-model-key-router --config router-config.json --show-logs 50
 ```
+
+检查 GitHub Release 最新版本：
+
+```bash
+auto-model-key-router --check-update
+```
+
+手动更新到 GitHub Release 最新版本：
+
+```bash
+auto-model-key-router --update
+```
+
+Terminal UI 启动时会快速检查 GitHub Release。如果发现新版本，首页会显示更新提示，也可以进入“版本更新”菜单重新检查或确认手动更新。更新完成后需要重启当前终端和正在运行的后台/系统服务，让新版本生效。
 
 ## 请求示例
 

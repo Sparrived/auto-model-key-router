@@ -53,7 +53,7 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     aliases_text = Prompt.ask("显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
     model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()] if aliases_text else []
     model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流", choices=["priority", "round_robin"], default=str(model.get("routing_mode") or "round_robin")).strip()
-    reasoning_effort = Prompt.ask("推理强度：default=不设置，minimal/low/medium/high", choices=["default", "minimal", "low", "medium", "high"], default=str(model.get("reasoning_effort") or "default")).strip()
+    reasoning_effort = Prompt.ask("推理强度：default=不设置，minimal/low/medium/high/xhigh", choices=["default", "minimal", "low", "medium", "high", "xhigh"], default=str(model.get("reasoning_effort") or "default")).strip()
     if reasoning_effort == "default":
         model.pop("reasoning_effort", None)
     else:
@@ -237,10 +237,10 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
     old_config = RouterConfig.from_dict(data)
     model = models[int(model_choice) - 1]
     current_effort = str(model.get("reasoning_effort") or "default")
-    effort_choice = select_option("选择推理强度", [("1", "默认：不设置"), ("2", "minimal"), ("3", "low"), ("4", "medium"), ("5", "high"), ("0", "返回")], selected={"default": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4}.get(current_effort, 0))
+    effort_choice = select_option("选择推理强度", [("1", "默认：不设置"), ("2", "minimal"), ("3", "low"), ("4", "medium"), ("5", "high"), ("6", "xhigh"), ("0", "返回")], selected={"default": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}.get(current_effort, 0))
     if effort_choice == "0":
         return section_panel("[yellow]配置未变化。[/yellow]", "推理强度", "yellow")
-    new_effort = {"1": "default", "2": "minimal", "3": "low", "4": "medium", "5": "high"}[effort_choice]
+    new_effort = {"1": "default", "2": "minimal", "3": "low", "4": "medium", "5": "high", "6": "xhigh"}[effort_choice]
     if new_effort == current_effort:
         return section_panel(f"模型 [bold]{short_text(model['id'], 32)}[/bold] 已是 [bold]{reasoning_effort_text(new_effort)}[/bold]。", "推理强度", "yellow")
     if new_effort == "default":
@@ -254,7 +254,7 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
 
 def reasoning_effort_text(value: str | None) -> str:
     effort = value or "default"
-    return {"default": "默认", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high"}.get(effort, effort)
+    return {"default": "默认", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}.get(effort, effort)
 
 
 def select_api_key(path: Path, title: str) -> tuple[dict[str, Any], dict[str, Any], int] | None:
@@ -291,44 +291,33 @@ def set_local_api_key_interactively(path: Path) -> Any:
     return Group(section_panel(f"已生成新密钥。\n\n[bold]{local_api_key}[/bold]\n\n请求时添加：\nAuthorization: Bearer <key>", "本地鉴权", "green"), restart_service_after_config_change(path, old_config, new_config))
 
 
-def set_host_interactively(path: Path) -> Any:
+def set_listen_interactively(path: Path) -> Any:
     data = load_config_data(path)
     old_config = RouterConfig.from_dict(data)
     current_host = str(data.get("host") or "127.0.0.1")
+    current_port = int(data.get("port") or 8000)
     host = Prompt.ask("监听 IP/地址", default=current_host).strip()
     if not host:
-        return section_panel("[red]监听 IP/地址不能为空。[/red]", "监听地址", "red")
+        return section_panel("[red]监听 IP/地址不能为空。[/red]", "监听配置", "red")
     if "://" in host or "/" in host:
-        return section_panel("[red]监听地址只填写 IP 或主机名，不要包含协议或路径。[/red]", "监听地址", "red")
-    if host == current_host:
-        return section_panel(f"监听地址未变化: [bold]{host}[/bold]", "监听地址", "yellow")
-    if host == "0.0.0.0" and not confirm_choice("0.0.0.0 会允许局域网/公网访问，确认继续？", default=False):
-        return section_panel("[yellow]配置未变化。[/yellow]", "监听地址", "yellow")
-    data["host"] = host
-    new_config = RouterConfig.from_dict(data)
-    save_config_data(path, data)
-    warning = "\n[bold red]风险提示: 0.0.0.0 会暴露到所有可达网络，请确保防火墙和本地鉴权已正确配置。[/bold red]" if host == "0.0.0.0" else ""
-    return Group(section_panel(f"已更新监听地址。\n配置文件: [bold]{path}[/bold]\n旧地址: [bold]{current_host}[/bold]\n新地址: [bold]{host}[/bold]{warning}", "监听地址", "green"), restart_service_after_config_change(path, old_config, new_config))
-
-
-def set_port_interactively(path: Path) -> Any:
-    data = load_config_data(path)
-    old_config = RouterConfig.from_dict(data)
-    current_port = int(data.get("port") or 8000)
+        return section_panel("[red]监听地址只填写 IP 或主机名，不要包含协议或路径。[/red]", "监听配置", "red")
     port_text = Prompt.ask("监听端口", default=str(current_port)).strip()
     try:
         port = int(port_text)
     except ValueError:
-        return section_panel("[red]端口必须是数字。[/red]", "监听端口", "red")
+        return section_panel("[red]端口必须是数字。[/red]", "监听配置", "red")
     if port < 1 or port > 65535:
-        return section_panel("[red]端口范围必须是 1-65535。[/red]", "监听端口", "red")
-    if port == current_port:
-        return section_panel(f"监听端口未变化: [bold]{port}[/bold]", "监听端口", "yellow")
+        return section_panel("[red]端口范围必须是 1-65535。[/red]", "监听配置", "red")
+    if host == current_host and port == current_port:
+        return section_panel(f"监听配置未变化: [bold]{host}:{port}[/bold]", "监听配置", "yellow")
+    if host == "0.0.0.0" and host != current_host and not confirm_choice("0.0.0.0 会允许局域网/公网访问，确认继续？", default=False):
+        return section_panel("[yellow]配置未变化。[/yellow]", "监听配置", "yellow")
+    data["host"] = host
     data["port"] = port
     new_config = RouterConfig.from_dict(data)
     save_config_data(path, data)
-    return Group(section_panel(f"已更新监听端口。\n配置文件: [bold]{path}[/bold]\n旧端口: [bold]{current_port}[/bold]\n新端口: [bold]{port}[/bold]", "监听端口", "green"), restart_service_after_config_change(path, old_config, new_config))
-
+    warning = "\n[bold red]风险提示: 0.0.0.0 会暴露到所有可达网络，请确保防火墙和本地鉴权已正确配置。[/bold red]" if host == "0.0.0.0" else ""
+    return Group(section_panel(f"已更新监听配置。\n配置文件: [bold]{path}[/bold]\n旧配置: [bold]{current_host}:{current_port}[/bold]\n新配置: [bold]{host}:{port}[/bold]{warning}", "监听配置", "green"), restart_service_after_config_change(path, old_config, new_config))
 
 def load_config_data(path: Path) -> dict[str, Any]:
     if not path.exists():
