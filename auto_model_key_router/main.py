@@ -37,9 +37,9 @@ def main() -> None:
             raise SystemExit(1) from exc
 
         if args.host:
-            config = RouterConfig(args.host, config.port, config.request_timeout, config.max_retries, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
+            config = RouterConfig(args.host, config.port, config.request_timeout, config.max_retries, config.key_failure_threshold, config.key_cooldown_seconds, config.key_state_path, config.upstream_health_check_interval, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
         if args.port:
-            config = RouterConfig(config.host, args.port, config.request_timeout, config.max_retries, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
+            config = RouterConfig(config.host, args.port, config.request_timeout, config.max_retries, config.key_failure_threshold, config.key_cooldown_seconds, config.key_state_path, config.upstream_health_check_interval, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
 
         if args.show_logs is not None:
             render_config(config, config_path)

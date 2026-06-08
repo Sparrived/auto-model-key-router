@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -29,9 +32,22 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         timeout=config.request_timeout,
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30),
     )
+    app.state.health_probe_task = None
+
+    @app.on_event("startup")
+    async def startup() -> None:
+        if app.state.config.upstream_health_check_interval > 0:
+            app.state.health_probe_task = asyncio.create_task(_health_probe_loop(app.state))
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
+        task = getattr(app.state, "health_probe_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await app.state.http_client.aclose()
         await app.state.metrics.close()
 
@@ -44,6 +60,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             "config_path": app.state.config_path,
             "local_auth_enabled": bool(local_api_key),
             "local_api_key_fingerprint": _key_fingerprint(local_api_key),
+            "key_states": app.state.key_pool.key_states(),
         }
 
     @app.get("/v1/models")
@@ -57,7 +74,9 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         }
 
     @app.get("/metrics")
-    async def metrics() -> dict[str, Any]:
+    async def metrics(request: Request):
+        if not _is_authorized(request, _current_local_api_key(app.state)):
+            return JSONResponse({"error": {"message": "本地 API key 验证失败"}}, status_code=401)
         return await app.state.metrics.snapshot()
 
     @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -72,7 +91,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         if requested_model_id is None:
             return JSONResponse({"error": {"message": "请求体中缺少 model 字段"}}, status_code=400)
         model_id = app.state.key_pool.resolve_model_id(requested_model_id)
-        upstream_body = _upstream_body(body, payload, model_id, stream=_is_stream_request(payload))
+        upstream_body = _upstream_body(body, payload, model_id, app.state.config, stream=_is_stream_request(payload))
 
         excluded: set[str] = set()
         last_error: JSONResponse | None = None
@@ -80,9 +99,9 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         if key_count == 0:
             return JSONResponse({"error": {"message": f"未配置模型: {model_id}"}}, status_code=404)
 
-        attempts = min(app.state.config.max_retries + 1, key_count)
+        attempts = key_count if key_count > 1 else app.state.config.max_retries + 1
 
-        for _ in range(attempts):
+        for attempt in range(attempts):
             try:
                 key = await app.state.key_pool.next_key(model_id, excluded)
             except KeyError:
@@ -90,7 +109,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             except RuntimeError as exc:
                 return JSONResponse({"error": {"message": str(exc)}}, status_code=503)
 
-            excluded.add(key.name)
+            if key_count > 1:
+                excluded.add(key.name)
             upstream = _join_url(key.base_url, f"/v1/{_upstream_path(path, payload)}")
             headers = _upstream_headers(request, key.api_key)
             _debug_report("upstream-attempt", {"upstream": upstream, "model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "stream": _is_stream_request(payload)})
@@ -120,9 +140,10 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     first_token_ms=duration_ms,
                     requested_model_id=requested_model_id,
                 )
+                await app.state.key_pool.mark_failure(model_id, key.name)
                 continue
 
-            if response.status_code in {401, 403, 429, 500, 502, 503, 504} and len(excluded) < attempts:
+            if response.status_code in {401, 403, 429, 500, 502, 503, 504} and attempt + 1 < attempts:
                 content = await response.aread()
                 duration_ms = _elapsed_ms(started)
                 _debug_report("upstream-retryable-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_preview": content[:500].decode("utf-8", errors="replace")})
@@ -138,13 +159,14 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     first_token_ms=duration_ms,
                     requested_model_id=requested_model_id,
                 )
+                await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
                 await _close_upstream_response(response)
                 continue
 
             if _is_stream_request(payload):
                 _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
                 return StreamingResponse(
-                    _stream_upstream(response, app.state.metrics, model_id, key.name, requested_model_id, started),
+                    _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, started),
                     status_code=response.status_code,
                     headers=_response_headers(response),
                     media_type=response.headers.get("content-type"),
@@ -163,6 +185,10 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 first_token_ms=duration_ms,
                 requested_model_id=requested_model_id,
             )
+            if response.status_code < 400:
+                await app.state.key_pool.mark_success(model_id, key.name)
+            elif response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+                await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
 
             return Response(
                 content=content,
@@ -203,11 +229,12 @@ def _is_stream_request(payload: dict[str, Any]) -> bool:
     return payload.get("stream") is True
 
 
-def _upstream_body(body: bytes, payload: dict[str, Any], model_id: str, stream: bool = False) -> bytes:
+def _upstream_body(body: bytes, payload: dict[str, Any], model_id: str, config: RouterConfig | None = None, stream: bool = False) -> bytes:
     if not payload or "model" not in payload:
         return body
     upstream_payload = dict(payload)
     upstream_payload["model"] = model_id
+    upstream_payload = _apply_reasoning_effort(upstream_payload, model_id, config)
     upstream_payload = _adapt_message_payload(upstream_payload)
     if stream:
         stream_options = upstream_payload.get("stream_options")
@@ -216,6 +243,19 @@ def _upstream_body(body: bytes, payload: dict[str, Any], model_id: str, stream: 
         stream_options["include_usage"] = True
         upstream_payload["stream_options"] = stream_options
     return json.dumps(upstream_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _apply_reasoning_effort(payload: dict[str, Any], model_id: str, config: RouterConfig | None) -> dict[str, Any]:
+    adapted = dict(payload)
+    reasoning = adapted.get("reasoning")
+    if "reasoning_effort" not in adapted and isinstance(reasoning, dict) and reasoning.get("effort"):
+        adapted["reasoning_effort"] = reasoning["effort"]
+    if "reasoning_effort" not in adapted and config is not None:
+        for model in config.models:
+            if model.id == model_id and model.reasoning_effort:
+                adapted["reasoning_effort"] = model.reasoning_effort
+                break
+    return adapted
 
 
 def _upstream_path(path: str, payload: dict[str, Any]) -> str:
@@ -381,6 +421,22 @@ def _response_headers(response: httpx.Response) -> dict[str, str]:
     return {key: value for key, value in response.headers.items() if key.lower() not in blocked}
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("retry-after")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.astimezone()
+            return max(0.0, retry_at.timestamp() - datetime.now(retry_at.tzinfo).timestamp())
+        except (TypeError, ValueError, OSError):
+            return None
+
+
 async def _send_upstream(
     client: httpx.AsyncClient,
     request: Request,
@@ -404,7 +460,36 @@ async def _send_upstream(
     return response
 
 
-async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, model_id: str, key_name: str, requested_model_id: str, started: float):
+async def _health_probe_loop(state: Any) -> None:
+    while True:
+        await asyncio.sleep(state.config.upstream_health_check_interval)
+        await _probe_cooling_keys(state)
+
+
+async def _probe_cooling_keys(state: Any) -> None:
+    for model_id in state.key_pool.model_ids:
+        for key in state.key_pool.keys_for_model(model_id):
+            key_state = state.key_pool.key_states().get(f"{model_id}:{key.name}", {})
+            if int(key_state.get("cooldown_remaining_seconds") or 0) <= 0:
+                continue
+            if await _probe_key(state.http_client, key):
+                await state.key_pool.mark_success(model_id, key.name)
+
+
+async def _probe_key(client: httpx.AsyncClient, key: Any) -> bool:
+    try:
+        response = await client.get(
+            _join_url(key.base_url, "/v1/models"),
+            headers={"Authorization": f"Bearer {key.api_key}"},
+        )
+        await response.aread()
+        await response.aclose()
+        return response.status_code < 400
+    except httpx.RequestError:
+        return False
+
+
+async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, started: float):
     chunk_count = 0
     byte_count = 0
     buffer = ""
@@ -436,6 +521,10 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, mode
             first_token_ms=first_token_ms,
             requested_model_id=requested_model_id,
         )
+        if failed or response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+            await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
+        elif response.status_code < 400:
+            await key_pool.mark_success(model_id, key_name)
         _debug_report("upstream-stream-close", {"status_code": response.status_code, "chunks": chunk_count, "bytes": byte_count, "first_token_ms": first_token_ms, "usage": usage})
         await response.aclose()
 

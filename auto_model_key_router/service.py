@@ -33,7 +33,7 @@ def start_service_background(config_path: Path, config: RouterConfig) -> Panel:
     pid_file = pid_file_path(config)
     existing_pid = read_pid(pid_file)
     if existing_pid and is_process_running(existing_pid):
-        return section_panel(f"后台服务已在运行。\nPID: [bold]{existing_pid}[/bold]", "后台服务", "yellow")
+        pid_file.unlink(missing_ok=True)
 
     Path(config.log_file_path).parent.mkdir(parents=True, exist_ok=True)
     pid_file.parent.mkdir(parents=True, exist_ok=True)

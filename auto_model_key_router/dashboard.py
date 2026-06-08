@@ -9,14 +9,14 @@ from rich.live import Live
 from rich.table import Table
 
 from .config import RouterConfig
-from .config_editor import manage_model_keys_interactively, set_local_api_key_interactively, set_port_interactively
+from .config_editor import manage_model_keys_interactively, set_host_interactively, set_local_api_key_interactively, set_port_interactively
 from .formatting import compact_url, short_text
 from .logs_tui import watch_logs
 from .service import background_status_panel, is_service_healthy, manage_system_service
 from .tui import clear_terminal_history, console, menu_table, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, show_result_page
 
 
-MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听端口"), ("5", "日志板块"), ("0", "退出")]
+MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听地址"), ("5", "监听端口"), ("6", "日志板块"), ("0", "退出")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
@@ -39,12 +39,18 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             config = RouterConfig.load(config_path)
             continue
         if choice == "4":
+            result = run_submodule(lambda: set_host_interactively(config_path))
+            if result is not None:
+                show_result_page("监听地址", result)
+            config = RouterConfig.load(config_path)
+            continue
+        if choice == "5":
             result = run_submodule(lambda: set_port_interactively(config_path))
             if result is not None:
                 show_result_page("监听端口", result)
             config = RouterConfig.load(config_path)
             continue
-        if choice == "5":
+        if choice == "6":
             run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
 
 
@@ -88,7 +94,7 @@ def render_config(config: RouterConfig, path: Path) -> None:
         console.print(renderable)
 
 
-def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, Any]:
+def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     model_count = len(config.models)
     key_count = sum(len(model.keys) for model in config.models)
     upstream_count = len({key.base_url for model in config.models for key in model.keys})
@@ -101,17 +107,23 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, Any]:
     summary.add_row(f"[dim]监听地址[/dim]\n[bold]{config.host}:{config.port}[/bold]", f"[dim]服务状态[/dim]\n[bold]{service_status}[/bold]", f"[dim]本地鉴权[/dim]\n[bold]{auth_status}[/bold]")
     summary.add_row(f"[dim]模型数量[/dim]\n[bold cyan]{model_count}[/bold cyan]", f"[dim]Key 数量[/dim]\n[bold green]{key_count}[/bold green]", f"[dim]上游数量[/dim]\n[bold magenta]{upstream_count}[/bold magenta]")
     summary.add_row(f"[dim]配置文件[/dim]\n[bold]{short_text(path, 48)}[/bold]", "[dim]路由入口[/dim]\n[bold]/v1/{path}[/bold]", "[dim]健康检查[/dim]\n[bold]/health[/bold]")
+    warning = section_panel("[bold red]⚠ 当前监听地址为 0.0.0.0，服务会接受所有可达网络的连接。[/bold red]\n[red]如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。[/red]", "公网开放风险", "red") if config.host == "0.0.0.0" else None
     table = Table(title="路由配置", show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("模型 ID", style="cyan", ratio=2)
     table.add_column("名称")
     table.add_column("路由模式")
+    table.add_column("推理强度")
     table.add_column("Keys", justify="right", style="green")
     table.add_column("上游", ratio=2)
     for model in config.models:
         upstreams = sorted({compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
         routing_mode = "优先级" if model.routing_mode == "priority" else "分流"
-        table.add_row(short_text(model.id, 28), short_text(display_names, 24), routing_mode, str(len(model.keys)), "\n".join(upstreams))
+        table.add_row(short_text(model.id, 28), short_text(display_names, 24), routing_mode, model.reasoning_effort or "-", str(len(model.keys)), "\n".join(upstreams))
     if not config.models:
-        table.add_row("未配置", "-", "-", "0", "-")
-    return section_panel(summary, "运行概览", "cyan"), section_panel(table, "模型路由", "blue")
+        table.add_row("未配置", "-", "-", "-", "0", "-")
+    renderables = [section_panel(summary, "运行概览", "cyan")]
+    if warning is not None:
+        renderables.append(warning)
+    renderables.append(section_panel(table, "模型路由", "blue"))
+    return tuple(renderables)

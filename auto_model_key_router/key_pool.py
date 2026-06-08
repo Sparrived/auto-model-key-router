@@ -1,22 +1,40 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import defaultdict
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from time import time
+from typing import Any
 
 from .config import KeyConfig, RouterConfig
+
+
+@dataclass
+class KeyState:
+    failures: int = 0
+    cooldown_until: float = 0.0
+    last_status_code: int | None = None
 
 
 class KeyPool:
     def __init__(self, config: RouterConfig):
         self._keys = {model.id: model.keys for model in config.models}
         self._routing_modes = {model.id: model.routing_mode for model in config.models}
+        self._reasoning_efforts = {model.id: model.reasoning_effort for model in config.models}
+        self._failure_threshold = config.key_failure_threshold
+        self._cooldown_seconds = config.key_cooldown_seconds
+        self._state_path = Path(config.key_state_path)
         self._aliases = {
             name: model.id
             for model in config.models
             for name in (model.id, *model.aliases)
         }
         self._cursors = defaultdict(int)
+        self._states = defaultdict(KeyState)
         self._lock = asyncio.Lock()
+        self._load_states()
 
     @property
     def model_ids(self) -> list[str]:
@@ -35,6 +53,12 @@ class KeyPool:
     def routing_mode(self, model_id: str) -> str:
         return self._routing_modes.get(self.resolve_model_id(model_id), "round_robin")
 
+    def reasoning_effort(self, model_id: str) -> str | None:
+        return self._reasoning_efforts.get(self.resolve_model_id(model_id))
+
+    def keys_for_model(self, model_id: str) -> tuple[KeyConfig, ...]:
+        return tuple(self._keys.get(self.resolve_model_id(model_id), ()))
+
     async def next_key(self, model_id: str, excluded: set[str] | None = None) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
         excluded = excluded or set()
@@ -42,9 +66,13 @@ class KeyPool:
         if not keys:
             raise KeyError(model_id)
 
+        available = [key for key in keys if key.name not in excluded and not self._is_cooling_down(model_id, key.name)]
+        if not available:
+            available = [key for key in keys if key.name not in excluded]
+
         if self.routing_mode(model_id) == "priority":
             for candidate in keys:
-                if candidate.name not in excluded:
+                if candidate in available:
                     return candidate
             raise RuntimeError(f"模型 {model_id} 没有可用 key")
 
@@ -53,7 +81,76 @@ class KeyPool:
                 cursor = self._cursors[model_id] % len(keys)
                 self._cursors[model_id] += 1
                 candidate = keys[cursor]
-                if candidate.name not in excluded:
+                if candidate in available:
                     return candidate
 
         raise RuntimeError(f"模型 {model_id} 没有可用 key")
+
+    async def mark_success(self, model_id: str, key_name: str) -> None:
+        async with self._lock:
+            self._states[(self.resolve_model_id(model_id), key_name)] = KeyState()
+            self._save_states()
+
+    async def mark_failure(self, model_id: str, key_name: str, status_code: int | None = None, retry_after: float | None = None) -> None:
+        model_id = self.resolve_model_id(model_id)
+        async with self._lock:
+            state = self._states[(model_id, key_name)]
+            state.failures += 1
+            state.last_status_code = status_code
+            cooldown_seconds = retry_after if retry_after is not None else self._cooldown_seconds
+            if cooldown_seconds > 0 and (status_code == 429 or state.failures >= self._failure_threshold):
+                state.cooldown_until = max(state.cooldown_until, time() + cooldown_seconds)
+            self._save_states()
+
+    def key_states(self) -> dict[str, dict[str, Any]]:
+        now = time()
+        return {
+            f"{model_id}:{key_name}": {
+                "failures": state.failures,
+                "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)),
+                "last_status_code": state.last_status_code,
+            }
+            for (model_id, key_name), state in self._states.items()
+        }
+
+    def _is_cooling_down(self, model_id: str, key_name: str) -> bool:
+        return self._states[(model_id, key_name)].cooldown_until > time()
+
+    def _valid_state_keys(self) -> set[tuple[str, str]]:
+        return {
+            (model_id, key.name)
+            for model_id, keys in self._keys.items()
+            for key in keys
+        }
+
+    def _load_states(self) -> None:
+        try:
+            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        valid_keys = self._valid_state_keys()
+        for item in raw.get("keys", []):
+            model_id = str(item.get("model_id") or "")
+            key_name = str(item.get("key_name") or "")
+            if (model_id, key_name) not in valid_keys:
+                continue
+            self._states[(model_id, key_name)] = KeyState(
+                failures=max(0, int(item.get("failures") or 0)),
+                cooldown_until=max(0.0, float(item.get("cooldown_until") or 0.0)),
+                last_status_code=item.get("last_status_code"),
+            )
+
+    def _save_states(self) -> None:
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": 1,
+                "keys": [
+                    {"model_id": model_id, "key_name": key_name, **asdict(state)}
+                    for (model_id, key_name), state in sorted(self._states.items())
+                    if state.failures or state.cooldown_until or state.last_status_code is not None
+                ],
+            }
+            self._state_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except OSError:
+            return

@@ -1,4 +1,4 @@
-Auto Model Key Router 是一个轻量的本地 API key 路由服务。它支持为同一个模型 ID 配置多个 API key，并以轮询/优先级的方式把请求自动分配到可用 key；当上游返回认证、限流或服务错误时，会在配置的重试次数内切换到下一个 key。
+Auto Model Key Router 是一个轻量的本地 API key 路由服务。它支持为同一个模型 ID 配置多个 API key，并以轮询/优先级的方式把请求自动分配到可用 key；当上游返回认证、限流或服务错误时，会依次切换到已配置的其他 key，只有单 key 配置才会按重试次数重复尝试同一个 key。
 
 ## 功能
 
@@ -95,6 +95,7 @@ auto-model-key-router --config router-config.json
 - 管理系统服务 / 开机自启动
 - 交互式添加模型 / API key
 - 生成 / 重置本地 API key
+- 配置监听地址与端口
 - 查看日志板块
 - 退出
 
@@ -150,6 +151,8 @@ auto-model-key-router --config router-config.json --show-config
 ```bash
 auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 ```
+
+也可以在 Terminal UI 中配置监听地址。默认只监听 `127.0.0.1`，配置为 `0.0.0.0` 时会接受所有可达网络的连接；如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。Terminal UI 首页会在检测到 `0.0.0.0` 时显示显眼风险提示。
 
 如果配置文件没有模型，直接启动服务时会自动进入交互式配置，依次输入模型 ID、Key 名称、上游 `base_url` 和 API key。
 

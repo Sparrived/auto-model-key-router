@@ -36,6 +36,10 @@ def default_metrics_db_path() -> str:
     return str(default_cache_dir() / "metrics.sqlite3")
 
 
+def default_key_state_path() -> str:
+    return str(default_cache_dir() / "key-state.json")
+
+
 def default_log_file_path() -> str:
     return str(default_cache_dir() / "server.log")
 
@@ -51,6 +55,10 @@ def empty_config_dict() -> dict[str, Any]:
         "default_base_url": "https://api.openai.com",
         "request_timeout": 60,
         "max_retries": 2,
+        "key_failure_threshold": 2,
+        "key_cooldown_seconds": 60,
+        "key_state_path": default_key_state_path(),
+        "upstream_health_check_interval": 30,
         "metrics_db_path": default_metrics_db_path(),
         "log_file_path": default_log_file_path(),
         "local_api_key": generate_local_api_key(),
@@ -87,6 +95,7 @@ class ModelConfig:
     keys: tuple[KeyConfig, ...]
     aliases: tuple[str, ...] = ()
     routing_mode: str = "round_robin"
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,10 @@ class RouterConfig:
     port: int
     request_timeout: float
     max_retries: int
+    key_failure_threshold: int
+    key_cooldown_seconds: float
+    key_state_path: str
+    upstream_health_check_interval: float
     metrics_db_path: str
     log_file_path: str
     local_api_key: str
@@ -128,13 +141,18 @@ class RouterConfig:
             )
             aliases = tuple(str(alias) for alias in model.get("aliases", []) if str(alias))
             routing_mode = str(model.get("routing_mode") or default_routing_mode)
-            models.append(ModelConfig(id=str(model["id"]), keys=keys, aliases=aliases, routing_mode=routing_mode))
+            reasoning_effort = str(model.get("reasoning_effort") or "").strip() or None
+            models.append(ModelConfig(id=str(model["id"]), keys=keys, aliases=aliases, routing_mode=routing_mode, reasoning_effort=reasoning_effort))
 
         config = cls(
             host=str(raw.get("host", "127.0.0.1")),
             port=int(raw.get("port", 8000)),
             request_timeout=float(raw.get("request_timeout", 60)),
             max_retries=int(raw.get("max_retries", 2)),
+            key_failure_threshold=max(1, int(raw.get("key_failure_threshold", 2))),
+            key_cooldown_seconds=max(0.0, float(raw.get("key_cooldown_seconds", 60))),
+            key_state_path=str(raw.get("key_state_path") or default_key_state_path()),
+            upstream_health_check_interval=max(0.0, float(raw.get("upstream_health_check_interval", 30))),
             metrics_db_path=str(raw.get("metrics_db_path") or default_metrics_db_path()),
             log_file_path=str(raw.get("log_file_path") or default_log_file_path()),
             local_api_key=str(raw.get("local_api_key", "")),
@@ -150,6 +168,8 @@ class RouterConfig:
                 raise ValueError("模型 id 不能为空")
             if model.routing_mode not in {"priority", "round_robin"}:
                 raise ValueError(f"模型 {model.id} 的 routing_mode 必须是 priority 或 round_robin")
+            if model.reasoning_effort is not None and model.reasoning_effort not in {"minimal", "low", "medium", "high"}:
+                raise ValueError(f"模型 {model.id} 的 reasoning_effort 必须是 minimal、low、medium 或 high")
             for name in (model.id, *model.aliases):
                 if name in model_names:
                     raise ValueError(f"模型名称重复: {name}")

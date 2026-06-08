@@ -8,16 +8,28 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
+env/
+.release-smoke/
 
 # Local configuration
 router-config.json
+.last_config_path
 .env
 .env.*
 
 # Tooling caches
 .pytest_cache/
+.coverage
 .ruff_cache/
 .mypy_cache/
+.dbg/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # Logs
 *.log

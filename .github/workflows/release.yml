@@ -61,6 +61,15 @@ jobs:
         if: steps.existing_release.outputs.exists == 'false'
         run: python -m twine check dist/*
 
+      - name: Smoke test wheel
+        if: steps.existing_release.outputs.exists == 'false'
+        run: |
+          python -m venv .release-smoke
+          .release-smoke/bin/python -m pip install --upgrade pip
+          .release-smoke/bin/python -m pip install dist/*.whl
+          .release-smoke/bin/auto-model-key-router --help
+          .release-smoke/bin/amkr --help
+
       - name: Create GitHub Release
         if: steps.existing_release.outputs.exists == 'false'
         env:
