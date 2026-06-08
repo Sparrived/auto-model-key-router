@@ -7,8 +7,8 @@ Auto Model Key Router 是一个轻量的本地 API key 路由服务。它支持�
 - 支持按模型维度选择“分流”或“优先级”路由模式
 - 支持 key 失败后自动尝试下一个 key
 - 支持请求量、成功/失败、重试、状态码、Token 使用量和缓存命中统计
-- 支持 Rich CLI 展示配置摘要、交互式添加配置和日志板块
-- 支持通过 GitHub 检查新版本、更新提示和手动更新
+- 支持 Rich CLI 展示配置摘要、交互式添加配置和调用日志
+- 支持通过 PyPI/GitHub 检查新版本、更新提示和手动更新
 - 支持 `/health`、`/metrics` 和 `/v1/models` 本地接口
 
 ## 安装
@@ -97,7 +97,7 @@ auto-model-key-router --config router-config.json
 - 交互式添加模型 / API key
 - 生成 / 重置本地 API key
 - 配置监听地址与端口
-- 查看日志板块
+- 查看调用日志
 - 检查版本更新
 - 退出
 
@@ -158,31 +158,33 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 
 如果配置文件没有模型，直接启动服务时会自动进入交互式配置，依次输入模型 ID、Key 名称、上游 `base_url` 和 API key。
 
-也可以通过命令直接查看日志板块，默认显示最近 20 行运行日志和最近 20 条请求记录：
+也可以通过命令直接查看调用日志，默认显示最近 20 行运行日志，调用统计明细固定 10 行/页：
 
 ```bash
 auto-model-key-router --config router-config.json --show-logs
 ```
 
-指定日志行数和请求记录条数：
+指定运行日志行数：
 
 ```bash
 auto-model-key-router --config router-config.json --show-logs 50
 ```
 
-检查 GitHub Release 最新版本：
+调用统计支持按 `24小时`、`3天`、`7天`、`30天`、`全部` 查询，Terminal UI 中可用 Tab 切换范围，总览和请求明细会同步按当前范围刷新。
+
+检查 PyPI/GitHub 最新版本：
 
 ```bash
 auto-model-key-router --check-update
 ```
 
-手动更新到 GitHub Release 最新版本：
+手动更新到 PyPI/GitHub 最新版本：
 
 ```bash
 auto-model-key-router --update
 ```
 
-Terminal UI 启动时会快速检查 GitHub Release。如果发现新版本，首页会显示更新提示，也可以进入“版本更新”菜单重新检查或确认手动更新。更新完成后需要重启当前终端和正在运行的后台/系统服务，让新版本生效。
+Terminal UI 启动时会优先快速检查 PyPI JSON API，PyPI 不可用时回退到 GitHub Release。如果发现新版本，首页会显示更新提示，也可以进入“版本更新”菜单重新检查或确认手动更新。PyPI 可用时会执行 `pip install --upgrade auto-model-key-router`，回退到 GitHub 时会安装对应 Release 源码包。更新完成后需要重启当前终端和正在运行的后台/系统服务，让新版本生效。
 
 ## 请求示例
 

@@ -16,9 +16,26 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 
 console = Console()
+
+APP_ASCII_FLAG = "\n".join([
+    "    _    __  __ _  ______ ",
+    "   / \\  |  \\/  | |/ /  _ \\",
+    "  / _ \\ | |\\/| | ' /| |_) |",
+    " / ___ \\| |  | | . \\|  _ < ",
+    "/_/   \\_\\_|  |_|_|\\_\\_| \\_\\",
+])
+
+
+def app_flag_title(subtitle: str, version: str) -> Panel:
+    layout = Table.grid(padding=(0, 3), pad_edge=False)
+    layout.add_column()
+    layout.add_column()
+    layout.add_row(Text(APP_ASCII_FLAG, style="bold cyan"), Text(f"\n{subtitle}\nv{version}", style="dim"))
+    return Panel(Align.center(layout), border_style="cyan", box=box.ROUNDED)
 
 
 def page_title(title: str, subtitle: str | None = None) -> Panel:

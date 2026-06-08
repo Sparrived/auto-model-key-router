@@ -10,7 +10,7 @@ from .dashboard import render_config, run_terminal_ui
 from .logs_tui import render_logs
 from .service import background_status_panel, manage_system_service, start_service_background, start_service_foreground, stop_background_service
 from .tui import clear_terminal_history, console, section_panel
-from .update import check_latest_release, render_version_check_result, update_latest_release
+from .update import check_latest_version, render_version_check_result, update_latest_version
 
 
 def main() -> None:
@@ -19,10 +19,10 @@ def main() -> None:
     parser.add_argument("--host", help="覆盖配置中的监听地址")
     parser.add_argument("--port", type=int, help="覆盖配置中的监听端口")
     parser.add_argument("--show-config", action="store_true", help="只展示配置摘要，不启动服务")
-    parser.add_argument("--show-logs", nargs="?", const=20, type=int, help="进入日志板块，显示最近 N 条请求记录")
+    parser.add_argument("--show-logs", nargs="?", const=20, type=int, help="进入调用日志，显示最近 N 行运行日志，调用统计明细固定 10 行/页")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--check-update", action="store_true", help="通过 GitHub 检查最新版本")
-    parser.add_argument("--update", action="store_true", help="通过 GitHub 手动更新到最新版本")
+    parser.add_argument("--check-update", action="store_true", help="通过 PyPI/GitHub 检查最新版本")
+    parser.add_argument("--update", action="store_true", help="通过 PyPI/GitHub 手动更新到最新版本")
     parser.add_argument("--serve", action="store_true", help="跳过 Terminal UI，后台启动服务")
     parser.add_argument("--serve-foreground", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--stop", action="store_true", help="停止后台服务")
@@ -33,10 +33,10 @@ def main() -> None:
 
     clear_terminal_history()
     if args.check_update:
-        console.print(render_version_check_result(check_latest_release(timeout=10.0)))
+        console.print(render_version_check_result(check_latest_version(timeout=10.0)))
         return
     if args.update:
-        console.print(update_latest_release(timeout=10.0))
+        console.print(update_latest_version(timeout=10.0))
         return
 
     config_path = Path(args.config)

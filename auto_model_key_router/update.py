@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -15,6 +16,9 @@ from . import __version__
 from .tui import section_panel
 
 
+PACKAGE_NAME = "auto-model-key-router"
+PYPI_PROJECT_URL = f"https://pypi.org/project/{PACKAGE_NAME}/"
+PYPI_JSON_API = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 GITHUB_REPOSITORY = "Sparrived/auto-model-key-router"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
@@ -26,6 +30,8 @@ class VersionCheckResult:
     latest_version: str | None = None
     latest_tag: str | None = None
     release_url: str | None = None
+    source: str | None = None
+    fallback_error: str | None = None
     error: str | None = None
 
     @property
@@ -46,18 +52,52 @@ def is_newer_version(latest: str, current: str) -> bool:
     return comparable_version(latest) > comparable_version(current)
 
 
-def check_latest_release(current_version: str = __version__, timeout: float = 3.0) -> VersionCheckResult:
+def fetch_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
     request = Request(
-        GITHUB_LATEST_RELEASE_API,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": f"auto-model-key-router/{current_version}",
-        },
+        url,
+        headers=headers,
     )
+    with urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("响应不是 JSON 对象。")
+    return data
+
+
+def check_latest_pypi(current_version: str = __version__, timeout: float = 3.0) -> VersionCheckResult:
     try:
-        with urlopen(request, timeout=timeout) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+        data = fetch_json(
+            PYPI_JSON_API,
+            {
+                "Accept": "application/json",
+                "User-Agent": f"auto-model-key-router/{current_version}",
+            },
+            timeout,
+        )
+    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+        return VersionCheckResult(current_version=current_version, error=str(exc))
+
+    info = data.get("info")
+    if not isinstance(info, dict):
+        return VersionCheckResult(current_version=current_version, error="PyPI 响应中缺少 info。")
+    latest_version = str(info.get("version") or "").strip()
+    if not latest_version:
+        return VersionCheckResult(current_version=current_version, error="PyPI 响应中缺少 version。")
+    release_url = str(info.get("package_url") or info.get("project_url") or PYPI_PROJECT_URL)
+    return VersionCheckResult(current_version=current_version, latest_version=latest_version, release_url=release_url, source="PyPI")
+
+
+def check_latest_release(current_version: str = __version__, timeout: float = 3.0) -> VersionCheckResult:
+    try:
+        data = fetch_json(
+            GITHUB_LATEST_RELEASE_API,
+            {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"auto-model-key-router/{current_version}",
+            },
+            timeout,
+        )
+    except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
         return VersionCheckResult(current_version=current_version, error=str(exc))
 
     tag = str(data.get("tag_name") or "").strip()
@@ -66,19 +106,39 @@ def check_latest_release(current_version: str = __version__, timeout: float = 3.
 
     latest_version = tag.removeprefix("v").removeprefix("V")
     release_url = str(data.get("html_url") or GITHUB_RELEASES_URL)
-    return VersionCheckResult(current_version=current_version, latest_version=latest_version, latest_tag=tag, release_url=release_url)
+    return VersionCheckResult(current_version=current_version, latest_version=latest_version, latest_tag=tag, release_url=release_url, source="GitHub")
+
+
+def check_latest_version(current_version: str = __version__, timeout: float = 3.0) -> VersionCheckResult:
+    pypi_result = check_latest_pypi(current_version, timeout)
+    if not pypi_result.error:
+        return pypi_result
+
+    github_result = check_latest_release(current_version, timeout)
+    if github_result.error:
+        return VersionCheckResult(current_version=current_version, error=f"PyPI 检查失败: {pypi_result.error}；GitHub 检查失败: {github_result.error}")
+    return VersionCheckResult(current_version=current_version, latest_version=github_result.latest_version, latest_tag=github_result.latest_tag, release_url=github_result.release_url, source=github_result.source, fallback_error=pypi_result.error)
 
 
 def github_source_archive_url(tag: str) -> str:
     return f"https://github.com/{GITHUB_REPOSITORY}/archive/refs/tags/{tag}.zip"
 
 
-def manual_update_command(tag: str) -> list[str]:
-    return [sys.executable, "-m", "pip", "install", "--upgrade", github_source_archive_url(tag)]
+def manual_update_command(result: VersionCheckResult) -> list[str]:
+    if result.source == "GitHub":
+        if not result.latest_tag:
+            raise ValueError("GitHub 更新缺少 tag。")
+        return [sys.executable, "-m", "pip", "install", "--upgrade", github_source_archive_url(result.latest_tag)]
+    return [sys.executable, "-m", "pip", "install", "--upgrade", PACKAGE_NAME]
 
 
-def manual_update_command_text(tag: str) -> str:
-    return f'"{sys.executable}" -m pip install --upgrade "{github_source_archive_url(tag)}"'
+def manual_update_command_text(result: VersionCheckResult) -> str:
+    command = manual_update_command(result)
+    return f'"{command[0]}" -m pip install --upgrade "{command[-1]}"'
+
+
+def update_target_label(result: VersionCheckResult) -> str:
+    return result.latest_tag or result.latest_version or "最新版本"
 
 
 def render_version_check_result(result: VersionCheckResult) -> Panel:
@@ -95,15 +155,19 @@ def render_version_check_result(result: VersionCheckResult) -> Panel:
 
     lines = [
         f"当前版本: [bold]{escape(result.current_version)}[/bold]",
-        f"最新版本: [bold]{escape(result.latest_version or '-') }[/bold]",
+        f"最新版本: [bold]{escape(result.latest_version or '-')}[/bold]",
     ]
+    if result.source:
+        lines.append(f"检查来源: [bold]{escape(result.source)}[/bold]")
+    if result.fallback_error:
+        lines.append(f"PyPI 回退原因: [yellow]{escape(result.fallback_error)}[/yellow]")
     if result.release_url:
         lines.append(f"发布页面: [bold]{escape(result.release_url)}[/bold]")
-    if result.update_available and result.latest_tag:
+    if result.update_available:
         lines.extend([
             "状态: [yellow]发现新版本，可手动更新。[/yellow]",
             "手动更新命令:",
-            f"[bold]{escape(manual_update_command_text(result.latest_tag))}[/bold]",
+            f"[bold]{escape(manual_update_command_text(result))}[/bold]",
         ])
         return section_panel("\n".join(lines), "版本检查", "yellow")
 
@@ -112,11 +176,11 @@ def render_version_check_result(result: VersionCheckResult) -> Panel:
 
 
 def render_update_notice(result: VersionCheckResult | None) -> Panel | None:
-    if result is None or not result.update_available or not result.latest_tag:
+    if result is None or not result.update_available:
         return None
     return section_panel(
         "\n".join([
-            f"发现新版本 [bold yellow]{escape(result.latest_tag)}[/bold yellow]，当前版本 [bold]{escape(result.current_version)}[/bold]。",
+            f"发现 {escape(result.source or '可用来源')} 新版本 [bold yellow]{escape(update_target_label(result))}[/bold yellow]，当前版本 [bold]{escape(result.current_version)}[/bold]。",
             "进入主菜单的“版本更新”可查看发布页面并手动更新。",
         ]),
         "更新提示",
@@ -124,31 +188,42 @@ def render_update_notice(result: VersionCheckResult | None) -> Panel | None:
     )
 
 
-def install_latest_release(tag: str) -> Panel:
-    command = manual_update_command(tag)
+def install_latest_version(version_result: VersionCheckResult) -> Panel:
+    try:
+        command = manual_update_command(version_result)
+    except ValueError as exc:
+        return section_panel(str(exc), "手动更新", "red")
     result = subprocess.run(command, capture_output=True, text=True)
     output = (result.stdout or result.stderr or "").strip()
     if len(output) > 4000:
         output = output[-4000:]
     if result.returncode == 0:
         content = "\n".join([
-            f"已通过 GitHub 安装 [bold]{escape(tag)}[/bold]。",
+            f"已通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
             "请重启当前终端和正在运行的服务，让新版本生效。",
-            f"命令: [bold]{escape(manual_update_command_text(tag))}[/bold]",
+            f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
             escape(output) if output else "pip 未返回额外输出。",
         ])
         return section_panel(content, "手动更新", "green")
 
     content = "\n".join([
         f"更新失败，退出码: [bold]{result.returncode}[/bold]",
-        f"命令: [bold]{escape(manual_update_command_text(tag))}[/bold]",
+        f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
         escape(output) if output else "pip 未返回错误详情。",
     ])
     return section_panel(content, "手动更新", "red")
 
 
-def update_latest_release(timeout: float = 10.0) -> Panel:
-    result = check_latest_release(timeout=timeout)
-    if result.error or not result.update_available or not result.latest_tag:
+def install_latest_release(tag: str) -> Panel:
+    return install_latest_version(VersionCheckResult(current_version=__version__, latest_version=tag.removeprefix("v").removeprefix("V"), latest_tag=tag, source="GitHub"))
+
+
+def update_latest_version(timeout: float = 10.0) -> Panel:
+    result = check_latest_version(timeout=timeout)
+    if result.error or not result.update_available:
         return render_version_check_result(result)
-    return install_latest_release(result.latest_tag)
+    return install_latest_version(result)
+
+
+def update_latest_release(timeout: float = 10.0) -> Panel:
+    return update_latest_version(timeout)

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- 新增关闭 reasoning 选项，并将未设置状态展示为“由下游决定”。
+
+### Changed
+- 模型级推理强度配置在非“由下游决定”时会覆盖下游请求中的 reasoning 设置。
+- 版本检查调整为优先查询 PyPI JSON API，失败时回退到 GitHub Release。
+
 ## [1.2.0] - 2026-06-09
 
 ### Added

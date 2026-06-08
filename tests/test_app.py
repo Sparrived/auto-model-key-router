@@ -205,7 +205,7 @@ def test_config_reasoning_effort_is_forwarded() -> None:
         assert upstream_bodies[0]["reasoning_effort"] == "xhigh"
 
 
-def test_request_reasoning_effort_overrides_config() -> None:
+def test_config_reasoning_effort_overrides_request_reasoning() -> None:
     with tempfile.TemporaryDirectory() as directory:
         upstream_bodies: list[dict[str, object]] = []
 
@@ -227,5 +227,57 @@ def test_request_reasoning_effort_overrides_config() -> None:
         response = run_client(app, requests)
 
         assert response.status_code == 200
+        assert upstream_bodies[0]["reasoning_effort"] == "high"
+        assert "reasoning" not in upstream_bodies[0]
+
+
+def test_downstream_reasoning_effort_is_forwarded_without_config_override() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/responses",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "input": "hi", "reasoning": {"effort": "low"}},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
         assert upstream_bodies[0]["reasoning_effort"] == "low"
+        assert "reasoning" not in upstream_bodies[0]
+
+
+def test_none_reasoning_effort_disables_request_reasoning() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),), reasoning_effort="none")
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "high", "reasoning": {"effort": "low"}},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert upstream_bodies[0]["reasoning_effort"] == "none"
         assert "reasoning" not in upstream_bodies[0]

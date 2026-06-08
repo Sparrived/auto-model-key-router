@@ -249,13 +249,13 @@ def _upstream_body(body: bytes, payload: dict[str, Any], model_id: str, config: 
 
 def _apply_reasoning_effort(payload: dict[str, Any], model_id: str, config: RouterConfig | None) -> dict[str, Any]:
     adapted = dict(payload)
+    reasoning_effort = config.reasoning_effort_by_model.get(model_id) if config is not None else None
+    if reasoning_effort:
+        adapted["reasoning_effort"] = reasoning_effort
+        return adapted
     reasoning = adapted.get("reasoning")
     if "reasoning_effort" not in adapted and isinstance(reasoning, dict) and reasoning.get("effort"):
         adapted["reasoning_effort"] = reasoning["effort"]
-    if "reasoning_effort" not in adapted and config is not None:
-        reasoning_effort = config.reasoning_effort_by_model.get(model_id)
-        if reasoning_effort:
-            adapted["reasoning_effort"] = reasoning_effort
     return adapted
 
 

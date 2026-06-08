@@ -53,8 +53,8 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     aliases_text = Prompt.ask("显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
     model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()] if aliases_text else []
     model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流", choices=["priority", "round_robin"], default=str(model.get("routing_mode") or "round_robin")).strip()
-    reasoning_effort = Prompt.ask("推理强度：default=不设置，minimal/low/medium/high/xhigh", choices=["default", "minimal", "low", "medium", "high", "xhigh"], default=str(model.get("reasoning_effort") or "default")).strip()
-    if reasoning_effort == "default":
+    reasoning_effort = Prompt.ask("推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"], default=normalize_reasoning_effort_choice(model.get("reasoning_effort"))).strip()
+    if reasoning_effort == "downstream":
         model.pop("reasoning_effort", None)
     else:
         model["reasoning_effort"] = reasoning_effort
@@ -228,7 +228,7 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
         return section_panel("[yellow]还没有模型配置。[/yellow]", "推理强度", "yellow")
     model_options = []
     for index, model in enumerate(models):
-        effort = str(model.get("reasoning_effort") or "default")
+        effort = normalize_reasoning_effort_choice(model.get("reasoning_effort"))
         model_options.append((str(index + 1), f"{short_text(model['id'], 28)} · {reasoning_effort_text(effort)}"))
     model_options.append(("0", "返回"))
     model_choice = select_option("选择模型", model_options)
@@ -236,14 +236,14 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
         return None
     old_config = RouterConfig.from_dict(data)
     model = models[int(model_choice) - 1]
-    current_effort = str(model.get("reasoning_effort") or "default")
-    effort_choice = select_option("选择推理强度", [("1", "默认：不设置"), ("2", "minimal"), ("3", "low"), ("4", "medium"), ("5", "high"), ("6", "xhigh"), ("0", "返回")], selected={"default": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}.get(current_effort, 0))
+    current_effort = normalize_reasoning_effort_choice(model.get("reasoning_effort"))
+    effort_choice = select_option("选择推理强度", [("1", "由下游决定"), ("2", "关闭 reasoning"), ("3", "minimal"), ("4", "low"), ("5", "medium"), ("6", "high"), ("7", "xhigh"), ("0", "返回")], selected={"downstream": 0, "none": 1, "minimal": 2, "low": 3, "medium": 4, "high": 5, "xhigh": 6}.get(current_effort, 0))
     if effort_choice == "0":
         return section_panel("[yellow]配置未变化。[/yellow]", "推理强度", "yellow")
-    new_effort = {"1": "default", "2": "minimal", "3": "low", "4": "medium", "5": "high", "6": "xhigh"}[effort_choice]
+    new_effort = {"1": "downstream", "2": "none", "3": "minimal", "4": "low", "5": "medium", "6": "high", "7": "xhigh"}[effort_choice]
     if new_effort == current_effort:
         return section_panel(f"模型 [bold]{short_text(model['id'], 32)}[/bold] 已是 [bold]{reasoning_effort_text(new_effort)}[/bold]。", "推理强度", "yellow")
-    if new_effort == "default":
+    if new_effort == "downstream":
         model.pop("reasoning_effort", None)
     else:
         model["reasoning_effort"] = new_effort
@@ -253,8 +253,13 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
 
 
 def reasoning_effort_text(value: str | None) -> str:
-    effort = value or "default"
-    return {"default": "默认", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}.get(effort, effort)
+    effort = normalize_reasoning_effort_choice(value)
+    return {"downstream": "由下游决定", "none": "关闭 reasoning", "minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}.get(effort, effort)
+
+
+def normalize_reasoning_effort_choice(value: Any) -> str:
+    effort = str(value or "").strip()
+    return "downstream" if effort in {"", "default", "downstream"} else effort
 
 
 def select_api_key(path: Path, title: str) -> tuple[dict[str, Any], dict[str, Any], int] | None:

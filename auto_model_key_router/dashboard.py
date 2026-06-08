@@ -9,21 +9,21 @@ from rich.live import Live
 from rich.table import Table
 
 from .config import RouterConfig
-from .config_editor import manage_model_keys_interactively, set_listen_interactively, set_local_api_key_interactively
+from .config_editor import manage_model_keys_interactively, reasoning_effort_text, set_listen_interactively, set_local_api_key_interactively
 from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import background_status_panel, is_service_healthy, manage_system_service
-from .tui import clear_terminal_history, confirm_choice, console, menu_table, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, show_result_page
-from .update import VersionCheckResult, check_latest_release, install_latest_release, render_update_notice, render_version_check_result
+from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, show_result_page
+from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
-MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听配置"), ("5", "日志板块"), ("6", "版本更新"), ("0", "退出")]
+MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听配置"), ("5", "调用日志"), ("6", "版本更新"), ("0", "退出")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
     selected = 0
-    update_result = check_latest_release(timeout=1.2)
+    update_result = check_latest_version(timeout=1.2)
     while True:
         choice, selected = select_menu_option(config_path, config, selected, update_result)
         if choice == "0":
@@ -78,7 +78,7 @@ def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 
 
 def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, update_result: VersionCheckResult | None = None) -> Group:
     update_notice = render_update_notice(update_result)
-    renderables = [page_title("Auto Model Key Router", f"OpenAI-Compatible 模型 API Key 路由控制台 · v{__version__}"), *config_renderables(config, config_path)]
+    renderables = [app_flag_title("OpenAI-Compatible 模型 API Key 路由控制台", __version__), *config_renderables(config, config_path)]
     if update_notice is not None:
         renderables.append(update_notice)
     renderables.extend([section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出")])
@@ -97,22 +97,22 @@ def manage_system_service_interactively(config_path: Path) -> None:
 
 
 def manage_version_update_interactively(update_result: VersionCheckResult | None = None) -> VersionCheckResult:
-    latest_result = update_result if update_result is not None and not update_result.error else check_latest_release(timeout=10.0)
+    latest_result = update_result if update_result is not None and not update_result.error else check_latest_version(timeout=10.0)
     while True:
         choice = select_option("版本更新", [("1", "重新检查"), ("2", "手动更新"), ("0", "返回")], selected=0, content=render_version_check_result(latest_result))
         if choice == "0":
             return latest_result
         if choice == "1":
-            latest_result = check_latest_release(timeout=10.0)
+            latest_result = check_latest_version(timeout=10.0)
             continue
         if choice == "2":
-            if latest_result.error or not latest_result.update_available or not latest_result.latest_tag:
+            if latest_result.error or not latest_result.update_available:
                 show_result_page("版本更新", render_version_check_result(latest_result))
                 continue
-            if confirm_choice(f"将通过 GitHub 安装 {latest_result.latest_tag}，更新完成后需要重启终端和服务。是否继续？"):
+            if confirm_choice(f"将通过 {latest_result.source or '可用来源'} 安装 {update_target_label(latest_result)}，更新完成后需要重启终端和服务。是否继续？"):
                 clear_terminal_history()
-                show_result_page("手动更新", install_latest_release(latest_result.latest_tag))
-                latest_result = check_latest_release(timeout=10.0)
+                show_result_page("手动更新", install_latest_version(latest_result))
+                latest_result = check_latest_version(timeout=10.0)
 
 
 def render_config(config: RouterConfig, path: Path) -> None:
@@ -132,9 +132,8 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     summary.add_column(ratio=1)
     summary.add_row(f"[dim]监听地址[/dim]\n[bold]{config.host}:{config.port}[/bold]", f"[dim]服务状态[/dim]\n[bold]{service_status}[/bold]", f"[dim]本地鉴权[/dim]\n[bold]{auth_status}[/bold]")
     summary.add_row(f"[dim]模型数量[/dim]\n[bold cyan]{model_count}[/bold cyan]", f"[dim]Key 数量[/dim]\n[bold green]{key_count}[/bold green]", f"[dim]上游数量[/dim]\n[bold magenta]{upstream_count}[/bold magenta]")
-    summary.add_row(f"[dim]配置文件[/dim]\n[bold]{short_text(path, 48)}[/bold]", "[dim]路由入口[/dim]\n[bold]/v1/{path}[/bold]", "[dim]健康检查[/dim]\n[bold]/health[/bold]")
     warning = section_panel("[bold red]⚠ 当前监听地址为 0.0.0.0，服务会接受所有可达网络的连接。[/bold red]\n[red]如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。[/red]", "公网开放风险", "red") if config.host == "0.0.0.0" else None
-    table = Table(title="路由配置", show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
+    table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("模型 ID", style="cyan", ratio=2)
     table.add_column("名称")
     table.add_column("路由模式")
@@ -145,7 +144,7 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
         upstreams = sorted({compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
         routing_mode = "优先级" if model.routing_mode == "priority" else "分流"
-        table.add_row(short_text(model.id, 28), short_text(display_names, 24), routing_mode, model.reasoning_effort or "-", str(len(model.keys)), "\n".join(upstreams))
+        table.add_row(short_text(model.id, 28), short_text(display_names, 24), routing_mode, reasoning_effort_text(model.reasoning_effort), str(len(model.keys)), "\n".join(upstreams))
     if not config.models:
         table.add_row("未配置", "-", "-", "-", "0", "-")
     renderables = [section_panel(summary, "运行概览", "cyan")]
