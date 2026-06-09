@@ -108,13 +108,12 @@ def test_open_log_file_uses_xdg_open_on_linux(tmp_path, monkeypatch) -> None:
 
 
 def test_main_menu_keeps_settings_entries_under_cli_settings() -> None:
-    assert dashboard.MENU_OPTIONS == [("1", "模型 Key"), ("2", "CLI 设置"), ("0", "退出")]
-    assert ("1", "一键配置") in dashboard.SETTINGS_OPTIONS
-    assert ("2", "模型服务") in dashboard.SETTINGS_OPTIONS
-    assert ("3", "本地鉴权") in dashboard.SETTINGS_OPTIONS
-    assert ("4", "监听配置") in dashboard.SETTINGS_OPTIONS
-    assert ("5", "调用日志") in dashboard.SETTINGS_OPTIONS
-    assert ("6", "版本更新") in dashboard.SETTINGS_OPTIONS
+    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
+    assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
+    assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
+    assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
+    assert ("4", "调用日志") in dashboard.SETTINGS_OPTIONS
+    assert ("5", "版本更新") in dashboard.SETTINGS_OPTIONS
 
 
 def test_configure_cli_generates_auth_key_and_installs_service(tmp_path, monkeypatch) -> None:

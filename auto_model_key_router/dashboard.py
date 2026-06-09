@@ -18,8 +18,8 @@ from .tui import app_flag_title, clear_terminal_history, confirm_choice, console
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
-MENU_OPTIONS = [("1", "模型 Key"), ("2", "CLI 设置"), ("0", "退出")]
-SETTINGS_OPTIONS = [("1", "一键配置"), ("2", "模型服务"), ("3", "本地鉴权"), ("4", "监听配置"), ("5", "调用日志"), ("6", "版本更新"), ("0", "返回")]
+MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
+SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "调用日志"), ("5", "版本更新"), ("0", "返回")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
@@ -30,10 +30,16 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
         if choice == "0":
             return
         if choice == "1":
-            run_submodule(lambda: manage_model_keys_interactively(config_path))
+            result = run_submodule(lambda: configure_cli_interactively(config_path))
+            if result is not None:
+                show_result_page("一键配置", result)
             config = RouterConfig.load(config_path)
             continue
         if choice == "2":
+            run_submodule(lambda: manage_model_keys_interactively(config_path))
+            config = RouterConfig.load(config_path)
+            continue
+        if choice == "3":
             result = run_submodule(lambda: manage_cli_settings_interactively(config_path, update_result))
             if isinstance(result, VersionCheckResult):
                 update_result = result
@@ -47,28 +53,23 @@ def manage_cli_settings_interactively(config_path: Path, update_result: VersionC
         if choice == "0":
             return latest_result
         if choice == "1":
-            result = run_submodule(lambda: configure_cli_interactively(config_path))
-            if result is not None:
-                show_result_page("一键配置", result)
-            continue
-        if choice == "2":
             run_submodule(lambda: manage_system_service_interactively(config_path))
             continue
-        if choice == "3":
+        if choice == "2":
             result = run_submodule(lambda: set_local_api_key_interactively(config_path))
             if result is not None:
                 show_result_page("本地鉴权", result)
             continue
-        if choice == "4":
+        if choice == "3":
             result = run_submodule(lambda: set_listen_interactively(config_path))
             if result is not None:
                 show_result_page("监听配置", result)
             continue
-        if choice == "5":
+        if choice == "4":
             config = RouterConfig.load(config_path)
             run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
             continue
-        if choice == "6":
+        if choice == "5":
             result = run_submodule(lambda: manage_version_update_interactively(latest_result))
             if isinstance(result, VersionCheckResult):
                 latest_result = result
