@@ -8,8 +8,8 @@ from rich.console import Group
 from rich.live import Live
 from rich.table import Table
 
-from .config import RouterConfig
-from .config_editor import manage_model_keys_interactively, reasoning_effort_text, set_listen_interactively, set_local_api_key_interactively
+from .config import RouterConfig, generate_local_api_key
+from .config_editor import load_config_data, manage_model_keys_interactively, reasoning_effort_text, save_config_data, set_listen_interactively, set_local_api_key_interactively
 from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
@@ -18,7 +18,8 @@ from .tui import app_flag_title, clear_terminal_history, confirm_choice, console
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
-MENU_OPTIONS = [("1", "系统服务"), ("2", "模型 Key"), ("3", "本地鉴权"), ("4", "监听配置"), ("5", "调用日志"), ("6", "版本更新"), ("0", "退出")]
+MENU_OPTIONS = [("1", "模型 Key"), ("2", "CLI 设置"), ("0", "退出")]
+SETTINGS_OPTIONS = [("1", "一键配置"), ("2", "模型服务"), ("3", "本地鉴权"), ("4", "监听配置"), ("5", "调用日志"), ("6", "版本更新"), ("0", "返回")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
@@ -29,31 +30,65 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
         if choice == "0":
             return
         if choice == "1":
-            run_submodule(lambda: manage_system_service_interactively(config_path))
-            continue
-        if choice == "2":
             run_submodule(lambda: manage_model_keys_interactively(config_path))
             config = RouterConfig.load(config_path)
+            continue
+        if choice == "2":
+            result = run_submodule(lambda: manage_cli_settings_interactively(config_path, update_result))
+            if isinstance(result, VersionCheckResult):
+                update_result = result
+            config = RouterConfig.load(config_path)
+
+
+def manage_cli_settings_interactively(config_path: Path, update_result: VersionCheckResult | None = None) -> VersionCheckResult | None:
+    latest_result = update_result
+    while True:
+        choice = select_option("CLI 设置", SETTINGS_OPTIONS)
+        if choice == "0":
+            return latest_result
+        if choice == "1":
+            result = run_submodule(lambda: configure_cli_interactively(config_path))
+            if result is not None:
+                show_result_page("一键配置", result)
+            continue
+        if choice == "2":
+            run_submodule(lambda: manage_system_service_interactively(config_path))
             continue
         if choice == "3":
             result = run_submodule(lambda: set_local_api_key_interactively(config_path))
             if result is not None:
                 show_result_page("本地鉴权", result)
-            config = RouterConfig.load(config_path)
             continue
         if choice == "4":
             result = run_submodule(lambda: set_listen_interactively(config_path))
             if result is not None:
                 show_result_page("监听配置", result)
-            config = RouterConfig.load(config_path)
             continue
         if choice == "5":
+            config = RouterConfig.load(config_path)
             run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
             continue
         if choice == "6":
-            result = run_submodule(lambda: manage_version_update_interactively(update_result))
+            result = run_submodule(lambda: manage_version_update_interactively(latest_result))
             if isinstance(result, VersionCheckResult):
-                update_result = result
+                latest_result = result
+
+
+def configure_cli_interactively(config_path: Path) -> Any:
+    config_exists = config_path.exists()
+    data = load_config_data(config_path)
+    local_api_key = str(data.get("local_api_key") or "").strip()
+    if not local_api_key:
+        local_api_key = generate_local_api_key()
+        data["local_api_key"] = local_api_key
+        save_config_data(config_path, data)
+        auth_message = "已生成本地鉴权 key。"
+    else:
+        auth_message = "已使用现有本地鉴权 key。" if config_exists else "已生成本地鉴权 key。"
+    config = RouterConfig.from_dict(data)
+    auth_panel = section_panel(f"{auth_message}\n\n[bold]{local_api_key}[/bold]\n\n请求时添加：\nAuthorization: Bearer {local_api_key}\n或：\nx-api-key: {local_api_key}", "本地鉴权", "green")
+    endpoint_panel = section_panel(f"配置文件: [bold]{config_path.resolve()}[/bold]\n服务地址: [bold]http://{config.host}:{config.port}[/bold]", "CLI 设置", "green")
+    return Group(auth_panel, manage_system_service(config_path, "install"), endpoint_panel)
 
 
 def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0, update_result: VersionCheckResult | None = None) -> tuple[str, int]:
@@ -93,13 +128,13 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
 
 def manage_system_service_interactively(config_path: Path) -> None:
     while True:
-        choice = select_option("系统服务", [("1", "安装自启"), ("2", "启动服务"), ("3", "停止服务"), ("4", "重启服务"), ("5", "服务状态"), ("6", "卸载自启"), ("0", "返回")], selected=4)
+        choice = select_option("模型服务", [("1", "安装自启"), ("2", "启动服务"), ("3", "停止服务"), ("4", "重启服务"), ("5", "服务状态"), ("6", "卸载自启"), ("0", "返回")], selected=4)
         actions = {"1": "install", "2": "start", "3": "stop", "4": "restart", "5": "status", "6": "uninstall"}
         if choice == "0":
             return
         clear_terminal_history()
         result = background_status_panel(RouterConfig.load(config_path), config_path) if choice == "5" else manage_system_service(config_path, actions[choice])
-        show_result_page("系统服务", result)
+        show_result_page("模型服务", result)
 
 
 def manage_version_update_interactively(update_result: VersionCheckResult | None = None) -> VersionCheckResult:

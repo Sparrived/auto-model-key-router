@@ -112,7 +112,7 @@ def fit_terminal_lines(lines: list[list[Segment]], height: int, preserve_bottom:
         if height == 1:
             return [folded_marker_line()]
         return [folded_marker_line(), *lines[-(height - 1):]]
-    return [*lines, *([[Segment("")]] for _ in range(height - len(lines)))]
+    return [*lines, *([Segment("")] for _ in range(height - len(lines)))]
 
 
 def terminal_frame(renderables: list[Any], footer: Any | None = None, preserve_bottom: bool = True) -> Group:

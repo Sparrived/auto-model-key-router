@@ -223,12 +223,10 @@ auto-model-key-router --config router-config.json
 
 | 菜单 | 能力 |
 | --- | --- |
-| 系统服务 | 安装自启、启动、停止、重启、查看状态和卸载自启 |
 | 模型 Key | 添加、编辑、删除、排序模型和 key，并配置路由模式与推理强度 |
-| 本地鉴权 | 生成、重置或清空本地 API key |
-| 监听配置 | 修改监听地址与端口 |
-| 调用日志 | 查看运行日志和 SQLite 调用统计 |
-| 版本更新 | 检查 PyPI/GitHub 最新版本并手动更新 |
+| CLI 设置 | 集中管理一键配置、模型服务、本地鉴权、监听配置、调用日志和版本更新 |
+
+CLI 设置菜单中的“一键配置”会自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key。
 
 ### 后台服务
 
@@ -259,7 +257,7 @@ auto-model-key-router --config router-config.json --service restart
 auto-model-key-router --config router-config.json --service uninstall
 ```
 
-Windows 下会注册为用户登录时启动的计划任务 `AutoModelKeyRouter` 并立即启动。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，同时尝试启用 linger 以支持用户未登录时启动。
+Windows 下会注册为当前用户登录时启动的计划任务 `AutoModelKeyRouter` 并立即启动，使用 `LIMITED` 权限级别，通常不需要管理员权限。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，通常不需要 `sudo`；同时会尝试启用 linger 以支持用户未登录时启动，该步骤可能需要管理员授权，失败时服务仍可在用户登录后自启。
 
 ### 常用命令
 

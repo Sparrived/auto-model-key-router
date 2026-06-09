@@ -156,11 +156,22 @@ def manage_system_service(config_path: Path, action: str) -> Any:
     return section_panel(f"暂不支持当前系统自动注册: {platform.system()}", "系统服务", "yellow")
 
 
+def service_registration_note_panel() -> Panel:
+    system = platform.system().lower()
+    if system == "windows":
+        content = "当前使用 Windows 当前用户计划任务注册，权限级别为 LIMITED，通常不需要管理员权限；任务会在该用户登录时启动。"
+    elif system == "linux":
+        content = "当前使用 systemd user service 注册，通常不需要 sudo；loginctl enable-linger 可能需要管理员授权，失败时服务仍可在用户登录后自启。"
+    else:
+        content = "当前系统暂不支持自动注册为用户级系统服务。"
+    return section_panel(content, "权限说明", "blue")
+
+
 def manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
     task_name = "AutoModelKeyRouter"
     if action == "install":
         command = ["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", task_name, "/RL", "LIMITED", "/IT", "/TR", f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground']
-        return Group(registration_result(command, "Windows 自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"))
+        return Group(registration_result(command, "Windows 自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), service_registration_note_panel())
     if action == "uninstall":
         config = RouterConfig.load(config_path)
         return Group(stop_background_service(config), registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"), registration_result(["schtasks", "/Delete", "/F", "/TN", task_name], "Windows 自启"))
@@ -190,7 +201,7 @@ def manage_systemd_user_service(python: Path, config_path: Path, action: str) ->
     if action == "install":
         service_dir.mkdir(parents=True, exist_ok=True)
         service_path.write_text("\n".join(["[Unit]", "Description=Auto Model Key Router", "After=network-online.target", "Wants=network-online.target", "", "[Service]", f"WorkingDirectory={Path.cwd()}", f"ExecStart={python} -m auto_model_key_router.main --config {config_path} --serve-foreground", "Restart=always", "RestartSec=3", "", "[Install]", "WantedBy=default.target", ""]), encoding="utf-8")
-        return Group(registration_result(["systemctl", "--user", "daemon-reload"], "systemd user"), registration_result(["systemctl", "--user", "enable", "--now", service_name], "systemd user"), registration_result(["loginctl", "enable-linger", os.getlogin()], "systemd linger"), section_panel(f"systemd 用户服务文件已写入:\n[bold]{service_path}[/bold]", "系统服务", "green"))
+        return Group(registration_result(["systemctl", "--user", "daemon-reload"], "systemd user"), registration_result(["systemctl", "--user", "enable", "--now", service_name], "systemd user"), registration_result(["loginctl", "enable-linger", os.getlogin()], "systemd linger"), section_panel(f"systemd 用户服务文件已写入:\n[bold]{service_path}[/bold]", "系统服务", "green"), service_registration_note_panel())
     commands = {
         "start": ["systemctl", "--user", "start", service_name],
         "stop": ["systemctl", "--user", "stop", service_name],
