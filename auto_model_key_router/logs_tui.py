@@ -14,7 +14,7 @@ from rich.text import Text
 
 from .formatting import percent, short_text
 from .metrics import BEIJING_TZ
-from .tui import console, key_pressed, section_panel, shortcut_text
+from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text
 
 
 REQUEST_STATS_PAGE_SIZE = 10
@@ -44,7 +44,7 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
     with console.screen():
         from rich.live import Live
 
-        with Live(render(), console=console, screen=True, auto_refresh=False) as live:
+        with mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
             while True:
                 started = time.monotonic()
                 while time.monotonic() - started < 1:
@@ -59,11 +59,11 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                         page = "stats"
                         live.update(render(), refresh=True)
                         continue
-                    if page == "logs" and key in {"up", "page_up", "k", "K"}:
+                    if page == "logs" and key in {"up", "page_up", "scroll_up", "k", "K"}:
                         log_offset += max(limit, 1) if key == "page_up" else 1
                         live.update(render(), refresh=True)
                         continue
-                    if page == "logs" and key in {"down", "page_down", "j", "J"}:
+                    if page == "logs" and key in {"down", "page_down", "scroll_down", "j", "J"}:
                         log_offset = max(0, log_offset - (max(limit, 1) if key == "page_down" else 1))
                         live.update(render(), refresh=True)
                         continue
@@ -109,7 +109,7 @@ def log_header_renderable(page: str) -> Panel:
 
 def log_help_text(page: str) -> Align:
     if page == "logs":
-        return shortcut_text("1 运行日志  ·  2 统计  ·  ↑/↓ 滚动  ·  Pg 翻页  ·  q 返回")
+        return shortcut_text("1 运行日志  ·  2 统计  ·  ↑/↓/滚轮 滚动  ·  Pg 翻页  ·  q 返回")
     return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→ 翻页  ·  q 返回")
 
 

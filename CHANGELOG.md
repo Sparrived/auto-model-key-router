@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-06-09
+
+### Added
+- 新增 Terminal UI 长内容滚动视窗，支持 PgUp/PgDn、Home/End 和鼠标滚轮翻阅。
+- 新增调用日志鼠标滚轮滚动支持。
+- 新增 Terminal UI 滚轮解析与内容滚动测试。
+
+### Changed
+- 优化 Terminal UI 标题展示与 README 使用说明。
+
 ## [1.2.1] - 2026-06-09
 
 ### Added

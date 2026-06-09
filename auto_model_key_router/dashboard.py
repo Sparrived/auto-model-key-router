@@ -78,7 +78,7 @@ def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 
 
 def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, update_result: VersionCheckResult | None = None) -> Group:
     update_notice = render_update_notice(update_result)
-    renderables = [app_flag_title("OpenAI-Compatible 模型 API Key 路由控制台", __version__), *config_renderables(config, config_path)]
+    renderables = [app_flag_title("Auto-Model-Key-Router", "OpenAI-Compatible 模型 API Key 路由控制台", __version__), *config_renderables(config, config_path)]
     if update_notice is not None:
         renderables.append(update_notice)
     renderables.extend([section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出")])
