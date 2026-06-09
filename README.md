@@ -367,7 +367,29 @@ uv sync --extra test
 uv run pytest
 ```
 
-## 📦 版本更新
+## � 维护者发布
+
+交互式发布脚本会自动读取 `pyproject.toml` 当前版本，选择发布类型后计算新版本号，更新版本与 `CHANGELOG.md`，运行测试、构建和 `twine check`，随后提交、打 tag 并推送到远端。
+
+```bash
+python -m pip install -e ".[test,release]"
+python scripts/release.py
+```
+
+支持的发布类型包含 `patch` 小版本、`minor` 中版本、`major` 大版本、`post` 版本、`preview`/`alpha`/`beta` 预览版本、`dev` 开发版本、`stable` 预览转正式版和 `custom` 自定义版本。
+
+常用非交互命令：
+
+```bash
+python scripts/release.py --type patch --yes
+python scripts/release.py --type minor --notes "新增核心功能" --yes
+python scripts/release.py --type custom --version 2.0.0rc1 --yes
+python scripts/release.py --type patch --dry-run
+```
+
+如果本机 Git 全局代理不可用，可以使用 `--no-proxy` 临时绕过代理推送；如果只想完成本地提交和标签，可以使用 `--no-push`。
+
+## �� 版本更新
 
 ```bash
 auto-model-key-router --check-update
