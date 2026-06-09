@@ -176,8 +176,8 @@ class RouterConfig:
         for model in self.models:
             if not model.id:
                 raise ValueError("模型 id 不能为空")
-            if model.routing_mode not in {"priority", "round_robin"}:
-                raise ValueError(f"模型 {model.id} 的 routing_mode 必须是 priority 或 round_robin")
+            if model.routing_mode not in {"priority", "round_robin", "only_first"}:
+                raise ValueError(f"模型 {model.id} 的 routing_mode 必须是 priority、round_robin 或 only_first")
             if model.reasoning_effort is not None and model.reasoning_effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
                 raise ValueError(f"模型 {model.id} 的 reasoning_effort 必须是 none、minimal、low、medium、high 或 xhigh")
             for name in (model.id, *model.aliases):
@@ -186,7 +186,13 @@ class RouterConfig:
                 model_names.add(name)
             if not model.keys:
                 raise ValueError(f"模型 {model.id} 至少需要配置一个 key")
+            key_names: set[str] = set()
             for key in model.keys:
+                if not key.name:
+                    raise ValueError(f"模型 {model.id} 存在空 key name")
+                if key.name in key_names:
+                    raise ValueError(f"模型 {model.id} 的 key name 重复: {key.name}")
+                key_names.add(key.name)
                 if not key.api_key:
                     raise ValueError(f"模型 {model.id} 存在空 api_key")
                 if not key.base_url.startswith(("http://", "https://")):

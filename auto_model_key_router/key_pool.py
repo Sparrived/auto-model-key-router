@@ -20,6 +20,24 @@ class KeyState:
 
 class KeyPool:
     def __init__(self, config: RouterConfig):
+        self._apply_config(config)
+        self._cursors = defaultdict(int)
+        self._states = defaultdict(KeyState)
+        self._lock = asyncio.Lock()
+        self._load_states()
+
+    async def reconfigure(self, config: RouterConfig) -> None:
+        async with self._lock:
+            old_state_path = self._state_path
+            self._apply_config(config)
+            self._cursors = defaultdict(int, {model_id: cursor for model_id, cursor in self._cursors.items() if model_id in self._keys})
+            valid_keys = self._valid_state_keys()
+            self._states = defaultdict(KeyState, {key: state for key, state in self._states.items() if key in valid_keys})
+            if self._state_path != old_state_path:
+                self._states = defaultdict(KeyState)
+                self._load_states()
+
+    def _apply_config(self, config: RouterConfig) -> None:
         self._keys = {model.id: model.keys for model in config.models}
         self._routing_modes = {model.id: model.routing_mode for model in config.models}
         self._reasoning_efforts = {model.id: model.reasoning_effort for model in config.models}
@@ -31,10 +49,6 @@ class KeyPool:
             for model in config.models
             for name in (model.id, *model.aliases)
         }
-        self._cursors = defaultdict(int)
-        self._states = defaultdict(KeyState)
-        self._lock = asyncio.Lock()
-        self._load_states()
 
     @property
     def model_ids(self) -> list[str]:
@@ -59,12 +73,28 @@ class KeyPool:
     def keys_for_model(self, model_id: str) -> tuple[KeyConfig, ...]:
         return tuple(self._keys.get(self.resolve_model_id(model_id), ()))
 
+    def key_by_name(self, model_id: str, key_name: str) -> KeyConfig:
+        model_id = self.resolve_model_id(model_id)
+        keys = self._keys.get(model_id)
+        if not keys:
+            raise KeyError(model_id)
+        for key in keys:
+            if key.name == key_name:
+                return key
+        raise RuntimeError(f"模型 {model_id} 未配置 key: {key_name}")
+
     async def next_key(self, model_id: str, excluded: set[str] | None = None) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
         excluded = excluded or set()
         keys = self._keys.get(model_id)
         if not keys:
             raise KeyError(model_id)
+
+        if self.routing_mode(model_id) == "only_first":
+            first_key = keys[0]
+            if first_key.name not in excluded:
+                return first_key
+            raise RuntimeError(f"模型 {model_id} 没有可用 key")
 
         available = [key for key in keys if key.name not in excluded and not self._is_cooling_down(model_id, key.name)]
         if not available:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,11 +40,12 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
     log_offset = 0
     stats_page = 1
     stats_range_index = 0
+    status_message: str | None = None
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
 
     def render() -> Group:
-        return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index)
+        return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, status_message)
 
     with console.screen():
         from rich.live import Live
@@ -77,6 +81,10 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                         log_offset = 0
                         live.update(render(), refresh=True)
                         continue
+                    if page == "logs" and key in {"o", "O"}:
+                        status_message = open_log_file(log_file_path)
+                        live.update(render(), refresh=True)
+                        continue
                     if page == "stats" and key in {"\t", "tab"}:
                         stats_range_index = (stats_range_index + 1) % len(STATS_TIME_RANGES)
                         stats_page = 1
@@ -94,12 +102,16 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                 live.update(render(), refresh=True)
 
 
-def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int) -> Group:
+def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int, status_message: str | None = None) -> Group:
     if page == "logs":
         content = service_logs_renderable(log_file_path, log_page_size(limit), log_offset)
     else:
         content = request_stats_renderable(database_path, stats_page, REQUEST_STATS_PAGE_SIZE, stats_range_index)
-    return Group(log_header_renderable(page), content, log_help_text(page))
+    renderables = [log_header_renderable(page), content]
+    if status_message:
+        renderables.append(section_panel(status_message, "提示", "green" if status_message.startswith("已") else "yellow"))
+    renderables.append(log_help_text(page))
+    return Group(*renderables)
 
 
 def log_page_size(limit: int) -> int:
@@ -115,8 +127,24 @@ def log_header_renderable(page: str) -> Panel:
 
 def log_help_text(page: str) -> Align:
     if page == "logs":
-        return shortcut_text("1 运行日志  ·  2 统计  ·  ↑/↓/滚轮 滚动  ·  Pg 翻页  ·  q 返回")
+        return shortcut_text("1 运行日志  ·  2 统计  ·  O 打开日志  ·  ↑/↓/滚轮 滚动  ·  Pg 翻页  ·  q 返回")
     return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→/滚轮 翻页  ·  q 返回")
+
+
+def open_log_file(log_file_path: str) -> str:
+    path = Path(log_file_path)
+    if not path.exists():
+        return f"运行日志不存在: {path}"
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-t", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (AttributeError, OSError, ValueError) as exc:
+        return f"无法打开运行日志: {exc}"
+    return f"已使用默认文本编辑器打开: {path}"
 
 
 def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> Panel:

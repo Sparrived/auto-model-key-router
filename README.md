@@ -89,9 +89,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | 阶段 | 行为 |
 | --- | --- |
 | 模型解析 | 从请求体读取 `model`，匹配真实模型 ID 或别名 |
-| Key 选择 | 根据模型的 `routing_mode` 选择可用 key |
+| Key 选择 | 根据模型的 `routing_mode` 选择可用 key，也可通过 `模型ID/别名[key name]` 显式指定 key |
 | 请求转发 | 重写上游 `Authorization`，转发到对应 `base_url` 的 `/v1/{path}` |
-| 失败处理 | 可重试错误触发换 key；单 key 模型按 `max_retries` 重试 |
+| 失败处理 | 可重试错误触发换 key；单 key 模型和 `only_first` 模式按 `max_retries` 重试 |
 | 状态维护 | key 失败、冷却、恢复状态写入 `key-state.json` |
 | 指标记录 | 每次上游尝试都会写入 SQLite 统计存档 |
 
@@ -145,7 +145,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `port` | `8000` | 本地服务监听端口 |
 | `default_base_url` | `https://api.openai.com` | key 未单独设置 `base_url` 时使用的默认上游地址 |
 | `request_timeout` | `60` | 上游请求超时时间，单位秒 |
-| `max_retries` | `2` | 单 key 模型最大重试次数；多 key 模型会按 key 数尝试不同 key |
+| `max_retries` | `2` | 单 key 模型和 `only_first` 模式最大重试次数；其他多 key 模型会按 key 数尝试不同 key |
 | `key_failure_threshold` | `2` | key 连续失败达到该次数后进入冷却，最小值为 `1` |
 | `key_cooldown_seconds` | `60` | 默认冷却时长，单位秒；上游返回 `Retry-After` 时优先使用该值 |
 | `key_state_path` | 缓存目录 | key 失败和冷却状态持久化路径 |
@@ -161,9 +161,22 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | --- | --- |
 | `id` | 转发给上游的真实模型 ID；客户端请求中的 `model` 会被替换为该值 |
 | `aliases` | 额外公开的模型名或显示名；客户端使用别名时仍会落到同一组 key |
-| `routing_mode` | 支持 `round_robin` 和 `priority`，未设置时默认 `round_robin` |
+| `routing_mode` | 支持 `round_robin`、`priority` 和 `only_first`，未设置时默认 `round_robin` |
 | `reasoning_effort` | 支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`；为空、`default` 或 `downstream` 表示由下游请求决定 |
 | `keys` | 每个 key 包含 `name`、`api_key` 和可选 `base_url`；`base_url` 缺省时使用 `default_base_url` |
+
+### 显式指定 key
+
+外部调用时可以把请求体中的 `model` 写成 `模型ID[key name]` 或 `别名[key name]`，强制本次请求使用同一模型下指定名称的 key。例如：
+
+```json
+{
+  "model": "fast-mini[gpt-4o-mini-key-2]",
+  "messages": [{"role": "user", "content": "hello"}]
+}
+```
+
+该请求会匹配别名 `fast-mini` 对应的真实模型 `gpt-4o-mini`，上游请求体仍会被改写为 `"model":"gpt-4o-mini"`，但 `Authorization` 使用 `gpt-4o-mini-key-2` 对应的 `api_key`。同一模型下的 `keys[].name` 必须非空且唯一。
 
 ### 路由模式
 
@@ -171,6 +184,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | --- | --- | --- |
 | `round_robin` | 多 key 均衡分流 | 按配置顺序轮询多个 key，把请求分配到不同 key |
 | `priority` | 主备 key 或成本优先 | 优先使用靠前 key，失败且错误可重试时再尝试后面的 key |
+| `only_first` | 只希望使用首个 key | 只尝试配置中的第一个 key，可重试错误按 `max_retries` 重试，超过次数后失败 |
 
 > [!NOTE]
 > `429` 会立即进入冷却；其他可重试错误在达到 `key_failure_threshold` 后进入冷却。冷却中的 key 会被优先跳过；如果所有候选 key 都处于冷却中，服务仍会尝试剩余 key，避免完全不可用。

@@ -149,7 +149,7 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     for model in config.models:
         upstreams = sorted({compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
-        routing_mode = "优先级" if model.routing_mode == "priority" else "分流"
+        routing_mode = {"round_robin": "分流", "priority": "优先级", "only_first": "仅首个"}.get(model.routing_mode, "分流")
         table.add_row(short_text(model.id, 28), short_text(display_names, 24), routing_mode, reasoning_effort_text(model.reasoning_effort), str(len(model.keys)), "\n".join(upstreams))
     if not config.models:
         table.add_row("未配置", "-", "-", "-", "0", "-")

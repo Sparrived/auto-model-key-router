@@ -8,6 +8,7 @@ from typing import TypeVar
 
 import anyio
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from auto_model_key_router.app import _probe_cooling_keys, create_app
@@ -27,12 +28,12 @@ async def _run_client(app: FastAPI, action: Callable[[httpx.AsyncClient], Awaita
             return await action(client)
 
 
-def make_config(tmp_path: Path, keys: tuple[KeyConfig, ...], local_api_key: str = "local-key", reasoning_effort: str | None = None) -> RouterConfig:
+def make_config(tmp_path: Path, keys: tuple[KeyConfig, ...], local_api_key: str = "local-key", reasoning_effort: str | None = None, routing_mode: str = "round_robin", max_retries: int = 1) -> RouterConfig:
     return RouterConfig(
         host="127.0.0.1",
         port=8000,
         request_timeout=10,
-        max_retries=1,
+        max_retries=max_retries,
         key_failure_threshold=1,
         key_cooldown_seconds=60,
         key_state_path=str(tmp_path / "key-state.json"),
@@ -44,7 +45,7 @@ def make_config(tmp_path: Path, keys: tuple[KeyConfig, ...], local_api_key: str 
             ModelConfig(
                 id="test-model",
                 aliases=("alias-model",),
-                routing_mode="round_robin",
+                routing_mode=routing_mode,
                 reasoning_effort=reasoning_effort,
                 keys=keys,
             ),
@@ -66,6 +67,72 @@ def test_metrics_requires_local_auth() -> None:
         assert unauthorized.status_code == 401
         assert authorized.status_code == 200
         assert authorized.json()["total"]["requests"] == 0
+
+
+def test_config_file_changes_are_hot_reloaded() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        tmp_path = Path(directory)
+        config_path = tmp_path / "router-config.json"
+        config_data = {
+            "host": "127.0.0.1",
+            "port": 8000,
+            "request_timeout": 10,
+            "max_retries": 1,
+            "key_failure_threshold": 1,
+            "key_cooldown_seconds": 60,
+            "key_state_path": str(tmp_path / "key-state.json"),
+            "upstream_health_check_interval": 0,
+            "metrics_db_path": str(tmp_path / "metrics.sqlite3"),
+            "log_file_path": str(tmp_path / "server.log"),
+            "local_api_key": "local-key",
+            "models": [
+                {
+                    "id": "test-model",
+                    "aliases": ["alias-model"],
+                    "routing_mode": "round_robin",
+                    "reasoning_effort": "low",
+                    "keys": [{"name": "key-1", "api_key": "sk-1", "base_url": "https://upstream-one.test"}],
+                }
+            ],
+        }
+        config_path.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+        config = RouterConfig.load(config_path)
+        upstream_bodies: list[dict[str, object]] = []
+        authorization_headers: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            authorization_headers.append(request.headers["Authorization"])
+            return httpx.Response(200, json={"id": "ok"})
+
+        app = create_app(config, config_path)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+            first = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "alias-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            config_data["local_api_key"] = "new-local-key"
+            config_data["models"][0]["reasoning_effort"] = "high"
+            config_data["models"][0]["keys"][0]["api_key"] = "sk-2"
+            config_path.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+            await anyio.sleep(0.01)
+            second = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer new-local-key"},
+                json={"model": "alias-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            return first, second
+
+        first, second = run_client(app, requests)
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert upstream_bodies[0]["reasoning_effort"] == "low"
+        assert upstream_bodies[1]["reasoning_effort"] == "high"
+        assert authorization_headers == ["Bearer sk-1", "Bearer sk-2"]
 
 
 def test_retryable_response_cools_down_failed_key() -> None:
@@ -134,6 +201,108 @@ def test_cooled_down_key_is_skipped_on_next_request() -> None:
 
         assert response.status_code == 200
         assert calls == ["https://upstream-two.test/v1/chat/completions"]
+
+
+def test_only_first_retries_only_first_key_until_max_retries() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+            routing_mode="only_first",
+            max_retries=2,
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 429
+        assert calls == ["https://upstream-one.test/v1/chat/completions"] * 3
+
+
+def test_model_suffix_selects_explicit_key_by_alias() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+        authorization_headers: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            authorization_headers.append(request.headers["Authorization"])
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "alias-model[key-2]", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert upstream_bodies[0]["model"] == "test-model"
+        assert authorization_headers == ["Bearer sk-2"]
+
+
+def test_model_suffix_returns_error_for_unknown_key() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model[missing-key]", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 503
+        assert response.json()["error"]["message"] == "模型 test-model 未配置 key: missing-key"
+
+
+def test_duplicate_key_name_is_rejected() -> None:
+    with pytest.raises(ValueError, match="key name 重复"):
+        RouterConfig.from_dict(
+            {
+                "models": [
+                    {
+                        "id": "test-model",
+                        "keys": [
+                            {"name": "same-key", "api_key": "sk-1"},
+                            {"name": "same-key", "api_key": "sk-2"},
+                        ],
+                    }
+                ]
+            }
+        )
 
 
 def test_key_state_is_persisted_and_restored() -> None:

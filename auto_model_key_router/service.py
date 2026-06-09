@@ -92,13 +92,9 @@ def stop_background_service(config: RouterConfig) -> Panel:
 
 
 def restart_service_after_config_change(path: Path, old_config: RouterConfig, new_config: RouterConfig) -> Any:
-    pid = read_pid(pid_file_path(old_config))
-    was_running = is_service_healthy(old_config.host, old_config.port, use_cache=False) or bool(pid and is_process_running(pid))
-    if not was_running:
-        return section_panel("配置已保存，下次启动生效。", "服务重启", "yellow")
-    stop_result = stop_background_service(old_config)
-    start_result = start_service_background(path, new_config)
-    return Group(stop_result, start_result)
+    if old_config.host != new_config.host or old_config.port != new_config.port:
+        return section_panel(f"配置已保存。当前进程将继续监听旧地址；新监听地址 [bold]http://{new_config.host}:{new_config.port}[/bold] 会在下次启动时生效。", "配置热重载", "yellow")
+    return section_panel("配置已保存，运行中的服务会在下一次请求时自动热重载。", "配置热重载", "green")
 
 
 def background_status_panel(config: RouterConfig, config_path: Path | None = None) -> Panel:
@@ -124,8 +120,6 @@ def background_status_panel(config: RouterConfig, config_path: Path | None = Non
         lines.append(f"运行中本地 key 指纹: [bold]{running_fingerprint}[/bold]")
     if expected_fingerprint:
         lines.append(f"当前配置本地 key 指纹: [bold]{expected_fingerprint}[/bold]")
-    if running_fingerprint and expected_fingerprint and running_fingerprint != expected_fingerprint:
-        lines.append("[yellow]服务仍用旧 Key，请重启。[/yellow]")
     return section_panel("\n".join(lines), "后台服务", "green")
 
 

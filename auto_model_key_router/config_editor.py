@@ -52,7 +52,7 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
 
     aliases_text = Prompt.ask("显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
     model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()] if aliases_text else []
-    model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流", choices=["priority", "round_robin"], default=str(model.get("routing_mode") or "round_robin")).strip()
+    model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流，only_first=仅首个", choices=["priority", "round_robin", "only_first"], default=str(model.get("routing_mode") or "round_robin")).strip()
     reasoning_effort = Prompt.ask("推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"], default=normalize_reasoning_effort_choice(model.get("reasoning_effort"))).strip()
     if reasoning_effort == "downstream":
         model.pop("reasoning_effort", None)
@@ -205,7 +205,7 @@ def set_model_routing_mode_interactively(path: Path) -> Any:
     model_options = []
     for index, model in enumerate(models):
         routing_mode = str(model.get("routing_mode") or data.get("routing_mode") or "round_robin")
-        routing_mode_text = "优先级" if routing_mode == "priority" else "分流"
+        routing_mode_text = routing_mode_display_text(routing_mode)
         model_options.append((str(index + 1), f"{short_text(model['id'], 28)} · {routing_mode_text}"))
     model_options.append(("0", "返回"))
     model_choice = select_option("选择模型", model_options)
@@ -214,19 +214,23 @@ def set_model_routing_mode_interactively(path: Path) -> Any:
     old_config = RouterConfig.from_dict(data)
     model = models[int(model_choice) - 1]
     current_mode = str(model.get("routing_mode") or data.get("routing_mode") or "round_robin")
-    mode_choice = select_option("选择路由模式", [("1", "分流：轮询"), ("2", "优先级：按顺序"), ("0", "返回")], selected=1 if current_mode == "priority" else 0)
+    mode_choice = select_option("选择路由模式", [("1", "分流：轮询"), ("2", "优先级：按顺序"), ("3", "仅首个：只重试第一个 Key"), ("0", "返回")], selected={"round_robin": 0, "priority": 1, "only_first": 2}.get(current_mode, 0))
     if mode_choice == "0":
         return section_panel("[yellow]配置未变化。[/yellow]", "路由模式", "yellow")
-    new_mode = "priority" if mode_choice == "2" else "round_robin"
+    new_mode = {"1": "round_robin", "2": "priority", "3": "only_first"}[mode_choice]
     if new_mode == current_mode:
-        mode_text = "优先级" if new_mode == "priority" else "分流"
+        mode_text = routing_mode_display_text(new_mode)
         return section_panel(f"模型 [bold]{short_text(model['id'], 32)}[/bold] 已是 [bold]{mode_text}[/bold]。", "路由模式", "yellow")
     model["routing_mode"] = new_mode
     new_config = RouterConfig.from_dict(data)
     save_config_data(path, data)
-    old_mode_text = "优先级" if current_mode == "priority" else "分流"
-    new_mode_text = "优先级" if new_mode == "priority" else "分流"
+    old_mode_text = routing_mode_display_text(current_mode)
+    new_mode_text = routing_mode_display_text(new_mode)
     return Group(section_panel(f"已更新路由模式。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\n原模式: [bold]{old_mode_text}[/bold]\n新模式: [bold]{new_mode_text}[/bold]", "路由模式", "green"), restart_service_after_config_change(path, old_config, new_config))
+
+
+def routing_mode_display_text(value: str | None) -> str:
+    return {"round_robin": "分流", "priority": "优先级", "only_first": "仅首个"}.get(str(value or "round_robin"), "分流")
 
 
 def set_model_reasoning_effort_interactively(path: Path) -> Any:

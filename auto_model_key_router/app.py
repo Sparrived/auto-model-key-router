@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -43,8 +44,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     app = FastAPI(title="Auto Model Key Router", version=__version__, lifespan=lifespan)
     app.state.config = config
     app.state.config_path = str(Path(config_path).resolve()) if config_path is not None else ""
-    app.state.local_api_key = config.local_api_key
-    app.state.local_api_key_mtime = _config_mtime(app.state.config_path)
+    app.state.config_mtime = _config_mtime(app.state.config_path)
+    app.state.config_reload_lock = asyncio.Lock()
     app.state.key_pool = KeyPool(config)
     app.state.metrics = MetricsStore(config.metrics_db_path)
     app.state.http_client = httpx.AsyncClient(
@@ -55,7 +56,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        local_api_key = _current_local_api_key(app.state)
+        await _reload_config_if_changed(app.state)
+        local_api_key = app.state.config.local_api_key
         return {
             "status": "ok",
             "models": app.state.key_pool.public_model_ids,
@@ -67,6 +69,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     @app.get("/v1/models")
     async def models() -> dict[str, Any]:
+        await _reload_config_if_changed(app.state)
         return {
             "object": "list",
             "data": [
@@ -77,13 +80,15 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     @app.get("/metrics")
     async def metrics(request: Request):
-        if not _is_authorized(request, _current_local_api_key(app.state)):
+        await _reload_config_if_changed(app.state)
+        if not _is_authorized(request, app.state.config.local_api_key):
             return JSONResponse({"error": {"message": "本地 API key 验证失败"}}, status_code=401)
         return await app.state.metrics.snapshot()
 
     @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def proxy(path: str, request: Request) -> Response:
-        if not _is_authorized(request, _current_local_api_key(app.state)):
+        await _reload_config_if_changed(app.state)
+        if not _is_authorized(request, app.state.config.local_api_key):
             return JSONResponse({"error": {"message": "本地 API key 验证失败"}}, status_code=401)
 
         body = await request.body()
@@ -92,7 +97,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         _debug_report("proxy-entry", {"path": path, "method": request.method, "requested_model_id": requested_model_id, "stream": _is_stream_request(payload), "body_bytes": len(body)})
         if requested_model_id is None:
             return JSONResponse({"error": {"message": "请求体中缺少 model 字段"}}, status_code=400)
-        model_id = app.state.key_pool.resolve_model_id(requested_model_id)
+        requested_model_name, requested_key_name = _split_requested_model_key(requested_model_id)
+        model_id = app.state.key_pool.resolve_model_id(requested_model_name)
         upstream_body = _upstream_body(body, payload, model_id, app.state.config, stream=_is_stream_request(payload))
 
         excluded: set[str] = set()
@@ -101,17 +107,21 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         if key_count == 0:
             return JSONResponse({"error": {"message": f"未配置模型: {model_id}"}}, status_code=404)
 
-        attempts = key_count if key_count > 1 else app.state.config.max_retries + 1
+        only_first = app.state.key_pool.routing_mode(model_id) == "only_first"
+        attempts = app.state.config.max_retries + 1 if requested_key_name or only_first or key_count == 1 else key_count
 
         for attempt in range(attempts):
             try:
-                key = await app.state.key_pool.next_key(model_id, excluded)
+                if requested_key_name:
+                    key = app.state.key_pool.key_by_name(model_id, requested_key_name)
+                else:
+                    key = await app.state.key_pool.next_key(model_id, excluded)
             except KeyError:
                 return JSONResponse({"error": {"message": f"未配置模型: {model_id}"}}, status_code=404)
             except RuntimeError as exc:
                 return JSONResponse({"error": {"message": str(exc)}}, status_code=503)
 
-            if key_count > 1:
+            if key_count > 1 and not requested_key_name and not only_first:
                 excluded.add(key.name)
             upstream = _join_url(key.base_url, f"/v1/{_upstream_path(path, payload)}")
             headers = _upstream_headers(request, key.api_key)
@@ -225,6 +235,13 @@ def _resolve_model_id(path: str, payload: dict[str, Any]) -> str | None:
         return ""
     model = payload.get("model")
     return str(model) if model else None
+
+
+def _split_requested_model_key(model_id: str) -> tuple[str, str | None]:
+    match = re.fullmatch(r"(.+)\[([^\[\]]+)\]", model_id)
+    if not match:
+        return model_id, None
+    return match.group(1), match.group(2).strip()
 
 
 def _is_stream_request(payload: dict[str, Any]) -> bool:
@@ -398,17 +415,45 @@ def _config_mtime(config_path: str) -> float:
         return 0.0
 
 
-def _current_local_api_key(state: Any) -> str:
+async def _reload_config_if_changed(state: Any) -> None:
     config_path = getattr(state, "config_path", "")
     mtime = _config_mtime(config_path)
-    if mtime and mtime != getattr(state, "local_api_key_mtime", 0.0):
+    if not mtime or mtime == getattr(state, "config_mtime", 0.0):
+        return
+    async with state.config_reload_lock:
+        mtime = _config_mtime(config_path)
+        if not mtime or mtime == getattr(state, "config_mtime", 0.0):
+            return
         try:
-            raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
-            state.local_api_key = str(raw.get("local_api_key") or "")
-            state.local_api_key_mtime = mtime
+            config = RouterConfig.load(config_path)
         except (OSError, ValueError):
-            pass
-    return str(getattr(state, "local_api_key", ""))
+            return
+        old_config = state.config
+        if old_config.request_timeout != config.request_timeout:
+            old_client = state.http_client
+            state.http_client = httpx.AsyncClient(
+                timeout=config.request_timeout,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30),
+            )
+            await old_client.aclose()
+        if old_config.metrics_db_path != config.metrics_db_path:
+            old_metrics = state.metrics
+            state.metrics = MetricsStore(config.metrics_db_path)
+            await old_metrics.close()
+        if old_config.upstream_health_check_interval <= 0 < config.upstream_health_check_interval:
+            state.health_probe_task = asyncio.create_task(_health_probe_loop(state))
+        if old_config.upstream_health_check_interval > 0 and config.upstream_health_check_interval <= 0:
+            task = getattr(state, "health_probe_task", None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                state.health_probe_task = None
+        state.config = config
+        await state.key_pool.reconfigure(config)
+        state.config_mtime = _config_mtime(config_path) or mtime
 
 
 def _key_fingerprint(api_key: str) -> str:
