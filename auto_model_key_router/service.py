@@ -159,7 +159,7 @@ def manage_system_service(config_path: Path, action: str) -> Any:
 def service_registration_note_panel() -> Panel:
     system = platform.system().lower()
     if system == "windows":
-        content = "当前使用 Windows 当前用户计划任务注册，权限级别为 LIMITED，通常不需要管理员权限；任务会在该用户登录时启动。"
+        content = "当前使用 Windows 开机启动计划任务注册，权限级别为 SYSTEM/HIGHEST；非管理员运行时会自动弹出 UAC 授权窗口。"
     elif system == "linux":
         content = "当前使用 systemd user service 注册，通常不需要 sudo；loginctl enable-linger 可能需要管理员授权，失败时服务仍可在用户登录后自启。"
     else:
@@ -167,14 +167,28 @@ def service_registration_note_panel() -> Panel:
     return section_panel(content, "权限说明", "blue")
 
 
+def user_service_registration_note_panel() -> Panel:
+    return section_panel("当前使用 Windows 当前用户计划任务注册，权限级别为 LIMITED；任务会在该用户登录时启动。", "权限说明", "blue")
+
+
 def manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
     task_name = "AutoModelKeyRouter"
-    if action == "install":
+    if action == "install-user":
         command = ["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", task_name, "/RL", "LIMITED", "/IT", "/TR", f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground']
-        return Group(registration_result(command, "Windows 自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), service_registration_note_panel())
+        return Group(registration_result(command, "Windows 登录自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), user_service_registration_note_panel())
+    elevated = action.removesuffix("-elevated") if action.endswith("-elevated") else ""
+    if elevated:
+        if not is_windows_admin():
+            return section_panel("未获得管理员权限，无法注册或管理开机启动任务。", "Windows UAC", "red")
+        action = elevated
+    elif action in {"install", "uninstall", "start", "stop", "restart"} and not is_windows_admin():
+        return elevate_windows_service_action(config_path, action)
+    if action == "install":
+        command = ["schtasks", "/Create", "/F", "/SC", "ONSTART", "/TN", task_name, "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground']
+        return Group(registration_result(command, "Windows 开机自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), service_registration_note_panel())
     if action == "uninstall":
         config = RouterConfig.load(config_path)
-        return Group(stop_background_service(config), registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"), registration_result(["schtasks", "/Delete", "/F", "/TN", task_name], "Windows 自启"))
+        return Group(registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"), stop_background_service(config), registration_result(["schtasks", "/Delete", "/F", "/TN", task_name], "Windows 自启"))
     commands = {
         "start": ["schtasks", "/Run", "/TN", task_name],
         "stop": ["schtasks", "/End", "/TN", task_name],
@@ -183,6 +197,32 @@ def manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
     if action == "restart":
         return Group(registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"))
     return registration_result(commands[action], "Windows 自启")
+
+
+def is_windows_admin() -> bool:
+    if platform.system().lower() != "windows":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def elevate_windows_service_action(config_path: Path, action: str) -> Panel:
+    elevated_action = f"{action}-elevated"
+    arguments = ["-m", "auto_model_key_router.main", "--config", str(config_path), "--service", elevated_action]
+    script = "$process = Start-Process -FilePath " + powershell_quote(str(sys.executable)) + " -ArgumentList @(" + ",".join(powershell_quote(argument) for argument in arguments) + ") -Verb RunAs -Wait -PassThru; exit $process.ExitCode"
+    result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], capture_output=True, text=True)
+    if result.returncode == 0:
+        return section_panel("已通过 UAC 管理员权限完成 Windows 开机自启任务管理。", "Windows UAC", "green")
+    message = (result.stderr or result.stdout or "管理员授权被取消或执行失败。").strip()
+    return section_panel(message, "Windows UAC", "red")
+
+
+def powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def background_python_executable() -> Path:

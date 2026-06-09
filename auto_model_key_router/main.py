@@ -28,7 +28,7 @@ def main() -> None:
     parser.add_argument("--stop", action="store_true", help="停止后台服务")
     parser.add_argument("--status", action="store_true", help="查看后台服务状态")
     parser.add_argument("--install-service", action="store_true", help="注册为 Windows/Linux 内置服务")
-    parser.add_argument("--service", choices=["install", "uninstall", "start", "stop", "restart", "status"], help="管理 Windows/Linux 内置服务")
+    parser.add_argument("--service", choices=["install", "install-user", "uninstall", "start", "stop", "restart", "status", "install-elevated", "uninstall-elevated", "start-elevated", "stop-elevated", "restart-elevated"], help="管理 Windows/Linux 内置服务")
     args = parser.parse_args()
 
     clear_terminal_history()

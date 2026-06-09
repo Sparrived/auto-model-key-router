@@ -107,6 +107,24 @@ def test_open_log_file_uses_xdg_open_on_linux(tmp_path, monkeypatch) -> None:
     assert message.startswith("已使用默认文本编辑器打开:")
 
 
+def test_log_line_text_colors_level_logger_and_status() -> None:
+    line = '2026-06-10 12:00:00 INFO uvicorn.access 127.0.0.1:1 - "GET /health HTTP/1.1" 200'
+
+    text = logs_tui.log_line_text(line)
+
+    assert text.plain == line
+    styles = {str(span.style) for span in text.spans}
+    assert "bold green" in styles
+    assert "blue" in styles
+
+
+def test_log_line_text_colors_error_fallback() -> None:
+    text = logs_tui.log_line_text("Traceback (most recent call last):")
+
+    assert text.plain == "Traceback (most recent call last):"
+    assert str(text.style) == "red"
+
+
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
@@ -128,15 +146,42 @@ def test_configure_cli_generates_auth_key_and_installs_service(tmp_path, monkeyp
     assert actions == [(str(config_path), "install")]
 
 
-def test_windows_service_registration_is_user_limited() -> None:
+def test_windows_user_service_registration_is_user_limited() -> None:
     result = service.manage_windows_task.__globals__["registration_result"]
     commands: list[list[str]] = []
     service.manage_windows_task.__globals__["registration_result"] = lambda command, title: commands.append(command) or tui.section_panel("ok", title, "green")
     try:
-        service.manage_windows_task(Path("pythonw.exe"), Path("router-config.json"), "install")
+        service.manage_windows_task(Path("pythonw.exe"), Path("router-config.json"), "install-user")
     finally:
         service.manage_windows_task.__globals__["registration_result"] = result
 
     assert "/RL" in commands[0]
     assert "LIMITED" in commands[0]
     assert "/IT" in commands[0]
+
+
+def test_windows_service_registration_uses_onstart_when_admin(monkeypatch) -> None:
+    result = service.manage_windows_task.__globals__["registration_result"]
+    commands: list[list[str]] = []
+    monkeypatch.setattr(service, "is_windows_admin", lambda: True)
+    service.manage_windows_task.__globals__["registration_result"] = lambda command, title: commands.append(command) or tui.section_panel("ok", title, "green")
+    try:
+        service.manage_windows_task(Path("pythonw.exe"), Path("router-config.json"), "install")
+    finally:
+        service.manage_windows_task.__globals__["registration_result"] = result
+
+    assert "/SC" in commands[0]
+    assert "ONSTART" in commands[0]
+    assert "/RU" in commands[0]
+    assert "SYSTEM" in commands[0]
+    assert "HIGHEST" in commands[0]
+
+
+def test_windows_service_registration_requests_uac_when_not_admin(monkeypatch) -> None:
+    requested: list[tuple[str, str]] = []
+    monkeypatch.setattr(service, "is_windows_admin", lambda: False)
+    monkeypatch.setattr(service, "elevate_windows_service_action", lambda path, action: requested.append((str(path), action)) or tui.section_panel("uac", "Windows UAC", "green"))
+
+    service.manage_windows_task(Path("pythonw.exe"), Path("router-config.json"), "install")
+
+    assert requested == [("router-config.json", "install")]

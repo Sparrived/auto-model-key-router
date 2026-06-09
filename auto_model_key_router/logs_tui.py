@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -21,6 +22,17 @@ from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut
 
 
 REQUEST_STATS_PAGE_SIZE = 10
+LOG_LINE_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:,\d{3})?)\s+(CRITICAL|ERROR|WARNING|WARN|INFO|DEBUG)\s+([^\s]+)\s*(.*)$")
+LOG_LEVEL_PATTERN = re.compile(r"\b(CRITICAL|ERROR|WARNING|WARN|INFO|DEBUG)\b")
+ACCESS_STATUS_PATTERN = re.compile(r'("\s)([1-5]\d\d)(?=\s|$)')
+LOG_LEVEL_STYLES = {
+    "CRITICAL": "bold white on red",
+    "ERROR": "bold red",
+    "WARNING": "bold yellow",
+    "WARN": "bold yellow",
+    "INFO": "bold green",
+    "DEBUG": "dim cyan",
+}
 STATS_TIME_RANGES: tuple[tuple[str, timedelta | None], ...] = (
     ("24小时", timedelta(hours=24)),
     ("3天", timedelta(days=3)),
@@ -157,9 +169,79 @@ def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> 
     offset = min(max(offset, 0), max_offset)
     end = total - offset
     start = max(end - page_size, 0)
-    content = Text("\n".join(lines[start:end]) if lines[start:end] else "暂无运行日志", no_wrap=True, overflow="ellipsis")
+    content = log_lines_text(lines[start:end])
     title = "运行日志" if total == 0 else f"运行日志 第 {start + 1}-{end} 行 / 共 {total} 行"
-    return section_panel(content, title, "blue")
+    return section_panel(content, title, "blue", "[dim]最新日志在底部 · 按级别与状态码染色[/dim]")
+
+
+def log_lines_text(lines: list[str]) -> Text:
+    if not lines:
+        return Text("暂无运行日志", style="dim", no_wrap=True, overflow="ellipsis")
+    content = Text(no_wrap=True, overflow="ellipsis")
+    for index, line in enumerate(lines):
+        if index:
+            content.append("\n")
+        content.append_text(log_line_text(line))
+    return content
+
+
+def log_line_text(line: str) -> Text:
+    match = LOG_LINE_PATTERN.match(line)
+    if not match:
+        return fallback_log_line_text(line)
+    timestamp, level, logger_name, message = match.groups()
+    text = Text()
+    text.append(timestamp, style="dim")
+    text.append(" ")
+    text.append(level, style=LOG_LEVEL_STYLES.get(level, "bold"))
+    text.append(" ")
+    text.append(logger_name, style=logger_style(logger_name))
+    if message:
+        text.append(" ")
+        text.append_text(log_message_text(message))
+    return text
+
+
+def fallback_log_line_text(line: str) -> Text:
+    level_match = LOG_LEVEL_PATTERN.search(line)
+    if level_match:
+        style = LOG_LEVEL_STYLES.get(level_match.group(1), "")
+    elif "Traceback" in line or "Exception" in line:
+        style = "red"
+    else:
+        style = "dim" if line.startswith((" ", "\t")) else ""
+    return Text(line, style=style)
+
+
+def log_message_text(message: str) -> Text:
+    text = Text()
+    position = 0
+    for match in ACCESS_STATUS_PATTERN.finditer(message):
+        text.append(message[position : match.start(2)])
+        text.append(match.group(2), style=status_code_style(match.group(2)))
+        position = match.end(2)
+    text.append(message[position:])
+    return text
+
+
+def logger_style(logger_name: str) -> str:
+    if logger_name.startswith("auto_model_key_router"):
+        return "bright_cyan"
+    if logger_name.startswith("uvicorn.access"):
+        return "blue"
+    if logger_name.startswith("uvicorn"):
+        return "cyan"
+    return "magenta"
+
+
+def status_code_style(status_code: str) -> str:
+    if status_code.startswith("2"):
+        return "bold green"
+    if status_code.startswith("3"):
+        return "bold cyan"
+    if status_code.startswith("4"):
+        return "bold yellow"
+    return "bold red"
 
 
 def request_stats_renderable(database_path: str, page: int, page_size: int, stats_range_index: int = 0) -> Group | Panel:

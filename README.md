@@ -251,6 +251,7 @@ auto-model-key-router --config router-config.json --install-service
 
 ```bash
 auto-model-key-router --config router-config.json --service install
+auto-model-key-router --config router-config.json --service install-user
 auto-model-key-router --config router-config.json --service status
 auto-model-key-router --config router-config.json --service start
 auto-model-key-router --config router-config.json --service stop
@@ -258,7 +259,7 @@ auto-model-key-router --config router-config.json --service restart
 auto-model-key-router --config router-config.json --service uninstall
 ```
 
-Windows 下会注册为当前用户登录时启动的计划任务 `AutoModelKeyRouter` 并立即启动，使用 `LIMITED` 权限级别，通常不需要管理员权限。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，通常不需要 `sudo`；同时会尝试启用 linger 以支持用户未登录时启动，该步骤可能需要管理员授权，失败时服务仍可在用户登录后自启。
+Windows 下默认会注册为开机启动的计划任务 `AutoModelKeyRouter`，使用 `SYSTEM` 账户和 `HIGHEST` 权限级别；如果当前终端不是管理员，会自动弹出 UAC 授权窗口。仍可使用 `--service install-user` 注册为当前用户登录时启动的 `LIMITED` 计划任务，该模式通常不需要管理员权限。Linux 下会注册为 systemd user service：`auto-model-key-router.service` 并立即启动，通常不需要 `sudo`；同时会尝试启用 linger 以支持用户未登录时启动，该步骤可能需要管理员授权，失败时服务仍可在用户登录后自启。
 
 ### 常用命令
 

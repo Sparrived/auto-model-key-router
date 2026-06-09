@@ -129,12 +129,12 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
 
 def manage_system_service_interactively(config_path: Path) -> None:
     while True:
-        choice = select_option("模型服务", [("1", "安装自启"), ("2", "启动服务"), ("3", "停止服务"), ("4", "重启服务"), ("5", "服务状态"), ("6", "卸载自启"), ("0", "返回")], selected=4)
-        actions = {"1": "install", "2": "start", "3": "stop", "4": "restart", "5": "status", "6": "uninstall"}
+        choice = select_option("模型服务", [("1", "安装开机自启"), ("2", "安装登录自启"), ("3", "启动服务"), ("4", "停止服务"), ("5", "重启服务"), ("6", "服务状态"), ("7", "卸载自启"), ("0", "返回")], selected=5)
+        actions = {"1": "install", "2": "install-user", "3": "start", "4": "stop", "5": "restart", "6": "status", "7": "uninstall"}
         if choice == "0":
             return
         clear_terminal_history()
-        result = background_status_panel(RouterConfig.load(config_path), config_path) if choice == "5" else manage_system_service(config_path, actions[choice])
+        result = background_status_panel(RouterConfig.load(config_path), config_path) if choice == "6" else manage_system_service(config_path, actions[choice])
         show_result_page("模型服务", result)
 
 
