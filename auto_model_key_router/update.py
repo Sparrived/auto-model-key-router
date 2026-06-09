@@ -5,6 +5,8 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -13,6 +15,7 @@ from rich.markup import escape
 from rich.panel import Panel
 
 from . import __version__
+from .config import default_cache_dir
 from .tui import section_panel
 
 
@@ -22,6 +25,9 @@ PYPI_JSON_API = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 GITHUB_REPOSITORY = "Sparrived/auto-model-key-router"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+UPDATE_LOG_FILE_NAME = "update.log"
+UPDATE_PREVIEW_LINES = 120
+UPDATE_PREVIEW_CHARS = 12000
 
 
 @dataclass(frozen=True)
@@ -141,6 +147,70 @@ def update_target_label(result: VersionCheckResult) -> str:
     return result.latest_tag or result.latest_version or "最新版本"
 
 
+def update_log_path() -> Path:
+    return default_cache_dir() / UPDATE_LOG_FILE_NAME
+
+
+def update_process_output(stdout: str | None, stderr: str | None) -> str:
+    streams = (("stdout", (stdout or "").strip()), ("stderr", (stderr or "").strip()))
+    return "\n\n".join(f"[{name}]\n{content}" for name, content in streams if content)
+
+
+def update_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def update_output_preview(output: str, line_limit: int = UPDATE_PREVIEW_LINES, char_limit: int = UPDATE_PREVIEW_CHARS) -> tuple[str, bool]:
+    lines = output.splitlines()
+    truncated = len(lines) > line_limit
+    preview = "\n".join(lines[-line_limit:]) if truncated else output
+    if len(preview) > char_limit:
+        preview = preview[-char_limit:]
+        truncated = True
+    return preview, truncated
+
+
+def write_update_log(version_result: VersionCheckResult, command: list[str], returncode: int | str | None, stdout: str | None, stderr: str | None) -> tuple[Path | None, str | None]:
+    path = update_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join([
+                f"时间: {datetime.now().astimezone().isoformat(timespec='seconds')}",
+                f"来源: {version_result.source or '可用来源'}",
+                f"目标: {update_target_label(version_result)}",
+                f"命令: {manual_update_command_text(version_result)}",
+                f"退出码: {'未启动' if returncode is None else returncode}",
+                "",
+                "[stdout]",
+                stdout or "",
+                "",
+                "[stderr]",
+                stderr or "",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return None, str(exc)
+    return path, None
+
+
+def update_log_lines(log_path: Path | None, log_error: str | None, truncated: bool) -> list[str]:
+    lines: list[str] = []
+    if log_path is not None:
+        lines.append(f"完整日志: [bold]{escape(str(log_path))}[/bold]")
+    if log_error is not None:
+        lines.append(f"日志写入失败: [yellow]{escape(log_error)}[/yellow]")
+    if truncated:
+        lines.append(f"界面仅展示最后 {UPDATE_PREVIEW_LINES} 行，完整内容请打开日志文件。")
+    return lines
+
+
 def render_version_check_result(result: VersionCheckResult) -> Panel:
     if result.error:
         return section_panel(
@@ -193,23 +263,39 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
         command = manual_update_command(version_result)
     except ValueError as exc:
         return section_panel(str(exc), "手动更新", "red")
-    result = subprocess.run(command, capture_output=True, text=True)
-    output = (result.stdout or result.stderr or "").strip()
-    if len(output) > 4000:
-        output = output[-4000:]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        stderr = str(exc)
+        log_path, log_error = write_update_log(version_result, command, None, "", stderr)
+        content = "\n".join([
+            "更新命令执行失败。",
+            f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
+            *update_log_lines(log_path, log_error, False),
+            escape(stderr),
+        ])
+        return section_panel(content, "手动更新", "red")
+
+    stdout = update_output_text(result.stdout)
+    stderr = update_output_text(result.stderr)
+    output = update_process_output(stdout, stderr)
+    preview, truncated = update_output_preview(output)
+    log_path, log_error = write_update_log(version_result, command, result.returncode, stdout, stderr)
     if result.returncode == 0:
         content = "\n".join([
             f"已通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
             "请重启当前终端和正在运行的服务，让新版本生效。",
             f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
-            escape(output) if output else "pip 未返回额外输出。",
+            *update_log_lines(log_path, log_error, truncated),
+            escape(preview) if preview else "pip 未返回额外输出。",
         ])
         return section_panel(content, "手动更新", "green")
 
     content = "\n".join([
         f"更新失败，退出码: [bold]{result.returncode}[/bold]",
         f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
-        escape(output) if output else "pip 未返回错误详情。",
+        *update_log_lines(log_path, log_error, truncated),
+        escape(preview) if preview else "pip 未返回错误详情。",
     ])
     return section_panel(content, "手动更新", "red")
 

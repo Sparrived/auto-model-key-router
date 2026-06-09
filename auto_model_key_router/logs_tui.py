@@ -14,7 +14,7 @@ from rich.text import Text
 
 from .formatting import percent, short_text
 from .metrics import BEIJING_TZ
-from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text
+from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text, should_handle_wheel
 
 
 REQUEST_STATS_PAGE_SIZE = 10
@@ -37,6 +37,8 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
     log_offset = 0
     stats_page = 1
     stats_range_index = 0
+    last_wheel_key: str | None = None
+    last_wheel_at = 0.0
 
     def render() -> Group:
         return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index)
@@ -49,6 +51,10 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                 started = time.monotonic()
                 while time.monotonic() - started < 1:
                     key = key_pressed()
+                    if key in {"scroll_up", "scroll_down"}:
+                        handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                        if not handle_wheel:
+                            continue
                     if key in {"q", "Q", "0", "cancel"}:
                         return
                     if key in {"1", "l", "L"}:
@@ -76,11 +82,11 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                         stats_page = 1
                         live.update(render(), refresh=True)
                         continue
-                    if page == "stats" and key in {"left", "page_up", "up", "p", "P"}:
+                    if page == "stats" and key in {"left", "page_up", "up", "scroll_up", "p", "P"}:
                         stats_page = max(1, stats_page - 1)
                         live.update(render(), refresh=True)
                         continue
-                    if page == "stats" and key in {"right", "page_down", "down", "n", "N"}:
+                    if page == "stats" and key in {"right", "page_down", "down", "scroll_down", "n", "N"}:
                         stats_page += 1
                         live.update(render(), refresh=True)
                         continue
@@ -110,7 +116,7 @@ def log_header_renderable(page: str) -> Panel:
 def log_help_text(page: str) -> Align:
     if page == "logs":
         return shortcut_text("1 运行日志  ·  2 统计  ·  ↑/↓/滚轮 滚动  ·  Pg 翻页  ·  q 返回")
-    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→ 翻页  ·  q 返回")
+    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→/滚轮 翻页  ·  q 返回")
 
 
 def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> Panel:

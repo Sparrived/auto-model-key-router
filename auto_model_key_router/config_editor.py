@@ -13,7 +13,7 @@ from rich.table import Table
 from .config import RouterConfig, empty_config_dict, generate_local_api_key
 from .formatting import compact_url, short_text
 from .service import restart_service_after_config_change
-from .tui import clear_terminal_history, confirm_choice, console, page_title, read_key, section_panel, select_option, shortcut_text, show_result_page
+from .tui import clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page
 
 
 def manage_model_keys_interactively(path: Path) -> None:
@@ -145,17 +145,25 @@ def reorder_api_keys_interactively(path: Path) -> Any:
 
 
 def select_reorder_key_action(model: dict[str, Any], selected: int = 0) -> tuple[str, int]:
-    with Live(render_key_order_menu(model, selected), console=console, screen=True, auto_refresh=False) as live:
+    last_wheel_key: str | None = None
+    last_wheel_at = 0.0
+    with mouse_wheel_mode(), Live(render_key_order_menu(model, selected), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":
                 return "cancel", selected
-            if key == "up":
+            if key in {"scroll_up", "scroll_down"}:
+                handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                if not handle_wheel:
+                    continue
+            if key in {"up", "scroll_up"}:
                 selected = max(0, selected - 1)
                 live.update(render_key_order_menu(model, selected), refresh=True)
-            if key == "down":
+                continue
+            if key in {"down", "scroll_down"}:
                 selected = min(len(model.get("keys", [])) - 1, selected + 1)
                 live.update(render_key_order_menu(model, selected), refresh=True)
+                continue
             if key in {"w", "W"}:
                 return "up", selected
             if key in {"s", "S"}:
@@ -177,7 +185,7 @@ def render_key_order_menu(model: dict[str, Any], selected: int) -> Group:
             table.add_row("[bold cyan]▶[/bold cyan]", f"[bold black on cyan] {index + 1} [/bold black on cyan]", f"[bold cyan]{name}[/bold cyan]", f"[bold cyan]{base_url}[/bold cyan]")
         else:
             table.add_row("", f"[dim]{index + 1}[/dim]", name, base_url)
-    return Group(page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]"), shortcut_text("↑/↓ 选择  ·  W/S 移动  ·  Enter 保存  ·  Esc 取消"))
+    return Group(page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]"), shortcut_text("↑/↓/滚轮 选择  ·  W/S 移动  ·  Enter 保存  ·  Esc 取消"))
 
 
 def key_order_text(model: dict[str, Any]) -> str:

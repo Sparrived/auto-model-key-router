@@ -14,7 +14,7 @@ from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import background_status_panel, is_service_healthy, manage_system_service
-from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, show_result_page
+from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
@@ -57,16 +57,22 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
 
 
 def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0, update_result: VersionCheckResult | None = None) -> tuple[str, int]:
-    with Live(render_terminal_ui(config_path, config, selected, update_result), console=console, screen=True, auto_refresh=False) as live:
+    last_wheel_key: str | None = None
+    last_wheel_at = 0.0
+    with mouse_wheel_mode(), Live(render_terminal_ui(config_path, config, selected, update_result), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":
                 return "0", next(index for index, option in enumerate(MENU_OPTIONS) if option[0] == "0")
-            if key == "up":
+            if key in {"scroll_up", "scroll_down"}:
+                handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                if not handle_wheel:
+                    continue
+            if key in {"up", "scroll_up"}:
                 selected = (selected - 1) % len(MENU_OPTIONS)
                 live.update(render_terminal_ui(config_path, config, selected, update_result), refresh=True)
                 continue
-            if key == "down":
+            if key in {"down", "scroll_down"}:
                 selected = (selected + 1) % len(MENU_OPTIONS)
                 live.update(render_terminal_ui(config_path, config, selected, update_result), refresh=True)
                 continue
@@ -81,7 +87,7 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
     renderables = [app_flag_title("Auto-Model-Key-Router", "OpenAI-Compatible 模型 API Key 路由控制台", __version__), *config_renderables(config, config_path)]
     if update_notice is not None:
         renderables.append(update_notice)
-    renderables.extend([section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出")])
+    renderables.extend([section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出")])
     return Group(*renderables)
 
 

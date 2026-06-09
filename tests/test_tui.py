@@ -20,3 +20,24 @@ def test_scrollable_content_state_clamps_offset(monkeypatch) -> None:
     assert offset == max_offset
     assert max_offset >= 7
     assert viewport_height == 3
+
+
+def test_should_handle_wheel_debounces_same_direction(monkeypatch) -> None:
+    moments = iter([10.0, 10.05, 10.20, 10.25])
+    monkeypatch.setattr(tui.time, "monotonic", lambda: next(moments))
+
+    handled, last_key, last_at = tui.should_handle_wheel("scroll_down", None, 0.0)
+    assert handled
+    handled, last_key, last_at = tui.should_handle_wheel("scroll_down", last_key, last_at)
+    assert not handled
+    handled, last_key, last_at = tui.should_handle_wheel("scroll_down", last_key, last_at)
+    assert handled
+    handled, _, _ = tui.should_handle_wheel("scroll_up", last_key, last_at)
+    assert handled
+
+
+def test_content_scroll_offset_uses_single_line_wheel_step() -> None:
+    assert tui.content_scroll_offset("scroll_down", 0, 10, 6) == 1
+    assert tui.content_scroll_offset("scroll_up", 5, 10, 6) == 4
+    assert tui.content_scroll_offset("page_down", 0, 10, 6) == 6
+    assert tui.content_scroll_offset("page_up", 5, 10, 6) == 0

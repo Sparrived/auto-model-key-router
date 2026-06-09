@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import sys
+import time
 from typing import Any
 
 if sys.platform == "win32":
@@ -33,6 +34,9 @@ APP_ASCII_FLAG = (
 APP_ASCII_FLAG_STYLES = ("bold bright_cyan", "bold cyan", "bold bright_blue", "bold bright_magenta")
 MOUSE_MODE_ENABLE = "\033[?1000h\033[?1006h"
 MOUSE_MODE_DISABLE = "\033[?1000l\033[?1006l"
+WHEEL_EVENT_INTERVAL_SECONDS = 0.16
+WHEEL_CONTENT_STEP = 1
+WHEEL_KEYS = {"scroll_up", "scroll_down"}
 
 
 def app_flag_title(title: str, subtitle: str, version: str) -> Panel:
@@ -127,6 +131,31 @@ def parse_sgr_mouse_sequence(sequence: str) -> str | None:
     if button < 64:
         return None
     return "scroll_down" if button & 1 else "scroll_up"
+
+
+def should_handle_wheel(key: str | None, last_key: str | None, last_at: float) -> tuple[bool, str | None, float]:
+    if key not in WHEEL_KEYS:
+        return True, last_key, last_at
+    now = time.monotonic()
+    if key == last_key and now - last_at < WHEEL_EVENT_INTERVAL_SECONDS:
+        return False, last_key, last_at
+    return True, key, now
+
+
+def content_scroll_offset(key: str, offset: int, max_offset: int, viewport_height: int) -> int:
+    if key == "scroll_up":
+        return max(0, offset - WHEEL_CONTENT_STEP)
+    if key == "scroll_down":
+        return min(max_offset, offset + WHEEL_CONTENT_STEP)
+    if key == "page_up":
+        return max(0, offset - viewport_height)
+    if key == "page_down":
+        return min(max_offset, offset + viewport_height)
+    if key == "home":
+        return 0
+    if key == "end":
+        return max_offset
+    return offset
 
 
 def read_windows_until(end_chars: set[str], limit: int = 64) -> str:
@@ -311,40 +340,34 @@ def read_posix_key() -> str:
 
 def select_option(title: str, options: list[tuple[str, str]], selected: int = 0, content: Any | None = None) -> str:
     content_offset = 0
+    last_wheel_key: str | None = None
+    last_wheel_at = 0.0
 
     def render() -> Group:
         return render_option_menu(title, options, selected, content, content_offset)
 
-    with mouse_wheel_mode(content is not None), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+    with mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":
                 return options[-1][0]
-            if key == "up":
-                selected = (selected - 1) % len(options)
-                live.update(render(), refresh=True)
-                continue
-            if key == "down":
-                selected = (selected + 1) % len(options)
-                live.update(render(), refresh=True)
-                continue
+            if key in WHEEL_KEYS:
+                handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                if not handle_wheel:
+                    continue
             if content is not None and key in {"scroll_up", "scroll_down", "page_up", "page_down", "home", "end"}:
                 _, content_offset, max_content_offset, viewport_height = scrollable_content_state(content, content_offset, len(options))
                 if max_content_offset:
-                    step = max(1, viewport_height // 3)
-                    if key == "scroll_up":
-                        content_offset = max(0, content_offset - step)
-                    if key == "scroll_down":
-                        content_offset = min(max_content_offset, content_offset + step)
-                    if key == "page_up":
-                        content_offset = max(0, content_offset - viewport_height)
-                    if key == "page_down":
-                        content_offset = min(max_content_offset, content_offset + viewport_height)
-                    if key == "home":
-                        content_offset = 0
-                    if key == "end":
-                        content_offset = max_content_offset
+                    content_offset = content_scroll_offset(key, content_offset, max_content_offset, viewport_height)
                     live.update(render(), refresh=True)
+                continue
+            if key in {"up", "scroll_up"}:
+                selected = (selected - 1) % len(options)
+                live.update(render(), refresh=True)
+                continue
+            if key in {"down", "scroll_down"}:
+                selected = (selected + 1) % len(options)
+                live.update(render(), refresh=True)
                 continue
             if key == "enter":
                 return options[selected][0]
