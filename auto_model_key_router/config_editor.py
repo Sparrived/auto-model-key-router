@@ -13,7 +13,7 @@ from rich.table import Table
 from .config import RouterConfig, empty_config_dict, generate_local_api_key
 from .formatting import compact_url, short_text
 from .service import restart_service_after_config_change
-from .tui import clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page
+from .tui import clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 
 
 def manage_model_keys_interactively(path: Path) -> None:
@@ -185,7 +185,7 @@ def render_key_order_menu(model: dict[str, Any], selected: int) -> Group:
             table.add_row("[bold cyan]▶[/bold cyan]", f"[bold black on cyan] {index + 1} [/bold black on cyan]", f"[bold cyan]{name}[/bold cyan]", f"[bold cyan]{base_url}[/bold cyan]")
         else:
             table.add_row("", f"[dim]{index + 1}[/dim]", name, base_url)
-    return Group(page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]"), shortcut_text("↑/↓/滚轮 选择  ·  W/S 移动  ·  Enter 保存  ·  Esc 取消"))
+    return terminal_frame([page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]")], shortcut_text("↑/↓/滚轮 选择  ·  W/S 移动  ·  Enter 保存  ·  Esc 取消"))
 
 
 def key_order_text(model: dict[str, Any]) -> str:

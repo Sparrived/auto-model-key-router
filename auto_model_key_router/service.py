@@ -262,6 +262,7 @@ def uvicorn_log_config(log_file_path: str) -> dict[str, Any]:
             }
         },
         "loggers": {
+            "auto_model_key_router": {"handlers": ["file"], "level": "INFO", "propagate": False},
             "uvicorn": {"handlers": ["file"], "level": "INFO", "propagate": False},
             "uvicorn.error": {"handlers": ["file"], "level": "INFO", "propagate": False},
             "uvicorn.access": {"handlers": ["file"], "level": "INFO", "propagate": False},

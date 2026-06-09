@@ -106,7 +106,7 @@ def run_command(args: Sequence[str], *, capture: bool = False, check: bool = Tru
 
 
 def git_args(args: Sequence[str], *, no_proxy: bool = False) -> list[str]:
-    command = ["git"]
+    command = ["git", "--no-pager"]
     if no_proxy:
         command.extend(["-c", "http.proxy=", "-c", "https.proxy="])
     command.extend(args)
@@ -325,6 +325,18 @@ def verify_dist(version: str) -> None:
     run_command([sys.executable, "-m", "twine", "check", *dist_files])
 
 
+def install_dev_environment() -> None:
+    pip_args = [sys.executable, "-m", "pip", "install", "--upgrade", "-e", ".[dev]"]
+    result = run_command(pip_args, capture=True, check=False)
+    if result.returncode == 0:
+        return
+    if "No module named pip" not in result.stderr:
+        raise SystemExit(result.returncode)
+    print("当前解释器缺少 pip，正在通过 ensurepip 初始化。")
+    run_command([sys.executable, "-m", "ensurepip", "--upgrade"])
+    run_command(pip_args)
+
+
 def preview_plan(current_version: str, next_version: str, tag: str, args: argparse.Namespace) -> None:
     print("发布计划")
     print(f"- 当前版本: {current_version}")
@@ -375,6 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ensure_safe_paths(status_files())
     if tag_exists(tag, args.remote, args.no_proxy):
         raise SystemExit(f"标签 {tag} 已存在。")
+    install_dev_environment()
     notes = args.notes if args.notes is not None else prompt_notes()
     write_project_version(next_version)
     update_changelog(next_version, date.today().isoformat(), notes)

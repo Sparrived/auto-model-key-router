@@ -37,6 +37,8 @@ MOUSE_MODE_DISABLE = "\033[?1000l\033[?1006l"
 WHEEL_EVENT_INTERVAL_SECONDS = 0.16
 WHEEL_CONTENT_STEP = 1
 WHEEL_KEYS = {"scroll_up", "scroll_down"}
+MIN_RENDER_WIDTH = 20
+FOLDED_CONTENT_MARKER = "… 上方内容已折叠"
 
 
 def app_flag_title(title: str, subtitle: str, version: str) -> Panel:
@@ -77,7 +79,7 @@ def section_panel(content: Any, title: str, border_style: str = "cyan", subtitle
 
 
 def shortcut_text(text: str) -> Align:
-    return Align.center(f"[dim]{text}[/dim]")
+    return Align.center(Text(text, style="dim", no_wrap=True, overflow="ellipsis"))
 
 
 def content_viewport_height(option_count: int) -> int:
@@ -85,11 +87,43 @@ def content_viewport_height(option_count: int) -> int:
 
 
 def renderable_line_segments(content: Any, width: int) -> list[list[Segment]]:
-    return console.render_lines(content, console.options.update(width=max(width, 20)), pad=False)
+    return console.render_lines(content, console.options.update(width=max(width, MIN_RENDER_WIDTH)), pad=False)
 
 
-def segment_lines_renderable(lines: list[list[Segment]]) -> Group:
-    return Group(*(Segments(line) for line in (lines or [[Segment("")]])))
+def segment_lines_renderable(lines: list[list[Segment]]) -> Segments:
+    segments: list[Segment] = []
+    for index, line in enumerate(lines or [[Segment("")]]):
+        if index:
+            segments.append(Segment.line())
+        segments.extend(line)
+    return Segments(segments)
+
+
+def folded_marker_line() -> list[Segment]:
+    return [Segment(FOLDED_CONTENT_MARKER, "dim")]
+
+
+def fit_terminal_lines(lines: list[list[Segment]], height: int, preserve_bottom: bool = True) -> list[list[Segment]]:
+    if height <= 0:
+        return []
+    if len(lines) > height:
+        if not preserve_bottom:
+            return lines[:height]
+        if height == 1:
+            return [folded_marker_line()]
+        return [folded_marker_line(), *lines[-(height - 1):]]
+    return [*lines, *([[Segment("")]] for _ in range(height - len(lines)))]
+
+
+def terminal_frame(renderables: list[Any], footer: Any | None = None, preserve_bottom: bool = True) -> Group:
+    width = max(console.size.width, MIN_RENDER_WIDTH)
+    height = max(console.size.height, 1)
+    footer_lines = renderable_line_segments(footer, width) if footer is not None else []
+    if len(footer_lines) >= height:
+        return segment_lines_renderable(footer_lines[-height:])
+    body_height = height - len(footer_lines)
+    body_lines = renderable_line_segments(Group(*renderables), width) if renderables else []
+    return segment_lines_renderable([*fit_terminal_lines(body_lines, body_height, preserve_bottom), *footer_lines])
 
 
 def scrollable_content_state(content: Any, offset: int, option_count: int) -> tuple[Any, int, int, int]:
@@ -114,11 +148,8 @@ def render_option_menu(title: str, options: list[tuple[str, str]], selected: int
     shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Esc 返回"
     if max_content_offset:
         shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅内容  ·  数字快捷键  ·  Esc 返回"
-    renderables.extend([
-        section_panel(menu_table(options, selected), "操作菜单", "cyan", "[dim]选择下一步操作[/dim]"),
-        shortcut_text(shortcuts),
-    ])
-    return Group(*renderables)
+    renderables.append(section_panel(menu_table(options, selected), "操作菜单", "cyan", "[dim]选择下一步操作[/dim]"))
+    return terminal_frame(renderables, shortcut_text(shortcuts))
 
 
 def parse_sgr_mouse_sequence(sequence: str) -> str | None:

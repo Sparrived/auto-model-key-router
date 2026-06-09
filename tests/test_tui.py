@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rich.console import ConsoleDimensions
 from rich.text import Text
 
 from auto_model_key_router import logs_tui
@@ -42,6 +43,26 @@ def test_content_scroll_offset_uses_single_line_wheel_step() -> None:
     assert tui.content_scroll_offset("scroll_up", 5, 10, 6) == 4
     assert tui.content_scroll_offset("page_down", 0, 10, 6) == 6
     assert tui.content_scroll_offset("page_up", 5, 10, 6) == 0
+
+
+def test_fit_terminal_lines_preserves_bottom_and_pads() -> None:
+    lines = [[tui.Segment(str(index))] for index in range(5)]
+
+    fitted = tui.fit_terminal_lines(lines, 3)
+
+    assert len(fitted) == 3
+    assert fitted[0][0].text == tui.FOLDED_CONTENT_MARKER
+    assert fitted[1][0].text == "3"
+    assert fitted[2][0].text == "4"
+
+
+def test_terminal_frame_keeps_footer_at_bottom(monkeypatch) -> None:
+    monkeypatch.setattr(tui.console.__class__, "size", property(lambda _: ConsoleDimensions(20, 5)))
+
+    lines = tui.renderable_line_segments(tui.terminal_frame([Text("a\nb\nc\nd\ne")], Text("footer")), 20)
+
+    assert len(lines) == 5
+    assert "footer" in "".join(segment.text for segment in lines[-1])
 
 
 def test_open_log_file_reports_missing_file(tmp_path) -> None:

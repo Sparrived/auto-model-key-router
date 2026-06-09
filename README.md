@@ -383,10 +383,9 @@ uv run pytest
 
 ## � 维护者发布
 
-交互式发布脚本会自动读取 `pyproject.toml` 当前版本，选择发布类型后计算新版本号，更新版本与 `CHANGELOG.md`，运行测试、构建和 `twine check`，随后提交、打 tag 并推送到远端。
+交互式发布脚本会自动读取 `pyproject.toml` 当前版本，选择发布类型后计算新版本号，自动安装开发发布依赖，更新版本与 `CHANGELOG.md`，运行测试、构建和 `twine check`，随后提交、打 tag 并推送到远端。
 
 ```bash
-python -m pip install -e ".[test,release]"
 python scripts/release.py
 ```
 

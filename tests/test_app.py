@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from time import perf_counter
 from typing import TypeVar
 
 import anyio
@@ -11,11 +13,17 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from auto_model_key_router.app import _probe_cooling_keys, create_app
+from auto_model_key_router.app import _probe_cooling_keys, _stream_upstream, create_app
 from auto_model_key_router.config import KeyConfig, ModelConfig, RouterConfig
 
 
 T = TypeVar("T")
+
+
+class BrokenStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: {\"id\":\"chunk\"}\n"
+        raise httpx.DecodingError("broken body")
 
 
 def run_client(app: FastAPI, action: Callable[[httpx.AsyncClient], Awaitable[T]]) -> T:
@@ -171,6 +179,33 @@ def test_retryable_response_cools_down_failed_key() -> None:
         assert health.json()["key_states"]["test-model:key-1"]["cooldown_remaining_seconds"] > 0
 
 
+def test_stream_request_disables_upstream_read_timeout() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_timeouts: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_timeouts.append(request.extensions["timeout"])
+            return httpx.Response(200, content=b'data: {"usage":{"total_tokens":1}}\n\ndata: [DONE]\n')
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert response.text == 'data: {"usage":{"total_tokens":1}}\n\ndata: [DONE]\n'
+        assert upstream_timeouts[0]["read"] is None
+        assert upstream_timeouts[0]["connect"] == config.request_timeout
+
+
 def test_cooled_down_key_is_skipped_on_next_request() -> None:
     with tempfile.TemporaryDirectory() as directory:
         calls: list[str] = []
@@ -268,6 +303,55 @@ def test_model_suffix_selects_explicit_key_by_alias() -> None:
         assert response.status_code == 200
         assert upstream_bodies[0]["model"] == "test-model"
         assert authorization_headers == ["Bearer sk-2"]
+
+
+def test_destination_addr_header_is_not_forwarded() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_headers: list[httpx.Headers] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_headers.append(request.headers)
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key", "destination-addr": "127.0.0.1:28881"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert "destination-addr" not in upstream_headers[0]
+
+
+def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=BrokenStream())
+
+        async def consume_stream() -> None:
+            with pytest.raises(httpx.DecodingError):
+                async for _ in _stream_upstream(response, app.state.metrics, app.state.key_pool, "test-model", "key-1", "test-model", "https://upstream.test/v1/chat/completions", perf_counter()):
+                    pass
+            await app.state.metrics.close()
+            await app.state.http_client.aclose()
+
+        caplog.set_level(logging.WARNING, logger="auto_model_key_router.app")
+        anyio.run(consume_stream)
+
+        message = next(record.message for record in caplog.records if record.name == "auto_model_key_router.app")
+        assert "upstream stream error" in message
+        assert "test-model" in message
+        assert "key-1" in message
+        assert "https://upstream.test/v1/chat/completions" in message
+        assert "DecodingError" in message
 
 
 def test_model_suffix_returns_error_for_unknown_key() -> None:

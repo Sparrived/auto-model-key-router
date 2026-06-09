@@ -2,12 +2,20 @@
 
 ## [Unreleased]
 
-### Added
-- 新增交互式维护者发布脚本，支持自动计算 patch、minor、major、post、preview、alpha、beta、dev、stable 和 custom 版本。
-- 新增发布脚本单元测试，覆盖版本计算与 CHANGELOG 归档逻辑。
+## [1.2.3rc3] - 2026-06-10
 
 ### Changed
-- README 补充维护者发布流程和常用脚本参数说明。
+- 测试
+
+## [1.2.3rc2] - 2026-06-10
+
+### Changed
+- 测试
+
+## [1.2.3rc1] - 2026-06-09
+
+### Changed
+- 测试
 
 ## [1.2.2] - 2026-06-09
 

@@ -14,7 +14,7 @@ from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import background_status_panel, is_service_healthy, manage_system_service
-from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page
+from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
@@ -87,8 +87,8 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
     renderables = [app_flag_title("Auto-Model-Key-Router", "OpenAI-Compatible 模型 API Key 路由控制台", __version__), *config_renderables(config, config_path)]
     if update_notice is not None:
         renderables.append(update_notice)
-    renderables.extend([section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"), shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出")])
-    return Group(*renderables)
+    renderables.append(section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"))
+    return terminal_frame(renderables, shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
 
 
 def manage_system_service_interactively(config_path: Path) -> None:

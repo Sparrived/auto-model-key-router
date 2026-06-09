@@ -17,7 +17,7 @@ from rich.text import Text
 
 from .formatting import percent, short_text
 from .metrics import BEIJING_TZ
-from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text, should_handle_wheel
+from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame
 
 
 REQUEST_STATS_PAGE_SIZE = 10
@@ -110,8 +110,7 @@ def render_live_logs(database_path: str, log_file_path: str, limit: int, page: s
     renderables = [log_header_renderable(page), content]
     if status_message:
         renderables.append(section_panel(status_message, "提示", "green" if status_message.startswith("已") else "yellow"))
-    renderables.append(log_help_text(page))
-    return Group(*renderables)
+    return terminal_frame(renderables, log_help_text(page))
 
 
 def log_page_size(limit: int) -> int:

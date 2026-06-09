@@ -40,6 +40,21 @@ def test_calculate_next_version_for_extra_release_types() -> None:
     assert release_script.calculate_next_version("1.2.2", "custom", "3.0.0rc1") == "3.0.0rc1"
 
 
+def test_git_args_disable_pager() -> None:
+    assert release_script.git_args(["diff", "--check"]) == ["git", "--no-pager", "diff", "--check"]
+    assert release_script.git_args(["push", "origin", "master"], no_proxy=True) == [
+        "git",
+        "--no-pager",
+        "-c",
+        "http.proxy=",
+        "-c",
+        "https.proxy=",
+        "push",
+        "origin",
+        "master",
+    ]
+
+
 def test_render_updated_changelog_moves_unreleased_body() -> None:
     text = "# Changelog\n\n## [Unreleased]\n\n### Added\n- 新增功能\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- 初始版本\n"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,6 +22,9 @@ from . import __version__
 from .config import RouterConfig
 from .key_pool import KeyPool
 from .metrics import MetricsStore, extract_usage
+
+
+LOGGER = logging.getLogger("auto_model_key_router.app")
 
 
 def create_app(config: RouterConfig, config_path: str | Path | None = None) -> FastAPI:
@@ -136,6 +140,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     headers,
                     upstream_body,
                     stream=_is_stream_request(payload),
+                    timeout=_upstream_timeout(app.state.config, _is_stream_request(payload)),
                 )
                 duration_ms = _elapsed_ms(started)
             except httpx.RequestError as exc:
@@ -178,7 +183,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             if _is_stream_request(payload):
                 _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
                 return StreamingResponse(
-                    _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, started),
+                    _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started),
                     status_code=response.status_code,
                     headers=_response_headers(response),
                     media_type=response.headers.get("content-type"),
@@ -391,7 +396,7 @@ def _join_url(base_url: str, path: str) -> str:
 
 
 def _upstream_headers(request: Request, api_key: str) -> dict[str, str]:
-    blocked = {"authorization", "host", "content-length"}
+    blocked = {"authorization", "host", "content-length", "destination-addr"}
     headers = {key: value for key, value in request.headers.items() if key.lower() not in blocked}
     headers["Authorization"] = f"Bearer {api_key}"
     return headers
@@ -483,6 +488,12 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
             return None
 
 
+def _upstream_timeout(config: RouterConfig, stream: bool) -> httpx.Timeout | None:
+    if not stream:
+        return None
+    return httpx.Timeout(config.request_timeout, read=None)
+
+
 async def _send_upstream(
     client: httpx.AsyncClient,
     request: Request,
@@ -490,19 +501,29 @@ async def _send_upstream(
     headers: dict[str, str],
     body: bytes,
     stream: bool = False,
+    timeout: httpx.Timeout | None = None,
 ) -> httpx.Response:
+    request_kwargs: dict[str, Any] = {
+        "params": request.query_params,
+        "headers": headers,
+        "content": body,
+    }
+    if timeout is not None:
+        request_kwargs["timeout"] = timeout
     response = await client.send(
         client.build_request(
             request.method,
             upstream,
-            params=request.query_params,
-            headers=headers,
-            content=body,
+            **request_kwargs,
         ),
         stream=True,
     )
-    if not stream:
-        await response.aread()
+    try:
+        if not stream:
+            await response.aread()
+    except Exception:
+        await response.aclose()
+        raise
     return response
 
 
@@ -535,7 +556,7 @@ async def _probe_key(client: httpx.AsyncClient, key: Any) -> bool:
         return False
 
 
-async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, started: float):
+async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
     chunk_count = 0
     byte_count = 0
     buffer = ""
@@ -554,7 +575,9 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
             yield chunk
     except Exception as exc:
         failed = True
-        _debug_report("upstream-stream-error", {"status_code": response.status_code, "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count})
+        payload = {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key_name, "upstream": upstream, "status_code": response.status_code, "content_type": response.headers.get("content-type"), "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count, "duration_ms": _elapsed_ms(started)}
+        LOGGER.warning("upstream stream error %s", json.dumps(payload, ensure_ascii=False))
+        _debug_report("upstream-stream-error", payload)
         raise
     finally:
         await metrics.record(
