@@ -107,7 +107,7 @@ def test_open_log_file_uses_xdg_open_on_linux(tmp_path, monkeypatch) -> None:
     assert message.startswith("已使用默认文本编辑器打开:")
 
 
-def test_main_menu_keeps_settings_entries_under_cli_settings() -> None:
+def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
