@@ -38,6 +38,7 @@ APP_ASCII_FLAG_STYLES = ("bold bright_cyan", "bold cyan", "bold bright_blue", "b
 MOUSE_MODE_ENABLE = "\033[?1000h\033[?1006h"
 MOUSE_MODE_DISABLE = "\033[?1000l\033[?1006l"
 WHEEL_EVENT_INTERVAL_SECONDS = 0.16
+ESC_SEQUENCE_TIMEOUT_SECONDS = 0.05
 WHEEL_CONTENT_STEP = 1
 WHEEL_KEYS = {"scroll_up", "scroll_down"}
 MIN_RENDER_WIDTH = 20
@@ -209,6 +210,17 @@ def read_windows_until(end_chars: set[str], limit: int = 64) -> str:
     return "".join(chars)
 
 
+def read_windows_char_if_available(timeout: float = ESC_SEQUENCE_TIMEOUT_SECONDS) -> str | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if msvcrt.kbhit():
+            return msvcrt.getwch()
+        time.sleep(0.005)
+    if msvcrt.kbhit():
+        return msvcrt.getwch()
+    return None
+
+
 def read_posix_until(end_chars: set[str], limit: int = 64) -> str:
     chars = []
     while len(chars) < limit and select.select([sys.stdin], [], [], 0.05)[0]:
@@ -308,9 +320,11 @@ def read_key() -> str:
         if code == "O":
             return "end"
     if key == "\x1b":
-        second = msvcrt.getwch()
-        third = msvcrt.getwch() if second == "[" else ""
-        if third == "<":
+        second = read_windows_char_if_available()
+        if second is None:
+            return "cancel"
+        third = read_windows_char_if_available() if second in {"[", "O"} else ""
+        if third == "<" and second == "[":
             mouse_key = parse_sgr_mouse_sequence(read_windows_until({"M", "m"}))
             if mouse_key:
                 return mouse_key
@@ -322,16 +336,17 @@ def read_key() -> str:
             return "left"
         if third == "C":
             return "right"
-        if third == "5":
-            msvcrt.getwch()
+        if third == "5" and second == "[":
+            read_windows_char_if_available()
             return "page_up"
-        if third == "6":
-            msvcrt.getwch()
+        if third == "6" and second == "[":
+            read_windows_char_if_available()
             return "page_down"
         if third == "H":
             return "home"
         if third == "F":
             return "end"
+        return "cancel"
     return key
 
 

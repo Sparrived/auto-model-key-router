@@ -18,8 +18,8 @@ from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_cho
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
-MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
-SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "调用日志"), ("5", "版本更新"), ("0", "返回")]
+MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "调用日志"), ("4", "CLI 设置"), ("0", "退出")]
+SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "版本更新"), ("0", "返回")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
@@ -40,6 +40,11 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             config = RouterConfig.load(config_path)
             continue
         if choice == "3":
+            config = RouterConfig.load(config_path)
+            run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
+            config = RouterConfig.load(config_path)
+            continue
+        if choice == "4":
             result = run_submodule(lambda: manage_cli_settings_interactively(config_path, update_result))
             if isinstance(result, VersionCheckResult):
                 update_result = result
@@ -66,10 +71,6 @@ def manage_cli_settings_interactively(config_path: Path, update_result: VersionC
                 show_result_page("监听配置", result)
             continue
         if choice == "4":
-            config = RouterConfig.load(config_path)
-            run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
-            continue
-        if choice == "5":
             result = run_submodule(lambda: manage_version_update_interactively(latest_result))
             if isinstance(result, VersionCheckResult):
                 latest_result = result
@@ -124,7 +125,7 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
     if update_notice is not None:
         renderables.append(update_notice)
     renderables.append(section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"))
-    return terminal_frame(renderables, shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
+    return terminal_frame(renderables, shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Esc/Ctrl+C 退出"))
 
 
 def manage_system_service_interactively(config_path: Path) -> None:

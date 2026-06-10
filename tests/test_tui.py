@@ -73,6 +73,31 @@ def test_mouse_wheel_mode_is_enabled_by_default(monkeypatch) -> None:
     assert output.getvalue() == f"{tui.MOUSE_MODE_ENABLE}{tui.MOUSE_MODE_DISABLE}"
 
 
+def test_read_key_windows_single_escape_returns_cancel(monkeypatch) -> None:
+    class FakeMsvcrt:
+        def getwch(self):
+            return "\x1b"
+
+    monkeypatch.setattr(tui.sys, "platform", "win32")
+    monkeypatch.setattr(tui, "msvcrt", FakeMsvcrt(), raising=False)
+    monkeypatch.setattr(tui, "read_windows_char_if_available", lambda: None)
+
+    assert tui.read_key() == "cancel"
+
+
+def test_read_key_windows_escape_sequence_still_handles_arrows(monkeypatch) -> None:
+    class FakeMsvcrt:
+        def getwch(self):
+            return "\x1b"
+
+    chars = iter(["[", "A"])
+    monkeypatch.setattr(tui.sys, "platform", "win32")
+    monkeypatch.setattr(tui, "msvcrt", FakeMsvcrt(), raising=False)
+    monkeypatch.setattr(tui, "read_windows_char_if_available", lambda: next(chars, None))
+
+    assert tui.read_key() == "up"
+
+
 def test_copy_to_clipboard_uses_available_command(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -227,12 +252,12 @@ def test_service_logs_renderable_can_show_archived_log(tmp_path) -> None:
 
 
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
-    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
+    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "调用日志"), ("4", "CLI 设置"), ("0", "退出")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
     assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
-    assert ("4", "调用日志") in dashboard.SETTINGS_OPTIONS
-    assert ("5", "版本更新") in dashboard.SETTINGS_OPTIONS
+    assert ("4", "版本更新") in dashboard.SETTINGS_OPTIONS
+    assert all(label != "调用日志" for _, label in dashboard.SETTINGS_OPTIONS)
 
 
 def test_configure_cli_generates_auth_key_and_installs_service(tmp_path, monkeypatch) -> None:
