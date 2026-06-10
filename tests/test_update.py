@@ -138,6 +138,16 @@ def test_detected_installation_method_reads_uv_tool_dir(tmp_path, monkeypatch) -
     assert detected_installation_method(prefix) == "uv-tool"
 
 
+def test_detected_installation_method_reads_windows_uv_tool_default(tmp_path, monkeypatch) -> None:
+    prefix = tmp_path / "Roaming" / "uv" / "tools" / "auto-model-key-router"
+    prefix.mkdir(parents=True)
+    monkeypatch.delenv("UV_TOOL_DIR", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setattr("auto_model_key_router.update.os.name", "nt")
+
+    assert detected_installation_method(prefix) == "uv-tool"
+
+
 def test_detected_installation_method_reads_uv_cache_dir(tmp_path, monkeypatch) -> None:
     prefix = tmp_path / "uv-cache" / "archive-v0" / "tool"
     prefix.mkdir(parents=True)

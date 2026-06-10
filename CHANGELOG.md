@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### FIXED
+
+- 修复 uv tool 默认安装目录未设置 `UV_TOOL_DIR` 时被误判为普通 pip 环境，导致手动更新调用缺失 pip 的工具环境失败的问题。
+
 ## [1.3.0] - 2026-06-11
 
 ### Added

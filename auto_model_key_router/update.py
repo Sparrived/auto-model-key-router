@@ -148,6 +148,22 @@ def default_uv_cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "uv"
 
 
+def default_uv_tool_dirs() -> tuple[Path, ...]:
+    dirs: list[Path] = []
+    if os.environ.get("UV_TOOL_DIR"):
+        dirs.append(Path(os.environ["UV_TOOL_DIR"]))
+    if os.name == "nt":
+        if os.environ.get("APPDATA"):
+            dirs.append(Path(os.environ["APPDATA"]) / "uv" / "tools")
+        if os.environ.get("LOCALAPPDATA"):
+            dirs.append(Path(os.environ["LOCALAPPDATA"]) / "uv" / "tools")
+    elif sys.platform == "darwin":
+        dirs.append(Path.home() / "Library" / "Application Support" / "uv" / "tools")
+    else:
+        dirs.append(Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "uv" / "tools")
+    return tuple(dict.fromkeys(dirs))
+
+
 def detected_installation_method(prefix: Path | None = None) -> str:
     current_prefix = (prefix or Path(sys.prefix)).resolve()
     if (current_prefix / "pipx_metadata.json").exists():
@@ -155,8 +171,7 @@ def detected_installation_method(prefix: Path | None = None) -> str:
     pipx_home = os.environ.get("PIPX_HOME")
     if pipx_home and is_relative_to(current_prefix, Path(pipx_home)):
         return "pipx"
-    uv_tool_dir = os.environ.get("UV_TOOL_DIR")
-    if uv_tool_dir and is_relative_to(current_prefix, Path(uv_tool_dir)):
+    if any(is_relative_to(current_prefix, uv_tool_dir) for uv_tool_dir in default_uv_tool_dirs()):
         return "uv-tool"
     if is_relative_to(current_prefix, default_uv_cache_dir()):
         return "uvx"
