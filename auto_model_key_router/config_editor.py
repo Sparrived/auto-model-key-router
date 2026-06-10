@@ -11,23 +11,24 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from .config import RouterConfig, empty_config_dict, generate_local_api_key
-from .formatting import compact_url, short_text
+from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
-from .tui import clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 
 
 def manage_model_keys_interactively(path: Path) -> None:
     while True:
-        choice = select_option("模型 Key", [("1", "添加 Key"), ("2", "编辑 API key"), ("3", "删除 API key"), ("4", "Key 排序"), ("5", "路由模式"), ("6", "推理强度"), ("0", "返回")])
+        choice = select_option("模型 Key", [("1", "添加 Key"), ("2", "编辑 API key"), ("3", "删除 API key"), ("4", "复制 API key"), ("5", "Key 排序"), ("6", "路由模式"), ("7", "推理强度"), ("0", "返回")])
         if choice == "0":
             return
         actions = {
             "1": ("添加 Key", lambda: add_config_interactively(path, ask_continue=False)),
             "2": ("编辑 API key", lambda: edit_api_key_interactively(path)),
             "3": ("删除 API key", lambda: delete_api_key_interactively(path)),
-            "4": ("Key 排序", lambda: reorder_api_keys_interactively(path)),
-            "5": ("路由模式", lambda: set_model_routing_mode_interactively(path)),
-            "6": ("推理强度", lambda: set_model_reasoning_effort_interactively(path)),
+            "4": ("复制 API key", lambda: copy_api_key_interactively(path)),
+            "5": ("Key 排序", lambda: reorder_api_keys_interactively(path)),
+            "6": ("路由模式", lambda: set_model_routing_mode_interactively(path)),
+            "7": ("推理强度", lambda: set_model_reasoning_effort_interactively(path)),
         }
         title, action = actions[choice]
         clear_terminal_history()
@@ -113,6 +114,19 @@ def delete_api_key_interactively(path: Path) -> Any:
     new_config = RouterConfig.from_dict(data)
     save_config_data(path, data)
     return Group(section_panel(message, "删除完成", "green"), restart_service_after_config_change(path, old_config, new_config))
+
+
+def copy_api_key_interactively(path: Path) -> Any:
+    selection = select_api_key(path, "选择要复制的 API key")
+    if selection is None:
+        return None
+    data, model, key_index = selection
+    key = model["keys"][key_index]
+    api_key = str(key.get("api_key") or "")
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    base_url = compact_url(key.get("base_url") or data.get("default_base_url") or "-", 48)
+    content = section_panel(f"模型: [bold]{short_text(model['id'], 48)}[/bold]\nKey: [bold]{short_text(key_name, 48)}[/bold]\n上游: [bold]{base_url}[/bold]\n指纹: [bold]{key_fingerprint(api_key)}[/bold]\n\n选择“复制 API key”即可写入剪贴板。", "复制 API key", "green")
+    return ResultPage(content, copy_text=api_key, copy_label="复制 API key")
 
 
 def reorder_api_keys_interactively(path: Path) -> Any:
@@ -305,7 +319,8 @@ def set_local_api_key_interactively(path: Path) -> Any:
     data["local_api_key"] = local_api_key
     new_config = RouterConfig.from_dict(data)
     save_config_data(path, data)
-    return Group(section_panel(f"已生成新密钥。\n\n[bold]{local_api_key}[/bold]\n\n请求时添加：\nAuthorization: Bearer <key>", "本地鉴权", "green"), restart_service_after_config_change(path, old_config, new_config))
+    content = Group(section_panel(f"已生成新密钥。\n\n[bold]{local_api_key}[/bold]\n\n请求时添加：\nAuthorization: Bearer <key>", "本地鉴权", "green"), restart_service_after_config_change(path, old_config, new_config))
+    return ResultPage(content, copy_text=local_api_key, copy_label="复制本地鉴权 key")
 
 
 def set_listen_interactively(path: Path) -> Any:

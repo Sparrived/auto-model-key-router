@@ -14,7 +14,7 @@ from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import is_service_healthy, manage_system_service, service_status_panel
-from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
 
@@ -89,7 +89,7 @@ def configure_cli_interactively(config_path: Path) -> Any:
     config = RouterConfig.from_dict(data)
     auth_panel = section_panel(f"{auth_message}\n\n[bold]{local_api_key}[/bold]\n\n请求时添加：\nAuthorization: Bearer {local_api_key}\n或：\nx-api-key: {local_api_key}", "本地鉴权", "green")
     endpoint_panel = section_panel(f"配置文件: [bold]{config_path.resolve()}[/bold]\n服务地址: [bold]http://{config.host}:{config.port}[/bold]", "CLI 设置", "green")
-    return Group(auth_panel, manage_system_service(config_path, "install"), endpoint_panel)
+    return ResultPage(Group(auth_panel, manage_system_service(config_path, "install"), endpoint_panel), copy_text=local_api_key, copy_label="复制本地鉴权 key")
 
 
 def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0, update_result: VersionCheckResult | None = None) -> tuple[str, int]:

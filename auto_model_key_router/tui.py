@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 import sys
 import time
 from typing import Any
@@ -22,6 +23,8 @@ from rich.segment import Segment, Segments
 from rich.table import Table
 from rich.text import Text
 
+from .clipboard import copy_to_clipboard
+
 
 console = Console()
 
@@ -39,6 +42,13 @@ WHEEL_CONTENT_STEP = 1
 WHEEL_KEYS = {"scroll_up", "scroll_down"}
 MIN_RENDER_WIDTH = 20
 FOLDED_CONTENT_MARKER = "… 上方内容已折叠"
+
+
+@dataclass(frozen=True)
+class ResultPage:
+    content: Any
+    copy_text: str | None = None
+    copy_label: str = "复制 key"
 
 
 def app_flag_title(title: str, subtitle: str, version: str) -> Panel:
@@ -402,8 +412,11 @@ def select_option(title: str, options: list[tuple[str, str]], selected: int = 0,
                 continue
             if key == "enter":
                 return options[selected][0]
-            if key in {option[0] for option in options}:
+            option_values = {option[0] for option in options}
+            if key in option_values:
                 return key
+            if isinstance(key, str) and key.lower() in option_values:
+                return key.lower()
 
 
 def clear_terminal_history() -> None:
@@ -426,4 +439,16 @@ def run_submodule(action: Any) -> Any:
 
 
 def show_result_page(title: str, content: Any) -> None:
-    select_option(title, [("0", "返回")], selected=0, content=content)
+    result = content if isinstance(content, ResultPage) else ResultPage(content)
+    status: Any | None = None
+    options = [("0", "返回")]
+    if result.copy_text:
+        options.insert(0, ("c", result.copy_label))
+    while True:
+        page_content = Group(result.content, status) if status is not None else result.content
+        choice = select_option(title, options, selected=0, content=page_content)
+        if choice == "c" and result.copy_text:
+            copied, message = copy_to_clipboard(result.copy_text)
+            status = section_panel(message, "复制结果", "green" if copied else "yellow")
+            continue
+        return
