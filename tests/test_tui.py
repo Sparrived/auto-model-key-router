@@ -213,6 +213,8 @@ def test_windows_user_service_registration_is_user_limited() -> None:
     assert "/RL" in commands[0]
     assert "LIMITED" in commands[0]
     assert "/IT" in commands[0]
+    assert any("AllowStartIfOnBatteries" in " ".join(command) for command in commands)
+    assert any("DontStopIfGoingOnBatteries" in " ".join(command) for command in commands)
 
 
 def test_windows_service_registration_uses_onstart_when_admin(monkeypatch) -> None:
@@ -230,6 +232,8 @@ def test_windows_service_registration_uses_onstart_when_admin(monkeypatch) -> No
     assert "/RU" in commands[0]
     assert "SYSTEM" in commands[0]
     assert "HIGHEST" in commands[0]
+    assert any("StartWhenAvailable" in " ".join(command) for command in commands)
+    assert any("ExecutionTimeLimit" in " ".join(command) for command in commands)
 
 
 def test_windows_service_registration_requests_uac_when_not_admin(monkeypatch) -> None:
@@ -247,6 +251,7 @@ def test_windows_service_status_panel_shows_registration_details(monkeypatch) ->
 <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
   <Principals><Principal><UserId>SYSTEM</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
   <Actions><Exec><Command>C:\\Python\\pythonw.exe</Command><Arguments>-m auto_model_key_router.main --config C:\\config.json --serve-foreground</Arguments><WorkingDirectory>C:\\app</WorkingDirectory></Exec></Actions>
 </Task>"""
     status = """TaskName: \\AutoModelKeyRouter
@@ -270,6 +275,7 @@ Last Result: 0x0"""
     assert "SYSTEM" in output
     assert "HighestAvailable" in output
     assert "--serve-foreground" in output
+    assert "PT0S" in output
     assert "0x0" in output
     assert "config.json" in output
 

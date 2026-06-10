@@ -168,6 +168,10 @@ def windows_task_status_panel(python: Path, config_path: Path) -> Any:
         ("执行程序", task_values.get("Command", "-")),
         ("启动参数", task_values.get("Arguments", "-")),
         ("工作目录", task_values.get("WorkingDirectory", "-")),
+        ("电池启动限制", task_values.get("DisallowStartIfOnBatteries", "-")),
+        ("电池停止", task_values.get("StopIfGoingOnBatteries", "-")),
+        ("错过后尽快启动", task_values.get("StartWhenAvailable", "-")),
+        ("执行时限", task_values.get("ExecutionTimeLimit", "-")),
         ("上次运行", first_value(list_values, "Last Run Time", "上次运行时间") or "-"),
         ("下次运行", first_value(list_values, "Next Run Time", "下次运行时间") or "-"),
         ("上次结果", first_value(list_values, "Last Result", "上次结果") or "-"),
@@ -283,7 +287,7 @@ def parse_windows_task_xml(text: str) -> dict[str, str]:
         name = local_xml_name(element.tag)
         if name.endswith("Trigger"):
             triggers.append(name)
-        if name in {"UserId", "RunLevel", "Command", "Arguments", "WorkingDirectory", "Enabled", "Hidden", "MultipleInstancesPolicy"} and element.text:
+        if name in {"UserId", "RunLevel", "Command", "Arguments", "WorkingDirectory", "Enabled", "Hidden", "MultipleInstancesPolicy", "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries", "StartWhenAvailable", "ExecutionTimeLimit"} and element.text:
             values.setdefault(name, element.text.strip())
     if triggers:
         values["Triggers"] = ", ".join(triggers)
@@ -367,7 +371,7 @@ def manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
     task_name = WINDOWS_TASK_NAME
     if action == "install-user":
         command = ["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", task_name, "/RL", "LIMITED", "/IT", "/TR", f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground']
-        return Group(registration_result(command, "Windows 登录自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), user_service_registration_note_panel())
+        return Group(registration_result(command, "Windows 登录自启"), registration_result(windows_task_settings_command(), "Windows 自启设置"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), user_service_registration_note_panel())
     elevated = action.removesuffix("-elevated") if action.endswith("-elevated") else ""
     if elevated:
         if not is_windows_admin():
@@ -377,7 +381,7 @@ def manage_windows_task(python: Path, config_path: Path, action: str) -> Any:
         return elevate_windows_service_action(config_path, action)
     if action == "install":
         command = ["schtasks", "/Create", "/F", "/SC", "ONSTART", "/TN", task_name, "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", f'"{python}" -m auto_model_key_router.main --config "{config_path}" --serve-foreground']
-        return Group(registration_result(command, "Windows 开机自启"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), service_registration_note_panel())
+        return Group(registration_result(command, "Windows 开机自启"), registration_result(windows_task_settings_command(), "Windows 自启设置"), registration_result(["schtasks", "/Run", "/TN", task_name], "Windows 启动"), service_registration_note_panel())
     if action == "uninstall":
         config = RouterConfig.load(config_path)
         return Group(registration_result(["schtasks", "/End", "/TN", task_name], "Windows 停止"), stop_background_service(config), registration_result(["schtasks", "/Delete", "/F", "/TN", task_name], "Windows 自启"))
@@ -411,6 +415,11 @@ def elevate_windows_service_action(config_path: Path, action: str) -> Panel:
         return section_panel("已通过 UAC 管理员权限完成 Windows 开机自启任务管理。", "Windows UAC", "green")
     message = (result.stderr or result.stdout or "管理员授权被取消或执行失败。").strip()
     return section_panel(message, "Windows UAC", "red")
+
+
+def windows_task_settings_command() -> list[str]:
+    script = "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0); Set-ScheduledTask -TaskName " + powershell_quote(WINDOWS_TASK_NAME) + " -Settings $settings | Out-Null"
+    return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]
 
 
 def powershell_quote(value: str) -> str:
