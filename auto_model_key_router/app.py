@@ -126,97 +126,101 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             except RuntimeError as exc:
                 return JSONResponse({"error": {"message": str(exc)}}, status_code=503)
 
-            if key_count > 1 and not requested_key_name and not only_first:
-                excluded.add(key.name)
-            upstream = _join_url(key.base_url, f"/v1/{_upstream_path(path, payload)}")
-            headers = _upstream_headers(request, key.api_key)
-            _debug_report("upstream-attempt", {"upstream": upstream, "model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "stream": _is_stream_request(payload)})
-
-            started = perf_counter()
+            release_key = True
             try:
-                response = await _send_upstream(
-                    app.state.http_client,
-                    request,
-                    upstream,
-                    headers,
-                    upstream_body,
-                    stream=_is_stream_request(payload),
-                    timeout=_upstream_timeout(app.state.config, _is_stream_request(payload)),
-                )
-                duration_ms = _elapsed_ms(started)
-            except httpx.RequestError as exc:
-                duration_ms = _elapsed_ms(started)
-                _debug_report("upstream-request-error", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "error_type": exc.__class__.__name__, "error": str(exc), "duration_ms": duration_ms})
-                last_error = JSONResponse({"error": {"message": f"上游请求失败: {exc.__class__.__name__}"}}, status_code=502)
-                await app.state.metrics.record(
-                    model_id,
-                    key.name,
-                    None,
-                    retried=True,
-                    failed=True,
-                    duration_ms=duration_ms,
-                    first_token_ms=duration_ms,
-                    requested_model_id=requested_model_id,
-                )
-                await app.state.key_pool.mark_failure(model_id, key.name)
-                await app.state.key_pool.release_key(model_id, key.name)
-                continue
+                if key_count > 1 and not requested_key_name and not only_first:
+                    excluded.add(key.name)
+                upstream = _join_url(key.base_url, f"/v1/{_upstream_path(path, payload)}")
+                headers = _upstream_headers(request, key.api_key)
+                _debug_report("upstream-attempt", {"upstream": upstream, "model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "stream": _is_stream_request(payload)})
 
-            if response.status_code in {401, 403, 429, 500, 502, 503, 504} and attempt + 1 < attempts:
+                started = perf_counter()
+                try:
+                    response = await _send_upstream(
+                        app.state.http_client,
+                        request,
+                        upstream,
+                        headers,
+                        upstream_body,
+                        stream=_is_stream_request(payload),
+                        timeout=_upstream_timeout(app.state.config, _is_stream_request(payload)),
+                    )
+                    duration_ms = _elapsed_ms(started)
+                except httpx.RequestError as exc:
+                    duration_ms = _elapsed_ms(started)
+                    _debug_report("upstream-request-error", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "error_type": exc.__class__.__name__, "error": str(exc), "duration_ms": duration_ms})
+                    last_error = JSONResponse({"error": {"message": f"上游请求失败: {exc.__class__.__name__}"}}, status_code=502)
+                    await app.state.metrics.record(
+                        model_id,
+                        key.name,
+                        None,
+                        retried=True,
+                        failed=True,
+                        duration_ms=duration_ms,
+                        first_token_ms=duration_ms,
+                        requested_model_id=requested_model_id,
+                    )
+                    await app.state.key_pool.mark_failure(model_id, key.name)
+                    continue
+
+                if response.status_code in {401, 403, 429, 500, 502, 503, 504} and attempt + 1 < attempts:
+                    content = await response.aread()
+                    duration_ms = _elapsed_ms(started)
+                    _debug_report("upstream-retryable-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_preview": content[:500].decode("utf-8", errors="replace")})
+                    last_error = _json_error_response_from_content(response, content)
+                    await app.state.metrics.record(
+                        model_id,
+                        key.name,
+                        response.status_code,
+                        extract_usage(_json_bytes(content)),
+                        retried=True,
+                        failed=True,
+                        duration_ms=duration_ms,
+                        first_token_ms=duration_ms,
+                        requested_model_id=requested_model_id,
+                    )
+                    await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
+                    await _close_upstream_response(response)
+                    continue
+
+                if _is_stream_request(payload):
+                    _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
+                    stream_response = StreamingResponse(
+                        _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started),
+                        status_code=response.status_code,
+                        headers=_response_headers(response),
+                        media_type=response.headers.get("content-type"),
+                    )
+                    release_key = False
+                    return stream_response
+
                 content = await response.aread()
                 duration_ms = _elapsed_ms(started)
-                _debug_report("upstream-retryable-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_preview": content[:500].decode("utf-8", errors="replace")})
-                last_error = _json_error_response_from_content(response, content)
+                _debug_report("upstream-buffered-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
+                await response.aclose()
                 await app.state.metrics.record(
                     model_id,
                     key.name,
                     response.status_code,
                     extract_usage(_json_bytes(content)),
-                    retried=True,
-                    failed=True,
                     duration_ms=duration_ms,
                     first_token_ms=duration_ms,
                     requested_model_id=requested_model_id,
                 )
-                await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
-                await _close_upstream_response(response)
-                await app.state.key_pool.release_key(model_id, key.name)
-                continue
+                if response.status_code < 400:
+                    await app.state.key_pool.mark_success(model_id, key.name)
+                elif response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+                    await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
 
-            if _is_stream_request(payload):
-                _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
-                return StreamingResponse(
-                    _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started),
+                return Response(
+                    content=content,
                     status_code=response.status_code,
                     headers=_response_headers(response),
                     media_type=response.headers.get("content-type"),
                 )
-
-            content = await response.aread()
-            duration_ms = _elapsed_ms(started)
-            _debug_report("upstream-buffered-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
-            await response.aclose()
-            await app.state.metrics.record(
-                model_id,
-                key.name,
-                response.status_code,
-                extract_usage(_json_bytes(content)),
-                duration_ms=duration_ms,
-                first_token_ms=duration_ms,
-                requested_model_id=requested_model_id,
-            )
-            if response.status_code < 400:
-                await app.state.key_pool.mark_success(model_id, key.name)
-            elif response.status_code in {401, 403, 429, 500, 502, 503, 504}:
-                await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
-            await app.state.key_pool.release_key(model_id, key.name)
-
-            return Response(
-                content=content,
-                status_code=response.status_code,
-                headers=_response_headers(response),
-                media_type=response.headers.get("content-type"),
-            )
+            finally:
+                if release_key:
+                    await app.state.key_pool.release_key(model_id, key.name)
 
         return last_error or JSONResponse({"error": {"message": "没有可用 key"}}, status_code=503)
 

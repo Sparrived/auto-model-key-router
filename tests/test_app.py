@@ -327,6 +327,37 @@ def test_model_suffix_selects_explicit_key_by_alias() -> None:
         assert authorization_headers == ["Bearer sk-2"]
 
 
+def test_acquired_key_is_released_when_proxy_raises() -> None:
+    class FailingMetrics:
+        async def record(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("metrics unavailable")
+
+        async def close(self) -> None:
+            pass
+
+    with tempfile.TemporaryDirectory() as directory:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        anyio.run(app.state.metrics.close)
+        app.state.metrics = FailingMetrics()
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> None:
+            with pytest.raises(RuntimeError, match="metrics unavailable"):
+                await client.post(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer local-key"},
+                    json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+                )
+
+        run_client(app, requests)
+
+        assert dict(app.state.key_pool._active_requests) == {}
+
+
 def test_destination_addr_header_is_not_forwarded() -> None:
     with tempfile.TemporaryDirectory() as directory:
         upstream_headers: list[httpx.Headers] = []
