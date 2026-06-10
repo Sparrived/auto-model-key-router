@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from auto_model_key_router.app import _probe_cooling_keys, _stream_upstream, create_app
 from auto_model_key_router.config import KeyConfig, ModelConfig, RouterConfig
+from auto_model_key_router.key_pool import KeyPool
 
 
 T = TypeVar("T")
@@ -204,6 +205,27 @@ def test_stream_request_disables_upstream_read_timeout() -> None:
         assert response.text == 'data: {"usage":{"total_tokens":1}}\n\ndata: [DONE]\n'
         assert upstream_timeouts[0]["read"] is None
         assert upstream_timeouts[0]["connect"] == config.request_timeout
+
+
+def test_round_robin_prefers_key_with_lower_active_load() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+        )
+        key_pool = KeyPool(config)
+
+        async def choose_keys() -> tuple[str, str, str]:
+            first = await key_pool.next_key("test-model")
+            second = await key_pool.next_key("test-model")
+            await key_pool.release_key("test-model", second.name)
+            third = await key_pool.next_key("test-model")
+            return first.name, second.name, third.name
+
+        assert anyio.run(choose_keys) == ("key-1", "key-2", "key-2")
 
 
 def test_cooled_down_key_is_skipped_on_next_request() -> None:

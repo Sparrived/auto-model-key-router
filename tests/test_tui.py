@@ -274,6 +274,69 @@ def test_configure_cli_generates_auth_key_and_installs_service(tmp_path, monkeyp
     assert actions == [(str(config_path), "install")]
 
 
+def test_model_service_menu_moves_autostart_into_single_entry(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(json.dumps({"models": []}, ensure_ascii=False), encoding="utf-8")
+    menus: list[list[tuple[str, str]]] = []
+
+    def choose(title, options, selected=0, content=None):
+        menus.append(options)
+        return "0"
+
+    monkeypatch.setattr(dashboard, "select_option", choose)
+
+    dashboard.manage_system_service_interactively(config_path)
+
+    assert ("1", "开机自启") in menus[0]
+    assert all(label not in {"安装开机自启", "安装登录自启", "卸载自启"} for _, label in menus[0])
+
+
+def test_autostart_menu_installs_boot_or_login_when_unregistered(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    choices = iter(["2", "0"])
+    menus: list[list[tuple[str, str]]] = []
+    actions: list[str] = []
+
+    def choose(title, options, selected=0, content=None):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(dashboard, "is_system_service_registered", lambda path: False)
+    monkeypatch.setattr(dashboard, "system_service_status_panel", lambda path: Text("status"))
+    monkeypatch.setattr(dashboard, "manage_system_service", lambda path, action: actions.append(action) or Text("done"))
+    monkeypatch.setattr(dashboard, "show_result_page", lambda title, content: None)
+    monkeypatch.setattr(dashboard, "clear_terminal_history", lambda: None)
+    monkeypatch.setattr(dashboard, "select_option", choose)
+
+    dashboard.manage_autostart_interactively(config_path)
+
+    assert menus[0] == [("1", "安装开机自启"), ("2", "安装登录自启"), ("0", "返回")]
+    assert actions == ["install-user"]
+
+
+def test_autostart_menu_shows_uninstall_when_registered(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    choices = iter(["1", "0"])
+    menus: list[list[tuple[str, str]]] = []
+    actions: list[str] = []
+
+    def choose(title, options, selected=0, content=None):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(dashboard, "is_system_service_registered", lambda path: True)
+    monkeypatch.setattr(dashboard, "system_service_status_panel", lambda path: Text("status"))
+    monkeypatch.setattr(dashboard, "manage_system_service", lambda path, action: actions.append(action) or Text("done"))
+    monkeypatch.setattr(dashboard, "show_result_page", lambda title, content: None)
+    monkeypatch.setattr(dashboard, "clear_terminal_history", lambda: None)
+    monkeypatch.setattr(dashboard, "select_option", choose)
+
+    dashboard.manage_autostart_interactively(config_path)
+
+    assert menus[0] == [("1", "卸载自启"), ("0", "返回")]
+    assert actions == ["uninstall"]
+
+
 def test_copy_api_key_interactively_returns_copyable_result(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(json.dumps({"models": [{"id": "test-model", "keys": [{"name": "main", "api_key": "sk-secret", "base_url": "https://example.com/v1"}]}]}, ensure_ascii=False), encoding="utf-8")
@@ -288,6 +351,71 @@ def test_copy_api_key_interactively_returns_copyable_result(tmp_path, monkeypatc
     assert "test-model" in output
     assert "main" in output
     assert "sk-secret" not in output
+
+
+def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "default_base_url": "https://default.example.com",
+                "models": [
+                    {
+                        "id": "existing-model",
+                        "aliases": ["Existing"],
+                        "routing_mode": "priority",
+                        "reasoning_effort": "high",
+                        "keys": [{"name": "main", "api_key": "sk-main", "base_url": "https://upstream.example.com"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+    answers = iter(["existing-model", "extra", "https://extra.example.com", "sk-extra"])
+
+    def ask(prompt: str, **kwargs):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(config_editor.Prompt, "ask", ask)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+
+    config_editor.add_config_interactively(config_path, ask_continue=False)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    model = data["models"][0]
+    assert prompts == ["模型 ID", "Key 名称", "上游 base_url", "API key"]
+    assert model["aliases"] == ["Existing"]
+    assert model["routing_mode"] == "priority"
+    assert model["reasoning_effort"] == "high"
+    assert model["keys"][-1] == {"name": "extra", "api_key": "sk-extra", "base_url": "https://extra.example.com"}
+
+
+def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(json.dumps({"default_base_url": "https://default.example.com", "models": []}, ensure_ascii=False), encoding="utf-8")
+    prompts: list[str] = []
+    answers = iter(["new-model", "New Alias", "only_first", "low", "primary", "https://primary.example.com", "sk-primary"])
+
+    def ask(prompt: str, **kwargs):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(config_editor.Prompt, "ask", ask)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+
+    config_editor.add_config_interactively(config_path, ask_continue=False)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    model = data["models"][0]
+    assert prompts == ["模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式：priority=优先级，round_robin=分流，only_first=仅首个", "推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", "Key 名称", "上游 base_url", "API key"]
+    assert model["aliases"] == ["New Alias"]
+    assert model["routing_mode"] == "only_first"
+    assert model["reasoning_effort"] == "low"
+    assert model["keys"] == [{"name": "primary", "api_key": "sk-primary", "base_url": "https://primary.example.com"}]
 
 
 def test_windows_user_service_registration_is_user_limited() -> None:

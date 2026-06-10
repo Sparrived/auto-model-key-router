@@ -46,19 +46,21 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
 
     models = data.setdefault("models", [])
     model = find_model(models, model_id)
+    is_new_model = model is None
     if model is None:
         model = {"id": model_id, "aliases": [], "routing_mode": "round_robin", "keys": []}
         models.append(model)
         console.print(f"[green]已创建模型配置:[/green] {model_id}")
 
-    aliases_text = Prompt.ask("显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
-    model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()] if aliases_text else []
-    model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流，only_first=仅首个", choices=["priority", "round_robin", "only_first"], default=str(model.get("routing_mode") or "round_robin")).strip()
-    reasoning_effort = Prompt.ask("推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"], default=normalize_reasoning_effort_choice(model.get("reasoning_effort"))).strip()
-    if reasoning_effort == "downstream":
-        model.pop("reasoning_effort", None)
-    else:
-        model["reasoning_effort"] = reasoning_effort
+    if is_new_model:
+        aliases_text = Prompt.ask("显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
+        model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()] if aliases_text else []
+        model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流，only_first=仅首个", choices=["priority", "round_robin", "only_first"], default=str(model.get("routing_mode") or "round_robin")).strip()
+        reasoning_effort = Prompt.ask("推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"], default=normalize_reasoning_effort_choice(model.get("reasoning_effort"))).strip()
+        if reasoning_effort == "downstream":
+            model.pop("reasoning_effort", None)
+        else:
+            model["reasoning_effort"] = reasoning_effort
     keys = model.setdefault("keys", [])
     default_key_name = f"{model_id}-key-{len(keys) + 1}"
     key_name = Prompt.ask("Key 名称", default=default_key_name).strip() or default_key_name

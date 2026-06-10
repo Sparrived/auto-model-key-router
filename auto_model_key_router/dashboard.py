@@ -13,7 +13,7 @@ from .config_editor import load_config_data, manage_model_keys_interactively, re
 from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
-from .service import is_service_healthy, manage_system_service, service_status_panel
+from .service import is_service_healthy, is_system_service_registered, manage_system_service, service_status_panel, system_service_status_panel
 from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
@@ -130,13 +130,28 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
 
 def manage_system_service_interactively(config_path: Path) -> None:
     while True:
-        choice = select_option("模型服务", [("1", "安装开机自启"), ("2", "安装登录自启"), ("3", "启动服务"), ("4", "停止服务"), ("5", "重启服务"), ("6", "服务状态"), ("7", "卸载自启"), ("0", "返回")], selected=5)
-        actions = {"1": "install", "2": "install-user", "3": "start", "4": "stop", "5": "restart", "6": "status", "7": "uninstall"}
+        choice = select_option("模型服务", [("1", "开机自启"), ("2", "启动服务"), ("3", "停止服务"), ("4", "重启服务"), ("5", "服务状态"), ("0", "返回")], selected=4)
+        actions = {"2": "start", "3": "stop", "4": "restart", "5": "status"}
+        if choice == "0":
+            return
+        if choice == "1":
+            run_submodule(lambda: manage_autostart_interactively(config_path))
+            continue
+        clear_terminal_history()
+        result = service_status_panel(RouterConfig.load(config_path), config_path) if choice == "5" else manage_system_service(config_path, actions[choice])
+        show_result_page("模型服务", result)
+
+
+def manage_autostart_interactively(config_path: Path) -> None:
+    while True:
+        registered = is_system_service_registered(config_path)
+        options = [("1", "卸载自启"), ("0", "返回")] if registered else [("1", "安装开机自启"), ("2", "安装登录自启"), ("0", "返回")]
+        choice = select_option("开机自启", options, selected=0, content=system_service_status_panel(config_path))
         if choice == "0":
             return
         clear_terminal_history()
-        result = service_status_panel(RouterConfig.load(config_path), config_path) if choice == "6" else manage_system_service(config_path, actions[choice])
-        show_result_page("模型服务", result)
+        action = "uninstall" if registered else {"1": "install", "2": "install-user"}[choice]
+        show_result_page("开机自启", manage_system_service(config_path, action))
 
 
 def manage_version_update_interactively(update_result: VersionCheckResult | None = None) -> VersionCheckResult:

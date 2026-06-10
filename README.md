@@ -35,6 +35,29 @@
 
 需要 Python `>=3.12`。
 
+推荐使用隔离的命令行工具环境安装：
+
+```bash
+pipx install auto-model-key-router
+```
+
+或使用 uv 长期安装：
+
+```bash
+uv tool install auto-model-key-router
+```
+
+如果只是临时试用，可以使用 uvx：
+
+```bash
+uvx --from auto-model-key-router amkr --version
+```
+
+> [!NOTE]
+> `uvx` 适合临时运行；如果需要后台服务、开机自启或在 TUI 中手动更新，建议使用 `pipx install` 或 `uv tool install`。
+
+也可以安装到当前 Python 环境：
+
 ```bash
 python -m pip install auto-model-key-router
 ```

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, github_source_archive_url, install_latest_version, is_newer_version, manual_update_command, update_output_preview
+from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, is_newer_version, manual_update_command, update_output_preview
 
 
 class FakeResponse:
@@ -80,7 +80,8 @@ def test_check_latest_version_falls_back_to_github(monkeypatch) -> None:
     assert result.update_available
 
 
-def test_manual_update_command_uses_github_archive() -> None:
+def test_manual_update_command_uses_github_archive(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "pip")
     archive_url = github_source_archive_url("v1.2.3")
     command = manual_update_command(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", latest_tag="v1.2.3", source="GitHub"))
 
@@ -89,11 +90,60 @@ def test_manual_update_command_uses_github_archive() -> None:
     assert command[-3:-1] == ["install", "--upgrade"]
 
 
-def test_manual_update_command_uses_pypi_package() -> None:
+def test_manual_update_command_uses_pypi_package(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "pip")
     command = manual_update_command(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"))
 
     assert command[-1] == "auto-model-key-router"
     assert command[-3:-1] == ["install", "--upgrade"]
+
+
+def test_detected_installation_method_reads_pipx_metadata(tmp_path) -> None:
+    prefix = tmp_path / "venv"
+    prefix.mkdir()
+    (prefix / "pipx_metadata.json").write_text("{}", encoding="utf-8")
+
+    assert detected_installation_method(prefix) == "pipx"
+
+
+def test_manual_update_command_uses_pipx_upgrade(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "pipx")
+
+    command = manual_update_command(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"))
+
+    assert command == ["pipx", "upgrade", "auto-model-key-router"]
+
+
+def test_manual_update_command_uses_uv_tool_upgrade(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "uv-tool")
+
+    command = manual_update_command(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"))
+
+    assert command == ["uv", "tool", "upgrade", "auto-model-key-router"]
+
+
+def test_manual_update_command_uses_uv_tool_install_for_uvx(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "uvx")
+
+    command = manual_update_command(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"))
+
+    assert command == ["uv", "tool", "install", "--force", "auto-model-key-router"]
+
+
+def test_detected_installation_method_reads_uv_tool_dir(tmp_path, monkeypatch) -> None:
+    prefix = tmp_path / "tools" / "auto-model-key-router"
+    prefix.mkdir(parents=True)
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "tools"))
+
+    assert detected_installation_method(prefix) == "uv-tool"
+
+
+def test_detected_installation_method_reads_uv_cache_dir(tmp_path, monkeypatch) -> None:
+    prefix = tmp_path / "uv-cache" / "archive-v0" / "tool"
+    prefix.mkdir(parents=True)
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+
+    assert detected_installation_method(prefix) == "uvx"
 
 
 def test_install_latest_version_shows_stderr_when_stdout_exists(monkeypatch, tmp_path) -> None:

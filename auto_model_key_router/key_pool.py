@@ -22,6 +22,7 @@ class KeyPool:
     def __init__(self, config: RouterConfig):
         self._apply_config(config)
         self._cursors = defaultdict(int)
+        self._active_requests = defaultdict(int)
         self._states = defaultdict(KeyState)
         self._lock = asyncio.Lock()
         self._load_states()
@@ -32,6 +33,7 @@ class KeyPool:
             self._apply_config(config)
             self._cursors = defaultdict(int, {model_id: cursor for model_id, cursor in self._cursors.items() if model_id in self._keys})
             valid_keys = self._valid_state_keys()
+            self._active_requests = defaultdict(int, {key: count for key, count in self._active_requests.items() if key in valid_keys and count > 0})
             self._states = defaultdict(KeyState, {key: state for key, state in self._states.items() if key in valid_keys})
             if self._state_path != old_state_path:
                 self._states = defaultdict(KeyState)
@@ -93,28 +95,50 @@ class KeyPool:
         if self.routing_mode(model_id) == "only_first":
             first_key = keys[0]
             if first_key.name not in excluded:
+                await self.acquire_key(model_id, first_key.name)
                 return first_key
             raise RuntimeError(f"模型 {model_id} 没有可用 key")
 
         available = [key for key in keys if key.name not in excluded and not self._is_cooling_down(model_id, key.name)]
         if not available:
             available = [key for key in keys if key.name not in excluded]
+        if not available:
+            raise RuntimeError(f"模型 {model_id} 没有可用 key")
 
         if self.routing_mode(model_id) == "priority":
-            for candidate in keys:
-                if candidate in available:
-                    return candidate
+            async with self._lock:
+                for candidate in keys:
+                    if candidate in available:
+                        self._active_requests[(model_id, candidate.name)] += 1
+                        return candidate
             raise RuntimeError(f"模型 {model_id} 没有可用 key")
 
         async with self._lock:
+            lowest_active = min(self._active_requests.get((model_id, key.name), 0) for key in available)
             for _ in range(len(keys)):
                 cursor = self._cursors[model_id] % len(keys)
                 self._cursors[model_id] += 1
                 candidate = keys[cursor]
-                if candidate in available:
+                if candidate in available and self._active_requests.get((model_id, candidate.name), 0) == lowest_active:
+                    self._active_requests[(model_id, candidate.name)] += 1
                     return candidate
 
         raise RuntimeError(f"模型 {model_id} 没有可用 key")
+
+    async def acquire_key(self, model_id: str, key_name: str) -> None:
+        model_id = self.resolve_model_id(model_id)
+        async with self._lock:
+            self._active_requests[(model_id, key_name)] += 1
+
+    async def release_key(self, model_id: str, key_name: str) -> None:
+        model_id = self.resolve_model_id(model_id)
+        async with self._lock:
+            active_key = (model_id, key_name)
+            count = self._active_requests.get(active_key, 0)
+            if count <= 1:
+                self._active_requests.pop(active_key, None)
+            else:
+                self._active_requests[active_key] = count - 1
 
     async def mark_success(self, model_id: str, key_name: str) -> None:
         async with self._lock:

@@ -118,6 +118,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             try:
                 if requested_key_name:
                     key = app.state.key_pool.key_by_name(model_id, requested_key_name)
+                    await app.state.key_pool.acquire_key(model_id, key.name)
                 else:
                     key = await app.state.key_pool.next_key(model_id, excluded)
             except KeyError:
@@ -158,6 +159,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     requested_model_id=requested_model_id,
                 )
                 await app.state.key_pool.mark_failure(model_id, key.name)
+                await app.state.key_pool.release_key(model_id, key.name)
                 continue
 
             if response.status_code in {401, 403, 429, 500, 502, 503, 504} and attempt + 1 < attempts:
@@ -178,6 +180,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 )
                 await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
                 await _close_upstream_response(response)
+                await app.state.key_pool.release_key(model_id, key.name)
                 continue
 
             if _is_stream_request(payload):
@@ -206,6 +209,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 await app.state.key_pool.mark_success(model_id, key.name)
             elif response.status_code in {401, 403, 429, 500, 502, 503, 504}:
                 await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
+            await app.state.key_pool.release_key(model_id, key.name)
 
             return Response(
                 content=content,
@@ -594,6 +598,7 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
             await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
         elif response.status_code < 400:
             await key_pool.mark_success(model_id, key_name)
+        await key_pool.release_key(model_id, key_name)
         _debug_report("upstream-stream-close", {"status_code": response.status_code, "chunks": chunk_count, "bytes": byte_count, "first_token_ms": first_token_ms, "usage": usage})
         await response.aclose()
 

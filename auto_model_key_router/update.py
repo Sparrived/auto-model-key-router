@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -130,17 +132,64 @@ def github_source_archive_url(tag: str) -> str:
     return f"https://github.com/{GITHUB_REPOSITORY}/archive/refs/tags/{tag}.zip"
 
 
-def manual_update_command(result: VersionCheckResult) -> list[str]:
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def default_uv_cache_dir() -> Path:
+    if os.environ.get("UV_CACHE_DIR"):
+        return Path(os.environ["UV_CACHE_DIR"])
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "uv" / "cache"
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "uv"
+
+
+def detected_installation_method(prefix: Path | None = None) -> str:
+    current_prefix = (prefix or Path(sys.prefix)).resolve()
+    if (current_prefix / "pipx_metadata.json").exists():
+        return "pipx"
+    pipx_home = os.environ.get("PIPX_HOME")
+    if pipx_home and is_relative_to(current_prefix, Path(pipx_home)):
+        return "pipx"
+    uv_tool_dir = os.environ.get("UV_TOOL_DIR")
+    if uv_tool_dir and is_relative_to(current_prefix, Path(uv_tool_dir)):
+        return "uv-tool"
+    if is_relative_to(current_prefix, default_uv_cache_dir()):
+        return "uvx"
+    return "pip"
+
+
+def manual_update_target(result: VersionCheckResult) -> str:
     if result.source == "GitHub":
         if not result.latest_tag:
             raise ValueError("GitHub 更新缺少 tag。")
-        return [sys.executable, "-m", "pip", "install", "--upgrade", github_source_archive_url(result.latest_tag)]
-    return [sys.executable, "-m", "pip", "install", "--upgrade", PACKAGE_NAME]
+        return github_source_archive_url(result.latest_tag)
+    return PACKAGE_NAME
+
+
+def manual_update_command(result: VersionCheckResult) -> list[str]:
+    target = manual_update_target(result)
+    method = detected_installation_method()
+    if method == "pipx":
+        if target == PACKAGE_NAME:
+            return ["pipx", "upgrade", PACKAGE_NAME]
+        return ["pipx", "install", "--force", target]
+    if method in {"uv-tool", "uvx"}:
+        if target == PACKAGE_NAME and method == "uv-tool":
+            return ["uv", "tool", "upgrade", PACKAGE_NAME]
+        return ["uv", "tool", "install", "--force", target]
+    return [sys.executable, "-m", "pip", "install", "--upgrade", target]
 
 
 def manual_update_command_text(result: VersionCheckResult) -> str:
     command = manual_update_command(result)
-    return f'"{command[0]}" -m pip install --upgrade "{command[-1]}"'
+    if os.name == "nt":
+        return subprocess.list2cmdline(command)
+    return shlex.join(command)
 
 
 def update_target_label(result: VersionCheckResult) -> str:

@@ -151,6 +151,28 @@ def system_service_status_panel(config_path: Path) -> Any:
     return section_panel(f"暂不支持当前系统自动注册: {platform.system()}", "系统服务注册", "yellow")
 
 
+def is_system_service_registered(config_path: Path) -> bool:
+    system = platform.system().lower()
+    if system == "windows":
+        return is_windows_task_registered()
+    if system == "linux":
+        return is_systemd_user_service_registered()
+    return False
+
+
+def is_windows_task_registered() -> bool:
+    list_result = run_status_command(["schtasks", "/Query", "/TN", WINDOWS_TASK_NAME, "/V", "/FO", "LIST"])
+    xml_result = run_status_command(["schtasks", "/Query", "/TN", WINDOWS_TASK_NAME, "/XML"])
+    return list_result.returncode == 0 or xml_result.returncode == 0
+
+
+def is_systemd_user_service_registered() -> bool:
+    service_path = Path.home() / ".config" / "systemd" / "user" / SYSTEMD_USER_SERVICE_NAME
+    show_result = run_status_command(["systemctl", "--user", "show", SYSTEMD_USER_SERVICE_NAME, "--property=LoadState", "--no-pager"])
+    show_values = parse_systemctl_properties(show_result.stdout)
+    return service_path.exists() or show_values.get("LoadState") not in {None, "", "not-found"}
+
+
 def windows_task_status_panel(python: Path, config_path: Path) -> Any:
     list_result = run_status_command(["schtasks", "/Query", "/TN", WINDOWS_TASK_NAME, "/V", "/FO", "LIST"])
     xml_result = run_status_command(["schtasks", "/Query", "/TN", WINDOWS_TASK_NAME, "/XML"])
