@@ -328,6 +328,7 @@ def read_key() -> str:
             mouse_key = parse_sgr_mouse_sequence(read_windows_until({"M", "m"}))
             if mouse_key:
                 return mouse_key
+            return "ignore"
         if third == "A":
             return "up"
         if third == "B":
@@ -368,6 +369,7 @@ def read_posix_key() -> str:
                     mouse_key = parse_sgr_mouse_sequence(read_posix_until({"M", "m"}))
                     if mouse_key:
                         return mouse_key
+                    return "ignore"
                 if third == "A":
                     return "up"
                 if third == "B":

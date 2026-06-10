@@ -98,6 +98,22 @@ def test_read_key_windows_escape_sequence_still_handles_arrows(monkeypatch) -> N
     assert tui.read_key() == "up"
 
 
+def test_read_key_windows_ignores_sgr_mouse_click(monkeypatch) -> None:
+    class FakeMsvcrt:
+        def __init__(self):
+            self.chars = iter(["\x1b", "0", ";", "2", "0", ";", "1", "0", "M"])
+
+        def getwch(self):
+            return next(self.chars)
+
+    chars = iter(["[", "<"])
+    monkeypatch.setattr(tui.sys, "platform", "win32")
+    monkeypatch.setattr(tui, "msvcrt", FakeMsvcrt(), raising=False)
+    monkeypatch.setattr(tui, "read_windows_char_if_available", lambda: next(chars, None))
+
+    assert tui.read_key() == "ignore"
+
+
 def test_copy_to_clipboard_uses_available_command(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
