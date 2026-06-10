@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-11
+
 ### Added
 - 新增跨平台剪贴板复制模块，支持自动检测 Windows、macOS、Linux 可用复制命令。
 - 新增 Terminal UI 结果页复制能力，可一键复制本地鉴权 key、模型 API key 等指定内容。
