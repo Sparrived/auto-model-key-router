@@ -13,7 +13,7 @@ from .config_editor import load_config_data, manage_model_keys_interactively, re
 from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
-from .service import background_status_panel, is_service_healthy, manage_system_service
+from .service import is_service_healthy, manage_system_service, service_status_panel
 from .tui import app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
 
@@ -134,7 +134,7 @@ def manage_system_service_interactively(config_path: Path) -> None:
         if choice == "0":
             return
         clear_terminal_history()
-        result = background_status_panel(RouterConfig.load(config_path), config_path) if choice == "6" else manage_system_service(config_path, actions[choice])
+        result = service_status_panel(RouterConfig.load(config_path), config_path) if choice == "6" else manage_system_service(config_path, actions[choice])
         show_result_page("模型服务", result)
 
 

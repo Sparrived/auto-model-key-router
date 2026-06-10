@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+from io import StringIO
 import json
 from pathlib import Path
+import subprocess
 
-from rich.console import ConsoleDimensions
+from rich.console import Console, ConsoleDimensions
 from rich.text import Text
 
 from auto_model_key_router import dashboard
+from auto_model_key_router import log_files
 from auto_model_key_router import logs_tui
 from auto_model_key_router import service
 from auto_model_key_router import tui
+
+
+def render_plain(renderable) -> str:
+    buffer = StringIO()
+    console = Console(file=buffer, force_terminal=False, width=180)
+    console.print(renderable)
+    return buffer.getvalue()
 
 
 def test_parse_sgr_mouse_sequence_reads_wheel_events() -> None:
@@ -125,6 +135,51 @@ def test_log_line_text_colors_error_fallback() -> None:
     assert str(text.style) == "red"
 
 
+def test_archive_current_log_moves_existing_log_and_creates_new_file(tmp_path) -> None:
+    log_file = tmp_path / "server.log"
+    log_file.write_text("old log", encoding="utf-8")
+
+    archive_path = log_files.archive_current_log(str(log_file))
+
+    assert archive_path is not None
+    assert archive_path.name.startswith("server.")
+    assert archive_path.name.endswith(".log")
+    assert archive_path.read_text(encoding="utf-8") == "old log"
+    assert log_file.exists()
+    assert log_file.read_text(encoding="utf-8") == ""
+
+
+def test_archived_log_paths_orders_newest_first(tmp_path) -> None:
+    log_file = tmp_path / "server.log"
+    log_file.write_text("current", encoding="utf-8")
+    older = tmp_path / "server.20260610-120000.log"
+    newer = tmp_path / "server.20260610-130000.log"
+    older.write_text("older", encoding="utf-8")
+    newer.write_text("newer", encoding="utf-8")
+
+    assert log_files.archived_log_paths(str(log_file)) == [newer, older]
+
+
+def test_log_file_choices_include_current_and_archives(tmp_path) -> None:
+    log_file = tmp_path / "server.log"
+    log_file.write_text("current", encoding="utf-8")
+    archive = tmp_path / "server.20260610-120000.log"
+    archive.write_text("old", encoding="utf-8")
+
+    assert logs_tui.log_file_choices(str(log_file)) == [log_file, archive]
+
+
+def test_service_logs_renderable_can_show_archived_log(tmp_path) -> None:
+    log_file = tmp_path / "server.20260610-120000.log"
+    log_file.write_text("2026-06-10 12:00:00 INFO uvicorn started", encoding="utf-8")
+
+    output = render_plain(logs_tui.service_logs_renderable(str(log_file), 10, 0, "历史日志 1/1 · server.20260610-120000.log"))
+
+    assert "历史日志 1/1" in output
+    assert "server.20260610-120000.log" in output
+    assert "uvicorn started" in output
+
+
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "CLI 设置"), ("0", "退出")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
@@ -185,3 +240,82 @@ def test_windows_service_registration_requests_uac_when_not_admin(monkeypatch) -
     service.manage_windows_task(Path("pythonw.exe"), Path("router-config.json"), "install")
 
     assert requested == [("router-config.json", "install")]
+
+
+def test_windows_service_status_panel_shows_registration_details(monkeypatch) -> None:
+    xml = """<?xml version="1.0" encoding="UTF-16"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal><UserId>SYSTEM</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Actions><Exec><Command>C:\\Python\\pythonw.exe</Command><Arguments>-m auto_model_key_router.main --config C:\\config.json --serve-foreground</Arguments><WorkingDirectory>C:\\app</WorkingDirectory></Exec></Actions>
+</Task>"""
+    status = """TaskName: \\AutoModelKeyRouter
+Status: Running
+Last Run Time: 2026/6/10 12:00:00
+Next Run Time: N/A
+Last Result: 0x0"""
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if "/XML" in command:
+            return subprocess.CompletedProcess(command, 0, xml, "")
+        return subprocess.CompletedProcess(command, 0, status, "")
+
+    monkeypatch.setattr(service, "run_status_command", fake_run)
+
+    output = render_plain(service.windows_task_status_panel(Path("C:/Python/pythonw.exe"), Path("C:/config.json")))
+
+    assert "Windows 计划任务" in output
+    assert "已注册" in output
+    assert "BootTrigger" in output
+    assert "SYSTEM" in output
+    assert "HighestAvailable" in output
+    assert "--serve-foreground" in output
+    assert "0x0" in output
+    assert "config.json" in output
+
+
+def test_systemd_service_status_panel_shows_registration_details(tmp_path, monkeypatch) -> None:
+    service_dir = tmp_path / ".config" / "systemd" / "user"
+    service_dir.mkdir(parents=True)
+    (service_dir / "auto-model-key-router.service").write_text(
+        "\n".join(
+            [
+                "[Service]",
+                "WorkingDirectory=/opt/amkr",
+                "ExecStart=/usr/bin/python -m auto_model_key_router.main --config /etc/amkr.json --serve-foreground",
+                "Restart=always",
+                "[Install]",
+                "WantedBy=default.target",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    show = """LoadState=loaded
+ActiveState=active
+SubState=running
+UnitFileState=enabled
+MainPID=1234
+Result=success
+ExecMainStatus=0
+NRestarts=2
+NeedDaemonReload=no"""
+    status = "● auto-model-key-router.service - Auto Model Key Router\n     Active: active (running)"
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if "show" in command:
+            return subprocess.CompletedProcess(command, 0, show, "")
+        return subprocess.CompletedProcess(command, 0, status, "")
+
+    monkeypatch.setattr(service.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(service, "run_status_command", fake_run)
+
+    output = render_plain(service.systemd_user_service_status_panel(Path("/usr/bin/python"), Path("/etc/amkr.json")))
+
+    assert "Linux systemd user service" in output
+    assert "已注册" in output
+    assert "active/running" in output
+    assert "enabled" in output
+    assert "1234" in output
+    assert "/opt/amkr" in output
+    assert "--serve-foreground" in output
+    assert "default.target" in output

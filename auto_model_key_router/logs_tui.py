@@ -17,6 +17,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .formatting import percent, short_text
+from .log_files import archived_log_paths
 from .metrics import BEIJING_TZ
 from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame
 
@@ -52,12 +53,13 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
     log_offset = 0
     stats_page = 1
     stats_range_index = 0
+    log_index = 0
     status_message: str | None = None
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
 
     def render() -> Group:
-        return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, status_message)
+        return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, log_index, status_message)
 
     with console.screen():
         from rich.live import Live
@@ -93,8 +95,20 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                         log_offset = 0
                         live.update(render(), refresh=True)
                         continue
+                    if page == "logs" and key in {"left", "["}:
+                        log_index = max(0, log_index - 1)
+                        log_offset = 0
+                        status_message = None
+                        live.update(render(), refresh=True)
+                        continue
+                    if page == "logs" and key in {"right", "]"}:
+                        log_index = min(log_index + 1, len(log_file_choices(log_file_path)) - 1)
+                        log_offset = 0
+                        status_message = None
+                        live.update(render(), refresh=True)
+                        continue
                     if page == "logs" and key in {"o", "O"}:
-                        status_message = open_log_file(log_file_path)
+                        status_message = open_log_file(str(selected_log_file(log_file_path, log_index)[0]))
                         live.update(render(), refresh=True)
                         continue
                     if page == "stats" and key in {"\t", "tab"}:
@@ -114,9 +128,10 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                 live.update(render(), refresh=True)
 
 
-def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int, status_message: str | None = None) -> Group:
+def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int, log_index: int = 0, status_message: str | None = None) -> Group:
     if page == "logs":
-        content = service_logs_renderable(log_file_path, log_page_size(limit), log_offset)
+        selected_path, selected_index, choices = selected_log_file(log_file_path, log_index)
+        content = service_logs_renderable(str(selected_path), log_page_size(limit), log_offset, log_file_title(selected_path, selected_index, len(choices)))
     else:
         content = request_stats_renderable(database_path, stats_page, REQUEST_STATS_PAGE_SIZE, stats_range_index)
     renderables = [log_header_renderable(page), content]
@@ -138,7 +153,7 @@ def log_header_renderable(page: str) -> Panel:
 
 def log_help_text(page: str) -> Align:
     if page == "logs":
-        return shortcut_text("1 运行日志  ·  2 统计  ·  O 打开日志  ·  ↑/↓/滚轮 滚动  ·  Pg 翻页  ·  q 返回")
+        return shortcut_text("1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
     return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→/滚轮 翻页  ·  q 返回")
 
 
@@ -158,10 +173,10 @@ def open_log_file(log_file_path: str) -> str:
     return f"已使用默认文本编辑器打开: {path}"
 
 
-def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> Panel:
+def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0, title_prefix: str = "运行日志") -> Panel:
     path = Path(log_file_path)
     if not path.exists():
-        return section_panel(f"[yellow]运行日志不存在: {path}[/yellow]", "运行日志", "yellow")
+        return section_panel(f"[yellow]运行日志不存在: {path}[/yellow]", title_prefix, "yellow")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     total = len(lines)
     page_size = max(limit, 1)
@@ -170,8 +185,24 @@ def service_logs_renderable(log_file_path: str, limit: int, offset: int = 0) -> 
     end = total - offset
     start = max(end - page_size, 0)
     content = log_lines_text(lines[start:end])
-    title = "运行日志" if total == 0 else f"运行日志 第 {start + 1}-{end} 行 / 共 {total} 行"
+    title = title_prefix if total == 0 else f"{title_prefix} 第 {start + 1}-{end} 行 / 共 {total} 行"
     return section_panel(content, title, "blue", "[dim]最新日志在底部 · 按级别与状态码染色[/dim]")
+
+
+def log_file_choices(log_file_path: str) -> list[Path]:
+    return [Path(log_file_path), *archived_log_paths(log_file_path)]
+
+
+def selected_log_file(log_file_path: str, index: int) -> tuple[Path, int, list[Path]]:
+    choices = log_file_choices(log_file_path)
+    selected_index = min(max(index, 0), len(choices) - 1)
+    return choices[selected_index], selected_index, choices
+
+
+def log_file_title(path: Path, index: int, total: int) -> str:
+    if index == 0:
+        return f"当前日志 1/{total} · {path.name}"
+    return f"历史日志 {index}/{max(total - 1, 1)} · {path.name}"
 
 
 def log_lines_text(lines: list[str]) -> Text:

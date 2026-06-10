@@ -8,7 +8,7 @@ from . import __version__
 from .config import DEFAULT_CONFIG_PATH, RouterConfig
 from .dashboard import render_config, run_terminal_ui
 from .logs_tui import render_logs
-from .service import background_status_panel, manage_system_service, start_service_background, start_service_foreground, stop_background_service
+from .service import background_status_panel, manage_system_service, service_status_panel, start_service_background, start_service_foreground, stop_background_service
 from .tui import clear_terminal_history, console, section_panel
 from .update import check_latest_version, render_version_check_result, update_latest_version
 
@@ -70,7 +70,7 @@ def main() -> None:
             console.print(manage_system_service(config_path, "install"))
             return
         if args.service:
-            result = background_status_panel(config, config_path) if args.service == "status" else manage_system_service(config_path, args.service)
+            result = service_status_panel(config, config_path) if args.service == "status" else manage_system_service(config_path, args.service)
             console.print(result)
             return
         if args.serve_foreground:
