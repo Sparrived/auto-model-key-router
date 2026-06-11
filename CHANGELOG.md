@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 POSIX 终端非阻塞字符读取辅助逻辑，并补充终端按键读取与 systemd 服务命令生成相关测试。
+
+### Changed
+- 优化 Linux systemd user service 启动命令，优先使用已安装的 `amkr` 控制台脚本，并通过 shell 安全拼接支持包含空格的路径。
+- 重构 Terminal UI 按键读取流程，简化 POSIX 终端输入读取与解析逻辑。
+
+### Fixed
+- 修复 Terminal UI 对转义序列、鼠标事件和未知输入的处理，避免无效输入被误判为有效按键。
+
 ## [1.3.1] - 2026-06-11
 
 ### FIXED
