@@ -231,6 +231,22 @@ def read_posix_until(end_chars: set[str], limit: int = 64) -> str:
     return "".join(chars)
 
 
+def read_posix_char_if_available(timeout: float = ESC_SEQUENCE_TIMEOUT_SECONDS) -> str | None:
+    if select.select([sys.stdin], [], [], timeout)[0]:
+        return sys.stdin.read(1)
+    return None
+
+
+def read_posix_chars_if_available(count: int) -> str:
+    chars = []
+    while len(chars) < count:
+        char = read_posix_char_if_available()
+        if char is None:
+            break
+        chars.append(char)
+    return "".join(chars)
+
+
 def enable_windows_virtual_terminal_input() -> Callable[[], None]:
     if sys.platform != "win32":
         return lambda: None
@@ -362,13 +378,18 @@ def read_posix_key() -> str:
         if key in {"\r", "\n"}:
             return "enter"
         if key == "\x1b":
-            if select.select([sys.stdin], [], [], 0.05)[0]:
-                second = sys.stdin.read(1)
-                third = sys.stdin.read(1) if second == "[" and select.select([sys.stdin], [], [], 0.05)[0] else ""
+            second = read_posix_char_if_available()
+            if second is None:
+                return "cancel"
+            third = read_posix_char_if_available() if second in {"[", "O"} else ""
+            if second in {"[", "O"}:
                 if third == "<":
                     mouse_key = parse_sgr_mouse_sequence(read_posix_until({"M", "m"}))
                     if mouse_key:
                         return mouse_key
+                    return "ignore"
+                if third == "M" and second == "[":
+                    read_posix_chars_if_available(3)
                     return "ignore"
                 if third == "A":
                     return "up"
@@ -388,7 +409,7 @@ def read_posix_key() -> str:
                     return "home"
                 if third == "F":
                     return "end"
-            return "cancel"
+            return "ignore"
         return key
     except KeyboardInterrupt:
         return "cancel"

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -457,13 +459,37 @@ def background_python_executable() -> Path:
     return python
 
 
+def console_script_executable() -> Path | None:
+    names = {"auto-model-key-router", "amkr", "auto-model-key-router.exe", "amkr.exe"}
+    argv0 = Path(sys.argv[0])
+    if argv0.name in names:
+        if argv0.is_absolute() and argv0.exists():
+            return argv0.resolve()
+        found = shutil.which(str(argv0))
+        if found:
+            return Path(found).resolve()
+    for name in ("auto-model-key-router", "amkr"):
+        found = shutil.which(name)
+        if found:
+            return Path(found).resolve()
+    return None
+
+
+def systemd_service_command(python: Path, config_path: Path) -> list[str]:
+    executable = console_script_executable()
+    if executable is not None:
+        return [str(executable), "--config", str(config_path), "--serve-foreground"]
+    return [str(python), "-m", "auto_model_key_router.main", "--config", str(config_path), "--serve-foreground"]
+
+
 def manage_systemd_user_service(python: Path, config_path: Path, action: str) -> Any:
     service_name = SYSTEMD_USER_SERVICE_NAME
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_path = service_dir / service_name
     if action == "install":
         service_dir.mkdir(parents=True, exist_ok=True)
-        service_path.write_text("\n".join(["[Unit]", "Description=Auto Model Key Router", "After=network-online.target", "Wants=network-online.target", "", "[Service]", f"WorkingDirectory={Path.cwd()}", f"ExecStart={python} -m auto_model_key_router.main --config {config_path} --serve-foreground", "Restart=always", "RestartSec=3", "", "[Install]", "WantedBy=default.target", ""]), encoding="utf-8")
+        command = systemd_service_command(python, config_path)
+        service_path.write_text("\n".join(["[Unit]", "Description=Auto Model Key Router", "After=network-online.target", "Wants=network-online.target", "", "[Service]", f"WorkingDirectory={Path.cwd()}", f"ExecStart={shlex.join(command)}", "Restart=always", "RestartSec=3", "", "[Install]", "WantedBy=default.target", ""]), encoding="utf-8")
         return Group(registration_result(["systemctl", "--user", "daemon-reload"], "systemd user"), registration_result(["systemctl", "--user", "enable", "--now", service_name], "systemd user"), registration_result(["loginctl", "enable-linger", os.getlogin()], "systemd linger"), section_panel(f"systemd 用户服务文件已写入:\n[bold]{service_path}[/bold]", "系统服务", "green"), service_registration_note_panel())
     commands = {
         "start": ["systemctl", "--user", "start", service_name],

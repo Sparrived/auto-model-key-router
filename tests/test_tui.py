@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import StringIO
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 
 from rich.console import Console, ConsoleDimensions
@@ -112,6 +112,66 @@ def test_read_key_windows_ignores_sgr_mouse_click(monkeypatch) -> None:
     monkeypatch.setattr(tui, "read_windows_char_if_available", lambda: next(chars, None))
 
     assert tui.read_key() == "ignore"
+
+
+def test_read_posix_key_handles_ss3_arrows(monkeypatch) -> None:
+    class FakeStdin:
+        def __init__(self):
+            self.chars = list("\x1bOA")
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    stdin = FakeStdin()
+    monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
+    monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
+    monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
+
+    assert tui.read_posix_key() == "up"
+
+
+def test_read_posix_key_ignores_sgr_mouse_click(monkeypatch) -> None:
+    class FakeStdin:
+        def __init__(self):
+            self.chars = list("\x1b[<0;20;10M")
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    stdin = FakeStdin()
+    monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
+    monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
+    monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
+
+    assert tui.read_posix_key() == "ignore"
+
+
+def test_read_posix_key_ignores_unknown_escape_sequence(monkeypatch) -> None:
+    class FakeStdin:
+        def __init__(self):
+            self.chars = list("\x1bZ")
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    stdin = FakeStdin()
+    monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
+    monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
+    monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
+
+    assert tui.read_posix_key() == "ignore"
 
 
 def test_copy_to_clipboard_uses_available_command(monkeypatch) -> None:
@@ -558,3 +618,33 @@ NeedDaemonReload=no"""
     assert "/opt/amkr" in output
     assert "--serve-foreground" in output
     assert "default.target" in output
+
+
+def test_systemd_service_registration_prefers_console_script(tmp_path, monkeypatch) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(service.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(service.Path, "cwd", lambda: PurePosixPath("/root"))
+    monkeypatch.setattr(service, "console_script_executable", lambda: PurePosixPath("/opt/pipx/bin/auto-model-key-router"))
+    monkeypatch.setattr(service, "registration_result", lambda command, title: commands.append(command) or tui.section_panel("ok", title, "green"))
+    monkeypatch.setattr(service.os, "getlogin", lambda: "root")
+
+    service.manage_systemd_user_service(PurePosixPath("/usr/bin/python3.12"), PurePosixPath("/root/.cache/auto-model-key-router/router-config.json"), "install")
+
+    unit = (tmp_path / ".config" / "systemd" / "user" / "auto-model-key-router.service").read_text(encoding="utf-8")
+    assert "ExecStart=/opt/pipx/bin/auto-model-key-router --config /root/.cache/auto-model-key-router/router-config.json --serve-foreground" in unit
+    assert "python3.12 -m auto_model_key_router.main" not in unit
+    assert commands[0] == ["systemctl", "--user", "daemon-reload"]
+    assert commands[1] == ["systemctl", "--user", "enable", "--now", "auto-model-key-router.service"]
+
+
+def test_systemd_service_registration_quotes_console_script_paths(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(service.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(service.Path, "cwd", lambda: PurePosixPath("/root/app dir"))
+    monkeypatch.setattr(service, "console_script_executable", lambda: PurePosixPath("/opt/amkr tools/auto-model-key-router"))
+    monkeypatch.setattr(service, "registration_result", lambda command, title: tui.section_panel("ok", title, "green"))
+    monkeypatch.setattr(service.os, "getlogin", lambda: "root")
+
+    service.manage_systemd_user_service(PurePosixPath("/usr/bin/python3.12"), PurePosixPath("/root/config dir/router-config.json"), "install")
+
+    unit = (tmp_path / ".config" / "systemd" / "user" / "auto-model-key-router.service").read_text(encoding="utf-8")
+    assert "ExecStart='/opt/amkr tools/auto-model-key-router' --config '/root/config dir/router-config.json' --serve-foreground" in unit
