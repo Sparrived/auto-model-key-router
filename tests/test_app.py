@@ -27,6 +27,15 @@ class BrokenStream(httpx.AsyncByteStream):
         raise httpx.DecodingError("broken body")
 
 
+class ChunkedStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+
 def run_client(app: FastAPI, action: Callable[[httpx.AsyncClient], Awaitable[T]]) -> T:
     return anyio.run(_run_client, app, action)
 
@@ -207,6 +216,109 @@ def test_stream_request_disables_upstream_read_timeout() -> None:
         assert upstream_timeouts[0]["connect"] == config.request_timeout
 
 
+def test_messages_response_is_converted_to_anthropic_schema() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-1",
+                    "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                },
+            )
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"x-api-key": "local-key", "anthropic-version": "2023-06-01"},
+                json={"model": "alias-model", "system": "be brief", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+        body = response.json()
+
+        assert response.status_code == 200
+        assert upstream_bodies[0]["model"] == "test-model"
+        assert upstream_bodies[0]["messages"] == [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}]
+        assert body == {
+            "id": "chatcmpl-1",
+            "type": "message",
+            "role": "assistant",
+            "model": "alias-model",
+            "content": [{"type": "text", "text": "hello"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        }
+
+
+def test_messages_stream_is_converted_to_anthropic_sse() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'data: {"id":"chatcmpl-1","choices":[{"delta":{"role":"assistant"}}]}\n\n'
+                    b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+                    b'data: {"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n'
+                    b"data: [DONE]\n\n"
+                ),
+            )
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert "data: [DONE]" not in response.text
+        assert "event: message_start" in response.text
+        assert "event: content_block_start" in response.text
+        assert '"text":"hel"' in response.text
+        assert '"text":"lo"' in response.text
+        assert "event: message_stop" in response.text
+
+
+def test_messages_non_json_upstream_error_returns_anthropic_json() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, content=b"<html>bad gateway</html>", headers={"content-type": "text/html"})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),), max_retries=0)
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 502
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {"type": "error", "error": {"type": "api_error", "message": "<html>bad gateway</html>"}}
+
+
 def test_round_robin_prefers_key_with_lower_active_load() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(
@@ -381,6 +493,34 @@ def test_destination_addr_header_is_not_forwarded() -> None:
 
         assert response.status_code == 200
         assert "destination-addr" not in upstream_headers[0]
+
+
+def test_anthropic_auth_headers_are_not_forwarded() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_headers: list[httpx.Headers] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_headers.append(request.headers)
+            return httpx.Response(200, json={"id": "ok", "choices": [{"message": {"content": "ok"}}]})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"x-api-key": "local-key", "anthropic-version": "2023-06-01", "anthropic-beta": "test-beta"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert upstream_headers[0]["authorization"] == "Bearer sk-1"
+        assert "x-api-key" not in upstream_headers[0]
+        assert "anthropic-version" not in upstream_headers[0]
+        assert "anthropic-beta" not in upstream_headers[0]
 
 
 def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) -> None:

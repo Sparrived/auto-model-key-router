@@ -183,13 +183,37 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     await _close_upstream_response(response)
                     continue
 
+                if _is_stream_request(payload) and response.status_code >= 400:
+                    content = await response.aread()
+                    duration_ms = _elapsed_ms(started)
+                    _debug_report("upstream-stream-error-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
+                    await response.aclose()
+                    await app.state.metrics.record(
+                        model_id,
+                        key.name,
+                        response.status_code,
+                        extract_usage(_json_bytes(content)),
+                        failed=True,
+                        duration_ms=duration_ms,
+                        first_token_ms=duration_ms,
+                        requested_model_id=requested_model_id,
+                    )
+                    if response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+                        await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
+                    return _json_error_response_from_content(response, content, anthropic=path == "messages")
+
                 if _is_stream_request(payload):
                     _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
+                    stream = _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
+                    media_type = response.headers.get("content-type")
+                    if path == "messages":
+                        stream = _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
+                        media_type = "text/event-stream"
                     stream_response = StreamingResponse(
-                        _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started),
+                        stream,
                         status_code=response.status_code,
                         headers=_response_headers(response),
-                        media_type=response.headers.get("content-type"),
+                        media_type=media_type,
                     )
                     release_key = False
                     return stream_response
@@ -212,6 +236,13 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 elif response.status_code in {401, 403, 429, 500, 502, 503, 504}:
                     await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
 
+                if response.status_code >= 400:
+                    return _json_error_response_from_content(response, content, anthropic=path == "messages")
+                if path == "messages":
+                    anthropic_response = _anthropic_message_response(_json_bytes(content), requested_model_id)
+                    if anthropic_response is None:
+                        return JSONResponse({"type": "error", "error": {"type": "api_error", "message": "上游返回了非 JSON 响应，无法转换为 Anthropic Messages 响应"}}, status_code=502)
+                    return JSONResponse(anthropic_response, status_code=response.status_code, headers=_response_headers(response))
                 return Response(
                     content=content,
                     status_code=response.status_code,
@@ -404,7 +435,7 @@ def _join_url(base_url: str, path: str) -> str:
 
 
 def _upstream_headers(request: Request, api_key: str) -> dict[str, str]:
-    blocked = {"authorization", "host", "content-length", "destination-addr"}
+    blocked = {"authorization", "host", "content-length", "destination-addr", "x-api-key", "anthropic-version", "anthropic-beta"}
     headers = {key: value for key, value in request.headers.items() if key.lower() not in blocked}
     headers["Authorization"] = f"Bearer {api_key}"
     return headers
@@ -607,6 +638,171 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
         await response.aclose()
 
 
+async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
+    chunk_count = 0
+    byte_count = 0
+    buffer = ""
+    usage: dict[str, Any] | None = None
+    first_token_ms = 0
+    failed = False
+    message_id = "msg_amkr"
+    role = "assistant"
+    content_started = False
+    try:
+        yield _anthropic_sse("message_start", {"type": "message_start", "message": {"id": message_id, "type": "message", "role": role, "model": requested_model_id, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
+        async for chunk in response.aiter_bytes():
+            chunk_count += 1
+            byte_count += len(chunk)
+            if first_token_ms == 0:
+                first_token_ms = _elapsed_ms(started)
+            buffer, events, chunk_usage, chunk_message_id, chunk_role = _anthropic_stream_events(buffer, chunk, content_started)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            if chunk_message_id:
+                message_id = chunk_message_id
+            if chunk_role:
+                role = chunk_role
+            for event in events:
+                if event.startswith(b"event: content_block_start"):
+                    content_started = True
+                yield event
+        if not content_started:
+            yield _anthropic_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+        yield _anthropic_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": _anthropic_stream_usage(usage)})
+        yield _anthropic_sse("message_stop", {"type": "message_stop"})
+    except Exception as exc:
+        failed = True
+        payload = {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key_name, "upstream": upstream, "status_code": response.status_code, "content_type": response.headers.get("content-type"), "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count, "duration_ms": _elapsed_ms(started)}
+        LOGGER.warning("upstream anthropic stream error %s", json.dumps(payload, ensure_ascii=False))
+        _debug_report("upstream-anthropic-stream-error", payload)
+        raise
+    finally:
+        await metrics.record(
+            model_id,
+            key_name,
+            response.status_code,
+            usage,
+            failed=failed,
+            duration_ms=_elapsed_ms(started),
+            first_token_ms=first_token_ms,
+            requested_model_id=requested_model_id,
+        )
+        if failed or response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+            await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
+        elif response.status_code < 400:
+            await key_pool.mark_success(model_id, key_name)
+        await key_pool.release_key(model_id, key_name)
+        _debug_report("upstream-anthropic-stream-close", {"status_code": response.status_code, "chunks": chunk_count, "bytes": byte_count, "first_token_ms": first_token_ms, "usage": usage})
+        await response.aclose()
+
+
+def _anthropic_stream_events(buffer: str, chunk: bytes, content_started: bool) -> tuple[str, list[bytes], dict[str, Any] | None, str | None, str | None]:
+    buffer += chunk.decode("utf-8", errors="replace")
+    events: list[bytes] = []
+    usage = None
+    message_id = None
+    role = None
+    started = content_started
+    while "\n" in buffer:
+        line, buffer = buffer.split("\n", 1)
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        payload = _json_text(data)
+        if not isinstance(payload, dict):
+            continue
+        chunk_usage = extract_usage(payload)
+        if chunk_usage is not None:
+            usage = chunk_usage
+        if payload.get("id"):
+            message_id = str(payload["id"])
+        for choice in _openai_choices(payload):
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            if delta.get("role"):
+                role = str(delta["role"])
+            text = _delta_text(delta)
+            if text:
+                if not started:
+                    events.append(_anthropic_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}))
+                    started = True
+                events.append(_anthropic_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}))
+    return buffer, events, usage, message_id, role
+
+
+def _anthropic_sse(event: str, payload: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+
+
+def _anthropic_stream_usage(usage: dict[str, Any] | None) -> dict[str, int]:
+    return {"output_tokens": int((usage or {}).get("completion_tokens") or (usage or {}).get("output_tokens") or 0)}
+
+
+def _anthropic_message_response(data: Any, requested_model_id: str) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    if data.get("type") == "message" and isinstance(data.get("content"), list):
+        return data
+    choice = next(iter(_openai_choices(data)), None)
+    if choice is None:
+        return None
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    text = _message_text(message.get("content", ""))
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return {
+        "id": str(data.get("id") or "msg_amkr"),
+        "type": "message",
+        "role": "assistant",
+        "model": requested_model_id,
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": _anthropic_stop_reason(choice.get("finish_reason")),
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
+        },
+    }
+
+
+def _openai_choices(data: dict[str, Any]) -> list[dict[str, Any]]:
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return []
+    return [choice for choice in choices if isinstance(choice, dict)]
+
+
+def _delta_text(delta: dict[str, Any]) -> str:
+    content = delta.get("content", "")
+    return _message_text(content)
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("text") is not None:
+                parts.append(str(part["text"]))
+            elif isinstance(part, str):
+                parts.append(part)
+        return "".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _anthropic_stop_reason(reason: Any) -> str:
+    if reason == "length":
+        return "max_tokens"
+    if reason in {"tool_calls", "function_call"}:
+        return "tool_use"
+    return "end_turn"
+
+
 def _stream_usage(buffer: str, chunk: bytes) -> tuple[str, dict[str, Any] | None]:
     buffer += chunk.decode("utf-8", errors="replace")
     usage = None
@@ -645,11 +841,32 @@ async def _close_upstream_response(response: httpx.Response) -> None:
     await response.aclose()
 
 
-def _json_error_response_from_content(response: httpx.Response, content: bytes) -> JSONResponse:
+def _json_error_response_from_content(response: httpx.Response, content: bytes, anthropic: bool = False) -> JSONResponse:
     data = _json_bytes(content)
     if data is None:
-        data = {"error": {"message": content.decode("utf-8", errors="replace")}}
+        message = content.decode("utf-8", errors="replace") or f"上游返回 HTTP {response.status_code}，且响应体为空"
+        if anthropic:
+            data = {"type": "error", "error": {"type": "api_error", "message": message}}
+        else:
+            data = {"error": {"message": message}}
+    elif anthropic:
+        data = _anthropic_error_response(data)
     return JSONResponse(data, status_code=response.status_code)
+
+
+def _anthropic_error_response(data: Any) -> dict[str, Any]:
+    if isinstance(data, dict) and data.get("type") == "error" and isinstance(data.get("error"), dict):
+        return data
+    message = "上游请求失败"
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or message)
+        elif isinstance(error, str):
+            message = error
+        elif data.get("message"):
+            message = str(data["message"])
+    return {"type": "error", "error": {"type": "api_error", "message": message}}
 
 
 def _json_bytes(content: bytes) -> Any:

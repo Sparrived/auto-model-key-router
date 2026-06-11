@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- 新增 `/v1/messages` 响应适配，将常见 OpenAI Chat Completions 文本响应转换为 Anthropic Messages 风格 JSON/SSE，提升 Claude Code 兼容性。
+- 新增 Claude Code 兼容相关测试，覆盖非流式响应转换、流式 SSE 转换、非 JSON 错误包装和 Anthropic 请求头过滤。
+
+### Changed
+- 更新请求兼容说明，明确 `/v1/messages` 已支持 Anthropic Messages 风格响应转换，`/v1/responses` 仍为输入兼容。
+
+### Fixed
+- 修复 Claude Code 访问 `/v1/messages` 时因收到 OpenAI SSE、`data: [DONE]` 或非 JSON 上游错误页而触发 `API Error: Failed to parse JSON` 的问题。
+- 修复转发上游时 `x-api-key`、`anthropic-version`、`anthropic-beta` 等 Anthropic/本地鉴权请求头污染 OpenAI-compatible 上游的问题。
+
 ## [1.3.2] - 2026-06-12
 
 ### Added
