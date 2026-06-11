@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.3a1] - 2026-06-12
+
 ### Added
 - 新增 `/v1/messages` 响应适配，将常见 OpenAI Chat Completions 文本响应转换为 Anthropic Messages 风格 JSON/SSE，提升 Claude Code 兼容性。
 - 新增 Claude Code 兼容相关测试，覆盖非流式响应转换、流式 SSE 转换、非 JSON 错误包装和 Anthropic 请求头过滤。
