@@ -20,6 +20,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.segment import Segment, Segments
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -111,7 +112,7 @@ def segment_lines_renderable(lines: list[list[Segment]]) -> Segments:
 
 
 def folded_marker_line() -> list[Segment]:
-    return [Segment(FOLDED_CONTENT_MARKER, "dim")]
+    return [Segment(FOLDED_CONTENT_MARKER, Style.parse("dim"))]
 
 
 def fit_terminal_lines(lines: list[list[Segment]], height: int, preserve_bottom: bool = True) -> list[list[Segment]]:

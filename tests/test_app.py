@@ -13,7 +13,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from auto_model_key_router.app import _probe_cooling_keys, _stream_upstream, create_app
+from auto_model_key_router.app import _probe_cooling_keys, _stream_anthropic_messages, _stream_upstream, create_app
 from auto_model_key_router.config import KeyConfig, ModelConfig, RouterConfig
 from auto_model_key_router.key_pool import KeyPool
 
@@ -529,18 +529,46 @@ def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) ->
         app = create_app(config)
         response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=BrokenStream())
 
-        async def consume_stream() -> None:
-            with pytest.raises(httpx.DecodingError):
-                async for _ in _stream_upstream(response, app.state.metrics, app.state.key_pool, "test-model", "key-1", "test-model", "https://upstream.test/v1/chat/completions", perf_counter()):
-                    pass
+        async def consume_stream() -> list[bytes]:
+            chunks = []
+            async for chunk in _stream_upstream(response, app.state.metrics, app.state.key_pool, "test-model", "key-1", "test-model", "https://upstream.test/v1/chat/completions", perf_counter()):
+                chunks.append(chunk)
             await app.state.metrics.close()
             await app.state.http_client.aclose()
+            return chunks
 
         caplog.set_level(logging.WARNING, logger="auto_model_key_router.app")
-        anyio.run(consume_stream)
+        chunks = anyio.run(consume_stream)
 
+        assert chunks == [b"data: {\"id\":\"chunk\"}\n"]
         message = next(record.message for record in caplog.records if record.name == "auto_model_key_router.app")
         assert "upstream stream error" in message
+        assert "test-model" in message
+        assert "key-1" in message
+        assert "https://upstream.test/v1/chat/completions" in message
+        assert "DecodingError" in message
+
+
+def test_anthropic_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=BrokenStream())
+
+        async def consume_stream() -> list[bytes]:
+            chunks = []
+            async for chunk in _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, "test-model", "key-1", "test-model", "https://upstream.test/v1/chat/completions", perf_counter()):
+                chunks.append(chunk)
+            await app.state.metrics.close()
+            await app.state.http_client.aclose()
+            return chunks
+
+        caplog.set_level(logging.WARNING, logger="auto_model_key_router.app")
+        chunks = anyio.run(consume_stream)
+
+        assert chunks == [b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_amkr","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}\n\n']
+        message = next(record.message for record in caplog.records if record.name == "auto_model_key_router.app")
+        assert "upstream anthropic stream error" in message
         assert "test-model" in message
         assert "key-1" in message
         assert "https://upstream.test/v1/chat/completions" in message

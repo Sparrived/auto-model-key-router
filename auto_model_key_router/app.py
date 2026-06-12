@@ -617,7 +617,6 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
         payload = {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key_name, "upstream": upstream, "status_code": response.status_code, "content_type": response.headers.get("content-type"), "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count, "duration_ms": _elapsed_ms(started)}
         LOGGER.warning("upstream stream error %s", json.dumps(payload, ensure_ascii=False))
         _debug_report("upstream-stream-error", payload)
-        raise
     finally:
         await metrics.record(
             model_id,
@@ -676,7 +675,6 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
         payload = {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key_name, "upstream": upstream, "status_code": response.status_code, "content_type": response.headers.get("content-type"), "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count, "duration_ms": _elapsed_ms(started)}
         LOGGER.warning("upstream anthropic stream error %s", json.dumps(payload, ensure_ascii=False))
         _debug_report("upstream-anthropic-stream-error", payload)
-        raise
     finally:
         await metrics.record(
             model_id,
