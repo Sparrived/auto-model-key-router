@@ -196,6 +196,21 @@ def test_copy_to_clipboard_uses_available_command(monkeypatch) -> None:
     assert calls == [{"command": ["clip"], "input": "secret-key", "text": True, "capture_output": True, "timeout": 5, "check": False}]
 
 
+def test_paste_from_clipboard_rejects_whitespace_only(monkeypatch) -> None:
+    class Result:
+        returncode = 0
+        stdout = " \t\n"
+        stderr = ""
+
+    monkeypatch.setattr(clipboard, "paste_commands", lambda: [["fake-paste"]])
+    monkeypatch.setattr(clipboard.subprocess, "run", lambda command, text, capture_output, timeout, check: Result())
+
+    pasted, message = clipboard.paste_from_clipboard()
+
+    assert not pasted
+    assert message == "剪贴板没有可粘贴内容。"
+
+
 def test_show_result_page_can_copy_text(monkeypatch) -> None:
     choices = iter(["c", "0"])
     copied: list[str] = []

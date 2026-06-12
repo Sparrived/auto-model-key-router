@@ -74,7 +74,7 @@ def paste_from_clipboard() -> tuple[bool, str]:
             continue
         if result.returncode == 0:
             text = result.stdout
-            if not text:
+            if not text.strip():
                 return False, "剪贴板没有可粘贴内容。"
             return True, text
         errors.append((result.stderr or result.stdout or f"退出码 {result.returncode}").strip())
