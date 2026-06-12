@@ -9,7 +9,7 @@ from rich.live import Live
 from rich.table import Table
 
 from .config import RouterConfig, generate_local_api_key
-from .config_editor import load_config_data, manage_model_keys_interactively, reasoning_effort_text, save_config_data, set_listen_interactively, set_local_api_key_interactively
+from .config_editor import load_config_data, manage_config_transfer_interactively, manage_model_keys_interactively, reasoning_effort_text, save_config_data, set_listen_interactively, set_local_api_key_interactively
 from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
@@ -19,7 +19,7 @@ from .update import VersionCheckResult, check_latest_version, install_latest_ver
 
 
 MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "调用日志"), ("4", "CLI 设置"), ("0", "退出")]
-SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "版本更新"), ("0", "返回")]
+SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "配置迁移"), ("5", "版本更新"), ("0", "返回")]
 
 
 def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
@@ -71,6 +71,9 @@ def manage_cli_settings_interactively(config_path: Path, update_result: VersionC
                 show_result_page("监听配置", result)
             continue
         if choice == "4":
+            run_submodule(lambda: manage_config_transfer_interactively(config_path))
+            continue
+        if choice == "5":
             result = run_submodule(lambda: manage_version_update_interactively(latest_result))
             if isinstance(result, VersionCheckResult):
                 latest_result = result

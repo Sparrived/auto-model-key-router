@@ -10,6 +10,7 @@ from rich.live import Live
 from rich.prompt import Prompt
 from rich.table import Table
 
+from .clipboard import paste_from_clipboard
 from .config import RouterConfig, empty_config_dict, generate_local_api_key
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
@@ -35,6 +36,50 @@ def manage_model_keys_interactively(path: Path) -> None:
         result = action()
         if result is not None:
             show_result_page(title, result)
+
+
+def manage_config_transfer_interactively(path: Path) -> None:
+    while True:
+        choice = select_option("配置迁移", [("1", "复制配置文件"), ("2", "粘贴并应用"), ("0", "返回")])
+        if choice == "0":
+            return
+        clear_terminal_history()
+        result = export_config_interactively(path) if choice == "1" else paste_config_interactively(path)
+        if result is not None:
+            show_result_page("配置迁移", result)
+
+
+def export_config_interactively(path: Path) -> ResultPage:
+    data = load_config_data(path)
+    config_text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    model_count = len(data.get("models", []))
+    key_count = sum(len(model.get("keys", [])) for model in data.get("models", []))
+    content = section_panel(f"配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]\n\n[bold yellow]复制内容包含本地鉴权 key 和上游 API key，请仅粘贴到可信终端。[/bold yellow]\n\n在另一台机器或另一个 TUI 中进入“CLI 设置 → 配置迁移 → 粘贴并应用”即可覆盖应用。", "复制配置文件", "green")
+    return ResultPage(content, copy_text=config_text, copy_label="复制配置文件")
+
+
+def paste_config_interactively(path: Path) -> Any:
+    pasted, text = paste_from_clipboard()
+    if not pasted:
+        return section_panel(text, "粘贴失败", "yellow")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return section_panel(f"剪贴板内容不是有效 JSON: {exc.msg}", "应用失败", "red")
+    if not isinstance(data, dict):
+        return section_panel("剪贴板内容必须是配置对象。", "应用失败", "red")
+    try:
+        new_config = RouterConfig.from_dict(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        return section_panel(f"配置校验失败: {exc}", "应用失败", "red")
+    if not confirm_choice(f"将用剪贴板配置覆盖当前配置文件：{path.resolve()}，是否继续？", default=False):
+        return section_panel("配置未变化。", "应用取消", "yellow")
+    old_config = RouterConfig.from_dict(load_config_data(path))
+    save_config_data(path, data)
+    model_count = len(new_config.models)
+    key_count = sum(len(model.keys) for model in new_config.models)
+    content = section_panel(f"已应用剪贴板配置。\n配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]", "应用完成", "green")
+    return Group(content, restart_service_after_config_change(path, old_config, new_config))
 
 
 def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:

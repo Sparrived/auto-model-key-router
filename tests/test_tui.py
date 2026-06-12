@@ -332,7 +332,8 @@ def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
     assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
-    assert ("4", "版本更新") in dashboard.SETTINGS_OPTIONS
+    assert ("4", "配置迁移") in dashboard.SETTINGS_OPTIONS
+    assert ("5", "版本更新") in dashboard.SETTINGS_OPTIONS
     assert all(label != "调用日志" for _, label in dashboard.SETTINGS_OPTIONS)
 
 
@@ -427,6 +428,50 @@ def test_copy_api_key_interactively_returns_copyable_result(tmp_path, monkeypatc
     assert "test-model" in output
     assert "main" in output
     assert "sk-secret" not in output
+
+
+def test_export_config_interactively_returns_copyable_config_without_rendering_secret(tmp_path) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(json.dumps({"local_api_key": "local-secret", "models": [{"id": "test-model", "keys": [{"name": "main", "api_key": "sk-secret", "base_url": "https://example.com/v1"}]}]}, ensure_ascii=False), encoding="utf-8")
+
+    result = config_editor.export_config_interactively(config_path)
+
+    assert isinstance(result, tui.ResultPage)
+    assert json.loads(result.copy_text or "") == json.loads(config_path.read_text(encoding="utf-8"))
+    output = render_plain(result.content)
+    assert "sk-secret" not in output
+    assert "local-secret" not in output
+    assert "复制内容包含本地鉴权 key 和上游 API key" in output
+
+
+def test_paste_config_interactively_applies_clipboard_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    old_data = {"local_api_key": "old-local", "models": [{"id": "old-model", "keys": [{"name": "old", "api_key": "sk-old", "base_url": "https://old.example.com"}]}]}
+    new_data = {"local_api_key": "new-local", "models": [{"id": "new-model", "keys": [{"name": "new", "api_key": "sk-new", "base_url": "https://new.example.com"}]}]}
+    config_path.write_text(json.dumps(old_data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_editor, "paste_from_clipboard", lambda: (True, json.dumps(new_data, ensure_ascii=False)))
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda message, default=False: True)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+
+    result = config_editor.paste_config_interactively(config_path)
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == new_data
+    output = render_plain(result)
+    assert "new-model" not in output
+    assert "sk-new" not in output
+    assert "已应用剪贴板配置" in output
+
+
+def test_paste_config_interactively_rejects_invalid_clipboard_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    old_text = json.dumps({"local_api_key": "old-local", "models": []}, ensure_ascii=False)
+    config_path.write_text(old_text, encoding="utf-8")
+    monkeypatch.setattr(config_editor, "paste_from_clipboard", lambda: (True, "not json"))
+
+    result = config_editor.paste_config_interactively(config_path)
+
+    assert config_path.read_text(encoding="utf-8") == old_text
+    assert "剪贴板内容不是有效 JSON" in render_plain(result)
 
 
 def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:

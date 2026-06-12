@@ -25,7 +25,7 @@
 | ❄️ 冷却恢复 | 支持失败阈值、`Retry-After`、状态持久化和上游健康探测恢复 |
 | 🔌 输入兼容 | 支持 OpenAI Chat Completions，并兼容 Anthropic Messages / OpenAI Responses 风格输入 |
 | 📊 调用统计 | 记录请求、成功/失败、重试、状态码、Token、缓存命中、耗时与首 token 耗时 |
-| 🖥️ Terminal UI | 使用 Rich 管理系统服务、模型 key、本地鉴权、监听配置、调用日志和版本更新 |
+| 🖥️ Terminal UI | 使用 Rich 管理系统服务、模型 key、本地鉴权、监听配置、配置迁移、调用日志和版本更新 |
 | 🔐 本地鉴权 | 支持 `Authorization: Bearer` 与 `x-api-key` 两种本地鉴权方式 |
 | 🚀 服务管理 | 支持后台进程、Windows 计划任务和 Linux systemd user service |
 
@@ -248,9 +248,11 @@ auto-model-key-router --config router-config.json
 | --- | --- |
 | 一键配置 | 自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key |
 | 模型 Key | 添加、编辑、删除、排序模型和 key，并配置路由模式与推理强度 |
-| CLI 设置 | 集中管理模型服务、本地鉴权、监听配置、调用日志和版本更新 |
+| CLI 设置 | 集中管理模型服务、本地鉴权、监听配置、配置迁移和版本更新 |
 
 首页中的“一键配置”会自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key。
+
+配置迁移可在“CLI 设置 → 配置迁移”中使用：先在当前 TUI 选择“复制配置文件”将完整 JSON 配置写入剪贴板，再到另一台机器或另一个 TUI 选择“粘贴并应用”，程序会读取剪贴板、校验配置并确认覆盖当前配置文件。复制内容包含本地鉴权 key 和上游 API key，请只在可信终端之间传递。
 
 ### 后台服务
 
