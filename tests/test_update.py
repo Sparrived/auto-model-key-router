@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
-from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, is_newer_version, manual_update_command, update_output_preview
+from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, is_newer_version, manual_update_command, should_defer_windows_update, update_output_preview, windows_deferred_update_script
 
 
 class FakeResponse:
@@ -168,6 +169,50 @@ def test_install_latest_version_shows_stderr_when_stdout_exists(monkeypatch, tmp
     assert "ERROR: network timeout" in text
     assert str(tmp_path / "update.log") in text
     assert "ERROR: network timeout" in (tmp_path / "update.log").read_text(encoding="utf-8")
+
+
+def test_should_defer_windows_update_for_console_script(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.update.os.name", "nt")
+    monkeypatch.setattr(sys, "argv", ["C:\\Users\\Sparr\\.local\\bin\\amkr.exe"])
+
+    assert should_defer_windows_update(["uv", "tool", "upgrade", "auto-model-key-router"])
+
+
+def test_install_latest_version_defers_windows_console_script_update(monkeypatch, tmp_path) -> None:
+    started: list[list[str]] = []
+    monkeypatch.setattr("auto_model_key_router.update.os.name", "nt")
+    monkeypatch.setattr(sys, "argv", ["C:\\Users\\Sparr\\.local\\bin\\amkr.exe"])
+    monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "uv-tool")
+    monkeypatch.setattr("auto_model_key_router.update.update_log_path", lambda: tmp_path / "update.log")
+    monkeypatch.setattr("auto_model_key_router.update.deferred_update_script_path", lambda: tmp_path / "update.ps1")
+    monkeypatch.setattr("auto_model_key_router.update.default_cache_dir", lambda: tmp_path)
+
+    def fake_popen(command: list[str], **kwargs: object) -> None:
+        started.append(command)
+
+    monkeypatch.setattr("auto_model_key_router.update.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("auto_model_key_router.update.subprocess.run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应直接运行更新命令")))
+
+    panel = install_latest_version(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"))
+    text = str(panel.renderable)
+    log_text = (tmp_path / "update.log").read_text(encoding="utf-8")
+
+    assert started == [["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(tmp_path / "update.ps1")]]
+    assert "已安排" in text
+    assert "退出当前 Terminal UI" in text
+    assert "退出码: 等待当前进程退出" in log_text
+    assert "uv tool upgrade auto-model-key-router" in log_text
+
+
+def test_windows_deferred_update_script_waits_parent_and_writes_log(tmp_path) -> None:
+    command = ["uv", "tool", "upgrade", "auto-model-key-router"]
+
+    script = windows_deferred_update_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log")
+
+    assert "Wait-Process -Id 123" in script
+    assert "Start-Process -FilePath $tool" in script
+    assert "命令: uv tool upgrade auto-model-key-router" in script
+    assert "Set-Content -LiteralPath $logPath" in script
 
 
 def test_update_output_preview_keeps_tail_for_long_logs() -> None:

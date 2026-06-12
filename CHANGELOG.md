@@ -5,6 +5,7 @@
 ## [1.3.3] - 2026-06-12
 
 ### Fixed
+- 修复 Windows 下从正在运行的 `amkr.exe` 内执行 `uv tool upgrade` 时，因入口文件被当前进程锁定导致更新失败的问题；现在会等待当前进程退出后继续执行更新。
 - 修复上游流处理异常时错误被重复抛出的问题，移除 `_stream_upstream` 和 `_stream_anthropic_messages` 中记录错误日志后多余的 `raise`。
 
 ## [1.3.3a1] - 2026-06-12

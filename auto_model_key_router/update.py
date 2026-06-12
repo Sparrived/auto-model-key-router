@@ -30,6 +30,7 @@ GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/r
 UPDATE_LOG_FILE_NAME = "update.log"
 UPDATE_PREVIEW_LINES = 120
 UPDATE_PREVIEW_CHARS = 12000
+WINDOWS_CONSOLE_SCRIPT_NAMES = {"amkr", "amkr.exe", "auto-model-key-router", "auto-model-key-router.exe"}
 
 
 @dataclass(frozen=True)
@@ -200,11 +201,14 @@ def manual_update_command(result: VersionCheckResult) -> list[str]:
     return [sys.executable, "-m", "pip", "install", "--upgrade", target]
 
 
-def manual_update_command_text(result: VersionCheckResult) -> str:
-    command = manual_update_command(result)
+def shell_command_text(command: list[str]) -> str:
     if os.name == "nt":
         return subprocess.list2cmdline(command)
     return shlex.join(command)
+
+
+def manual_update_command_text(result: VersionCheckResult) -> str:
+    return shell_command_text(manual_update_command(result))
 
 
 def update_target_label(result: VersionCheckResult) -> str:
@@ -213,6 +217,88 @@ def update_target_label(result: VersionCheckResult) -> str:
 
 def update_log_path() -> Path:
     return default_cache_dir() / UPDATE_LOG_FILE_NAME
+
+
+def deferred_update_script_path() -> Path:
+    return default_cache_dir() / f"update-{os.getpid()}.ps1"
+
+
+def is_windows_console_script_process(argv0: str | None = None) -> bool:
+    if os.name != "nt":
+        return False
+    return Path(argv0 or sys.argv[0]).name.lower() in WINDOWS_CONSOLE_SCRIPT_NAMES
+
+
+def should_defer_windows_update(command: list[str]) -> bool:
+    return bool(command) and is_windows_console_script_process()
+
+
+def powershell_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def powershell_array(values: list[str]) -> str:
+    return "@(" + ", ".join(powershell_string(value) for value in values) + ")"
+
+
+def windows_update_creationflags() -> int:
+    return sum(getattr(subprocess, name, 0) for name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"))
+
+
+def windows_deferred_update_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, log_path: Path, stdout_path: Path, stderr_path: Path) -> str:
+    source_line = f"来源: {version_result.source or '可用来源'}"
+    target_line = f"目标: {update_target_label(version_result)}"
+    command_line = f"命令: {shell_command_text(command)}"
+    return "\n".join([
+        "$ErrorActionPreference = 'Continue'",
+        "$ProgressPreference = 'SilentlyContinue'",
+        f"$tool = {powershell_string(command[0])}",
+        f"$argsList = {powershell_array(command[1:])}",
+        f"$logPath = {powershell_string(str(log_path))}",
+        f"$stdoutPath = {powershell_string(str(stdout_path))}",
+        f"$stderrPath = {powershell_string(str(stderr_path))}",
+        "$exitCode = 1",
+        "try {",
+        f"    Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue",
+        "    $process = Start-Process -FilePath $tool -ArgumentList $argsList -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath",
+        "    $exitCode = $process.ExitCode",
+        "} catch {",
+        "    $_ | Out-String | Set-Content -LiteralPath $stderrPath -Encoding UTF8",
+        "}",
+        "$stdoutText = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }",
+        "$stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }",
+        "$parent = Split-Path -Parent $logPath",
+        "if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }",
+        "$lines = @(",
+        "    \"时间: $(Get-Date -Format o)\"",
+        f"    {powershell_string(source_line)}",
+        f"    {powershell_string(target_line)}",
+        f"    {powershell_string(command_line)}",
+        "    \"退出码: $exitCode\"",
+        "    ''",
+        "    '[stdout]'",
+        "    $stdoutText",
+        "    ''",
+        "    '[stderr]'",
+        "    $stderrText",
+        "    ''",
+        ")",
+        "Set-Content -LiteralPath $logPath -Value $lines -Encoding UTF8",
+        "Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue",
+        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+        "",
+    ])
+
+
+def start_deferred_windows_update(version_result: VersionCheckResult, command: list[str]) -> Path:
+    script_path = deferred_update_script_path()
+    log_path = update_log_path()
+    stdout_path = default_cache_dir() / f"update-{os.getpid()}.stdout.log"
+    stderr_path = default_cache_dir() / f"update-{os.getpid()}.stderr.log"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text(windows_deferred_update_script(version_result, command, os.getpid(), log_path, stdout_path, stderr_path), encoding="utf-8")
+    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=windows_update_creationflags())
+    return script_path
 
 
 def update_process_output(stdout: str | None, stderr: str | None) -> str:
@@ -247,7 +333,7 @@ def write_update_log(version_result: VersionCheckResult, command: list[str], ret
                 f"时间: {datetime.now().astimezone().isoformat(timespec='seconds')}",
                 f"来源: {version_result.source or '可用来源'}",
                 f"目标: {update_target_label(version_result)}",
-                f"命令: {manual_update_command_text(version_result)}",
+                f"命令: {shell_command_text(command)}",
                 f"退出码: {'未启动' if returncode is None else returncode}",
                 "",
                 "[stdout]",
@@ -327,6 +413,30 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
         command = manual_update_command(version_result)
     except ValueError as exc:
         return section_panel(str(exc), "手动更新", "red")
+    if should_defer_windows_update(command):
+        try:
+            start_deferred_windows_update(version_result, command)
+        except (OSError, subprocess.SubprocessError) as exc:
+            stderr = str(exc)
+            log_path, log_error = write_update_log(version_result, command, None, "", stderr)
+            content = "\n".join([
+                "延迟更新任务启动失败。",
+                f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
+                *update_log_lines(log_path, log_error, False),
+                escape(stderr),
+            ])
+            return section_panel(content, "手动更新", "red")
+        stdout = "Windows 已安排延迟更新。退出当前正在运行的 amkr 后，将自动执行更新命令。"
+        log_path, log_error = write_update_log(version_result, command, "等待当前进程退出", stdout, "")
+        content = "\n".join([
+            f"已安排通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
+            "请退出当前 Terminal UI 或关闭正在运行的 amkr 命令，Windows 释放 amkr.exe 后会自动继续更新。",
+            "更新完成后请重新打开终端，并重启正在运行的后台/系统服务。",
+            f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
+            *update_log_lines(log_path, log_error, False),
+            escape(stdout),
+        ])
+        return section_panel(content, "手动更新", "yellow")
     try:
         result = subprocess.run(command, capture_output=True, text=True, errors="replace")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -334,7 +444,7 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
         log_path, log_error = write_update_log(version_result, command, None, "", stderr)
         content = "\n".join([
             "更新命令执行失败。",
-            f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
+            f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
             *update_log_lines(log_path, log_error, False),
             escape(stderr),
         ])
@@ -349,7 +459,7 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
         content = "\n".join([
             f"已通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
             "请重启当前终端和正在运行的服务，让新版本生效。",
-            f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
+            f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
             *update_log_lines(log_path, log_error, truncated),
             escape(preview) if preview else "pip 未返回额外输出。",
         ])
@@ -357,7 +467,7 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
 
     content = "\n".join([
         f"更新失败，退出码: [bold]{result.returncode}[/bold]",
-        f"命令: [bold]{escape(manual_update_command_text(version_result))}[/bold]",
+        f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
         *update_log_lines(log_path, log_error, truncated),
         escape(preview) if preview else "pip 未返回错误详情。",
     ])
