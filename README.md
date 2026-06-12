@@ -106,12 +106,14 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 > [!TIP]
 > 客户端请求中的 `model` 可以使用真实模型 ID，也可以使用配置中的任意 `aliases`。转发上游前会统一替换为真实模型 ID。
+> 配置 `unified_model` 后，调用端还可以始终使用固定模型名 `unified_model`，再通过 CLI 即时切换实际模型或 key。
 
 ## 🧭 工作方式
 
 | 阶段 | 行为 |
 | --- | --- |
 | 模型解析 | 从请求体读取 `model`，匹配真实模型 ID 或别名 |
+| 统一模型 | `unified_model` 会解析到 CLI 当前选择的真实模型和可选固定 key |
 | Key 选择 | 根据模型的 `routing_mode` 选择可用 key，也可通过 `模型ID/别名[key name]` 显式指定 key |
 | 请求转发 | 重写上游 `Authorization`，转发到对应 `base_url` 的 `/v1/{path}` |
 | 失败处理 | 可重试错误触发换 key；单 key 模型和 `only_first` 模式按 `max_retries` 重试 |
@@ -138,6 +140,10 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   "metrics_db_path": "",
   "log_file_path": "",
   "local_api_key": "amkr-generated-local-api-key",
+  "unified_model": {
+    "model": "gpt-4o-mini",
+    "key": "gpt-4o-mini-key-1"
+  },
   "models": [
     {
       "id": "gpt-4o-mini",
@@ -176,6 +182,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `metrics_db_path` | 缓存目录 | SQLite 计量存档路径 |
 | `log_file_path` | 缓存目录 | 服务运行日志路径 |
 | `local_api_key` | 自动生成 | 本地代理鉴权 key，留空则不启用本地鉴权 |
+| `unified_model` | 未配置 | 固定虚拟模型 `unified_model` 当前指向的已有模型和可选 key |
 | `models` | `[]` | 模型、别名、路由模式、推理强度和上游 key 列表 |
 
 ### 模型配置
@@ -187,6 +194,38 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `routing_mode` | 支持 `round_robin`、`priority` 和 `only_first`，未设置时默认 `round_robin` |
 | `reasoning_effort` | 支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`；为空、`default` 或 `downstream` 表示由下游请求决定 |
 | `keys` | 每个 key 包含 `name`、`api_key` 和可选 `base_url`；`base_url` 缺省时使用 `default_base_url` |
+
+### 统一模型快速切换
+
+启用后，调用端的请求体可以始终使用固定模型名：
+
+```json
+{
+  "model": "unified_model",
+  "messages": [{"role": "user", "content": "hello"}]
+}
+```
+
+通过 CLI 切换实际模型或 key，配置文件会原子更新，运行中的服务会自动热加载：
+
+```bash
+# 切换模型，自动使用该模型自身的 routing_mode 选择 key
+auto-model-key-router --config router-config.json --switch-model gpt-4o-mini
+
+# 同时固定到该模型下的已有 key
+auto-model-key-router --config router-config.json --switch-model gpt-4o-mini --switch-key gpt-4o-mini-key-2
+
+# 只切换当前目标模型使用的 key
+auto-model-key-router --config router-config.json --switch-key gpt-4o-mini-key-1
+
+# 取消固定 key，恢复自动路由
+auto-model-key-router --config router-config.json --switch-key auto
+
+# 查看当前选择
+auto-model-key-router --config router-config.json --show-unified-model
+```
+
+`--switch-model` 接受真实模型 ID 或别名，写回配置时会规范化为真实模型 ID。切换到另一模型且未同时指定 `--switch-key` 时，会自动清除旧 key，避免误用同名 key。`unified_model` 只引用 `models` 中已有的配置，不会复制或新增 API key。
 
 ### 显式指定 key
 
@@ -248,6 +287,7 @@ auto-model-key-router --config router-config.json
 | --- | --- |
 | 一键配置 | 自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key |
 | 模型 Key | 添加、编辑、删除、排序模型和 key，并配置路由模式与推理强度 |
+| 统一模型 | 查看或切换 `unified_model` 指向的已有模型，并选择自动路由或指定已启用 key |
 | CLI 设置 | 集中管理模型服务、本地鉴权、监听配置、配置迁移和版本更新 |
 
 首页中的“一键配置”会自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key。
@@ -291,6 +331,9 @@ Windows 下默认会注册为开机启动的计划任务 `AutoModelKeyRouter`，
 | 命令 | 用途 |
 | --- | --- |
 | `auto-model-key-router --config router-config.json --show-config` | 只查看配置摘要 |
+| `auto-model-key-router --config router-config.json --show-unified-model` | 查看 `unified_model` 当前指向 |
+| `auto-model-key-router --config router-config.json --switch-model MODEL` | 切换 `unified_model` 的实际模型 |
+| `auto-model-key-router --config router-config.json --switch-key KEY` | 切换 `unified_model` 的固定 key；`auto` 恢复自动路由 |
 | `auto-model-key-router --config router-config.json --show-logs` | 查看最近 20 行运行日志和调用统计 |
 | `auto-model-key-router --config router-config.json --show-logs 50` | 查看最近 50 行运行日志 |
 | `auto-model-key-router --check-update` | 检查 PyPI/GitHub 最新版本 |
@@ -310,7 +353,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | 接口 | 鉴权 | 说明 |
 | --- | --- | --- |
 | `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、key 指纹和 key 冷却状态 |
-| `GET /v1/models` | 不需要 | 返回 OpenAI 风格模型列表，包含真实模型 ID 和 aliases |
+| `GET /v1/models` | 不需要 | 返回 OpenAI 风格模型列表，包含真实模型 ID、aliases 和已启用的 `unified_model` |
 | `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照 |
 | `/v1/{path}` | 启用 `local_api_key` 时需要 | 代理 OpenAI-compatible 请求，支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE` |
 
@@ -434,7 +477,7 @@ auto-model-key-router --check-update
 auto-model-key-router --update
 ```
 
-Terminal UI 启动时会优先快速检查 PyPI JSON API，PyPI 不可用时回退到 GitHub Release。如果发现新版本，首页会显示更新提示，也可以进入“版本更新”菜单重新检查或确认手动更新。PyPI 可用时会执行 `pip install --upgrade auto-model-key-router`，回退到 GitHub 时会安装对应 Release 源码包。更新完成后需要重启当前终端和正在运行的后台/系统服务，让新版本生效。
+Terminal UI 启动时会优先快速检查 PyPI JSON API，PyPI 不可用时回退到 GitHub Release。如果发现新版本，首页会显示更新提示，也可以进入“版本更新”菜单重新检查或确认手动更新。PyPI 可用时会执行 `pip install --upgrade auto-model-key-router`，回退到 GitHub 时会安装对应 Release 源码包。Windows 从正在运行的 `amkr.exe` 发起更新时，会打开独立更新器窗口，确认接管后退出当前界面，等待文件锁释放并自动重试；更新成功后会按原运行状态重启服务和 Terminal UI，失败原因会显示在更新器窗口并写入更新日志。
 
 ## 📄 许可证
 

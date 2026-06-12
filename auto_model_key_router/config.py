@@ -30,6 +30,7 @@ def default_config_path() -> Path:
 
 LEGACY_CONFIG_PATH = Path("router-config.json")
 DEFAULT_CONFIG_PATH = default_config_path()
+UNIFIED_MODEL_ID = "unified_model"
 
 
 def default_metrics_db_path() -> str:
@@ -100,6 +101,12 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class UnifiedModelConfig:
+    model: str
+    key: str | None = None
+
+
+@dataclass(frozen=True)
 class RouterConfig:
     host: str
     port: int
@@ -113,6 +120,7 @@ class RouterConfig:
     log_file_path: str
     local_api_key: str
     models: tuple[ModelConfig, ...]
+    unified_model: UnifiedModelConfig | None = None
     reasoning_effort_by_model: dict[str, str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -156,6 +164,17 @@ class RouterConfig:
                 reasoning_effort = None
             models.append(ModelConfig(id=str(model["id"]), keys=keys, aliases=aliases, routing_mode=routing_mode, reasoning_effort=reasoning_effort))
 
+        unified_model = None
+        raw_unified_model = raw.get("unified_model")
+        if raw_unified_model is not None:
+            if not isinstance(raw_unified_model, dict):
+                raise ValueError("unified_model 必须是对象")
+            target_model = str(raw_unified_model.get("model") or "").strip()
+            target_key = str(raw_unified_model.get("key") or "").strip() or None
+            if not target_model:
+                raise ValueError("unified_model.model 不能为空")
+            unified_model = UnifiedModelConfig(model=target_model, key=target_key)
+
         config = cls(
             host=str(raw.get("host", "127.0.0.1")),
             port=int(raw.get("port", 8000)),
@@ -169,12 +188,15 @@ class RouterConfig:
             log_file_path=str(raw.get("log_file_path") or default_log_file_path()),
             local_api_key=str(raw.get("local_api_key", "")),
             models=tuple(models),
+            unified_model=unified_model,
         )
         config.validate()
         return config
 
     def validate(self) -> None:
         model_names: set[str] = set()
+        model_ids_by_name: dict[str, str] = {}
+        models_by_id: dict[str, ModelConfig] = {}
         for model in self.models:
             if not model.id:
                 raise ValueError("模型 id 不能为空")
@@ -186,6 +208,8 @@ class RouterConfig:
                 if name in model_names:
                     raise ValueError(f"模型名称重复: {name}")
                 model_names.add(name)
+                model_ids_by_name[name] = model.id
+            models_by_id[model.id] = model
             if not model.keys:
                 raise ValueError(f"模型 {model.id} 至少需要配置一个 key")
             key_names: set[str] = set()
@@ -199,3 +223,22 @@ class RouterConfig:
                     raise ValueError(f"模型 {model.id} 存在空 api_key")
                 if not key.base_url.startswith(("http://", "https://")):
                     raise ValueError(f"模型 {model.id} 的 base_url 必须以 http:// 或 https:// 开头")
+
+        if self.unified_model is None:
+            return
+        if UNIFIED_MODEL_ID in model_names:
+            raise ValueError(f"启用 unified_model 时，模型 ID 和别名不能使用保留名称: {UNIFIED_MODEL_ID}")
+        target_model_id = model_ids_by_name.get(self.unified_model.model)
+        if target_model_id is None:
+            raise ValueError(f"unified_model 引用了未配置的模型: {self.unified_model.model}")
+        if self.unified_model.key is None:
+            return
+        target_model = models_by_id[target_model_id]
+        if not any(key.name == self.unified_model.key and key.enabled for key in target_model.keys):
+            raise ValueError(f"模型 {target_model_id} 未配置可用 key: {self.unified_model.key}")
+
+    def configured_model_id(self, model_name: str) -> str | None:
+        for model in self.models:
+            if model_name == model.id or model_name in model.aliases:
+                return model.id
+        return None

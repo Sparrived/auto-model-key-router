@@ -4,8 +4,10 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +55,7 @@ class VersionCheckResult:
 class UpdateInstallOutcome:
     content: Any
     updated: bool = False
-    deferred: bool = False
+    handoff: bool = False
 
 
 def version_numbers(version: str) -> tuple[int, ...]:
@@ -227,8 +229,12 @@ def update_log_path() -> Path:
     return default_cache_dir() / UPDATE_LOG_FILE_NAME
 
 
-def deferred_update_script_path() -> Path:
+def windows_update_script_path() -> Path:
     return default_cache_dir() / f"update-{os.getpid()}.ps1"
+
+
+def windows_update_ready_path() -> Path:
+    return default_cache_dir() / f"update-{os.getpid()}.ready"
 
 
 def is_windows_console_script_process(argv0: str | None = None) -> bool:
@@ -237,7 +243,7 @@ def is_windows_console_script_process(argv0: str | None = None) -> bool:
     return Path(argv0 or sys.argv[0]).name.lower() in WINDOWS_CONSOLE_SCRIPT_NAMES
 
 
-def should_defer_windows_update(command: list[str]) -> bool:
+def should_use_windows_update_helper(command: list[str]) -> bool:
     return bool(command) and is_windows_console_script_process()
 
 
@@ -250,73 +256,157 @@ def powershell_array(values: list[str]) -> str:
 
 
 def windows_update_creationflags() -> int:
-    return sum(getattr(subprocess, name, 0) for name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"))
+    return sum(getattr(subprocess, name, 0) for name in ("CREATE_NEW_PROCESS_GROUP", "CREATE_NEW_CONSOLE"))
 
 
-def windows_deferred_update_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, log_path: Path, stdout_path: Path, stderr_path: Path, post_update_commands: list[list[str]] | None = None) -> str:
+def resolved_update_command(command: list[str]) -> list[str]:
+    executable = shutil.which(command[0]) or command[0]
+    return [executable, *command[1:]]
+
+
+def windows_update_helper_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, ready_path: Path, log_path: Path, stdout_path: Path, stderr_path: Path, post_update_commands: list[list[str]] | None = None, max_attempts: int = 6) -> str:
     source_line = f"来源: {version_result.source or '可用来源'}"
     target_line = f"目标: {update_target_label(version_result)}"
     command_line = f"命令: {shell_command_text(command)}"
     post_update_lines: list[str] = []
     for index, post_update_command in enumerate(post_update_commands or []):
-        post_update_lines.extend([
-            f"$postTool{index} = {powershell_string(post_update_command[0])}",
-            f"$postArgs{index} = {powershell_array(post_update_command[1:])}",
-            f"$postProcess{index} = Start-Process -FilePath $postTool{index} -ArgumentList $postArgs{index} -PassThru",
-            f"if ({index} -eq 0) {{ $postProcess{index}.WaitForExit() }}",
-        ])
+        post_command = resolved_update_command(post_update_command)
+        post_update_lines.extend(
+            [
+                f"$postTool{index} = {powershell_string(post_command[0])}",
+                f"$postArgs{index} = {powershell_array(post_command[1:])}",
+            ]
+        )
+        if index == 0:
+            post_update_lines.extend(
+                [
+                    "Write-Host '正在执行更新后的服务处理...'",
+                    "try {",
+                    f"    & $postTool{index} @postArgs{index}",
+                    f"    if ($LASTEXITCODE -ne 0) {{ $postUpdateFailed = $true; $attemptLog += @('', '[post-update warning]', \"更新后命令退出码: $LASTEXITCODE\") }}",
+                    "} catch {",
+                    "    $postUpdateFailed = $true",
+                    "    $attemptLog += @('', '[post-update warning]', ($_ | Out-String))",
+                    "}",
+                ]
+            )
+        else:
+            post_update_lines.extend(
+                [
+                    f"$postArgumentLine{index} = {powershell_string(subprocess.list2cmdline(post_command[1:]))}",
+                    "try {",
+                    f"    Start-Process -FilePath $postTool{index} -ArgumentList $postArgumentLine{index} | Out-Null",
+                    "} catch {",
+                    "    $postUpdateFailed = $true",
+                    "    $attemptLog += @('', '[post-update warning]', ($_ | Out-String))",
+                    "}",
+                ]
+            )
     if post_update_lines:
         post_update_lines = ["if ($exitCode -eq 0) {", *[f"    {line}" for line in post_update_lines], "}"]
     return "\n".join([
-        "$ErrorActionPreference = 'Continue'",
+        "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
         f"$tool = {powershell_string(command[0])}",
-        f"$argsList = {powershell_array(command[1:])}",
+        f"$commandArgs = {powershell_array(command[1:])}",
+        f"$readyPath = {powershell_string(str(ready_path))}",
         f"$logPath = {powershell_string(str(log_path))}",
         f"$stdoutPath = {powershell_string(str(stdout_path))}",
         f"$stderrPath = {powershell_string(str(stderr_path))}",
+        f"$maxAttempts = {max_attempts}",
         "$exitCode = 1",
-        "try {",
-        f"    Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue",
-        "    $process = Start-Process -FilePath $tool -ArgumentList $argsList -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath",
-        "    $exitCode = $process.ExitCode",
-        *post_update_lines,
-        "} catch {",
-        "    $_ | Out-String | Set-Content -LiteralPath $stderrPath -Encoding UTF8",
-        "}",
-        "$stdoutText = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }",
-        "$stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }",
+        "$stdoutText = ''",
+        "$stderrText = ''",
+        "$attemptLog = @()",
+        "$postUpdateFailed = $false",
         "$parent = Split-Path -Parent $logPath",
         "if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }",
-        "$lines = @(",
-        "    \"时间: $(Get-Date -Format o)\"",
-        f"    {powershell_string(source_line)}",
-        f"    {powershell_string(target_line)}",
-        f"    {powershell_string(command_line)}",
-        "    \"退出码: $exitCode\"",
-        "    ''",
-        "    '[stdout]'",
-        "    $stdoutText",
-        "    ''",
-        "    '[stderr]'",
-        "    $stderrText",
-        "    ''",
-        ")",
-        "Set-Content -LiteralPath $logPath -Value $lines -Encoding UTF8",
-        "Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue",
+        "function Save-UpdateLog([string]$status) {",
+        "    $lines = @(",
+        "        \"时间: $(Get-Date -Format o)\"",
+        f"        {powershell_string(source_line)}",
+        f"        {powershell_string(target_line)}",
+        f"        {powershell_string(command_line)}",
+        "        \"状态: $status\"",
+        "        \"退出码: $exitCode\"",
+        "    ) + $attemptLog",
+        "    Set-Content -LiteralPath $logPath -Value $lines -Encoding UTF8",
+        "}",
+        "Save-UpdateLog '更新器已接管，等待当前进程退出'",
+        "'ready' | Set-Content -LiteralPath $readyPath -Encoding ASCII",
+        "Write-Host 'Windows 更新器已接管。正在等待当前 amkr 退出并释放文件锁...'",
+        "try {",
+        f"    Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue",
+        "    Start-Sleep -Milliseconds 500",
+        "    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {",
+        "        Write-Host \"正在更新（第 $attempt/$maxAttempts 次）...\"",
+        "        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue",
+        "        & $tool @commandArgs 1> $stdoutPath 2> $stderrPath",
+        "        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }",
+        "        $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }",
+        "        $stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }",
+        "        $attemptLog += @('', \"[attempt $attempt stdout]\", $stdoutText, '', \"[attempt $attempt stderr]\", $stderrText)",
+        "        Save-UpdateLog $(if ($exitCode -eq 0) { '更新成功' } else { \"第 $attempt 次更新失败\" })",
+        "        if ($exitCode -eq 0) { break }",
+        "        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds ([Math]::Min(5, $attempt)) }",
+        "    }",
+        "    if ($exitCode -ne 0) { throw \"更新命令在 $maxAttempts 次尝试后仍失败，退出码: $exitCode\" }",
+        *post_update_lines,
+        "} catch {",
+        "    $failure = $_ | Out-String",
+        "    $attemptLog += @('', '[updater error]', $failure)",
+        "    Save-UpdateLog '更新失败'",
+        "    Write-Host ''",
+        "    Write-Host '更新失败，详情已写入：' -ForegroundColor Red",
+        "    Write-Host $logPath -ForegroundColor Yellow",
+        "    Write-Host $failure -ForegroundColor Red",
+        "    Read-Host '按 Enter 关闭更新器'",
+        "    exit 1",
+        "}",
+        "$finalStatus = if ($postUpdateFailed) { '更新成功，后续操作失败' } else { '更新成功' }",
+        "Save-UpdateLog $finalStatus",
+        "Write-Host ''",
+        "if ($postUpdateFailed) {",
+        "    Write-Host '更新已完成，但服务或 Terminal UI 的自动重启失败，请查看更新日志。' -ForegroundColor Yellow",
+        "} else {",
+        "    Write-Host '更新完成。' -ForegroundColor Green",
+        "}",
+        "Start-Sleep -Seconds 1",
+        "Remove-Item -LiteralPath $stdoutPath, $stderrPath, $readyPath -Force -ErrorAction SilentlyContinue",
         "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
         "",
     ])
 
 
-def start_deferred_windows_update(version_result: VersionCheckResult, command: list[str], post_update_commands: list[list[str]] | None = None) -> Path:
-    script_path = deferred_update_script_path()
+def wait_for_windows_update_helper(process: subprocess.Popen[Any], ready_path: Path, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready_path.exists():
+            return
+        returncode = process.poll()
+        if returncode is not None:
+            raise RuntimeError(f"Windows 更新器在接管前退出，退出码: {returncode}")
+        time.sleep(0.05)
+    raise TimeoutError("Windows 更新器启动超时，未确认接管。")
+
+
+def start_windows_update_helper(version_result: VersionCheckResult, command: list[str], post_update_commands: list[list[str]] | None = None) -> Path:
+    script_path = windows_update_script_path()
+    ready_path = windows_update_ready_path()
     log_path = update_log_path()
     stdout_path = default_cache_dir() / f"update-{os.getpid()}.stdout.log"
     stderr_path = default_cache_dir() / f"update-{os.getpid()}.stderr.log"
+    command = resolved_update_command(command)
     script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(windows_deferred_update_script(version_result, command, os.getpid(), log_path, stdout_path, stderr_path, post_update_commands), encoding="utf-8")
-    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=windows_update_creationflags())
+    ready_path.unlink(missing_ok=True)
+    script_path.write_text(windows_update_helper_script(version_result, command, os.getpid(), ready_path, log_path, stdout_path, stderr_path, post_update_commands), encoding="utf-8-sig")
+    process = subprocess.Popen(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        close_fds=True,
+        creationflags=windows_update_creationflags(),
+    )
+    wait_for_windows_update_helper(process, ready_path)
+    ready_path.unlink(missing_ok=True)
     return script_path
 
 
@@ -458,31 +548,29 @@ def install_latest_version_outcome(version_result: VersionCheckResult, config_pa
         command = manual_update_command(version_result)
     except ValueError as exc:
         return UpdateInstallOutcome(section_panel(str(exc), "手动更新", "red"))
-    if should_defer_windows_update(command):
+    if should_use_windows_update_helper(command):
         try:
-            start_deferred_windows_update(version_result, command, post_update_commands(config_path, restart_tui))
-        except (OSError, subprocess.SubprocessError) as exc:
+            start_windows_update_helper(version_result, command, post_update_commands(config_path, restart_tui))
+        except (OSError, subprocess.SubprocessError, RuntimeError, TimeoutError) as exc:
             stderr = str(exc)
             log_path, log_error = write_update_log(version_result, command, None, "", stderr)
             content = "\n".join([
-                "延迟更新任务启动失败。",
+                "Windows 独立更新器启动失败。",
                 f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
                 *update_log_lines(log_path, log_error, False),
                 escape(stderr),
             ])
             return UpdateInstallOutcome(section_panel(content, "手动更新", "red"))
-        stdout = "Windows 已安排延迟更新。退出当前正在运行的 amkr 后，将自动执行更新命令。"
-        log_path, log_error = write_update_log(version_result, command, "等待当前进程退出", stdout, "")
-        follow_up = "更新完成后会自动重启正在运行的服务，并重新打开 Terminal UI。" if restart_tui and config_path is not None else "更新完成后会自动重启正在运行的后台/系统服务。" if config_path is not None else "更新完成后请重新打开终端，并重启正在运行的后台/系统服务。"
+        log_path = update_log_path()
+        follow_up = "更新成功后会自动重启正在运行的服务，并重新打开 Terminal UI。" if restart_tui and config_path is not None else "更新成功后会自动重启正在运行的后台/系统服务。" if config_path is not None else "更新成功后请重新打开终端，并重启正在运行的后台/系统服务。"
         content = "\n".join([
-            f"已安排通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
-            "请退出当前 Terminal UI 或关闭正在运行的 amkr 命令，Windows 释放 amkr.exe 后会自动继续更新。",
+            f"Windows 独立更新器已接管，将通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
+            "当前界面将立即退出；请在新打开的更新器窗口中查看进度和错误信息。",
             follow_up,
             f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
-            *update_log_lines(log_path, log_error, False),
-            escape(stdout),
+            *update_log_lines(log_path, None, False),
         ])
-        return UpdateInstallOutcome(section_panel(content, "手动更新", "yellow"), updated=True, deferred=True)
+        return UpdateInstallOutcome(section_panel(content, "手动更新", "yellow"), updated=True, handoff=True)
     try:
         result = subprocess.run(command, capture_output=True, text=True, errors="replace")
     except (OSError, subprocess.SubprocessError) as exc:

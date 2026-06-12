@@ -6,7 +6,7 @@ import sys
 
 from rich.console import Console
 
-from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, install_latest_version_outcome, is_newer_version, manual_update_command, post_update_commands, should_defer_windows_update, update_output_preview, windows_deferred_update_script
+from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, install_latest_version_outcome, is_newer_version, manual_update_command, post_update_commands, should_use_windows_update_helper, start_windows_update_helper, update_output_preview, windows_update_helper_script
 
 
 class FakeResponse:
@@ -190,43 +190,41 @@ def test_install_latest_version_restarts_service_after_success(monkeypatch, tmp_
     text = render_text(outcome.content)
 
     assert outcome.updated
-    assert not outcome.deferred
+    assert not outcome.handoff
     assert restarted == [str(tmp_path / "config.json")]
     assert "Terminal UI 将重新启动" in text
     assert "service restarted" in text
 
 
-def test_should_defer_windows_update_for_console_script(monkeypatch) -> None:
+def test_should_use_windows_update_helper_for_console_script(monkeypatch) -> None:
     monkeypatch.setattr("auto_model_key_router.update.os.name", "nt")
     monkeypatch.setattr(sys, "argv", ["C:\\Users\\Sparr\\.local\\bin\\amkr.exe"])
 
-    assert should_defer_windows_update(["uv", "tool", "upgrade", "auto-model-key-router"])
+    assert should_use_windows_update_helper(["uv", "tool", "upgrade", "auto-model-key-router"])
 
 
-def test_install_latest_version_defers_windows_console_script_update(monkeypatch, tmp_path) -> None:
-    started: list[list[str]] = []
+def test_install_latest_version_hands_off_to_windows_update_helper(monkeypatch, tmp_path) -> None:
+    started: list[tuple[list[str], list[list[str]]]] = []
     monkeypatch.setattr("auto_model_key_router.update.os.name", "nt")
     monkeypatch.setattr(sys, "argv", ["C:\\Users\\Sparr\\.local\\bin\\amkr.exe"])
     monkeypatch.setattr("auto_model_key_router.update.detected_installation_method", lambda: "uv-tool")
     monkeypatch.setattr("auto_model_key_router.update.update_log_path", lambda: tmp_path / "update.log")
-    monkeypatch.setattr("auto_model_key_router.update.deferred_update_script_path", lambda: tmp_path / "update.ps1")
-    monkeypatch.setattr("auto_model_key_router.update.default_cache_dir", lambda: tmp_path)
 
-    def fake_popen(command: list[str], **kwargs: object) -> None:
-        started.append(command)
+    def fake_start(version_result: VersionCheckResult, command: list[str], commands_after_update: list[list[str]]) -> None:
+        started.append((command, commands_after_update))
 
-    monkeypatch.setattr("auto_model_key_router.update.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("auto_model_key_router.update.start_windows_update_helper", fake_start)
     monkeypatch.setattr("auto_model_key_router.update.subprocess.run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("不应直接运行更新命令")))
 
-    panel = install_latest_version(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"))
-    text = str(panel.renderable)
-    log_text = (tmp_path / "update.log").read_text(encoding="utf-8")
+    outcome = install_latest_version_outcome(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), tmp_path / "config.json", restart_tui=True)
+    text = render_text(outcome.content)
 
-    assert started == [["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(tmp_path / "update.ps1")]]
-    assert "已安排" in text
-    assert "退出当前 Terminal UI" in text
-    assert "退出码: 等待当前进程退出" in log_text
-    assert "uv tool upgrade auto-model-key-router" in log_text
+    assert started[0][0] == ["uv", "tool", "upgrade", "auto-model-key-router"]
+    assert started[0][1][0][-1] == "--restart-service-after-update"
+    assert outcome.updated
+    assert outcome.handoff
+    assert "独立更新器已接管" in text
+    assert "当前界面将立即退出" in text
 
 
 def test_post_update_commands_restart_service_and_tui(tmp_path) -> None:
@@ -239,27 +237,48 @@ def test_post_update_commands_restart_service_and_tui(tmp_path) -> None:
     assert commands[1][-2:] == ["--config", str(config_path)]
 
 
-def test_windows_deferred_update_script_waits_parent_and_writes_log(tmp_path) -> None:
+def test_windows_update_helper_script_handshakes_retries_and_writes_log(tmp_path) -> None:
     command = ["uv", "tool", "upgrade", "auto-model-key-router"]
 
-    script = windows_deferred_update_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log")
+    script = windows_update_helper_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.ready", tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log")
 
+    assert "Set-Content -LiteralPath $readyPath" in script
     assert "Wait-Process -Id 123" in script
-    assert "Start-Process -FilePath $tool" in script
+    assert "for ($attempt = 1; $attempt -le $maxAttempts; $attempt++)" in script
+    assert "& $tool @commandArgs" in script
     assert "命令: uv tool upgrade auto-model-key-router" in script
-    assert "Set-Content -LiteralPath $logPath" in script
+    assert "Save-UpdateLog '更新失败'" in script
+    assert "Read-Host '按 Enter 关闭更新器'" in script
 
 
-def test_windows_deferred_update_script_runs_post_update_commands_on_success(tmp_path) -> None:
+def test_windows_update_helper_script_runs_post_update_commands_on_success(tmp_path) -> None:
     command = ["uv", "tool", "upgrade", "auto-model-key-router"]
     post_commands = [[sys.executable, "-m", "auto_model_key_router.main", "--config", str(tmp_path / "config.json"), "--restart-service-after-update"], [sys.executable, "-m", "auto_model_key_router.main", "--config", str(tmp_path / "config.json")]]
 
-    script = windows_deferred_update_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log", post_commands)
+    script = windows_update_helper_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.ready", tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log", post_commands)
 
     assert "if ($exitCode -eq 0)" in script
     assert "--restart-service-after-update" in script
-    assert "Start-Process -FilePath $postTool0" in script
+    assert "& $postTool0 @postArgs0" in script
     assert "Start-Process -FilePath $postTool1" in script
+    assert "更新成功，后续操作失败" in script
+
+
+def test_start_windows_update_helper_writes_utf8_bom_for_windows_powershell(tmp_path, monkeypatch) -> None:
+    launched: list[tuple[list[str], dict[str, object]]] = []
+    script_path = tmp_path / "update.ps1"
+    monkeypatch.setattr("auto_model_key_router.update.windows_update_script_path", lambda: script_path)
+    monkeypatch.setattr("auto_model_key_router.update.windows_update_ready_path", lambda: tmp_path / "update.ready")
+    monkeypatch.setattr("auto_model_key_router.update.update_log_path", lambda: tmp_path / "update.log")
+    monkeypatch.setattr("auto_model_key_router.update.default_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr("auto_model_key_router.update.wait_for_windows_update_helper", lambda process, ready_path: None)
+    monkeypatch.setattr("auto_model_key_router.update.subprocess.Popen", lambda command, **kwargs: launched.append((command, kwargs)) or object())
+
+    start_windows_update_helper(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), ["uv", "tool", "upgrade", "auto-model-key-router"])
+
+    assert script_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert launched[0][0][0] == "powershell.exe"
+    assert "-File" in launched[0][0]
 
 
 def test_update_output_preview_keeps_tail_for_long_logs() -> None:

@@ -58,6 +58,10 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     )
     app.state.health_probe_task = None
 
+    @app.head("/", include_in_schema=False)
+    async def root_probe() -> Response:
+        return Response(status_code=204)
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         await _reload_config_if_changed(app.state)
@@ -68,6 +72,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             "config_path": app.state.config_path,
             "local_auth_enabled": bool(local_api_key),
             "local_api_key_fingerprint": _key_fingerprint(local_api_key),
+            "unified_model": app.state.key_pool.unified_route,
             "key_states": app.state.key_pool.key_states(),
         }
 
@@ -102,7 +107,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         if requested_model_id is None:
             return JSONResponse({"error": {"message": "请求体中缺少 model 字段"}}, status_code=400)
         requested_model_name, requested_key_name = _split_requested_model_key(requested_model_id)
-        model_id = app.state.key_pool.resolve_model_id(requested_model_name)
+        model_id, requested_key_name = app.state.key_pool.resolve_route(requested_model_name, requested_key_name)
         upstream_body = _upstream_body(body, payload, model_id, app.state.config, stream=_is_stream_request(payload))
 
         excluded: set[str] = set()

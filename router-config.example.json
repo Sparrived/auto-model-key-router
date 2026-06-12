@@ -11,6 +11,10 @@
   "metrics_db_path": "",
   "log_file_path": "",
   "local_api_key": "amkr-generated-local-api-key",
+  "unified_model": {
+    "model": "gpt-4o-mini",
+    "key": "gpt-4o-mini-key-1"
+  },
   "models": [
     {
       "id": "gpt-4o-mini",

@@ -424,13 +424,102 @@ def test_service_logs_renderable_can_show_archived_log(tmp_path) -> None:
 
 
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
-    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "调用日志"), ("4", "CLI 设置"), ("0", "退出")]
+    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
     assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
     assert ("4", "配置迁移") in dashboard.SETTINGS_OPTIONS
     assert ("5", "版本更新") in dashboard.SETTINGS_OPTIONS
     assert all(label != "调用日志" for _, label in dashboard.SETTINGS_OPTIONS)
+
+
+def test_tui_switches_unified_model_and_key(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "local_api_key": "local-key",
+                "unified_model": {"model": "model-one", "key": "one"},
+                "models": [
+                    {
+                        "id": "model-one",
+                        "keys": [{"name": "one", "api_key": "sk-one", "base_url": "https://one.test"}],
+                    },
+                    {
+                        "id": "model-two",
+                        "aliases": ["second"],
+                        "keys": [
+                            {"name": "two-a", "api_key": "sk-two-a", "base_url": "https://two-a.test"},
+                            {"name": "two-b", "api_key": "sk-two-b", "base_url": "https://two-b.test"},
+                            {"name": "disabled", "api_key": "sk-disabled", "base_url": "https://disabled.test", "enabled": False},
+                        ],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["2", "2"])
+    menus: list[list[tuple[str, str]]] = []
+
+    def choose(title, options, selected=0, content=None):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(dashboard, "select_option", choose)
+
+    result = dashboard.switch_unified_model_interactively(config_path, choose_model=True)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["unified_model"] == {"model": "model-two", "key": "two-b"}
+    assert "model-two" in render_plain(result)
+    assert "two-b" in render_plain(result)
+    assert all("disabled" not in label for _, label in menus[1])
+
+
+def test_tui_can_restore_unified_model_auto_routing(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "local_api_key": "local-key",
+                "unified_model": {"model": "test-model", "key": "key-1"},
+                "models": [
+                    {
+                        "id": "test-model",
+                        "keys": [
+                            {"name": "key-1", "api_key": "sk-one", "base_url": "https://one.test"},
+                            {"name": "key-2", "api_key": "sk-two", "base_url": "https://two.test"},
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "select_option", lambda title, options, selected=0, content=None: "a")
+
+    result = dashboard.switch_unified_model_interactively(config_path, choose_model=False)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["unified_model"] == {"model": "test-model"}
+    assert "自动路由" in render_plain(result)
+
+
+def test_terminal_ui_exits_immediately_after_windows_update_handoff(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config = dashboard.RouterConfig.from_dict({"models": []})
+    shown: list[object] = []
+    monkeypatch.setattr(dashboard, "check_latest_version", lambda timeout: None)
+    monkeypatch.setattr(dashboard, "select_menu_option", lambda *args: ("5", 0))
+    monkeypatch.setattr(dashboard, "run_submodule", lambda action: dashboard.UpdateInstallOutcome(Text("updater"), updated=True, handoff=True))
+    monkeypatch.setattr(dashboard, "show_result_page", lambda title, content: shown.append(content))
+
+    dashboard.run_terminal_ui(config_path, config)
+
+    assert shown == []
 
 
 def test_configure_cli_generates_auth_key_and_installs_service(tmp_path, monkeypatch) -> None:
@@ -591,44 +680,71 @@ def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_p
         encoding="utf-8",
     )
     prompts: list[str] = []
-    answers = iter(["existing-model", "extra", "https://extra.example.com", "sk-extra"])
+    answers = iter(["extra", "sk-extra"])
+    choices = iter(["1", "1"])
+    menus: list[tuple[str, list[tuple[str, str]]]] = []
 
     def ask(prompt: str, **kwargs):
         prompts.append(prompt)
         return next(answers)
 
+    def choose(title, options, selected=0, content=None):
+        menus.append((title, options))
+        return next(choices)
+
     monkeypatch.setattr(config_editor.Prompt, "ask", ask)
+    monkeypatch.setattr(config_editor, "select_option", choose)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
 
     config_editor.add_config_interactively(config_path, ask_continue=False)
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
     model = data["models"][0]
-    assert prompts == ["模型 ID", "Key 名称", "上游 base_url", "API key"]
+    assert prompts == ["Key 名称", "API key"]
+    assert menus[0][0] == "选择模型"
+    assert menus[0][1][-2:] == [("n", "自定义添加新的模型 ID"), ("0", "返回")]
+    assert menus[1][0] == "选择上游 URL"
+    assert menus[1][1][0][1] == "upstream.example.com"
     assert model["aliases"] == ["Existing"]
     assert model["routing_mode"] == "priority"
     assert model["reasoning_effort"] == "high"
-    assert model["keys"][-1] == {"name": "extra", "api_key": "sk-extra", "base_url": "https://extra.example.com"}
+    assert model["keys"][-1] == {"name": "extra", "api_key": "sk-extra", "base_url": "https://upstream.example.com"}
 
 
 def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
-    config_path.write_text(json.dumps({"default_base_url": "https://default.example.com", "models": []}, ensure_ascii=False), encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            {
+                "default_base_url": "https://default.example.com",
+                "models": [
+                    {
+                        "id": "existing-model",
+                        "keys": [{"name": "main", "api_key": "sk-main", "base_url": "https://upstream.example.com"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     prompts: list[str] = []
     answers = iter(["new-model", "New Alias", "only_first", "low", "primary", "https://primary.example.com", "sk-primary"])
+    choices = iter(["n", "n"])
 
     def ask(prompt: str, **kwargs):
         prompts.append(prompt)
         return next(answers)
 
     monkeypatch.setattr(config_editor.Prompt, "ask", ask)
+    monkeypatch.setattr(config_editor, "select_option", lambda title, options, selected=0, content=None: next(choices))
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
 
     config_editor.add_config_interactively(config_path, ask_continue=False)
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    model = data["models"][0]
-    assert prompts == ["模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式：priority=优先级，round_robin=分流，only_first=仅首个", "推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", "Key 名称", "上游 base_url", "API key"]
+    model = data["models"][1]
+    assert prompts == ["新模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式：priority=优先级，round_robin=分流，only_first=仅首个", "推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", "Key 名称", "新的上游 base_url", "API key"]
     assert model["aliases"] == ["New Alias"]
     assert model["routing_mode"] == "only_first"
     assert model["reasoning_effort"] == "low"

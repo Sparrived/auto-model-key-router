@@ -9,17 +9,18 @@ from rich.console import Group
 from rich.live import Live
 from rich.table import Table
 
-from .config import RouterConfig, generate_local_api_key
+from .config import UNIFIED_MODEL_ID, RouterConfig, generate_local_api_key
 from .config_editor import load_config_data, manage_config_transfer_interactively, manage_model_keys_interactively, reasoning_effort_text, save_config_data, set_listen_interactively, set_local_api_key_interactively
 from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import is_service_healthy, is_system_service_registered, manage_system_service, service_status_panel, system_service_status_panel
 from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .unified_model import switch_unified_model
 from .update import UpdateInstallOutcome, VersionCheckResult, check_latest_version, install_latest_version_outcome, render_update_notice, render_version_check_result, update_target_label
 
 
-MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "调用日志"), ("4", "CLI 设置"), ("0", "退出")]
+MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
 SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "配置迁移"), ("5", "版本更新"), ("0", "返回")]
 
 
@@ -41,13 +42,19 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             config = RouterConfig.load(config_path)
             continue
         if choice == "3":
+            run_submodule(lambda: manage_unified_model_interactively(config_path))
+            config = RouterConfig.load(config_path)
+            continue
+        if choice == "4":
             config = RouterConfig.load(config_path)
             run_submodule(lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20))
             config = RouterConfig.load(config_path)
             continue
-        if choice == "4":
+        if choice == "5":
             result = run_submodule(lambda: manage_cli_settings_interactively(config_path, update_result))
             if isinstance(result, UpdateInstallOutcome):
+                if result.handoff:
+                    return
                 show_result_page("手动更新", result.content)
                 if result.updated:
                     return
@@ -55,6 +62,74 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             if isinstance(result, VersionCheckResult):
                 update_result = result
             config = RouterConfig.load(config_path)
+
+
+def manage_unified_model_interactively(config_path: Path) -> None:
+    while True:
+        config = RouterConfig.load(config_path)
+        choice = select_option(
+            "统一模型",
+            [("1", "切换模型和 Key"), ("2", "仅切换 Key"), ("0", "返回")],
+            content=unified_model_status_panel(config),
+        )
+        if choice == "0":
+            return
+        result = run_submodule(lambda: switch_unified_model_interactively(config_path, choose_model=choice == "1"))
+        if result is not None:
+            show_result_page("统一模型", result)
+
+
+def switch_unified_model_interactively(config_path: Path, *, choose_model: bool) -> Any:
+    config = RouterConfig.load(config_path)
+    selectable_models = [model for model in config.models if any(key.enabled for key in model.keys)]
+    if not selectable_models:
+        return section_panel("[yellow]还没有包含已启用 Key 的模型配置。[/yellow]", "统一模型", "yellow")
+
+    current = config.unified_model
+    if choose_model or current is None:
+        model_options = []
+        for index, model in enumerate(selectable_models):
+            aliases = f" · {short_text(', '.join(model.aliases), 24)}" if model.aliases else ""
+            model_options.append((str(index + 1), f"{short_text(model.id, 28)}{aliases}"))
+        model_options.append(("0", "返回"))
+        current_model_id = config.configured_model_id(current.model) if current is not None else None
+        selected_model = next((index for index, model in enumerate(selectable_models) if model.id == current_model_id), 0)
+        model_choice = select_option("选择统一模型", model_options, selected=selected_model)
+        if model_choice == "0":
+            return None
+        target_model = selectable_models[int(model_choice) - 1]
+    else:
+        target_model_id = config.configured_model_id(current.model)
+        target_model = next((model for model in selectable_models if model.id == target_model_id), None)
+        if target_model is None:
+            return section_panel("[red]当前统一模型目标不存在或没有已启用 Key，请重新选择模型。[/red]", "统一模型", "red")
+
+    enabled_keys = [key for key in target_model.keys if key.enabled]
+    key_options = [("a", "自动路由")]
+    for index, key in enumerate(enabled_keys):
+        key_options.append((str(index + 1), f"{short_text(key.name, 28)} · {compact_url(key.base_url, 32)}"))
+    key_options.append(("0", "返回"))
+    current_key = current.key if current is not None and target_model.id == config.configured_model_id(current.model) else None
+    selected_key = next((index + 1 for index, key in enumerate(enabled_keys) if key.name == current_key), 0)
+    key_choice = select_option("选择统一模型 Key", key_options, selected=selected_key)
+    if key_choice == "0":
+        return None
+    key_name = None if key_choice == "a" else enabled_keys[int(key_choice) - 1].name
+
+    updated = switch_unified_model(config_path, target_model.id, key_name, update_key=True)
+    return unified_model_status_panel(updated, title="统一模型已切换", color="green")
+
+
+def unified_model_status_panel(config: RouterConfig, title: str = "当前路由", color: str = "cyan") -> Any:
+    if config.unified_model is None:
+        content = f"[yellow]尚未配置 {UNIFIED_MODEL_ID}。[/yellow]\n请选择已有模型和 Key。"
+    else:
+        content = (
+            f"请求模型: [bold cyan]{UNIFIED_MODEL_ID}[/bold cyan]\n"
+            f"目标模型: [bold]{config.unified_model.model}[/bold]\n"
+            f"使用 Key: [bold green]{config.unified_model.key or '自动路由'}[/bold green]"
+        )
+    return section_panel(content, title, color)
 
 
 def manage_cli_settings_interactively(config_path: Path, update_result: VersionCheckResult | None = None) -> VersionCheckResult | UpdateInstallOutcome | None:
@@ -178,7 +253,7 @@ def manage_version_update_interactively(config_path: Path, update_result: Versio
             if latest_result.error or not latest_result.update_available:
                 show_result_page("版本更新", render_version_check_result(latest_result))
                 continue
-            if confirm_choice(f"将通过 {latest_result.source or '可用来源'} 安装 {update_target_label(latest_result)}，更新完成后自动重启服务和 Terminal UI。是否继续？"):
+            if confirm_choice(f"将通过 {latest_result.source or '可用来源'} 安装 {update_target_label(latest_result)}。Windows 会交由独立更新器接管并退出当前界面，更新成功后自动重启服务和 Terminal UI。是否继续？"):
                 clear_terminal_history()
                 return install_latest_version_outcome(latest_result, config_path, restart_tui=True)
 
@@ -218,5 +293,8 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     renderables = [section_panel(summary, "运行概览", "cyan")]
     if warning is not None:
         renderables.append(warning)
+    if config.unified_model is not None:
+        key_text = config.unified_model.key or "自动路由"
+        renderables.append(section_panel(f"[bold cyan]{UNIFIED_MODEL_ID}[/bold cyan] → [bold]{config.unified_model.model}[/bold]\nKey: [bold green]{key_text}[/bold green]", "统一模型", "cyan"))
     renderables.append(section_panel(table, "模型路由", "blue"))
     return tuple(renderables)

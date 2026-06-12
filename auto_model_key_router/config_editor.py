@@ -200,14 +200,63 @@ def paste_config_interactively(path: Path) -> Any:
     return Group(content, restart_service_after_config_change(path, old_config, new_config))
 
 
+def select_model_id_for_new_key(models: list[dict[str, Any]]) -> str | None:
+    if not models:
+        return Prompt.ask("新模型 ID").strip()
+
+    options = [
+        (str(index + 1), f"{short_text(model.get('id') or '-', 32)} · {len(model.get('keys', []))} Key")
+        for index, model in enumerate(models)
+    ]
+    options.extend([("n", "自定义添加新的模型 ID"), ("0", "返回")])
+    choice = select_option("选择模型", options)
+    if choice == "0":
+        return None
+    if choice == "n":
+        return Prompt.ask("新模型 ID").strip()
+    return str(models[int(choice) - 1].get("id") or "").strip()
+
+
+def configured_base_urls(data: dict[str, Any], selected_model: dict[str, Any]) -> list[str]:
+    base_urls: list[str] = []
+
+    def append(value: Any) -> None:
+        base_url = str(value or "").strip()
+        if base_url and base_url not in base_urls:
+            base_urls.append(base_url)
+
+    for key in selected_model.get("keys", []):
+        append(key.get("base_url"))
+    for model in data.get("models", []):
+        for key in model.get("keys", []):
+            append(key.get("base_url"))
+    append(data.get("default_base_url") or "https://api.openai.com")
+    return base_urls
+
+
+def select_base_url_for_new_key(data: dict[str, Any], selected_model: dict[str, Any]) -> str | None:
+    base_urls = configured_base_urls(data, selected_model)
+    options = [(str(index + 1), compact_url(base_url, 48)) for index, base_url in enumerate(base_urls)]
+    options.extend([("n", "自定义添加新的上游 URL"), ("0", "返回")])
+    choice = select_option("选择上游 URL", options)
+    if choice == "0":
+        return None
+    if choice == "n":
+        default_base_url = str(data.get("default_base_url") or "https://api.openai.com")
+        return Prompt.ask("新的上游 base_url", default=default_base_url).strip()
+    return base_urls[int(choice) - 1]
+
+
 def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     data = load_config_data(path)
     old_config = RouterConfig.from_dict(data)
-    model_id = Prompt.ask("模型 ID").strip()
+    models = data.setdefault("models", [])
+    model_id = select_model_id_for_new_key(models)
+    if model_id is None:
+        return None
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加失败", "red")
 
-    models = data.setdefault("models", [])
     model = find_model(models, model_id)
     is_new_model = model is None
     if model is None:
@@ -227,7 +276,11 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     keys = model.setdefault("keys", [])
     default_key_name = f"{model_id}-key-{len(keys) + 1}"
     key_name = Prompt.ask("Key 名称", default=default_key_name).strip() or default_key_name
-    base_url = Prompt.ask("上游 base_url", default=str(data.get("default_base_url") or "https://api.openai.com")).strip()
+    base_url = select_base_url_for_new_key(data, model)
+    if base_url is None:
+        return None
+    if not base_url:
+        return section_panel("[red]上游 base_url 不能为空[/red]", "添加失败", "red")
     api_key = Prompt.ask("API key", password=True).strip()
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")

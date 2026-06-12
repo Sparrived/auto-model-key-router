@@ -8,7 +8,7 @@ from pathlib import Path
 from time import time
 from typing import Any
 
-from .config import KeyConfig, RouterConfig
+from .config import UNIFIED_MODEL_ID, KeyConfig, RouterConfig
 
 
 @dataclass
@@ -51,6 +51,12 @@ class KeyPool:
             for model in config.models
             for name in (model.id, *model.aliases)
         }
+        self._unified_model_id = None
+        self._unified_key_name = None
+        if config.unified_model is not None:
+            self._unified_model_id = self._aliases[config.unified_model.model]
+            self._unified_key_name = config.unified_model.key
+            self._aliases[UNIFIED_MODEL_ID] = self._unified_model_id
 
     @property
     def model_ids(self) -> list[str]:
@@ -62,6 +68,17 @@ class KeyPool:
 
     def resolve_model_id(self, model_id: str) -> str:
         return self._aliases.get(model_id, model_id)
+
+    def resolve_route(self, model_id: str, key_name: str | None = None) -> tuple[str, str | None]:
+        if model_id == UNIFIED_MODEL_ID and key_name is None:
+            key_name = self._unified_key_name
+        return self.resolve_model_id(model_id), key_name
+
+    @property
+    def unified_route(self) -> dict[str, str | None] | None:
+        if self._unified_model_id is None:
+            return None
+        return {"model": self._unified_model_id, "key": self._unified_key_name}
 
     def key_count(self, model_id: str) -> int:
         return len([k for k in self._keys.get(self.resolve_model_id(model_id), ()) if k.enabled])

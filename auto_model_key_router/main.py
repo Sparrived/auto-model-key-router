@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
-from .config import DEFAULT_CONFIG_PATH, RouterConfig
+from .config import DEFAULT_CONFIG_PATH, UNIFIED_MODEL_ID, RouterConfig
 from .dashboard import render_config, run_terminal_ui
 from .logs_tui import render_logs
 from .service import background_status_panel, manage_system_service, service_status_panel, start_service_background, start_service_foreground, stop_background_service
 from .tui import clear_terminal_history, console, section_panel
+from .unified_model import switch_unified_model
 from .update import check_latest_version, render_version_check_result, restart_service_after_update, update_latest_version
 
 
@@ -19,6 +21,9 @@ def main() -> None:
     parser.add_argument("--host", help="覆盖配置中的监听地址")
     parser.add_argument("--port", type=int, help="覆盖配置中的监听端口")
     parser.add_argument("--show-config", action="store_true", help="只展示配置摘要，不启动服务")
+    parser.add_argument("--switch-model", metavar="MODEL", help=f"切换 {UNIFIED_MODEL_ID} 指向的已有模型或别名")
+    parser.add_argument("--switch-key", metavar="KEY", help=f"切换 {UNIFIED_MODEL_ID} 使用的已有 key；传 auto 恢复自动路由")
+    parser.add_argument("--show-unified-model", action="store_true", help=f"查看 {UNIFIED_MODEL_ID} 当前指向")
     parser.add_argument("--show-logs", nargs="?", const=20, type=int, help="进入调用日志，显示最近 N 行运行日志，调用统计明细固定 10 行/页")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--check-update", action="store_true", help="通过 PyPI/GitHub 检查最新版本")
@@ -46,9 +51,32 @@ def main() -> None:
             raise SystemExit(1) from exc
 
         if args.host:
-            config = RouterConfig(args.host, config.port, config.request_timeout, config.max_retries, config.key_failure_threshold, config.key_cooldown_seconds, config.key_state_path, config.upstream_health_check_interval, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
+            config = replace(config, host=args.host)
         if args.port:
-            config = RouterConfig(config.host, args.port, config.request_timeout, config.max_retries, config.key_failure_threshold, config.key_cooldown_seconds, config.key_state_path, config.upstream_health_check_interval, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
+            config = replace(config, port=args.port)
+
+        if args.switch_model is not None or args.switch_key is not None:
+            try:
+                config = switch_unified_model(
+                    config_path,
+                    args.switch_model,
+                    None if args.switch_key == "auto" else args.switch_key,
+                    update_key=args.switch_key is not None,
+                )
+            except (OSError, ValueError) as exc:
+                console.print(section_panel(f"[red]{exc}[/red]", "统一模型切换失败", "red"))
+                raise SystemExit(1) from exc
+            unified = config.unified_model
+            key_text = unified.key if unified and unified.key else "自动路由"
+            console.print(section_panel(f"请求模型: [bold]{UNIFIED_MODEL_ID}[/bold]\n目标模型: [bold]{unified.model if unified else '-'}[/bold]\n使用 Key: [bold]{key_text}[/bold]", "统一模型已切换", "green"))
+            return
+        if args.show_unified_model:
+            unified = config.unified_model
+            if unified is None:
+                console.print(section_panel(f"[yellow]尚未配置 {UNIFIED_MODEL_ID}。[/yellow]", "统一模型", "yellow"))
+            else:
+                console.print(section_panel(f"请求模型: [bold]{UNIFIED_MODEL_ID}[/bold]\n目标模型: [bold]{unified.model}[/bold]\n使用 Key: [bold]{unified.key or '自动路由'}[/bold]", "统一模型", "cyan"))
+            return
 
         if args.update:
             console.print(update_latest_version(timeout=10.0, config_path=config_path))
