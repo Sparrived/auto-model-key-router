@@ -260,6 +260,128 @@ def test_messages_response_is_converted_to_anthropic_schema() -> None:
         }
 
 
+def test_messages_tools_and_tool_history_are_converted_both_ways() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-tool",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-edit",
+                                        "type": "function",
+                                        "function": {"name": "Edit", "arguments": '{"path":"app.py","old":"a","new":"b"}'},
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 8, "completion_tokens": 4},
+                },
+            )
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"x-api-key": "local-key"},
+                json={
+                    "model": "test-model",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "Checking the file."},
+                                {"type": "tool_use", "id": "toolu-grep", "name": "Grep", "input": {"pattern": "needle"}},
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "tool_result", "tool_use_id": "toolu-grep", "content": [{"type": "text", "text": "app.py:10"}]}
+                            ],
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "name": "Grep",
+                            "description": "Search files",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"pattern": {"type": "string"}},
+                                "required": ["pattern"],
+                            },
+                        }
+                    ],
+                    "tool_choice": {"type": "tool", "name": "Grep", "disable_parallel_tool_use": True},
+                },
+            )
+
+        response = run_client(app, requests)
+        upstream = upstream_bodies[0]
+
+        assert upstream["tools"] == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Grep",
+                    "description": "Search files",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"pattern": {"type": "string"}},
+                        "required": ["pattern"],
+                    },
+                },
+            }
+        ]
+        assert upstream["tool_choice"] == {"type": "function", "function": {"name": "Grep"}}
+        assert upstream["parallel_tool_calls"] is False
+        assert upstream["messages"] == [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Checking the file."}],
+                "tool_calls": [
+                    {
+                        "id": "toolu-grep",
+                        "type": "function",
+                        "function": {"name": "Grep", "arguments": '{"pattern":"needle"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "toolu-grep", "content": "app.py:10"},
+        ]
+        assert response.json() == {
+            "id": "chatcmpl-tool",
+            "type": "message",
+            "role": "assistant",
+            "model": "test-model",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call-edit",
+                    "name": "Edit",
+                    "input": {"path": "app.py", "old": "a", "new": "b"},
+                }
+            ],
+            "stop_reason": "tool_use",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 8, "output_tokens": 4},
+        }
+
+
 def test_messages_stream_is_converted_to_anthropic_sse() -> None:
     with tempfile.TemporaryDirectory() as directory:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -296,6 +418,50 @@ def test_messages_stream_is_converted_to_anthropic_sse() -> None:
         assert "event: message_stop" in response.text
 
 
+def test_messages_stream_converts_openai_tool_calls_to_anthropic_tool_use() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=ChunkedStream(
+                    (
+                        b'data: {"choices":[{"delta":{"content":"I will inspect it."}}]}\n\n',
+                        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-grep","type":"function","function":{"name":"Grep","arguments":"{\\"pattern\\":"}}]}}]}\n\n',
+                        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"needle\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}\n\n',
+                        b"data: [DONE]\n\n",
+                    )
+                ),
+            )
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "find it"}],
+                    "tools": [{"name": "Grep", "input_schema": {"type": "object"}}],
+                    "stream": True,
+                },
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["x-accel-buffering"] == "no"
+        assert '"type":"text_delta","text":"I will inspect it."' in response.text
+        assert '"type":"tool_use","id":"call-grep","name":"Grep","input":{}' in response.text
+        assert '"type":"input_json_delta","partial_json":"{\\"pattern\\":\\"needle\\"}"' in response.text
+        assert '"stop_reason":"tool_use"' in response.text
+        assert response.text.index('"type":"text_delta"') < response.text.index('"type":"tool_use"')
+
+
 def test_messages_non_json_upstream_error_returns_anthropic_json() -> None:
     with tempfile.TemporaryDirectory() as directory:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -317,6 +483,24 @@ def test_messages_non_json_upstream_error_returns_anthropic_json() -> None:
         assert response.status_code == 502
         assert response.headers["content-type"].startswith("application/json")
         assert response.json() == {"type": "error", "error": {"type": "api_error", "message": "<html>bad gateway</html>"}}
+
+
+def test_keys_for_model_excludes_disabled_keys() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        enabled_key = KeyConfig("enabled-key", "sk-enabled", "https://enabled.test")
+        disabled_key = KeyConfig("disabled-key", "sk-disabled", "https://disabled.test", enabled=False)
+        key_pool = KeyPool(make_config(Path(directory), (enabled_key, disabled_key)))
+
+        assert key_pool.keys_for_model("alias-model") == (enabled_key,)
+
+
+def test_key_by_name_rejects_disabled_key() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        disabled_key = KeyConfig("disabled-key", "sk-disabled", "https://disabled.test", enabled=False)
+        key_pool = KeyPool(make_config(Path(directory), (disabled_key,)))
+
+        with pytest.raises(RuntimeError):
+            key_pool.key_by_name("alias-model", "disabled-key")
 
 
 def test_round_robin_prefers_key_with_lower_active_load() -> None:

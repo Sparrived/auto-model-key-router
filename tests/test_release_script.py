@@ -55,6 +55,18 @@ def test_git_args_disable_pager() -> None:
     ]
 
 
+def test_run_command_prints_captured_stderr(capsys) -> None:
+    result = release_script.run_command(
+        [sys.executable, "-c", "import sys; sys.stderr.write('release error\\n')"],
+        capture=True,
+        check=False,
+    )
+
+    captured = capsys.readouterr()
+    assert result.returncode == 0
+    assert "release error" in captured.err
+
+
 def test_render_updated_changelog_moves_unreleased_body() -> None:
     text = "# Changelog\n\n## [Unreleased]\n\n### Added\n- 新增功能\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- 初始版本\n"
 

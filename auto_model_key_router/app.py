@@ -206,13 +206,16 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
                     stream = _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
                     media_type = response.headers.get("content-type")
+                    response_headers = _response_headers(response)
                     if path == "messages":
                         stream = _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
                         media_type = "text/event-stream"
+                        response_headers["cache-control"] = "no-cache"
+                        response_headers["x-accel-buffering"] = "no"
                     stream_response = StreamingResponse(
                         stream,
                         status_code=response.status_code,
-                        headers=_response_headers(response),
+                        headers=response_headers,
                         media_type=media_type,
                     )
                     release_key = False
@@ -339,11 +342,22 @@ def _adapt_anthropic_messages_payload(payload: dict[str, Any]) -> dict[str, Any]
     if not isinstance(messages, list):
         return payload
     adapted = dict(payload)
-    adapted_messages = [_adapt_message(message) for message in messages if isinstance(message, dict)]
+    adapted_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict):
+            adapted_messages.extend(_adapt_anthropic_message(message))
     system = adapted.pop("system", None)
     if system:
         adapted_messages = [{"role": "system", "content": _adapt_content(system)}, *adapted_messages]
     adapted["messages"] = adapted_messages
+    tools = adapted.get("tools")
+    if isinstance(tools, list):
+        adapted["tools"] = [_adapt_anthropic_tool(tool) for tool in tools if isinstance(tool, dict)]
+    tool_choice = adapted.get("tool_choice")
+    if isinstance(tool_choice, dict):
+        adapted["tool_choice"] = _adapt_anthropic_tool_choice(tool_choice)
+        if "disable_parallel_tool_use" in tool_choice:
+            adapted["parallel_tool_calls"] = not bool(tool_choice["disable_parallel_tool_use"])
     return adapted
 
 
@@ -391,10 +405,104 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
     return messages
 
 
-def _adapt_message(message: dict[str, Any]) -> dict[str, Any]:
+def _adapt_anthropic_message(message: dict[str, Any]) -> list[dict[str, Any]]:
+    role = str(message.get("role") or "user")
+    content = message.get("content", "")
+    if not isinstance(content, list):
+        return [{**message, "role": role, "content": _adapt_content(content)}]
+
+    if role == "assistant":
+        text_parts: list[Any] = []
+        tool_calls: list[dict[str, Any]] = []
+        for index, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                tool_input = part.get("input")
+                tool_calls.append(
+                    {
+                        "id": str(part.get("id") or f"toolu_amkr_{index}"),
+                        "type": "function",
+                        "function": {
+                            "name": str(part.get("name") or ""),
+                            "arguments": json.dumps(tool_input if tool_input is not None else {}, ensure_ascii=False, separators=(",", ":")),
+                        },
+                    }
+                )
+            else:
+                text_parts.append(part)
+        adapted = {key: value for key, value in message.items() if key != "content"}
+        adapted["role"] = role
+        adapted["content"] = _adapt_content(text_parts) if text_parts else None
+        if tool_calls:
+            adapted["tool_calls"] = tool_calls
+        return [adapted]
+
+    if role == "user" and any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content):
+        adapted_messages: list[dict[str, Any]] = []
+        pending_parts: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "tool_result":
+                pending_parts.append(part)
+                continue
+            if pending_parts:
+                adapted_messages.append({"role": "user", "content": _adapt_content(pending_parts)})
+                pending_parts = []
+            adapted_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(part.get("tool_use_id") or ""),
+                    "content": _tool_result_text(part.get("content", "")),
+                }
+            )
+        if pending_parts:
+            adapted_messages.append({"role": "user", "content": _adapt_content(pending_parts)})
+        return adapted_messages
+
     adapted = dict(message)
-    adapted["content"] = _adapt_content(adapted.get("content", ""))
-    return adapted
+    adapted["role"] = role
+    adapted["content"] = _adapt_content(content)
+    return [adapted]
+
+
+def _adapt_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+        return tool
+    function: dict[str, Any] = {"name": str(tool.get("name") or "")}
+    if tool.get("description") is not None:
+        function["description"] = str(tool["description"])
+    parameters = tool.get("input_schema", tool.get("parameters"))
+    function["parameters"] = parameters if isinstance(parameters, dict) else {"type": "object", "properties": {}}
+    return {"type": "function", "function": function}
+
+
+def _adapt_anthropic_tool_choice(tool_choice: dict[str, Any]) -> Any:
+    choice_type = tool_choice.get("type")
+    if choice_type == "any":
+        return "required"
+    if choice_type in {"auto", "none"}:
+        return choice_type
+    if choice_type == "tool":
+        return {"type": "function", "function": {"name": str(tool_choice.get("name") or "")}}
+    return tool_choice
+
+
+def _tool_result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("text") is not None:
+                parts.append(str(part["text"]))
+            elif isinstance(part, str):
+                parts.append(part)
+            else:
+                parts.append(json.dumps(part, ensure_ascii=False, separators=(",", ":")))
+        return "".join(parts)
+    if content is None:
+        return ""
+    if isinstance(content, dict) and content.get("text") is not None:
+        return str(content["text"])
+    return json.dumps(content, ensure_ascii=False, separators=(",", ":"))
 
 
 def _adapt_content(content: Any) -> Any:
@@ -644,31 +752,55 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
     usage: dict[str, Any] | None = None
     first_token_ms = 0
     failed = False
-    message_id = "msg_amkr"
-    role = "assistant"
-    content_started = False
+    stream_state: dict[str, Any] = {
+        "next_content_index": 0,
+        "text_index": None,
+        "tool_calls": {},
+        "stop_reason": None,
+    }
     try:
-        yield _anthropic_sse("message_start", {"type": "message_start", "message": {"id": message_id, "type": "message", "role": role, "model": requested_model_id, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
+        yield _anthropic_sse("message_start", {"type": "message_start", "message": {"id": "msg_amkr", "type": "message", "role": "assistant", "model": requested_model_id, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
         async for chunk in response.aiter_bytes():
             chunk_count += 1
             byte_count += len(chunk)
             if first_token_ms == 0:
                 first_token_ms = _elapsed_ms(started)
-            buffer, events, chunk_usage, chunk_message_id, chunk_role = _anthropic_stream_events(buffer, chunk, content_started)
+            buffer, events, chunk_usage = _anthropic_stream_events(buffer, chunk, stream_state)
             if chunk_usage is not None:
                 usage = chunk_usage
-            if chunk_message_id:
-                message_id = chunk_message_id
-            if chunk_role:
-                role = chunk_role
             for event in events:
-                if event.startswith(b"event: content_block_start"):
-                    content_started = True
                 yield event
-        if not content_started:
+        if buffer.strip():
+            buffer, events, chunk_usage = _anthropic_stream_events(buffer, b"\n", stream_state)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            for event in events:
+                yield event
+
+        text_index = stream_state.get("text_index")
+        if isinstance(text_index, int):
+            yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": text_index})
+
+        tool_calls = stream_state["tool_calls"]
+        for tool_index in sorted(tool_calls):
+            tool_call = tool_calls[tool_index]
+            content_index = int(stream_state["next_content_index"])
+            stream_state["next_content_index"] = content_index + 1
+            tool_id = str(tool_call.get("id") or f"call_amkr_{tool_index}")
+            tool_name = str(tool_call.get("name") or "")
+            arguments = str(tool_call.get("arguments") or "{}")
+            yield _anthropic_sse("content_block_start", {"type": "content_block_start", "index": content_index, "content_block": {"type": "tool_use", "id": tool_id, "name": tool_name, "input": {}}})
+            yield _anthropic_sse("content_block_delta", {"type": "content_block_delta", "index": content_index, "delta": {"type": "input_json_delta", "partial_json": arguments}})
+            yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": content_index})
+
+        if text_index is None and not tool_calls:
             yield _anthropic_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-        yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-        yield _anthropic_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": _anthropic_stream_usage(usage)})
+            yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+
+        stop_reason = stream_state.get("stop_reason")
+        if not stop_reason:
+            stop_reason = "tool_use" if tool_calls else "end_turn"
+        yield _anthropic_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": _anthropic_stream_usage(usage)})
         yield _anthropic_sse("message_stop", {"type": "message_stop"})
     except Exception as exc:
         failed = True
@@ -695,13 +827,10 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
         await response.aclose()
 
 
-def _anthropic_stream_events(buffer: str, chunk: bytes, content_started: bool) -> tuple[str, list[bytes], dict[str, Any] | None, str | None, str | None]:
+def _anthropic_stream_events(buffer: str, chunk: bytes, stream_state: dict[str, Any]) -> tuple[str, list[bytes], dict[str, Any] | None]:
     buffer += chunk.decode("utf-8", errors="replace")
     events: list[bytes] = []
     usage = None
-    message_id = None
-    role = None
-    started = content_started
     while "\n" in buffer:
         line, buffer = buffer.split("\n", 1)
         line = line.strip()
@@ -716,19 +845,48 @@ def _anthropic_stream_events(buffer: str, chunk: bytes, content_started: bool) -
         chunk_usage = extract_usage(payload)
         if chunk_usage is not None:
             usage = chunk_usage
-        if payload.get("id"):
-            message_id = str(payload["id"])
         for choice in _openai_choices(payload):
             delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
-            if delta.get("role"):
-                role = str(delta["role"])
             text = _delta_text(delta)
             if text:
-                if not started:
-                    events.append(_anthropic_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}))
-                    started = True
-                events.append(_anthropic_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}))
-    return buffer, events, usage, message_id, role
+                text_index = stream_state.get("text_index")
+                if not isinstance(text_index, int):
+                    text_index = int(stream_state["next_content_index"])
+                    stream_state["next_content_index"] = text_index + 1
+                    stream_state["text_index"] = text_index
+                    events.append(_anthropic_sse("content_block_start", {"type": "content_block_start", "index": text_index, "content_block": {"type": "text", "text": ""}}))
+                events.append(_anthropic_sse("content_block_delta", {"type": "content_block_delta", "index": text_index, "delta": {"type": "text_delta", "text": text}}))
+            tool_calls = delta.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for fallback_index, tool_call in enumerate(tool_calls):
+                    if isinstance(tool_call, dict):
+                        _accumulate_stream_tool_call(stream_state["tool_calls"], tool_call, fallback_index)
+            function_call = delta.get("function_call")
+            if isinstance(function_call, dict):
+                _accumulate_stream_tool_call(stream_state["tool_calls"], {"index": 0, "function": function_call}, 0)
+            if choice.get("finish_reason") is not None:
+                stream_state["stop_reason"] = _anthropic_stop_reason(choice.get("finish_reason"))
+    return buffer, events, usage
+
+
+def _accumulate_stream_tool_call(tool_calls: dict[int, dict[str, str]], tool_call: dict[str, Any], fallback_index: int) -> None:
+    try:
+        tool_index = int(tool_call.get("index", fallback_index))
+    except (TypeError, ValueError):
+        tool_index = fallback_index
+    accumulated = tool_calls.setdefault(tool_index, {"id": "", "name": "", "arguments": ""})
+    if tool_call.get("id") and not accumulated["id"]:
+        accumulated["id"] = str(tool_call["id"])
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        return
+    if function.get("name") and not accumulated["name"]:
+        accumulated["name"] = str(function["name"])
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        accumulated["arguments"] += arguments
+    elif arguments is not None:
+        accumulated["arguments"] += json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
 
 
 def _anthropic_sse(event: str, payload: dict[str, Any]) -> bytes:
@@ -749,14 +907,20 @@ def _anthropic_message_response(data: Any, requested_model_id: str) -> dict[str,
         return None
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
     text = _message_text(message.get("content", ""))
+    content: list[dict[str, Any]] = []
+    if text:
+        content.append({"type": "text", "text": text})
+    content.extend(_anthropic_tool_use_blocks(message))
+    if not content:
+        content.append({"type": "text", "text": ""})
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     return {
         "id": str(data.get("id") or "msg_amkr"),
         "type": "message",
         "role": "assistant",
         "model": requested_model_id,
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": _anthropic_stop_reason(choice.get("finish_reason")),
+        "content": content,
+        "stop_reason": _anthropic_stop_reason(choice.get("finish_reason"), any(block.get("type") == "tool_use" for block in content)),
         "stop_sequence": None,
         "usage": {
             "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
@@ -793,10 +957,37 @@ def _message_text(content: Any) -> str:
     return str(content)
 
 
-def _anthropic_stop_reason(reason: Any) -> str:
+def _anthropic_tool_use_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        function_call = message.get("function_call")
+        tool_calls = [{"id": "call_amkr_0", "function": function_call}] if isinstance(function_call, dict) else []
+    blocks: list[dict[str, Any]] = []
+    for index, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict):
+            continue
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            parsed_arguments = _json_text(arguments)
+            arguments = parsed_arguments if parsed_arguments is not None else {}
+        blocks.append(
+            {
+                "type": "tool_use",
+                "id": str(tool_call.get("id") or f"call_amkr_{index}"),
+                "name": str(function.get("name") or ""),
+                "input": arguments if arguments is not None else {},
+            }
+        )
+    return blocks
+
+
+def _anthropic_stop_reason(reason: Any, has_tool_use: bool = False) -> str:
     if reason == "length":
         return "max_tokens"
-    if reason in {"tool_calls", "function_call"}:
+    if has_tool_use or reason in {"tool_calls", "function_call"}:
         return "tool_use"
     return "end_turn"
 

@@ -73,7 +73,7 @@ class KeyPool:
         return self._reasoning_efforts.get(self.resolve_model_id(model_id))
 
     def keys_for_model(self, model_id: str) -> tuple[KeyConfig, ...]:
-        return tuple(self._keys.get(self.resolve_model_id(model_id), ()))
+        return tuple(key for key in self._keys.get(self.resolve_model_id(model_id), ()) if key.enabled)
 
     def key_by_name(self, model_id: str, key_name: str) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
@@ -81,7 +81,7 @@ class KeyPool:
         if not keys:
             raise KeyError(model_id)
         for key in keys:
-            if key.name == key_name:
+            if key.name == key_name and key.enabled:
                 return key
         raise RuntimeError(f"模型 {model_id} 未配置 key: {key_name}")
 

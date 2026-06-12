@@ -321,7 +321,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | 请求入口 | 转发目标 | 兼容行为 |
 | --- | --- | --- |
 | `/v1/chat/completions` | `/v1/chat/completions` | 兼容 Anthropic 顶层 `system` 和 Responses 风格 content part 类型 |
-| `/v1/messages` | `/v1/chat/completions` | Anthropic `system` 转 system message，`text` 和 base64 `image` 转 OpenAI-compatible 消息块；响应转换为 Anthropic Messages 风格 JSON/SSE |
+| `/v1/messages` | `/v1/chat/completions` | Anthropic `system`、`tools`、`tool_use`、`tool_result` 转 OpenAI-compatible 请求；响应文本和工具调用转换为 Anthropic Messages 风格 JSON/SSE |
 | `/v1/responses` | `/v1/chat/completions` | `instructions` 转 system message，`input` 字符串或消息数组转 `messages` |
 
 参数兼容：
@@ -332,7 +332,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 - `stream: true` 会自动补充 `stream_options.include_usage=true`，并从 SSE `data:` chunk 中提取 `usage` 用于统计。
 
 > [!IMPORTANT]
-> `/v1/messages` 会把常见 OpenAI Chat Completions 文本响应转换为 Anthropic Messages 风格 schema，便于 Claude Code 等客户端解析；复杂 tool_use、多模态输出等高级响应仍取决于上游兼容程度。`/v1/responses` 当前仍提供输入兼容，上游响应体会按原样返回，不会反向转换为 OpenAI Responses 的响应 schema。
+> `/v1/messages` 支持 Anthropic 与 OpenAI Chat Completions 之间的标准文本和工具调用双向转换，便于 Claude Code 等客户端实际执行工具；多模态输出等高级响应仍取决于上游兼容程度。`/v1/responses` 当前仍提供输入兼容，上游响应体会按原样返回，不会反向转换为 OpenAI Responses 的响应 schema。
 
 模型级 `reasoning_effort` 非空时会覆盖请求中的推理强度；没有模型级覆盖时，Responses 风格的 `reasoning.effort` 会转换为 OpenAI-compatible `reasoning_effort` 后转发。
 

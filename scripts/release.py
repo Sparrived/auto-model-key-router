@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 console = Console()
+error_console = Console(stderr=True)
 VERSION_PATTERN = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:(?P<pre>a|b|rc)(?P<pre_num>\d+))?(?:\.post(?P<post>\d+))?(?:\.dev(?P<dev>\d+))?$")
 RELEASE_TYPES = ("patch", "minor", "major", "post", "preview", "alpha", "beta", "dev", "stable", "custom")
 RELEASE_LABELS = {
@@ -139,7 +140,7 @@ def run_command(args: Sequence[str], *, capture: bool = False, check: bool = Tru
         if result.stdout:
             console.print(result.stdout, end="")
         if result.stderr:
-            console.print(result.stderr, end="", style="red", file=sys.stderr)
+            error_console.print(result.stderr, end="", style="red")
     if check and result.returncode != 0:
         raise SystemExit(result.returncode)
     return result
