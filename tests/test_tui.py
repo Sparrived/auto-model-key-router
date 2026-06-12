@@ -174,6 +174,26 @@ def test_read_posix_key_ignores_unknown_escape_sequence(monkeypatch) -> None:
     assert tui.read_posix_key() == "ignore"
 
 
+def test_read_posix_key_ignores_single_escape(monkeypatch) -> None:
+    class FakeStdin:
+        def __init__(self):
+            self.chars = list("\x1b")
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    stdin = FakeStdin()
+    monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
+    monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
+    monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
+
+    assert tui.read_posix_key() == "ignore"
+
+
 def test_read_posix_key_ignores_incomplete_csi_sequence(monkeypatch) -> None:
     class FakeStdin:
         def __init__(self):

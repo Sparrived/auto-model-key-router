@@ -157,9 +157,9 @@ def render_option_menu(title: str, options: list[tuple[str, str]], selected: int
     if content is not None:
         content, _, max_content_offset, _ = scrollable_content_state(content, content_offset, len(options))
         renderables.append(content)
-    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Esc 返回"
+    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 返回"
     if max_content_offset:
-        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅内容  ·  数字快捷键  ·  Esc 返回"
+        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅内容  ·  数字快捷键  ·  Ctrl+C 返回"
     renderables.append(section_panel(menu_table(options, selected), "操作菜单", "cyan", "[dim]选择下一步操作[/dim]"))
     return terminal_frame(renderables, shortcut_text(shortcuts))
 
@@ -381,7 +381,7 @@ def read_posix_key() -> str:
         if key == "\x1b":
             second = read_posix_char_if_available()
             if second is None:
-                return "cancel"
+                return "ignore"
             third = read_posix_char_if_available() if second in {"[", "O"} else ""
             if second in {"[", "O"}:
                 if third is None:

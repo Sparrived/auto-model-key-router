@@ -15,7 +15,7 @@ from . import __version__
 from .logs_tui import watch_logs
 from .service import is_service_healthy, is_system_service_registered, manage_system_service, service_status_panel, system_service_status_panel
 from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
-from .update import VersionCheckResult, check_latest_version, install_latest_version, render_update_notice, render_version_check_result, update_target_label
+from .update import UpdateInstallOutcome, VersionCheckResult, check_latest_version, install_latest_version_outcome, render_update_notice, render_version_check_result, update_target_label
 
 
 MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "调用日志"), ("4", "CLI 设置"), ("0", "退出")]
@@ -46,12 +46,17 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             continue
         if choice == "4":
             result = run_submodule(lambda: manage_cli_settings_interactively(config_path, update_result))
+            if isinstance(result, UpdateInstallOutcome):
+                show_result_page("手动更新", result.content)
+                if result.updated:
+                    return
+                continue
             if isinstance(result, VersionCheckResult):
                 update_result = result
             config = RouterConfig.load(config_path)
 
 
-def manage_cli_settings_interactively(config_path: Path, update_result: VersionCheckResult | None = None) -> VersionCheckResult | None:
+def manage_cli_settings_interactively(config_path: Path, update_result: VersionCheckResult | None = None) -> VersionCheckResult | UpdateInstallOutcome | None:
     latest_result = update_result
     while True:
         choice = select_option("CLI 设置", SETTINGS_OPTIONS)
@@ -74,7 +79,9 @@ def manage_cli_settings_interactively(config_path: Path, update_result: VersionC
             run_submodule(lambda: manage_config_transfer_interactively(config_path))
             continue
         if choice == "5":
-            result = run_submodule(lambda: manage_version_update_interactively(latest_result))
+            result = run_submodule(lambda: manage_version_update_interactively(config_path, latest_result))
+            if isinstance(result, UpdateInstallOutcome):
+                return result
             if isinstance(result, VersionCheckResult):
                 latest_result = result
 
@@ -128,7 +135,7 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
     if update_notice is not None:
         renderables.append(update_notice)
     renderables.append(section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"))
-    return terminal_frame(renderables, shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Esc/Ctrl+C 退出"))
+    return terminal_frame(renderables, shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
 
 
 def manage_system_service_interactively(config_path: Path) -> None:
@@ -157,7 +164,7 @@ def manage_autostart_interactively(config_path: Path) -> None:
         show_result_page("开机自启", manage_system_service(config_path, action))
 
 
-def manage_version_update_interactively(update_result: VersionCheckResult | None = None) -> VersionCheckResult:
+def manage_version_update_interactively(config_path: Path, update_result: VersionCheckResult | None = None) -> VersionCheckResult | UpdateInstallOutcome:
     latest_result = update_result if update_result is not None and not update_result.error else check_latest_version(timeout=10.0)
     while True:
         choice = select_option("版本更新", [("1", "重新检查"), ("2", "手动更新"), ("0", "返回")], selected=0, content=render_version_check_result(latest_result))
@@ -170,10 +177,9 @@ def manage_version_update_interactively(update_result: VersionCheckResult | None
             if latest_result.error or not latest_result.update_available:
                 show_result_page("版本更新", render_version_check_result(latest_result))
                 continue
-            if confirm_choice(f"将通过 {latest_result.source or '可用来源'} 安装 {update_target_label(latest_result)}，更新完成后需要重启终端和服务。是否继续？"):
+            if confirm_choice(f"将通过 {latest_result.source or '可用来源'} 安装 {update_target_label(latest_result)}，更新完成后自动重启服务和 Terminal UI。是否继续？"):
                 clear_terminal_history()
-                show_result_page("手动更新", install_latest_version(latest_result))
-                latest_result = check_latest_version(timeout=10.0)
+                return install_latest_version_outcome(latest_result, config_path, restart_tui=True)
 
 
 def render_config(config: RouterConfig, path: Path) -> None:

@@ -13,6 +13,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from rich.console import Group
 from rich.markup import escape
 from rich.panel import Panel
 
@@ -46,6 +47,13 @@ class VersionCheckResult:
     @property
     def update_available(self) -> bool:
         return bool(self.latest_version and is_newer_version(self.latest_version, self.current_version))
+
+
+@dataclass(frozen=True)
+class UpdateInstallOutcome:
+    content: Any
+    updated: bool = False
+    deferred: bool = False
 
 
 def version_numbers(version: str) -> tuple[int, ...]:
@@ -245,10 +253,20 @@ def windows_update_creationflags() -> int:
     return sum(getattr(subprocess, name, 0) for name in ("CREATE_NEW_PROCESS_GROUP", "DETACHED_PROCESS", "CREATE_NO_WINDOW"))
 
 
-def windows_deferred_update_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, log_path: Path, stdout_path: Path, stderr_path: Path) -> str:
+def windows_deferred_update_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, log_path: Path, stdout_path: Path, stderr_path: Path, post_update_commands: list[list[str]] | None = None) -> str:
     source_line = f"来源: {version_result.source or '可用来源'}"
     target_line = f"目标: {update_target_label(version_result)}"
     command_line = f"命令: {shell_command_text(command)}"
+    post_update_lines: list[str] = []
+    for index, post_update_command in enumerate(post_update_commands or []):
+        post_update_lines.extend([
+            f"$postTool{index} = {powershell_string(post_update_command[0])}",
+            f"$postArgs{index} = {powershell_array(post_update_command[1:])}",
+            f"$postProcess{index} = Start-Process -FilePath $postTool{index} -ArgumentList $postArgs{index} -PassThru",
+            f"if ({index} -eq 0) {{ $postProcess{index}.WaitForExit() }}",
+        ])
+    if post_update_lines:
+        post_update_lines = ["if ($exitCode -eq 0) {", *[f"    {line}" for line in post_update_lines], "}"]
     return "\n".join([
         "$ErrorActionPreference = 'Continue'",
         "$ProgressPreference = 'SilentlyContinue'",
@@ -262,6 +280,7 @@ def windows_deferred_update_script(version_result: VersionCheckResult, command: 
         f"    Wait-Process -Id {parent_pid} -ErrorAction SilentlyContinue",
         "    $process = Start-Process -FilePath $tool -ArgumentList $argsList -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath",
         "    $exitCode = $process.ExitCode",
+        *post_update_lines,
         "} catch {",
         "    $_ | Out-String | Set-Content -LiteralPath $stderrPath -Encoding UTF8",
         "}",
@@ -290,13 +309,13 @@ def windows_deferred_update_script(version_result: VersionCheckResult, command: 
     ])
 
 
-def start_deferred_windows_update(version_result: VersionCheckResult, command: list[str]) -> Path:
+def start_deferred_windows_update(version_result: VersionCheckResult, command: list[str], post_update_commands: list[list[str]] | None = None) -> Path:
     script_path = deferred_update_script_path()
     log_path = update_log_path()
     stdout_path = default_cache_dir() / f"update-{os.getpid()}.stdout.log"
     stderr_path = default_cache_dir() / f"update-{os.getpid()}.stderr.log"
     script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(windows_deferred_update_script(version_result, command, os.getpid(), log_path, stdout_path, stderr_path), encoding="utf-8")
+    script_path.write_text(windows_deferred_update_script(version_result, command, os.getpid(), log_path, stdout_path, stderr_path, post_update_commands), encoding="utf-8")
     subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, creationflags=windows_update_creationflags())
     return script_path
 
@@ -408,14 +427,40 @@ def render_update_notice(result: VersionCheckResult | None) -> Panel | None:
     )
 
 
-def install_latest_version(version_result: VersionCheckResult) -> Panel:
+def post_update_commands(config_path: Path | None, restart_tui: bool) -> list[list[str]]:
+    if config_path is None:
+        return []
+    commands = [[sys.executable, "-m", "auto_model_key_router.main", "--config", str(config_path), "--restart-service-after-update"]]
+    if restart_tui:
+        commands.append([sys.executable, "-m", "auto_model_key_router.main", "--config", str(config_path)])
+    return commands
+
+
+def restart_service_after_update(config_path: Path | None) -> Any | None:
+    if config_path is None:
+        return None
+    from .config import RouterConfig
+    from .service import is_process_running, is_service_healthy, is_system_service_registered, manage_system_service, pid_file_path, read_pid, start_service_background, stop_background_service
+
+    config = RouterConfig.load(config_path)
+    if is_system_service_registered(config_path):
+        return manage_system_service(config_path, "restart")
+    pid = read_pid(pid_file_path(config))
+    if pid and is_process_running(pid):
+        return Group(stop_background_service(config), start_service_background(config_path, config))
+    if is_service_healthy(config.host, config.port, use_cache=False):
+        return Group(stop_background_service(config), start_service_background(config_path, config))
+    return section_panel("未检测到正在运行的后台/系统服务，已跳过服务重启。", "更新后服务重启", "yellow")
+
+
+def install_latest_version_outcome(version_result: VersionCheckResult, config_path: Path | None = None, restart_tui: bool = False) -> UpdateInstallOutcome:
     try:
         command = manual_update_command(version_result)
     except ValueError as exc:
-        return section_panel(str(exc), "手动更新", "red")
+        return UpdateInstallOutcome(section_panel(str(exc), "手动更新", "red"))
     if should_defer_windows_update(command):
         try:
-            start_deferred_windows_update(version_result, command)
+            start_deferred_windows_update(version_result, command, post_update_commands(config_path, restart_tui))
         except (OSError, subprocess.SubprocessError) as exc:
             stderr = str(exc)
             log_path, log_error = write_update_log(version_result, command, None, "", stderr)
@@ -425,18 +470,19 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
                 *update_log_lines(log_path, log_error, False),
                 escape(stderr),
             ])
-            return section_panel(content, "手动更新", "red")
+            return UpdateInstallOutcome(section_panel(content, "手动更新", "red"))
         stdout = "Windows 已安排延迟更新。退出当前正在运行的 amkr 后，将自动执行更新命令。"
         log_path, log_error = write_update_log(version_result, command, "等待当前进程退出", stdout, "")
+        follow_up = "更新完成后会自动重启正在运行的服务，并重新打开 Terminal UI。" if restart_tui and config_path is not None else "更新完成后会自动重启正在运行的后台/系统服务。" if config_path is not None else "更新完成后请重新打开终端，并重启正在运行的后台/系统服务。"
         content = "\n".join([
             f"已安排通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
             "请退出当前 Terminal UI 或关闭正在运行的 amkr 命令，Windows 释放 amkr.exe 后会自动继续更新。",
-            "更新完成后请重新打开终端，并重启正在运行的后台/系统服务。",
+            follow_up,
             f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
             *update_log_lines(log_path, log_error, False),
             escape(stdout),
         ])
-        return section_panel(content, "手动更新", "yellow")
+        return UpdateInstallOutcome(section_panel(content, "手动更新", "yellow"), updated=True, deferred=True)
     try:
         result = subprocess.run(command, capture_output=True, text=True, errors="replace")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -448,7 +494,7 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
             *update_log_lines(log_path, log_error, False),
             escape(stderr),
         ])
-        return section_panel(content, "手动更新", "red")
+        return UpdateInstallOutcome(section_panel(content, "手动更新", "red"))
 
     stdout = update_output_text(result.stdout)
     stderr = update_output_text(result.stderr)
@@ -456,14 +502,16 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
     preview, truncated = update_output_preview(output)
     log_path, log_error = write_update_log(version_result, command, result.returncode, stdout, stderr)
     if result.returncode == 0:
+        restart_result = restart_service_after_update(config_path)
         content = "\n".join([
             f"已通过 {escape(version_result.source or '可用来源')} 安装 [bold]{escape(update_target_label(version_result))}[/bold]。",
-            "请重启当前终端和正在运行的服务，让新版本生效。",
+            "服务已按当前运行状态自动重启；Terminal UI 将重新启动以加载新版本。" if restart_tui else "服务已按当前运行状态自动重启；请重新打开终端让新版本 CLI 生效。",
             f"命令: [bold]{escape(shell_command_text(command))}[/bold]",
             *update_log_lines(log_path, log_error, truncated),
             escape(preview) if preview else "pip 未返回额外输出。",
         ])
-        return section_panel(content, "手动更新", "green")
+        panel = section_panel(content, "手动更新", "green")
+        return UpdateInstallOutcome(Group(panel, restart_result) if restart_result is not None else panel, updated=True)
 
     content = "\n".join([
         f"更新失败，退出码: [bold]{result.returncode}[/bold]",
@@ -471,18 +519,22 @@ def install_latest_version(version_result: VersionCheckResult) -> Panel:
         *update_log_lines(log_path, log_error, truncated),
         escape(preview) if preview else "pip 未返回错误详情。",
     ])
-    return section_panel(content, "手动更新", "red")
+    return UpdateInstallOutcome(section_panel(content, "手动更新", "red"))
+
+
+def install_latest_version(version_result: VersionCheckResult, config_path: Path | None = None) -> Any:
+    return install_latest_version_outcome(version_result, config_path).content
 
 
 def install_latest_release(tag: str) -> Panel:
     return install_latest_version(VersionCheckResult(current_version=__version__, latest_version=tag.removeprefix("v").removeprefix("V"), latest_tag=tag, source="GitHub"))
 
 
-def update_latest_version(timeout: float = 10.0) -> Panel:
+def update_latest_version(timeout: float = 10.0, config_path: Path | None = None) -> Any:
     result = check_latest_version(timeout=timeout)
     if result.error or not result.update_available:
         return render_version_check_result(result)
-    return install_latest_version(result)
+    return install_latest_version(result, config_path)
 
 
 def update_latest_release(timeout: float = 10.0) -> Panel:

@@ -10,7 +10,7 @@
 ![Rich](https://img.shields.io/badge/TUI-Rich-8A2BE2)
 ![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI--compatible-111827)
 
-[快速开始](#-快速开始) · [配置](#-配置) · [运行](#-运行) · [接口](#-本地接口) · [统计](#-计量统计)
+[快速开始](#-快速开始) · [配置](#-配置) · [运行](#-运行) · [接口](#-本地接口) · [统计](#-计量统计) · [许可证](#-许可证)
 
 </div>
 
@@ -435,3 +435,7 @@ auto-model-key-router --update
 ```
 
 Terminal UI 启动时会优先快速检查 PyPI JSON API，PyPI 不可用时回退到 GitHub Release。如果发现新版本，首页会显示更新提示，也可以进入“版本更新”菜单重新检查或确认手动更新。PyPI 可用时会执行 `pip install --upgrade auto-model-key-router`，回退到 GitHub 时会安装对应 Release 源码包。更新完成后需要重启当前终端和正在运行的后台/系统服务，让新版本生效。
+
+## 📄 许可证
+
+本项目基于 [MIT License](LICENSE) 开源发布。

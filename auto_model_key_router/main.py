@@ -10,7 +10,7 @@ from .dashboard import render_config, run_terminal_ui
 from .logs_tui import render_logs
 from .service import background_status_panel, manage_system_service, service_status_panel, start_service_background, start_service_foreground, stop_background_service
 from .tui import clear_terminal_history, console, section_panel
-from .update import check_latest_version, render_version_check_result, update_latest_version
+from .update import check_latest_version, render_version_check_result, restart_service_after_update, update_latest_version
 
 
 def main() -> None:
@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--update", action="store_true", help="通过 PyPI/GitHub 手动更新到最新版本")
     parser.add_argument("--serve", action="store_true", help="跳过 Terminal UI，后台启动服务")
     parser.add_argument("--serve-foreground", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--restart-service-after-update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--stop", action="store_true", help="停止后台服务")
     parser.add_argument("--status", action="store_true", help="查看后台服务状态")
     parser.add_argument("--install-service", action="store_true", help="注册为 Windows/Linux 内置服务")
@@ -35,10 +36,6 @@ def main() -> None:
     if args.check_update:
         console.print(render_version_check_result(check_latest_version(timeout=10.0)))
         return
-    if args.update:
-        console.print(update_latest_version(timeout=10.0))
-        return
-
     config_path = Path(args.config)
 
     try:
@@ -52,6 +49,15 @@ def main() -> None:
             config = RouterConfig(args.host, config.port, config.request_timeout, config.max_retries, config.key_failure_threshold, config.key_cooldown_seconds, config.key_state_path, config.upstream_health_check_interval, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
         if args.port:
             config = RouterConfig(config.host, args.port, config.request_timeout, config.max_retries, config.key_failure_threshold, config.key_cooldown_seconds, config.key_state_path, config.upstream_health_check_interval, config.metrics_db_path, config.log_file_path, config.local_api_key, config.models)
+
+        if args.update:
+            console.print(update_latest_version(timeout=10.0, config_path=config_path))
+            return
+        if args.restart_service_after_update:
+            result = restart_service_after_update(config_path)
+            if result is not None:
+                console.print(result)
+            return
 
         if args.show_logs is not None:
             render_config(config, config_path)

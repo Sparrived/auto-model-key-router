@@ -4,7 +4,9 @@ import json
 import subprocess
 import sys
 
-from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, is_newer_version, manual_update_command, should_defer_windows_update, update_output_preview, windows_deferred_update_script
+from rich.console import Console
+
+from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, install_latest_version_outcome, is_newer_version, manual_update_command, post_update_commands, should_defer_windows_update, update_output_preview, windows_deferred_update_script
 
 
 class FakeResponse:
@@ -19,6 +21,12 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return json.dumps(self.data).encode("utf-8")
+
+
+def render_text(renderable: object) -> str:
+    with Console(record=True, width=180) as console:
+        console.print(renderable)
+    return console.export_text()
 
 
 def test_is_newer_version_compares_semantic_numbers() -> None:
@@ -171,6 +179,23 @@ def test_install_latest_version_shows_stderr_when_stdout_exists(monkeypatch, tmp
     assert "ERROR: network timeout" in (tmp_path / "update.log").read_text(encoding="utf-8")
 
 
+def test_install_latest_version_restarts_service_after_success(monkeypatch, tmp_path) -> None:
+    result = subprocess.CompletedProcess(["python", "-m", "pip"], 0, stdout="updated", stderr="")
+    restarted: list[str] = []
+    monkeypatch.setattr("auto_model_key_router.update.subprocess.run", lambda *args, **kwargs: result)
+    monkeypatch.setattr("auto_model_key_router.update.update_log_path", lambda: tmp_path / "update.log")
+    monkeypatch.setattr("auto_model_key_router.update.restart_service_after_update", lambda config_path: restarted.append(str(config_path)) or "service restarted")
+
+    outcome = install_latest_version_outcome(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), tmp_path / "config.json", restart_tui=True)
+    text = render_text(outcome.content)
+
+    assert outcome.updated
+    assert not outcome.deferred
+    assert restarted == [str(tmp_path / "config.json")]
+    assert "Terminal UI 将重新启动" in text
+    assert "service restarted" in text
+
+
 def test_should_defer_windows_update_for_console_script(monkeypatch) -> None:
     monkeypatch.setattr("auto_model_key_router.update.os.name", "nt")
     monkeypatch.setattr(sys, "argv", ["C:\\Users\\Sparr\\.local\\bin\\amkr.exe"])
@@ -204,6 +229,16 @@ def test_install_latest_version_defers_windows_console_script_update(monkeypatch
     assert "uv tool upgrade auto-model-key-router" in log_text
 
 
+def test_post_update_commands_restart_service_and_tui(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+
+    commands = post_update_commands(config_path, restart_tui=True)
+
+    assert commands[0][-1:] == ["--restart-service-after-update"]
+    assert str(config_path) in commands[0]
+    assert commands[1][-2:] == ["--config", str(config_path)]
+
+
 def test_windows_deferred_update_script_waits_parent_and_writes_log(tmp_path) -> None:
     command = ["uv", "tool", "upgrade", "auto-model-key-router"]
 
@@ -213,6 +248,18 @@ def test_windows_deferred_update_script_waits_parent_and_writes_log(tmp_path) ->
     assert "Start-Process -FilePath $tool" in script
     assert "命令: uv tool upgrade auto-model-key-router" in script
     assert "Set-Content -LiteralPath $logPath" in script
+
+
+def test_windows_deferred_update_script_runs_post_update_commands_on_success(tmp_path) -> None:
+    command = ["uv", "tool", "upgrade", "auto-model-key-router"]
+    post_commands = [[sys.executable, "-m", "auto_model_key_router.main", "--config", str(tmp_path / "config.json"), "--restart-service-after-update"], [sys.executable, "-m", "auto_model_key_router.main", "--config", str(tmp_path / "config.json")]]
+
+    script = windows_deferred_update_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log", post_commands)
+
+    assert "if ($exitCode -eq 0)" in script
+    assert "--restart-service-after-update" in script
+    assert "Start-Process -FilePath $postTool0" in script
+    assert "Start-Process -FilePath $postTool1" in script
 
 
 def test_update_output_preview_keeps_tail_for_long_logs() -> None:

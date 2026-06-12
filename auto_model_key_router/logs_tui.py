@@ -153,8 +153,8 @@ def log_header_renderable(page: str) -> Panel:
 
 def log_help_text(page: str) -> Align:
     if page == "logs":
-        return shortcut_text("1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/滚轮/Pg 滚动  ·  Esc/q 返回")
-    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→/滚轮 翻页  ·  Esc/q 返回")
+        return shortcut_text("1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
+    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→/滚轮 翻页  ·  q 返回")
 
 
 def open_log_file(log_file_path: str) -> str:
