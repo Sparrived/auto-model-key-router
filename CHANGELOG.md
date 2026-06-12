@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-06-13
+
 ### Fixed
 - 修复 `/v1/messages` 将 OpenAI 流式 `tool_calls` 缓存到消息结束后才转换为 Anthropic `tool_use`，导致 Claude Code 延迟显示工具调用的问题；现在会在首个工具 delta 到达时关闭文本块、立即开始工具块，并逐段转发 JSON 参数。
 - 修复同一个上游网络块包含多个 SSE 事件时，下游可能合并发送连续事件、导致 Claude Code 长时间无输出后一次性显示整段内容的问题；现在会在每个转换后的 Anthropic SSE 事件之间主动让出执行权。
