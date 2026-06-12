@@ -469,9 +469,53 @@ def test_messages_stream_converts_openai_tool_calls_to_anthropic_tool_use() -> N
         assert response.headers["x-accel-buffering"] == "no"
         assert '"type":"text_delta","text":"I will inspect it."' in response.text
         assert '"type":"tool_use","id":"call-grep","name":"Grep","input":{}' in response.text
-        assert '"type":"input_json_delta","partial_json":"{\\"pattern\\":\\"needle\\"}"' in response.text
+        assert '"type":"input_json_delta","partial_json":"{\\"pattern\\":"}' in response.text
+        assert '"type":"input_json_delta","partial_json":"\\"needle\\"}"}' in response.text
         assert '"stop_reason":"tool_use"' in response.text
-        assert response.text.index('"type":"text_delta"') < response.text.index('"type":"tool_use"')
+        text_delta = response.text.index('"type":"text_delta"')
+        text_stop = response.text.index("event: content_block_stop", text_delta)
+        tool_start = response.text.index('"type":"tool_use"')
+        first_tool_delta = response.text.index('"type":"input_json_delta"')
+        second_tool_delta = response.text.index('"type":"input_json_delta"', first_tool_delta + 1)
+        tool_stop = response.text.index("event: content_block_stop", tool_start)
+        assert text_delta < text_stop < tool_start < first_tool_delta < second_tool_delta < tool_stop
+
+
+def test_anthropic_stream_yields_between_sse_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        flushes: list[None] = []
+
+        async def record_flush() -> None:
+            flushes.append(None)
+
+        monkeypatch.setattr("auto_model_key_router.app._flush_stream_event", record_flush)
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=ChunkedStream(
+                (
+                    b'data: {"choices":[{"delta":{"content":"one"}}]}\n\n'
+                    b'data: {"choices":[{"delta":{"content":"two"},"finish_reason":"stop"}]}\n\n'
+                    b"data: [DONE]\n\n",
+                )
+            ),
+        )
+
+        async def consume_stream() -> list[bytes]:
+            chunks = []
+            async for chunk in _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, "test-model", "key-1", "test-model", "https://upstream.test/v1/chat/completions", perf_counter()):
+                chunks.append(chunk)
+            await app.state.metrics.close()
+            await app.state.http_client.aclose()
+            return chunks
+
+        chunks = anyio.run(consume_stream)
+        body = b"".join(chunks)
+
+        assert body.count(b'"type":"text_delta"') == 2
+        assert len(flushes) == 5
 
 
 def test_messages_non_json_upstream_error_returns_anthropic_json() -> None:

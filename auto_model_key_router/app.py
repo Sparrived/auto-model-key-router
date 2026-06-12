@@ -760,7 +760,9 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
     stream_state: dict[str, Any] = {
         "next_content_index": 0,
         "text_index": None,
+        "text_stopped": False,
         "tool_calls": {},
+        "active_tool_index": None,
         "stop_reason": None,
     }
     try:
@@ -775,37 +777,37 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
                 usage = chunk_usage
             for event in events:
                 yield event
+                await _flush_stream_event()
         if buffer.strip():
             buffer, events, chunk_usage = _anthropic_stream_events(buffer, b"\n", stream_state)
             if chunk_usage is not None:
                 usage = chunk_usage
             for event in events:
                 yield event
+                await _flush_stream_event()
 
         text_index = stream_state.get("text_index")
-        if isinstance(text_index, int):
+        if isinstance(text_index, int) and not stream_state["text_stopped"]:
             yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": text_index})
+            await _flush_stream_event()
+            stream_state["text_stopped"] = True
 
         tool_calls = stream_state["tool_calls"]
-        for tool_index in sorted(tool_calls):
-            tool_call = tool_calls[tool_index]
-            content_index = int(stream_state["next_content_index"])
-            stream_state["next_content_index"] = content_index + 1
-            tool_id = str(tool_call.get("id") or f"call_amkr_{tool_index}")
-            tool_name = str(tool_call.get("name") or "")
-            arguments = str(tool_call.get("arguments") or "{}")
-            yield _anthropic_sse("content_block_start", {"type": "content_block_start", "index": content_index, "content_block": {"type": "tool_use", "id": tool_id, "name": tool_name, "input": {}}})
-            yield _anthropic_sse("content_block_delta", {"type": "content_block_delta", "index": content_index, "delta": {"type": "input_json_delta", "partial_json": arguments}})
-            yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": content_index})
+        for event in _finish_anthropic_stream_tools(stream_state):
+            yield event
+            await _flush_stream_event()
 
-        if text_index is None and not tool_calls:
+        if stream_state["next_content_index"] == 0:
             yield _anthropic_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+            await _flush_stream_event()
             yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+            await _flush_stream_event()
 
         stop_reason = stream_state.get("stop_reason")
         if not stop_reason:
             stop_reason = "tool_use" if tool_calls else "end_turn"
         yield _anthropic_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": _anthropic_stream_usage(usage)})
+        await _flush_stream_event()
         yield _anthropic_sse("message_stop", {"type": "message_stop"})
     except Exception as exc:
         failed = True
@@ -855,47 +857,135 @@ def _anthropic_stream_events(buffer: str, chunk: bytes, stream_state: dict[str, 
             text = _delta_text(delta)
             if text:
                 text_index = stream_state.get("text_index")
-                if not isinstance(text_index, int):
+                if not isinstance(text_index, int) or stream_state["text_stopped"]:
                     text_index = int(stream_state["next_content_index"])
                     stream_state["next_content_index"] = text_index + 1
                     stream_state["text_index"] = text_index
+                    stream_state["text_stopped"] = False
                     events.append(_anthropic_sse("content_block_start", {"type": "content_block_start", "index": text_index, "content_block": {"type": "text", "text": ""}}))
                 events.append(_anthropic_sse("content_block_delta", {"type": "content_block_delta", "index": text_index, "delta": {"type": "text_delta", "text": text}}))
             tool_calls = delta.get("tool_calls")
             if isinstance(tool_calls, list):
                 for fallback_index, tool_call in enumerate(tool_calls):
                     if isinstance(tool_call, dict):
-                        _accumulate_stream_tool_call(stream_state["tool_calls"], tool_call, fallback_index)
+                        events.extend(_anthropic_stream_tool_events(stream_state, tool_call, fallback_index))
             function_call = delta.get("function_call")
             if isinstance(function_call, dict):
-                _accumulate_stream_tool_call(stream_state["tool_calls"], {"index": 0, "function": function_call}, 0)
+                events.extend(_anthropic_stream_tool_events(stream_state, {"index": 0, "function": function_call}, 0))
             if choice.get("finish_reason") is not None:
                 stream_state["stop_reason"] = _anthropic_stop_reason(choice.get("finish_reason"))
     return buffer, events, usage
 
 
-def _accumulate_stream_tool_call(tool_calls: dict[int, dict[str, str]], tool_call: dict[str, Any], fallback_index: int) -> None:
+def _anthropic_stream_tool_events(stream_state: dict[str, Any], tool_call: dict[str, Any], fallback_index: int) -> list[bytes]:
+    events: list[bytes] = []
+    text_index = stream_state.get("text_index")
+    if isinstance(text_index, int) and not stream_state["text_stopped"]:
+        events.append(_anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": text_index}))
+        stream_state["text_stopped"] = True
+
     try:
         tool_index = int(tool_call.get("index", fallback_index))
     except (TypeError, ValueError):
         tool_index = fallback_index
-    accumulated = tool_calls.setdefault(tool_index, {"id": "", "name": "", "arguments": ""})
+    accumulated = stream_state["tool_calls"].setdefault(
+        tool_index,
+        {"id": "", "name": "", "arguments": "", "emitted_arguments": 0, "content_index": None, "started": False, "stopped": False},
+    )
     if tool_call.get("id") and not accumulated["id"]:
         accumulated["id"] = str(tool_call["id"])
     function = tool_call.get("function")
-    if not isinstance(function, dict):
-        return
-    if function.get("name") and not accumulated["name"]:
-        accumulated["name"] = str(function["name"])
-    arguments = function.get("arguments")
-    if isinstance(arguments, str):
-        accumulated["arguments"] += arguments
-    elif arguments is not None:
-        accumulated["arguments"] += json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(function, dict):
+        if function.get("name") and not accumulated["name"]:
+            accumulated["name"] = str(function["name"])
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            accumulated["arguments"] += arguments
+        elif arguments is not None:
+            accumulated["arguments"] += json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+
+    if stream_state["active_tool_index"] is None and accumulated["id"] and accumulated["name"]:
+        stream_state["active_tool_index"] = tool_index
+        events.extend(_start_anthropic_stream_tool(stream_state, tool_index))
+    if stream_state["active_tool_index"] == tool_index:
+        events.extend(_anthropic_stream_tool_argument_events(accumulated))
+    return events
+
+
+def _start_anthropic_stream_tool(stream_state: dict[str, Any], tool_index: int) -> list[bytes]:
+    tool_call = stream_state["tool_calls"][tool_index]
+    if tool_call["started"]:
+        return []
+    content_index = int(stream_state["next_content_index"])
+    stream_state["next_content_index"] = content_index + 1
+    tool_call["content_index"] = content_index
+    tool_call["started"] = True
+    return [
+        _anthropic_sse(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": content_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": str(tool_call["id"] or f"call_amkr_{tool_index}"),
+                    "name": str(tool_call["name"] or ""),
+                    "input": {},
+                },
+            },
+        )
+    ]
+
+
+def _anthropic_stream_tool_argument_events(tool_call: dict[str, Any]) -> list[bytes]:
+    arguments = str(tool_call["arguments"])
+    emitted_arguments = int(tool_call["emitted_arguments"])
+    if not tool_call["started"] or emitted_arguments >= len(arguments):
+        return []
+    tool_call["emitted_arguments"] = len(arguments)
+    return [
+        _anthropic_sse(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": int(tool_call["content_index"]),
+                "delta": {"type": "input_json_delta", "partial_json": arguments[emitted_arguments:]},
+            },
+        )
+    ]
+
+
+def _finish_anthropic_stream_tools(stream_state: dict[str, Any]) -> list[bytes]:
+    events: list[bytes] = []
+    active_tool_index = stream_state.get("active_tool_index")
+    ordered_indexes = []
+    if isinstance(active_tool_index, int):
+        ordered_indexes.append(active_tool_index)
+    ordered_indexes.extend(index for index in sorted(stream_state["tool_calls"]) if index != active_tool_index)
+
+    for tool_index in ordered_indexes:
+        tool_call = stream_state["tool_calls"][tool_index]
+        if tool_call["stopped"]:
+            continue
+        if not tool_call["started"]:
+            if not tool_call["id"]:
+                tool_call["id"] = f"call_amkr_{tool_index}"
+            events.extend(_start_anthropic_stream_tool(stream_state, tool_index))
+        events.extend(_anthropic_stream_tool_argument_events(tool_call))
+        events.append(_anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": int(tool_call["content_index"])}))
+        tool_call["stopped"] = True
+    stream_state["active_tool_index"] = None
+    return events
 
 
 def _anthropic_sse(event: str, payload: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+
+
+async def _flush_stream_event() -> None:
+    # Let the ASGI server flush each SSE event instead of coalescing a burst
+    # from one upstream network chunk into a single downstream TCP write.
+    await asyncio.sleep(0)
 
 
 def _anthropic_stream_usage(usage: dict[str, Any] | None) -> dict[str, int]:
