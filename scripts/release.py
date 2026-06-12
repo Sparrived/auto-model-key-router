@@ -13,10 +13,17 @@ from datetime import date
 from pathlib import Path
 from typing import Sequence
 
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
+console = Console()
 VERSION_PATTERN = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)(?:(?P<pre>a|b|rc)(?P<pre_num>\d+))?(?:\.post(?P<post>\d+))?(?:\.dev(?P<dev>\d+))?$")
 RELEASE_TYPES = ("patch", "minor", "major", "post", "preview", "alpha", "beta", "dev", "stable", "custom")
 RELEASE_LABELS = {
@@ -31,6 +38,15 @@ RELEASE_LABELS = {
     "stable": "当前预览转正式版",
     "custom": "自定义版本号",
 }
+STEP_TITLES = {
+    "install": "准备发布环境",
+    "tests": "运行测试",
+    "build": "构建分发产物",
+    "twine": "校验分发产物",
+    "git": "检查 Git 改动",
+    "commit": "创建提交和标签",
+    "push": "推送远端仓库",
+}
 SENSITIVE_PATTERNS = (
     ".env",
     ".env.*",
@@ -42,6 +58,30 @@ SENSITIVE_PATTERNS = (
     "*.sqlite3-shm",
     "*.log",
 )
+
+
+def info(message: str) -> None:
+    console.print(f"[cyan]ℹ[/cyan] {message}")
+
+
+def success(message: str) -> None:
+    console.print(f"[green]✓[/green] {message}")
+
+
+def warning(message: str) -> None:
+    console.print(f"[yellow]⚠[/yellow] {message}")
+
+
+def step(title: str) -> None:
+    console.rule(f"[bold cyan]{title}[/bold cyan]", style="cyan")
+
+
+def print_error(message: str) -> None:
+    console.print(Panel(f"[red]{message}[/red]", title="[bold red]发布已中止[/bold red]", border_style="red", box=box.ROUNDED))
+
+
+def input_text(prompt: str) -> str:
+    return input(f"{prompt} ")
 
 
 @dataclass(frozen=True)
@@ -93,13 +133,13 @@ def format_command(args: Sequence[str]) -> str:
 
 
 def run_command(args: Sequence[str], *, capture: bool = False, check: bool = True, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
-    print(f"$ {format_command(args)}")
+    console.print(Text(f"$ {format_command(args)}", style="bold blue"))
     result = subprocess.run(args, cwd=cwd, text=True, capture_output=capture)
     if capture:
         if result.stdout:
-            print(result.stdout, end="")
+            console.print(result.stdout, end="")
         if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
+            console.print(result.stderr, end="", style="red", file=sys.stderr)
     if check and result.returncode != 0:
         raise SystemExit(result.returncode)
     return result
@@ -213,33 +253,38 @@ def update_changelog(version: str, release_date: str, notes: str, path: Path = C
 
 
 def prompt_release_type(current_version: str) -> str:
-    print(f"当前版本: {current_version}")
+    table = Table(title="发布类型", box=box.ROUNDED, header_style="bold cyan", border_style="cyan", show_lines=False)
+    table.add_column("编号", justify="right", style="cyan", width=4)
+    table.add_column("类型", style="bold")
+    table.add_column("目标版本", style="green")
     for index, release_type in enumerate(RELEASE_TYPES, 1):
         try:
             preview = calculate_next_version(current_version, release_type, "0.0.0" if release_type == "custom" else None)
         except ValueError:
             preview = "手动输入"
-        print(f"{index}. {RELEASE_LABELS[release_type]} -> {preview}")
+        table.add_row(str(index), RELEASE_LABELS[release_type], preview)
+    console.print(Panel(f"当前版本: [bold green]{current_version}[/bold green]", title="[bold]版本发布[/bold]", border_style="cyan", box=box.ROUNDED))
+    console.print(table)
     while True:
-        choice = input("请选择发布类型，默认 1: ").strip() or "1"
+        choice = input_text("请选择发布类型，默认 1:").strip() or "1"
         if choice.isdigit() and 1 <= int(choice) <= len(RELEASE_TYPES):
             return RELEASE_TYPES[int(choice) - 1]
         if choice in RELEASE_TYPES:
             return choice
-        print("请输入菜单编号或发布类型名称。")
+        warning("请输入菜单编号或发布类型名称。")
 
 
 def prompt_custom_version() -> str:
     while True:
-        value = input("请输入自定义版本号: ").strip()
+        value = input_text("请输入自定义版本号:").strip()
         try:
             return ParsedVersion.parse(value).normalized
         except ValueError as exc:
-            print(exc)
+            warning(str(exc))
 
 
 def prompt_notes() -> str:
-    print("请输入发布说明，空行结束；如果 CHANGELOG 的 Unreleased 已有内容，可直接留空。")
+    info("请输入发布说明，空行结束；如果 CHANGELOG 的 Unreleased 已有内容，可直接留空。")
     lines: list[str] = []
     while True:
         line = input()
@@ -251,9 +296,9 @@ def prompt_notes() -> str:
 
 def confirm(message: str, *, assume_yes: bool = False) -> bool:
     if assume_yes:
-        print(f"{message} yes")
+        success(f"{message} yes")
         return True
-    return input(f"{message} [y/N]: ").strip().lower() in {"y", "yes"}
+    return input_text(f"{message} [y/N]:").strip().lower() in {"y", "yes"}
 
 
 def status_files() -> list[str]:
@@ -312,7 +357,7 @@ def push_with_proxy_fallback(args: Sequence[str], no_proxy: bool) -> None:
         return
     output = f"{result.stdout}\n{result.stderr}"
     if not no_proxy and ("127.0.0.1" in output or "proxy" in output.lower()):
-        print("检测到 Git 代理连接异常，临时绕过代理重试。")
+        warning("检测到 Git 代理连接异常，临时绕过代理重试。")
         run_git(args, capture=True, no_proxy=True)
         return
     raise SystemExit(result.returncode)
@@ -332,22 +377,25 @@ def install_dev_environment() -> None:
         return
     if "No module named pip" not in result.stderr:
         raise SystemExit(result.returncode)
-    print("当前解释器缺少 pip，正在通过 ensurepip 初始化。")
+    warning("当前解释器缺少 pip，正在通过 ensurepip 初始化。")
     run_command([sys.executable, "-m", "ensurepip", "--upgrade"])
     run_command(pip_args)
 
 
 def preview_plan(current_version: str, next_version: str, tag: str, args: argparse.Namespace) -> None:
-    print("发布计划")
-    print(f"- 当前版本: {current_version}")
-    print(f"- 目标版本: {next_version}")
-    print(f"- 标签名称: {tag}")
-    print(f"- 目标分支: {args.branch}")
-    print(f"- 远端仓库: {args.remote}")
-    print(f"- 跳过测试: {'是' if args.skip_tests else '否'}")
-    print(f"- 跳过构建: {'是' if args.skip_build else '否'}")
-    print(f"- 跳过 twine: {'是' if args.skip_twine else '否'}")
-    print(f"- 仅本地不推送: {'是' if args.no_push else '否'}")
+    table = Table(box=box.SIMPLE_HEAVY, show_header=False, padding=(0, 1))
+    table.add_column("项目", style="cyan", no_wrap=True)
+    table.add_column("值", style="bold")
+    table.add_row("当前版本", current_version)
+    table.add_row("目标版本", f"[green]{next_version}[/green]")
+    table.add_row("标签名称", f"[magenta]{tag}[/magenta]")
+    table.add_row("目标分支", args.branch)
+    table.add_row("远端仓库", args.remote)
+    table.add_row("测试", "[yellow]跳过[/yellow]" if args.skip_tests else "[green]执行[/green]")
+    table.add_row("构建", "[yellow]跳过[/yellow]" if args.skip_build else "[green]执行[/green]")
+    table.add_row("Twine", "[yellow]跳过[/yellow]" if args.skip_twine else "[green]执行[/green]")
+    table.add_row("推送", "[yellow]仅本地[/yellow]" if args.no_push else "[green]推送远端[/green]")
+    console.print(Panel(table, title="[bold cyan]发布计划[/bold cyan]", border_style="cyan", box=box.ROUNDED))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -383,32 +431,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if not confirm("确认开始发布流程?", assume_yes=args.yes):
         return 1
+    step("发布前检查")
     ensure_branch(args.branch, args.yes)
     ensure_safe_paths(status_files())
     if tag_exists(tag, args.remote, args.no_proxy):
         raise SystemExit(f"标签 {tag} 已存在。")
+    step(STEP_TITLES["install"])
     install_dev_environment()
     notes = args.notes if args.notes is not None else prompt_notes()
     write_project_version(next_version)
     update_changelog(next_version, date.today().isoformat(), notes)
+    success("已更新 pyproject.toml 和 CHANGELOG.md")
     if not args.skip_tests:
+        step(STEP_TITLES["tests"])
         run_command([sys.executable, "-m", "pytest"])
     if not args.skip_build:
+        step(STEP_TITLES["build"])
         run_command([sys.executable, "-m", "build"])
     if not args.skip_twine:
+        step(STEP_TITLES["twine"])
         verify_dist(next_version)
+    step(STEP_TITLES["git"])
     run_git(["diff", "--check"])
     run_git(["add", "-A"])
     ensure_safe_paths(staged_files())
     run_git(["diff", "--cached", "--check"])
     message = args.commit_message or f"chore(release): 发布 {next_version} 版本"
+    step(STEP_TITLES["commit"])
     run_git(["commit", "-m", message])
     run_git(["tag", "-a", tag, "-m", tag])
     if not args.no_push:
+        step(STEP_TITLES["push"])
         push_with_proxy_fallback(["push", args.remote, args.branch], args.no_proxy)
         push_with_proxy_fallback(["push", args.remote, tag], args.no_proxy)
     run_git(["status", "--short", "--branch"])
-    print(f"发布流程完成: {tag}")
+    console.print(Panel(f"[green]发布流程完成[/green]\n[bold magenta]{tag}[/bold magenta]", title="[bold green]成功[/bold green]", border_style="green", box=box.ROUNDED))
     return 0
 
 

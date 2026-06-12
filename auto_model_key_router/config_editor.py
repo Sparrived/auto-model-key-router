@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -246,7 +247,7 @@ def render_key_order_menu(model: dict[str, Any], selected: int) -> Group:
             table.add_row("[bold cyan]▶[/bold cyan]", f"[bold black on cyan] {index + 1} [/bold black on cyan]", f"[bold cyan]{name}[/bold cyan]", f"[bold cyan]{base_url}[/bold cyan]")
         else:
             table.add_row("", f"[dim]{index + 1}[/dim]", name, base_url)
-    return terminal_frame([page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]")], shortcut_text("↑/↓/滚轮 选择  ·  W/S 移动  ·  Enter 保存  ·  Ctrl+C 取消"))
+    return terminal_frame([page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]")], shortcut_text("↑/↓ 选择  ·  W/S 移动  ·  Enter 保存  ·  Ctrl+C 取消" if sys.platform != "win32" else "↑/↓/滚轮 选择  ·  W/S 移动  ·  Enter 保存  ·  Ctrl+C 取消"))
 
 
 def key_order_text(model: dict[str, Any]) -> str:

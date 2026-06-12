@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 import sys
 import time
 from typing import Any
@@ -148,7 +149,7 @@ def scrollable_content_state(content: Any, offset: int, option_count: int) -> tu
     end = min(offset + viewport_height, len(lines))
     viewport = segment_lines_renderable(lines[offset:end])
     title = f"内容 第 {offset + 1}-{end} 行 / 共 {len(lines)} 行"
-    return section_panel(viewport, title, "blue", "[dim]滚轮或 PgUp/PgDn 翻阅[/dim]"), offset, max_offset, viewport_height
+    return section_panel(viewport, title, "blue", "[dim]滚轮或 PgUp/PgDn 翻阅[/dim]" if sys.platform == "win32" else "[dim]PgUp/PgDn 翻阅[/dim]"), offset, max_offset, viewport_height
 
 
 def render_option_menu(title: str, options: list[tuple[str, str]], selected: int, content: Any | None = None, content_offset: int = 0) -> Group:
@@ -159,7 +160,7 @@ def render_option_menu(title: str, options: list[tuple[str, str]], selected: int
         renderables.append(content)
     shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 返回"
     if max_content_offset:
-        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅内容  ·  数字快捷键  ·  Ctrl+C 返回"
+        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 翻阅内容  ·  数字快捷键  ·  Ctrl+C 返回" if sys.platform != "win32" else "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅内容  ·  数字快捷键  ·  Ctrl+C 返回"
     renderables.append(section_panel(menu_table(options, selected), "操作菜单", "cyan", "[dim]选择下一步操作[/dim]"))
     return terminal_frame(renderables, shortcut_text(shortcuts))
 
@@ -223,9 +224,13 @@ def read_windows_char_if_available(timeout: float = ESC_SEQUENCE_TIMEOUT_SECONDS
 
 
 def read_posix_until(end_chars: set[str], limit: int = 64) -> str:
+    fd = sys.stdin.fileno()
     chars = []
-    while len(chars) < limit and select.select([sys.stdin], [], [], ESC_SEQUENCE_TIMEOUT_SECONDS)[0]:
-        char = sys.stdin.read(1)
+    while len(chars) < limit and select.select([fd], [], [], ESC_SEQUENCE_TIMEOUT_SECONDS)[0]:
+        ch = os.read(fd, 1)
+        if not ch:
+            break
+        char = ch.decode("utf-8", errors="ignore")
         chars.append(char)
         if char in end_chars:
             break
@@ -233,8 +238,12 @@ def read_posix_until(end_chars: set[str], limit: int = 64) -> str:
 
 
 def read_posix_char_if_available(timeout: float = ESC_SEQUENCE_TIMEOUT_SECONDS) -> str | None:
-    if select.select([sys.stdin], [], [], timeout)[0]:
-        return sys.stdin.read(1)
+    fd = sys.stdin.fileno()
+    if select.select([fd], [], [], timeout)[0]:
+        ch = os.read(fd, 1)
+        if not ch:
+            return None
+        return ch.decode("utf-8", errors="ignore")
     return None
 
 
@@ -276,7 +285,7 @@ def enable_windows_virtual_terminal_input() -> Callable[[], None]:
 
 @contextmanager
 def mouse_wheel_mode(enabled: bool = True) -> Iterator[None]:
-    if not enabled or sys.stdout is None:
+    if not enabled or sys.stdout is None or sys.platform != "win32":
         yield
         return
     restore_input_mode = enable_windows_virtual_terminal_input()
@@ -296,7 +305,7 @@ def mouse_wheel_mode(enabled: bool = True) -> Iterator[None]:
 def key_pressed() -> str | None:
     if sys.platform == "win32" and msvcrt.kbhit():
         return read_key()
-    if sys.platform != "win32" and select.select([sys.stdin], [], [], 0)[0]:
+    if sys.platform != "win32" and select.select([sys.stdin.fileno()], [], [], 0)[0]:
         return read_key()
     return None
 
@@ -373,7 +382,10 @@ def read_posix_key() -> str:
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        key = sys.stdin.read(1)
+        ch = os.read(fd, 1)
+        if not ch:
+            return "ignore"
+        key = ch.decode("utf-8", errors="ignore")
         if key == "\x03":
             return "cancel"
         if key in {"\r", "\n"}:

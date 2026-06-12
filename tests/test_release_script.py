@@ -71,3 +71,17 @@ def test_render_updated_changelog_uses_notes_when_unreleased_empty() -> None:
     updated = release_script.render_updated_changelog(text, "1.0.1", "2026-06-09", "修复发布流程")
 
     assert "## [1.0.1] - 2026-06-09\n\n### Changed\n- 修复发布流程" in updated
+
+
+def test_preview_plan_renders_rich_release_summary(capsys) -> None:
+    args = release_script.build_parser().parse_args(["--type", "patch", "--dry-run", "--skip-tests", "--no-push"])
+
+    release_script.preview_plan("1.2.3", "1.2.4", "v1.2.4", args)
+
+    output = capsys.readouterr().out
+    assert "发布计划" in output
+    assert "当前版本" in output
+    assert "1.2.3" in output
+    assert "目标版本" in output
+    assert "1.2.4" in output
+    assert "仅本地" in output

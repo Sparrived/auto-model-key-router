@@ -65,12 +65,24 @@ def test_content_scroll_offset_uses_single_line_wheel_step() -> None:
 def test_mouse_wheel_mode_is_enabled_by_default(monkeypatch) -> None:
     output = StringIO()
     monkeypatch.setattr(tui.sys, "stdout", output)
+    monkeypatch.setattr(tui.sys, "platform", "win32")
     monkeypatch.setattr(tui, "enable_windows_virtual_terminal_input", lambda: lambda: None)
 
     with tui.mouse_wheel_mode():
         pass
 
     assert output.getvalue() == f"{tui.MOUSE_MODE_ENABLE}{tui.MOUSE_MODE_DISABLE}"
+
+
+def test_mouse_wheel_mode_is_disabled_on_linux(monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(tui.sys, "stdout", output)
+    monkeypatch.setattr(tui.sys, "platform", "linux")
+
+    with tui.mouse_wheel_mode():
+        pass
+
+    assert output.getvalue() == ""
 
 
 def test_read_key_windows_single_escape_returns_cancel(monkeypatch) -> None:
@@ -122,11 +134,9 @@ def test_read_posix_key_handles_ss3_arrows(monkeypatch) -> None:
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     stdin = FakeStdin()
     monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui.os, "read", lambda fd, size: stdin.chars.pop(0).encode("utf-8") if stdin.chars else b"")
     monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
     monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
     monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
@@ -142,11 +152,9 @@ def test_read_posix_key_ignores_sgr_mouse_click(monkeypatch) -> None:
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     stdin = FakeStdin()
     monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui.os, "read", lambda fd, size: stdin.chars.pop(0).encode("utf-8") if stdin.chars else b"")
     monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
     monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
     monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
@@ -162,11 +170,9 @@ def test_read_posix_key_ignores_unknown_escape_sequence(monkeypatch) -> None:
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     stdin = FakeStdin()
     monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui.os, "read", lambda fd, size: stdin.chars.pop(0).encode("utf-8") if stdin.chars else b"")
     monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
     monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
     monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
@@ -182,11 +188,9 @@ def test_read_posix_key_ignores_single_escape(monkeypatch) -> None:
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     stdin = FakeStdin()
     monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui.os, "read", lambda fd, size: stdin.chars.pop(0).encode("utf-8") if stdin.chars else b"")
     monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
     monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
     monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
@@ -202,11 +206,9 @@ def test_read_posix_key_ignores_incomplete_csi_sequence(monkeypatch) -> None:
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     stdin = FakeStdin()
     monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui.os, "read", lambda fd, size: stdin.chars.pop(0).encode("utf-8") if stdin.chars else b"")
     monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
     monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
     monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
@@ -222,11 +224,9 @@ def test_read_posix_key_ignores_incomplete_page_sequence(monkeypatch) -> None:
         def fileno(self):
             return 0
 
-        def read(self, size=1):
-            return self.chars.pop(0) if self.chars else ""
-
     stdin = FakeStdin()
     monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui.os, "read", lambda fd, size: stdin.chars.pop(0).encode("utf-8") if stdin.chars else b"")
     monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
     monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
     monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)

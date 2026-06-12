@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -135,7 +136,7 @@ def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, u
     if update_notice is not None:
         renderables.append(update_notice)
     renderables.append(section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"))
-    return terminal_frame(renderables, shortcut_text("↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
+    return terminal_frame(renderables, shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出" if sys.platform != "win32" else "↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
 
 
 def manage_system_service_interactively(config_path: Path) -> None:
