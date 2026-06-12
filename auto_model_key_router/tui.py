@@ -39,7 +39,7 @@ APP_ASCII_FLAG_STYLES = ("bold bright_cyan", "bold cyan", "bold bright_blue", "b
 MOUSE_MODE_ENABLE = "\033[?1000h\033[?1006h"
 MOUSE_MODE_DISABLE = "\033[?1000l\033[?1006l"
 WHEEL_EVENT_INTERVAL_SECONDS = 0.16
-ESC_SEQUENCE_TIMEOUT_SECONDS = 0.05
+ESC_SEQUENCE_TIMEOUT_SECONDS = 0.2
 WHEEL_CONTENT_STEP = 1
 WHEEL_KEYS = {"scroll_up", "scroll_down"}
 MIN_RENDER_WIDTH = 20
@@ -224,7 +224,7 @@ def read_windows_char_if_available(timeout: float = ESC_SEQUENCE_TIMEOUT_SECONDS
 
 def read_posix_until(end_chars: set[str], limit: int = 64) -> str:
     chars = []
-    while len(chars) < limit and select.select([sys.stdin], [], [], 0.05)[0]:
+    while len(chars) < limit and select.select([sys.stdin], [], [], ESC_SEQUENCE_TIMEOUT_SECONDS)[0]:
         char = sys.stdin.read(1)
         chars.append(char)
         if char in end_chars:
@@ -384,6 +384,8 @@ def read_posix_key() -> str:
                 return "cancel"
             third = read_posix_char_if_available() if second in {"[", "O"} else ""
             if second in {"[", "O"}:
+                if third is None:
+                    return "ignore"
                 if third == "<":
                     mouse_key = parse_sgr_mouse_sequence(read_posix_until({"M", "m"}))
                     if mouse_key:
@@ -401,11 +403,9 @@ def read_posix_key() -> str:
                 if third == "C":
                     return "right"
                 if third == "5":
-                    sys.stdin.read(1)
-                    return "page_up"
+                    return "page_up" if read_posix_char_if_available() == "~" else "ignore"
                 if third == "6":
-                    sys.stdin.read(1)
-                    return "page_down"
+                    return "page_down" if read_posix_char_if_available() == "~" else "ignore"
                 if third == "H":
                     return "home"
                 if third == "F":

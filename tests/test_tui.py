@@ -174,6 +174,46 @@ def test_read_posix_key_ignores_unknown_escape_sequence(monkeypatch) -> None:
     assert tui.read_posix_key() == "ignore"
 
 
+def test_read_posix_key_ignores_incomplete_csi_sequence(monkeypatch) -> None:
+    class FakeStdin:
+        def __init__(self):
+            self.chars = list("\x1b[")
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    stdin = FakeStdin()
+    monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
+    monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
+    monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
+
+    assert tui.read_posix_key() == "ignore"
+
+
+def test_read_posix_key_ignores_incomplete_page_sequence(monkeypatch) -> None:
+    class FakeStdin:
+        def __init__(self):
+            self.chars = list("\x1b[5")
+
+        def fileno(self):
+            return 0
+
+        def read(self, size=1):
+            return self.chars.pop(0) if self.chars else ""
+
+    stdin = FakeStdin()
+    monkeypatch.setattr(tui.sys, "stdin", stdin)
+    monkeypatch.setattr(tui, "termios", type("Termios", (), {"TCSADRAIN": object(), "tcgetattr": lambda self, fd: object(), "tcsetattr": lambda self, fd, when, settings: None})(), raising=False)
+    monkeypatch.setattr(tui, "tty", type("Tty", (), {"setraw": lambda self, fd: None})(), raising=False)
+    monkeypatch.setattr(tui, "select", type("Select", (), {"select": lambda self, readers, writers, errors, timeout: (readers, writers, errors) if stdin.chars else ([], [], [])})(), raising=False)
+
+    assert tui.read_posix_key() == "ignore"
+
+
 def test_copy_to_clipboard_uses_available_command(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
@@ -194,6 +234,27 @@ def test_copy_to_clipboard_uses_available_command(monkeypatch) -> None:
     assert copied
     assert message == "已复制到剪贴板。"
     assert calls == [{"command": ["clip"], "input": "secret-key", "text": True, "capture_output": True, "timeout": 5, "check": False}]
+
+
+def test_copy_to_clipboard_uses_terminal_clipboard_for_remote_session(monkeypatch) -> None:
+    output = StringIO()
+    commands_called = False
+
+    def clipboard_commands():
+        nonlocal commands_called
+        commands_called = True
+        return [["clip"]]
+
+    monkeypatch.setenv("SSH_CONNECTION", "client server")
+    monkeypatch.setattr(clipboard.sys, "stdout", output)
+    monkeypatch.setattr(clipboard, "clipboard_commands", clipboard_commands)
+
+    copied, message = clipboard.copy_to_clipboard("secret-key")
+
+    assert copied
+    assert message == "已发送复制请求到终端剪贴板。"
+    assert output.getvalue() == "\033]52;c;c2VjcmV0LWtleQ==\a"
+    assert not commands_called
 
 
 def test_paste_from_clipboard_rejects_whitespace_only(monkeypatch) -> None:

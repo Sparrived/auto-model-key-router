@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import base64
+import os
 import platform
 import shutil
 import subprocess
+import sys
+
+
+REMOTE_TERMINAL_ENV_VARS = ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
 
 
 def clipboard_commands() -> list[list[str]]:
@@ -41,9 +47,27 @@ def paste_commands() -> list[list[str]]:
     return commands
 
 
+def is_remote_terminal() -> bool:
+    return any(os.environ.get(name) for name in REMOTE_TERMINAL_ENV_VARS)
+
+
+def copy_to_terminal_clipboard(text: str) -> bool:
+    if sys.stdout is None:
+        return False
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    try:
+        sys.stdout.write(f"\033]52;c;{encoded}\a")
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def copy_to_clipboard(text: str) -> tuple[bool, str]:
     if not text:
         return False, "没有可复制的内容。"
+    if is_remote_terminal() and copy_to_terminal_clipboard(text):
+        return True, "已发送复制请求到终端剪贴板。"
     commands = clipboard_commands()
     if not commands:
         return False, "当前系统未找到可用的剪贴板命令。"
