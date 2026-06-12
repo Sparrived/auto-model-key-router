@@ -15,28 +15,145 @@ from .clipboard import paste_from_clipboard
 from .config import RouterConfig, empty_config_dict, generate_local_api_key
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
-from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 
 
 def manage_model_keys_interactively(path: Path) -> None:
     while True:
-        choice = select_option("模型 Key", [("1", "添加 Key"), ("2", "编辑 API key"), ("3", "删除 API key"), ("4", "复制 API key"), ("5", "Key 排序"), ("6", "路由模式"), ("7", "推理强度"), ("0", "返回")])
+        choice = select_option("模型 Key", [("1", "添加 Key"), ("2", "管理 Key"), ("3", "Key 排序"), ("4", "路由模式"), ("5", "推理强度"), ("0", "返回")])
         if choice == "0":
             return
-        actions = {
-            "1": ("添加 Key", lambda: add_config_interactively(path, ask_continue=False)),
-            "2": ("编辑 API key", lambda: edit_api_key_interactively(path)),
-            "3": ("删除 API key", lambda: delete_api_key_interactively(path)),
-            "4": ("复制 API key", lambda: copy_api_key_interactively(path)),
-            "5": ("Key 排序", lambda: reorder_api_keys_interactively(path)),
-            "6": ("路由模式", lambda: set_model_routing_mode_interactively(path)),
-            "7": ("推理强度", lambda: set_model_reasoning_effort_interactively(path)),
-        }
-        title, action = actions[choice]
-        clear_terminal_history()
-        result = action()
-        if result is not None:
-            show_result_page(title, result)
+        if choice == "1":
+            clear_terminal_history()
+            result = add_config_interactively(path, ask_continue=False)
+            if result is not None:
+                show_result_page("添加 Key", result)
+        elif choice == "2":
+            run_submodule(lambda: manage_selected_key_interactively(path))
+        elif choice == "3":
+            clear_terminal_history()
+            result = reorder_api_keys_interactively(path)
+            if result is not None:
+                show_result_page("Key 排序", result)
+        elif choice == "4":
+            clear_terminal_history()
+            result = set_model_routing_mode_interactively(path)
+            if result is not None:
+                show_result_page("路由模式", result)
+        elif choice == "5":
+            clear_terminal_history()
+            result = set_model_reasoning_effort_interactively(path)
+            if result is not None:
+                show_result_page("推理强度", result)
+
+
+def manage_selected_key_interactively(path: Path) -> None:
+    while True:
+        selection = select_api_key(path, "选择要管理的 Key")
+        if selection is None:
+            return
+        data, model, key_index = selection
+        key = model["keys"][key_index]
+        key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+        enabled = key.get("enabled", True)
+        status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+
+        while True:
+            choice = select_option(
+                f"管理 Key · {short_text(key_name, 24)}",
+                [("1", "编辑"), ("2", "删除"), ("3", "复制 API key"), ("4", "禁用" if enabled else "启用"), ("0", "返回")],
+                content=section_panel(
+                    f"模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
+                    f"Key: [bold]{short_text(key_name, 32)}[/bold]\n"
+                    f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]\n"
+                    f"状态: {status_text}",
+                    "Key 信息", "cyan"
+                )
+            )
+            if choice == "0":
+                break
+            clear_terminal_history()
+            if choice == "1":
+                result = edit_selected_key_interactively(path, data, model, key_index)
+            elif choice == "2":
+                result = delete_selected_key_interactively(path, data, model, key_index)
+                if result is not None:
+                    show_result_page("删除 API key", result)
+                    return  # key已删除，返回选择列表
+                continue
+            elif choice == "3":
+                result = copy_selected_key_interactively(data, model, key_index)
+            elif choice == "4":
+                result = toggle_selected_key_interactively(path, data, model, key_index)
+            else:
+                continue
+            if result is not None:
+                show_result_page("编辑" if choice == "1" else ("复制 API key" if choice == "3" else "Key 开关"), result)
+            if choice in ("1", "4"):
+                # 编辑或切换状态后刷新数据
+                data = load_config_data(path)
+                model = find_model(data.get("models", []), model["id"])
+                if model is None or key_index >= len(model.get("keys", [])):
+                    return
+                key = model["keys"][key_index]
+                key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+                enabled = key.get("enabled", True)
+                status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+
+
+def edit_selected_key_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int) -> Any:
+    old_config = RouterConfig.from_dict(data)
+    key = model["keys"][key_index]
+    old_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    key_name = Prompt.ask("Key 名称", default=old_name).strip() or old_name
+    key["name"] = key_name
+    key["base_url"] = Prompt.ask("上游 base_url", default=str(key.get("base_url") or data.get("default_base_url") or "https://api.openai.com")).strip()
+    api_key = Prompt.ask("新 API key（留空则不修改）", default="", password=True).strip()
+    if api_key:
+        key["api_key"] = api_key
+    new_config = RouterConfig.from_dict(data)
+    save_config_data(path, data)
+    return Group(section_panel(f"已更新配置文件: [bold]{path}[/bold]\n模型: [bold]{model['id']}[/bold]\nKey: [bold]{key_name}[/bold]", "编辑完成", "green"), restart_service_after_config_change(path, old_config, new_config))
+
+
+def delete_selected_key_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int) -> Any:
+    old_config = RouterConfig.from_dict(data)
+    key = model["keys"][key_index]
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    if not confirm_choice(f"确认删除模型 {model['id']} 的 Key {key_name}？", default=False):
+        return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
+    del model["keys"][key_index]
+    if not model["keys"]:
+        data["models"].remove(model)
+        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
+    else:
+        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
+    new_config = RouterConfig.from_dict(data)
+    save_config_data(path, data)
+    return Group(section_panel(message, "删除完成", "green"), restart_service_after_config_change(path, old_config, new_config))
+
+
+def copy_selected_key_interactively(data: dict[str, Any], model: dict[str, Any], key_index: int) -> ResultPage:
+    key = model["keys"][key_index]
+    api_key = str(key.get("api_key") or "")
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    base_url = compact_url(key.get("base_url") or data.get("default_base_url") or "-", 48)
+    content = section_panel(f"模型: [bold]{short_text(model['id'], 48)}[/bold]\nKey: [bold]{short_text(key_name, 48)}[/bold]\n上游: [bold]{base_url}[/bold]\n指纹: [bold]{key_fingerprint(api_key)}[/bold]\n\n选择“复制 API key”即可写入剪贴板。", "复制 API key", "green")
+    return ResultPage(content, copy_text=api_key, copy_label="复制 API key")
+
+
+def toggle_selected_key_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int) -> Any:
+    old_config = RouterConfig.from_dict(data)
+    key = model["keys"][key_index]
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    current_enabled = key.get("enabled", True)
+    new_enabled = not current_enabled
+    key["enabled"] = new_enabled
+    new_config = RouterConfig.from_dict(data)
+    save_config_data(path, data)
+    old_status = "启用" if current_enabled else "禁用"
+    new_status = "启用" if new_enabled else "禁用"
+    return Group(section_panel(f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: [bold]{key_name}[/bold]\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]", "Key 开关", "green"), restart_service_after_config_change(path, old_config, new_config))
 
 
 def manage_config_transfer_interactively(path: Path) -> None:
@@ -206,6 +323,24 @@ def reorder_api_keys_interactively(path: Path) -> Any:
             selected += 1
 
 
+def toggle_key_enabled_interactively(path: Path) -> Any:
+    selection = select_api_key(path, "选择要切换状态的 Key")
+    if selection is None:
+        return None
+    data, model, key_index = selection
+    old_config = RouterConfig.from_dict(data)
+    key = model["keys"][key_index]
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    current_enabled = key.get("enabled", True)
+    new_enabled = not current_enabled
+    key["enabled"] = new_enabled
+    new_config = RouterConfig.from_dict(data)
+    save_config_data(path, data)
+    old_status = "启用" if current_enabled else "禁用"
+    new_status = "启用" if new_enabled else "禁用"
+    return Group(section_panel(f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: [bold]{key_name}[/bold]\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]", "Key 开关", "green"), restart_service_after_config_change(path, old_config, new_config))
+
+
 def select_reorder_key_action(model: dict[str, Any], selected: int = 0) -> tuple[str, int]:
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
@@ -350,7 +485,9 @@ def select_api_key(path: Path, title: str) -> tuple[dict[str, Any], dict[str, An
     for index, key in enumerate(model.get("keys", [])):
         name = short_text(key.get("name") or f"{model['id']}-{index + 1}", 28)
         base_url = compact_url(key.get("base_url") or data.get("default_base_url") or "-", 28)
-        key_options.append((str(index + 1), f"{name} · {base_url}"))
+        enabled = key.get("enabled", True)
+        status = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+        key_options.append((str(index + 1), f"{name} · {base_url} · {status}"))
     key_options.append(("0", "返回"))
     key_choice = select_option(title, key_options)
     if key_choice == "0":

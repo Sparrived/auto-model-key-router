@@ -64,7 +64,7 @@ class KeyPool:
         return self._aliases.get(model_id, model_id)
 
     def key_count(self, model_id: str) -> int:
-        return len(self._keys.get(self.resolve_model_id(model_id), ()))
+        return len([k for k in self._keys.get(self.resolve_model_id(model_id), ()) if k.enabled])
 
     def routing_mode(self, model_id: str) -> str:
         return self._routing_modes.get(self.resolve_model_id(model_id), "round_robin")
@@ -88,7 +88,7 @@ class KeyPool:
     async def next_key(self, model_id: str, excluded: set[str] | None = None) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
         excluded = excluded or set()
-        keys = self._keys.get(model_id)
+        keys = [key for key in self._keys.get(model_id, ()) if key.enabled]
         if not keys:
             raise KeyError(model_id)
 

@@ -87,6 +87,7 @@ class KeyConfig:
     name: str
     api_key: str
     base_url: str
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,7 @@ class RouterConfig:
                     name=str(key.get("name") or f"{model['id']}-{index + 1}"),
                     api_key=str(key["api_key"]),
                     base_url=str(key.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
+                    enabled=bool(key.get("enabled", True)),
                 )
                 for index, key in enumerate(model.get("keys", []))
             )

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- 修复 Linux/POSIX 终端下方向键无法用于菜单选择的问题，原因是 Python `BufferedReader` 预读了 ESC 序列的后续字节，导致 `select.select` 检查底层 fd 时超时，将方向键误判为 `ignore`；改为使用 `os.read(fd, 1)` 直接从文件描述符读取，绕过 Python 缓冲层。
+
+### Changed
+- Linux/POSIX 平台禁用鼠标滚轮支持，避免部分终端因鼠标模式与键盘输入冲突导致交互异常；相应移除 Linux 下 UI 中的滚轮操作提示。
+
 ## [1.3.6] - 2026-06-12
 
 ### Added
