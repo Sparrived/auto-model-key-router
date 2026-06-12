@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-06-12
+
 ### Added
 - 新增 MIT License 文件，并补充 PyPI 包元数据、项目链接、分类器和 README 许可证入口。
 - 新增更新后服务重启和 Windows 延迟更新后置命令相关回归测试。
