@@ -228,6 +228,51 @@ def test_stream_request_disables_upstream_read_timeout() -> None:
         assert upstream_timeouts[0]["connect"] == config.request_timeout
 
 
+def test_chat_completions_stream_splits_and_flushes_sse_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        flushes: list[None] = []
+
+        async def record_flush() -> None:
+            flushes.append(None)
+
+        monkeypatch.setattr("auto_model_key_router.app._flush_stream_event", record_flush)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=ChunkedStream(
+                    (
+                        b'data: {"choices":[{"delta":{"content":"one"}}]}\n\ndata: {"choices":',
+                        b'[{"delta":{"content":"two"}}]}\n\ndata: [DONE]\n\n',
+                    )
+                ),
+            )
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["x-accel-buffering"] == "no"
+        assert response.content == (
+            b'data: {"choices":[{"delta":{"content":"one"}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"two"}}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        assert len(flushes) == 3
+
+
 def test_messages_response_is_converted_to_anthropic_schema() -> None:
     with tempfile.TemporaryDirectory() as directory:
         upstream_bodies: list[dict[str, object]] = []

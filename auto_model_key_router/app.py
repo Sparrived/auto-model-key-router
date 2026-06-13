@@ -25,6 +25,14 @@ from .metrics import MetricsStore, extract_usage
 
 
 LOGGER = logging.getLogger("auto_model_key_router.app")
+RETRYABLE_STATUS_CODES = frozenset({401, 403, 429, 500, 502, 503, 504})
+
+
+def _new_http_client(timeout: float) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=timeout,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30),
+    )
 
 
 def create_app(config: RouterConfig, config_path: str | Path | None = None) -> FastAPI:
@@ -52,10 +60,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     app.state.config_reload_lock = asyncio.Lock()
     app.state.key_pool = KeyPool(config)
     app.state.metrics = MetricsStore(config.metrics_db_path)
-    app.state.http_client = httpx.AsyncClient(
-        timeout=config.request_timeout,
-        limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30),
-    )
+    app.state.http_client = _new_http_client(config.request_timeout)
     app.state.health_probe_task = None
 
     @app.head("/", include_in_schema=False)
@@ -102,13 +107,14 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
         body = await request.body()
         payload = _json_body(body)
+        is_stream = _is_stream_request(payload)
         requested_model_id = _resolve_model_id(path, payload)
-        _debug_report("proxy-entry", {"path": path, "method": request.method, "requested_model_id": requested_model_id, "stream": _is_stream_request(payload), "body_bytes": len(body)})
+        _debug_report("proxy-entry", {"path": path, "method": request.method, "requested_model_id": requested_model_id, "stream": is_stream, "body_bytes": len(body)})
         if requested_model_id is None:
             return JSONResponse({"error": {"message": "请求体中缺少 model 字段"}}, status_code=400)
         requested_model_name, requested_key_name = _split_requested_model_key(requested_model_id)
         model_id, requested_key_name = app.state.key_pool.resolve_route(requested_model_name, requested_key_name)
-        upstream_body = _upstream_body(body, payload, model_id, app.state.config, stream=_is_stream_request(payload))
+        upstream_body = _upstream_body(body, payload, model_id, app.state.config, stream=is_stream)
 
         excluded: set[str] = set()
         last_error: JSONResponse | None = None
@@ -137,7 +143,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     excluded.add(key.name)
                 upstream = _join_url(key.base_url, f"/v1/{_upstream_path(path, payload)}")
                 headers = _upstream_headers(request, key.api_key)
-                _debug_report("upstream-attempt", {"upstream": upstream, "model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "stream": _is_stream_request(payload)})
+                _debug_report("upstream-attempt", {"upstream": upstream, "model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "stream": is_stream})
 
                 started = perf_counter()
                 try:
@@ -147,8 +153,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                         upstream,
                         headers,
                         upstream_body,
-                        stream=_is_stream_request(payload),
-                        timeout=_upstream_timeout(app.state.config, _is_stream_request(payload)),
+                        stream=is_stream,
+                        timeout=_upstream_timeout(app.state.config, is_stream),
                     )
                     duration_ms = _elapsed_ms(started)
                 except httpx.RequestError as exc:
@@ -168,50 +174,31 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     await app.state.key_pool.mark_failure(model_id, key.name)
                     continue
 
-                if response.status_code in {401, 403, 429, 500, 502, 503, 504} and attempt + 1 < attempts:
+                if response.status_code in RETRYABLE_STATUS_CODES and attempt + 1 < attempts:
                     content = await response.aread()
                     duration_ms = _elapsed_ms(started)
                     _debug_report("upstream-retryable-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_preview": content[:500].decode("utf-8", errors="replace")})
                     last_error = _json_error_response_from_content(response, content)
-                    await app.state.metrics.record(
-                        model_id,
-                        key.name,
-                        response.status_code,
-                        extract_usage(_json_bytes(content)),
-                        retried=True,
-                        failed=True,
-                        duration_ms=duration_ms,
-                        first_token_ms=duration_ms,
-                        requested_model_id=requested_model_id,
-                    )
-                    await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
-                    await _close_upstream_response(response)
+                    await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms, retried=True)
+                    await response.aclose()
                     continue
 
-                if _is_stream_request(payload) and response.status_code >= 400:
+                if is_stream and response.status_code >= 400:
                     content = await response.aread()
                     duration_ms = _elapsed_ms(started)
                     _debug_report("upstream-stream-error-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
                     await response.aclose()
-                    await app.state.metrics.record(
-                        model_id,
-                        key.name,
-                        response.status_code,
-                        extract_usage(_json_bytes(content)),
-                        failed=True,
-                        duration_ms=duration_ms,
-                        first_token_ms=duration_ms,
-                        requested_model_id=requested_model_id,
-                    )
-                    if response.status_code in {401, 403, 429, 500, 502, 503, 504}:
-                        await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
+                    await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms)
                     return _json_error_response_from_content(response, content, anthropic=path == "messages")
 
-                if _is_stream_request(payload):
+                if is_stream:
                     _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
                     stream = _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
                     media_type = response.headers.get("content-type")
                     response_headers = _response_headers(response)
+                    if _is_sse_media_type(media_type):
+                        response_headers["cache-control"] = "no-cache"
+                        response_headers["x-accel-buffering"] = "no"
                     if path == "messages":
                         stream = _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
                         media_type = "text/event-stream"
@@ -230,19 +217,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 duration_ms = _elapsed_ms(started)
                 _debug_report("upstream-buffered-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
                 await response.aclose()
-                await app.state.metrics.record(
-                    model_id,
-                    key.name,
-                    response.status_code,
-                    extract_usage(_json_bytes(content)),
-                    duration_ms=duration_ms,
-                    first_token_ms=duration_ms,
-                    requested_model_id=requested_model_id,
-                )
-                if response.status_code < 400:
-                    await app.state.key_pool.mark_success(model_id, key.name)
-                elif response.status_code in {401, 403, 429, 500, 502, 503, 504}:
-                    await app.state.key_pool.mark_failure(model_id, key.name, response.status_code, _retry_after_seconds(response))
+                await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms)
 
                 if response.status_code >= 400:
                     return _json_error_response_from_content(response, content, anthropic=path == "messages")
@@ -264,6 +239,33 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         return last_error or JSONResponse({"error": {"message": "没有可用 key"}}, status_code=503)
 
     return app
+
+
+async def _record_upstream_response(
+    state: Any,
+    model_id: str,
+    key_name: str,
+    requested_model_id: str,
+    response: httpx.Response,
+    content: bytes,
+    duration_ms: int,
+    *,
+    retried: bool = False,
+) -> None:
+    await state.metrics.record(
+        model_id,
+        key_name,
+        response.status_code,
+        extract_usage(_json_bytes(content)),
+        retried=retried,
+        duration_ms=duration_ms,
+        first_token_ms=duration_ms,
+        requested_model_id=requested_model_id,
+    )
+    if response.status_code < 400:
+        await state.key_pool.mark_success(model_id, key_name)
+    elif response.status_code in RETRYABLE_STATUS_CODES:
+        await state.key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
 
 
 def _elapsed_ms(started: float) -> int:
@@ -588,10 +590,7 @@ async def _reload_config_if_changed(state: Any) -> None:
         old_config = state.config
         if old_config.request_timeout != config.request_timeout:
             old_client = state.http_client
-            state.http_client = httpx.AsyncClient(
-                timeout=config.request_timeout,
-                limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30),
-            )
+            state.http_client = _new_http_client(config.request_timeout)
             await old_client.aclose()
         if old_config.metrics_db_path != config.metrics_db_path:
             old_metrics = state.metrics
@@ -712,6 +711,8 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
     chunk_count = 0
     byte_count = 0
     buffer = ""
+    sse_buffer = b""
+    is_sse = _is_sse_media_type(response.headers.get("content-type"))
     usage: dict[str, Any] | None = None
     first_token_ms = 0
     failed = False
@@ -724,8 +725,22 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
             buffer, chunk_usage = _stream_usage(buffer, chunk)
             if chunk_usage is not None:
                 usage = chunk_usage
-            yield chunk
+            if is_sse:
+                sse_buffer, events = _split_sse_events(sse_buffer, chunk)
+                for event in events:
+                    yield event
+                    await _flush_stream_event()
+            else:
+                yield chunk
+        if sse_buffer:
+            yield sse_buffer
+            await _flush_stream_event()
+            sse_buffer = b""
     except Exception as exc:
+        if sse_buffer:
+            yield sse_buffer
+            await _flush_stream_event()
+            sse_buffer = b""
         failed = True
         payload = {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key_name, "upstream": upstream, "status_code": response.status_code, "content_type": response.headers.get("content-type"), "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count, "duration_ms": _elapsed_ms(started)}
         LOGGER.warning("upstream stream error %s", json.dumps(payload, ensure_ascii=False))
@@ -741,13 +756,30 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
             first_token_ms=first_token_ms,
             requested_model_id=requested_model_id,
         )
-        if failed or response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+        if failed or response.status_code in RETRYABLE_STATUS_CODES:
             await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
         elif response.status_code < 400:
             await key_pool.mark_success(model_id, key_name)
         await key_pool.release_key(model_id, key_name)
         _debug_report("upstream-stream-close", {"status_code": response.status_code, "chunks": chunk_count, "bytes": byte_count, "first_token_ms": first_token_ms, "usage": usage})
         await response.aclose()
+
+
+def _is_sse_media_type(media_type: str | None) -> bool:
+    return bool(media_type and media_type.split(";", 1)[0].strip().lower() == "text/event-stream")
+
+
+def _split_sse_events(buffer: bytes, chunk: bytes) -> tuple[bytes, list[bytes]]:
+    buffer += chunk
+    events: list[bytes] = []
+    while True:
+        separators = [(index, separator) for separator in (b"\n\n", b"\r\n\r\n") if (index := buffer.find(separator)) >= 0]
+        if not separators:
+            return buffer, events
+        index, separator = min(separators, key=lambda item: item[0])
+        end = index + len(separator)
+        events.append(buffer[:end])
+        buffer = buffer[end:]
 
 
 async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
@@ -825,7 +857,7 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
             first_token_ms=first_token_ms,
             requested_model_id=requested_model_id,
         )
-        if failed or response.status_code in {401, 403, 429, 500, 502, 503, 504}:
+        if failed or response.status_code in RETRYABLE_STATUS_CODES:
             await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
         elif response.status_code < 400:
             await key_pool.mark_success(model_id, key_name)
@@ -1119,10 +1151,6 @@ def _debug_report(event: str, payload: dict[str, Any]) -> None:
     except Exception:
         return
 #endregion debug-point upstream-request-failed
-
-
-async def _close_upstream_response(response: httpx.Response) -> None:
-    await response.aclose()
 
 
 def _json_error_response_from_content(response: httpx.Response, content: bytes, anthropic: bool = False) -> JSONResponse:

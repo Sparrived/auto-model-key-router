@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-06-13
+
+### Fixed
+- 修复 `/v1/chat/completions` 等非 Anthropic 转换路径直接按上游网络 chunk 转发 SSE，导致一个 chunk 内多个 `data:` 事件在客户端一次性显示的问题；现在所有 `text/event-stream` 响应都会按完整 SSE event 拆分并逐事件刷新。
+
 ## [1.4.1] - 2026-06-13
 
 ### Fixed

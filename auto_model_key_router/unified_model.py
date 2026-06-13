@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
-import secrets
 from pathlib import Path
 
-from .config import RouterConfig
+from .config import RouterConfig, load_config_data, save_config_data
 
 
 def switch_unified_model(
@@ -16,7 +14,7 @@ def switch_unified_model(
 ) -> RouterConfig:
     path = Path(config_path)
     current_config = RouterConfig.load(path)
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = load_config_data(path)
     current = current_config.unified_model
 
     if model_name is None:
@@ -44,18 +42,5 @@ def switch_unified_model(
     data["unified_model"] = unified_data
 
     updated_config = RouterConfig.from_dict(data)
-    _write_json_atomic(path, data)
+    save_config_data(path, data)
     return updated_config
-
-
-def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-    try:
-        temporary_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        temporary_path.replace(path)
-    finally:
-        try:
-            temporary_path.unlink()
-        except OSError:
-            pass

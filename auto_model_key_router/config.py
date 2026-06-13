@@ -67,6 +67,27 @@ def empty_config_dict() -> dict[str, Any]:
     }
 
 
+def load_config_data(path: Path) -> dict[str, Any]:
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    data = empty_config_dict()
+    save_config_data(path, data)
+    return data
+
+
+def save_config_data(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        temporary_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temporary_path.replace(path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+
+
 def _resolve_config_path(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path)
@@ -133,14 +154,10 @@ class RouterConfig:
     @classmethod
     def load(cls, path: str | Path | None = None) -> "RouterConfig":
         config_path = _resolve_config_path(path)
-        if not config_path.exists():
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(json.dumps(empty_config_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = load_config_data(config_path)
         if not raw.get("local_api_key"):
             raw["local_api_key"] = generate_local_api_key()
-            config_path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            save_config_data(config_path, raw)
         return cls.from_dict(raw)
 
     @classmethod

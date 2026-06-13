@@ -5,14 +5,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from rich import box
 from rich.console import Group
 from rich.live import Live
 from rich.prompt import Prompt
 from rich.table import Table
 
 from .clipboard import paste_from_clipboard
-from .config import RouterConfig, empty_config_dict, generate_local_api_key
+from .config import RouterConfig, generate_local_api_key, load_config_data, save_config_data
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
 from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
@@ -588,18 +587,6 @@ def set_listen_interactively(path: Path) -> Any:
     save_config_data(path, data)
     warning = "\n[bold red]风险提示: 0.0.0.0 会暴露到所有可达网络，请确保防火墙和本地鉴权已正确配置。[/bold red]" if host == "0.0.0.0" else ""
     return Group(section_panel(f"已更新监听配置。\n配置文件: [bold]{path}[/bold]\n旧配置: [bold]{current_host}:{current_port}[/bold]\n新配置: [bold]{host}:{port}[/bold]{warning}", "监听配置", "green"), restart_service_after_config_change(path, old_config, new_config))
-
-def load_config_data(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        data = empty_config_dict()
-        save_config_data(path, data)
-        return data
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def save_config_data(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
 
 def find_model(models: list[dict[str, Any]], model_id: str) -> dict[str, Any] | None:
     for model in models:
