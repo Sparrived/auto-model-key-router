@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from io import StringIO
 import json
 from pathlib import Path, PurePosixPath
+import sqlite3
 import subprocess
 
 from rich.console import Console, ConsoleDimensions
@@ -586,6 +587,91 @@ def test_service_logs_renderable_can_show_archived_log(tmp_path) -> None:
     assert "uvicorn started" in output
 
 
+def test_request_stats_pages_filter_local_and_visitor_calls(tmp_path) -> None:
+    database_path = tmp_path / "metrics.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE request_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                caller_type TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                key_name TEXT NOT NULL,
+                status_code INTEGER,
+                success INTEGER NOT NULL,
+                retried INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                cached_tokens INTEGER NOT NULL,
+                cache_hit INTEGER NOT NULL,
+                first_token_ms INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO request_metrics (
+                created_at, caller_type, model_id, key_name, status_code, success,
+                retried, prompt_tokens, completion_tokens, total_tokens,
+                cached_tokens, cache_hit, first_token_ms, duration_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("2026-06-13T12:00:00+08:00", "local", "local-model", "local-key", 200, 1, 0, 2, 1, 3, 0, 0, 10, 20),
+                ("2026-06-13T12:01:00+08:00", "visitor", "visitor-model", "visitor-key", 200, 1, 0, 4, 2, 6, 1, 1, 15, 30),
+            ],
+        )
+
+    local_output = render_plain(logs_tui.request_stats_renderable(str(database_path), 1, 10, 4, caller_type="local"))
+    visitor_output = render_plain(logs_tui.request_stats_renderable(str(database_path), 1, 10, 4, caller_type="visitor"))
+
+    assert "本地调用" in local_output
+    assert "local-model" in local_output
+    assert "visitor-model" not in local_output
+    assert "访客调用" in visitor_output
+    assert "visitor-model" in visitor_output
+    assert "local-model" not in visitor_output
+
+
+def test_request_stats_pages_support_legacy_database_without_caller_type(tmp_path) -> None:
+    database_path = tmp_path / "legacy-metrics.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE request_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                key_name TEXT NOT NULL,
+                status_code INTEGER,
+                success INTEGER NOT NULL,
+                retried INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO request_metrics (
+                created_at, model_id, key_name, status_code, success, retried,
+                prompt_tokens, completion_tokens, total_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-06-13T12:00:00+08:00", "legacy-model", "legacy-key", 200, 1, 0, 1, 1, 2),
+        )
+
+    local_output = render_plain(logs_tui.request_stats_renderable(str(database_path), 1, 10, 4, caller_type="local"))
+    visitor_output = render_plain(logs_tui.request_stats_renderable(str(database_path), 1, 10, 4, caller_type="visitor"))
+
+    assert "legacy-model" in local_output
+    assert "共 0 条" in visitor_output
+
+
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
     assert dashboard.ONE_CLICK_OPTIONS == [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("0", "返回")]
@@ -792,36 +878,125 @@ def test_copy_api_key_interactively_returns_copyable_result(tmp_path, monkeypatc
     assert "sk-secret" not in output
 
 
-def test_export_config_interactively_returns_copyable_config_without_rendering_secret(tmp_path) -> None:
+def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
-    config_path.write_text(json.dumps({"local_api_key": "local-secret", "models": [{"id": "test-model", "keys": [{"name": "main", "api_key": "sk-secret", "base_url": "https://example.com/v1"}]}]}, ensure_ascii=False), encoding="utf-8")
+    config_path.write_text(
+        json.dumps(
+            {
+                "host": "0.0.0.0",
+                "port": 9000,
+                "local_api_key": "local-secret",
+                "default_base_url": "https://default.example.com",
+                "routing_mode": "priority",
+                "unified_model": {"model": "test-model", "key": "main"},
+                "models": [
+                    {
+                        "id": "test-model",
+                        "keys": [{"name": "main", "api_key": "sk-secret", "allow_visitor": True}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
 
     result = config_editor.export_config_interactively(config_path)
 
     assert isinstance(result, tui.ResultPage)
-    assert json.loads(result.copy_text or "") == json.loads(config_path.read_text(encoding="utf-8"))
+    assert json.loads(result.copy_text or "") == {
+        "models": [
+            {
+                "id": "test-model",
+                "routing_mode": "priority",
+                "keys": [
+                    {
+                        "name": "main",
+                        "api_key": "sk-secret",
+                        "base_url": "https://default.example.com",
+                    }
+                ],
+            }
+        ]
+    }
     output = render_plain(result.content)
     assert "sk-secret" not in output
     assert "local-secret" not in output
-    assert "复制内容包含本地鉴权 key 和上游 API key" in output
+    assert "本地鉴权、监听地址、端口及其他 CLI 设置不会复制" in output
+    assert "visitor 扩展未安装，不包含访客访问权限" in output
 
 
-def test_paste_config_interactively_applies_clipboard_config(tmp_path, monkeypatch) -> None:
+def test_export_config_interactively_includes_visitor_access_when_installed(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
-    old_data = {"local_api_key": "old-local", "models": [{"id": "old-model", "keys": [{"name": "old", "api_key": "sk-old", "base_url": "https://old.example.com"}]}]}
-    new_data = {"local_api_key": "new-local", "models": [{"id": "new-model", "keys": [{"name": "new", "api_key": "sk-new", "base_url": "https://new.example.com"}]}]}
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "test-model",
+                        "keys": [
+                            {
+                                "name": "main",
+                                "api_key": "sk-secret",
+                                "base_url": "https://example.com/v1",
+                                "allow_visitor": True,
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: True)
+
+    result = config_editor.export_config_interactively(config_path)
+
+    copied = json.loads(result.copy_text or "")
+    assert copied["models"][0]["keys"][0]["allow_visitor"] is True
+    assert "包含访客访问权限" in render_plain(result.content)
+
+
+def test_paste_config_interactively_applies_only_key_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    old_data = {
+        "host": "127.0.0.1",
+        "port": 8123,
+        "request_timeout": 45,
+        "local_api_key": "old-local",
+        "models": [{"id": "old-model", "keys": [{"name": "old", "api_key": "sk-old", "base_url": "https://old.example.com"}]}],
+    }
+    new_data = {
+        "host": "0.0.0.0",
+        "port": 9000,
+        "request_timeout": 120,
+        "local_api_key": "new-local",
+        "models": [{"id": "new-model", "keys": [{"name": "new", "api_key": "sk-new", "base_url": "https://new.example.com", "allow_visitor": True}]}],
+    }
     config_path.write_text(json.dumps(old_data, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(config_editor, "paste_from_clipboard", lambda: (True, json.dumps(new_data, ensure_ascii=False)))
     monkeypatch.setattr(config_editor, "confirm_choice", lambda message, default=False: True)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
 
     result = config_editor.paste_config_interactively(config_path)
 
-    assert json.loads(config_path.read_text(encoding="utf-8")) == new_data
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        **old_data,
+        "models": [
+            {
+                "id": "new-model",
+                "routing_mode": "round_robin",
+                "keys": [{"name": "new", "api_key": "sk-new", "base_url": "https://new.example.com"}],
+            }
+        ],
+    }
     output = render_plain(result)
     assert "new-model" not in output
     assert "sk-new" not in output
-    assert "已应用剪贴板配置" in output
+    assert "已应用剪贴板 Key 配置，并保留本机 CLI 设置" in output
 
 
 def test_paste_config_interactively_rejects_invalid_clipboard_config(tmp_path, monkeypatch) -> None:

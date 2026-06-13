@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import sys
 from pathlib import Path
@@ -207,7 +208,7 @@ def toggle_visitor_access_interactively(path: Path, data: dict[str, Any], model:
 
 def manage_config_transfer_interactively(path: Path) -> None:
     while True:
-        choice = select_option("配置迁移", [("1", "复制配置文件"), ("2", "粘贴并应用"), ("0", "返回")])
+        choice = select_option("配置迁移", [("1", "复制 Key 配置"), ("2", "粘贴并应用"), ("0", "返回")])
         if choice == "0":
             return
         clear_terminal_history()
@@ -216,13 +217,49 @@ def manage_config_transfer_interactively(path: Path) -> None:
             show_result_page("配置迁移", result)
 
 
+def transferable_key_config(data: dict[str, Any], *, include_visitor: bool) -> dict[str, Any]:
+    default_base_url = str(data.get("default_base_url") or "https://api.openai.com")
+    default_routing_mode = str(data.get("routing_mode") or "round_robin")
+    raw_models = data.get("models", [])
+    if not isinstance(raw_models, list):
+        raise ValueError("models 必须是数组")
+    models = deepcopy(raw_models)
+    for model in models:
+        if not isinstance(model, dict):
+            raise ValueError("models 中的每一项必须是对象")
+        if not model.get("routing_mode"):
+            model["routing_mode"] = default_routing_mode
+        keys = model.get("keys", [])
+        if not isinstance(keys, list):
+            raise ValueError("模型 keys 必须是数组")
+        for key in keys:
+            if not isinstance(key, dict):
+                raise ValueError("模型 keys 中的每一项必须是对象")
+            if not key.get("base_url"):
+                key["base_url"] = default_base_url
+            if not include_visitor:
+                key.pop("allow_visitor", None)
+    return {"models": models}
+
+
 def export_config_interactively(path: Path) -> ResultPage:
     data = load_config_data(path)
-    config_text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    model_count = len(data.get("models", []))
-    key_count = sum(len(model.get("keys", [])) for model in data.get("models", []))
-    content = section_panel(f"配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]\n\n[bold yellow]复制内容包含本地鉴权 key 和上游 API key，请仅粘贴到可信终端。[/bold yellow]\n\n在另一台机器或另一个 TUI 中进入“CLI 设置 → 配置迁移 → 粘贴并应用”即可覆盖应用。", "复制配置文件", "green")
-    return ResultPage(content, copy_text=config_text, copy_label="复制配置文件")
+    visitor_installed = visitor_feature_available()
+    transfer_data = transferable_key_config(data, include_visitor=visitor_installed)
+    config_text = json.dumps(transfer_data, indent=2, ensure_ascii=False) + "\n"
+    model_count = len(transfer_data["models"])
+    key_count = sum(len(model.get("keys", [])) for model in transfer_data["models"])
+    visitor_message = "包含访客访问权限。" if visitor_installed else "visitor 扩展未安装，不包含访客访问权限。"
+    content = section_panel(
+        f"配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\n"
+        f"Key 数量: [bold]{key_count}[/bold]\n\n"
+        f"[bold yellow]复制内容仅包含模型与上游 API key，{visitor_message}请仅粘贴到可信终端。[/bold yellow]\n\n"
+        "本地鉴权、监听地址、端口及其他 CLI 设置不会复制。\n\n"
+        "在另一台机器或另一个 TUI 中进入“CLI 设置 → 配置迁移 → 粘贴并应用”即可导入。",
+        "复制 Key 配置",
+        "green",
+    )
+    return ResultPage(content, copy_text=config_text, copy_label="复制 Key 配置")
 
 
 def paste_config_interactively(path: Path) -> Any:
@@ -236,16 +273,29 @@ def paste_config_interactively(path: Path) -> Any:
     if not isinstance(data, dict):
         return section_panel("剪贴板内容必须是配置对象。", "应用失败", "red")
     try:
-        new_config = RouterConfig.from_dict(data)
+        transfer_data = transferable_key_config(data, include_visitor=visitor_feature_available())
+        RouterConfig.from_dict(transfer_data)
     except (KeyError, TypeError, ValueError) as exc:
         return section_panel(f"配置校验失败: {exc}", "应用失败", "red")
-    if not confirm_choice(f"将用剪贴板配置覆盖当前配置文件：{path.resolve()}，是否继续？", default=False):
+    if not confirm_choice(f"将用剪贴板配置替换当前模型 Key，并保留本机 CLI 设置：{path.resolve()}，是否继续？", default=False):
         return section_panel("配置未变化。", "应用取消", "yellow")
-    old_config = RouterConfig.from_dict(load_config_data(path))
-    save_config_data(path, data)
+    current_data = load_config_data(path)
+    old_config = RouterConfig.from_dict(current_data)
+    merged_data = deepcopy(current_data)
+    merged_data["models"] = transfer_data["models"]
+    try:
+        new_config = RouterConfig.from_dict(merged_data)
+    except (KeyError, TypeError, ValueError) as exc:
+        return section_panel(f"配置校验失败: {exc}", "应用失败", "red")
+    save_config_data(path, merged_data)
     model_count = len(new_config.models)
     key_count = sum(len(model.keys) for model in new_config.models)
-    content = section_panel(f"已应用剪贴板配置。\n配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]", "应用完成", "green")
+    content = section_panel(
+        f"已应用剪贴板 Key 配置，并保留本机 CLI 设置。\n配置文件: [bold]{path.resolve()}[/bold]\n"
+        f"模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]",
+        "应用完成",
+        "green",
+    )
     return Group(content, restart_service_after_config_change(path, old_config, new_config))
 
 

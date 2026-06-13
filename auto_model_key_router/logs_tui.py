@@ -43,6 +43,11 @@ STATS_TIME_RANGES: tuple[tuple[str, timedelta | None], ...] = (
     ("30天", timedelta(days=30)),
     ("全部", None),
 )
+STATS_CALLER_PAGES: tuple[tuple[str, str, str | None], ...] = (
+    ("stats", "全部调用", None),
+    ("stats_local", "本地调用", "local"),
+    ("stats_visitor", "访客调用", "visitor"),
+)
 
 
 def render_logs(database_path: str, log_file_path: str, limit: int) -> None:
@@ -101,6 +106,18 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                     frame_offset = 0
                     refresh()
                     continue
+                if key == "3":
+                    page = "stats_local"
+                    stats_page = 1
+                    frame_offset = 0
+                    refresh()
+                    continue
+                if key == "4":
+                    page = "stats_visitor"
+                    stats_page = 1
+                    frame_offset = 0
+                    refresh()
+                    continue
                 if page == "logs" and key in {"up", "page_up", "scroll_up", "k", "K"}:
                     log_offset += log_page_size(limit) if key == "page_up" else 1
                     refresh()
@@ -131,22 +148,22 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                     status_message = open_log_file(str(selected_log_file(log_file_path, log_index)[0]))
                     refresh()
                     continue
-                if page == "stats" and key in {"\t", "tab"}:
+                if page != "logs" and key in {"\t", "tab"}:
                     stats_range_index = (stats_range_index + 1) % len(STATS_TIME_RANGES)
                     stats_page = 1
                     frame_offset = 0
                     refresh()
                     continue
-                if page == "stats" and key in {"up", "scroll_up", "down", "scroll_down", "page_up", "page_down", "home", "end"} and frame_state.max_offset:
+                if page != "logs" and key in {"up", "scroll_up", "down", "scroll_down", "page_up", "page_down", "home", "end"} and frame_state.max_offset:
                     frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
                     refresh()
                     continue
-                if page == "stats" and key in {"left", "p", "P"}:
+                if page != "logs" and key in {"left", "p", "P"}:
                     stats_page = max(1, stats_page - 1)
                     frame_offset = 0
                     refresh()
                     continue
-                if page == "stats" and key in {"right", "n", "N"}:
+                if page != "logs" and key in {"right", "n", "N"}:
                     stats_page += 1
                     frame_offset = 0
                     refresh()
@@ -171,7 +188,13 @@ def render_live_logs_state(
         selected_path, selected_index, choices = selected_log_file(log_file_path, log_index)
         content = service_logs_renderable(str(selected_path), log_page_size(limit), log_offset, log_file_title(selected_path, selected_index, len(choices)))
     else:
-        content = request_stats_renderable(database_path, stats_page, REQUEST_STATS_PAGE_SIZE, stats_range_index)
+        content = request_stats_renderable(
+            database_path,
+            stats_page,
+            REQUEST_STATS_PAGE_SIZE,
+            stats_range_index,
+            caller_type=stats_caller_type(page),
+        )
     renderables = [log_header_renderable(page), content]
     if status_message:
         renderables.append(section_panel(status_message, "提示", "green" if status_message.startswith("已") else "yellow"))
@@ -189,14 +212,20 @@ def log_page_size(limit: int) -> int:
 
 def log_header_renderable(page: str) -> Panel:
     logs_label = "[bold black on cyan] 1 运行日志 [/bold black on cyan]" if page == "logs" else "[dim]1[/dim] 运行日志"
-    stats_label = "[bold black on cyan] 2 调用统计 [/bold black on cyan]" if page == "stats" else "[dim]2[/dim] 调用统计"
-    return section_panel(Align.center(f"{logs_label}    {stats_label}"), "调用日志", "cyan", "[dim]运行日志与调用统计[/dim]")
+    caller_labels = []
+    for index, (page_id, label, _) in enumerate(STATS_CALLER_PAGES, start=2):
+        caller_labels.append(
+            f"[bold black on cyan] {index} {label} [/bold black on cyan]"
+            if page == page_id
+            else f"[dim]{index}[/dim] {label}"
+        )
+    return section_panel(Align.center("    ".join([logs_label, *caller_labels])), "调用日志", "cyan", "[dim]运行日志与分类调用统计[/dim]")
 
 
 def log_help_text(page: str) -> Align:
     if page == "logs":
-        return shortcut_text("1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/Pg 滚动  ·  q 返回" if sys.platform != "win32" else "1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
-    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ↑/↓/Pg 滚动  ·  ←/→ 翻页  ·  q 返回" if sys.platform != "win32" else "1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ↑/↓/滚轮/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
+        return shortcut_text("1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  ←/→ 切换日志  ·  O 打开  ·  ↑/↓/Pg 滚动  ·  q 返回" if sys.platform != "win32" else "1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  ←/→ 切换日志  ·  O 打开  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
+    return shortcut_text("1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  Tab 时间范围  ·  ↑/↓/Pg 滚动  ·  ←/→ 翻页  ·  q 返回" if sys.platform != "win32" else "1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  Tab 时间范围  ·  ↑/↓/滚轮/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
 
 
 def open_log_file(log_file_path: str) -> str:
@@ -317,7 +346,7 @@ def status_code_style(status_code: str) -> str:
     return "bold red"
 
 
-def request_stats_renderable(database_path: str, page: int, page_size: int, stats_range_index: int = 0) -> Group | Panel:
+def request_stats_renderable(database_path: str, page: int, page_size: int, stats_range_index: int = 0, caller_type: str | None = None) -> Group | Panel:
     path = Path(database_path)
     if not path.exists():
         return section_panel(f"[yellow]统计数据库不存在: {path}[/yellow]", "调用统计", "yellow")
@@ -325,14 +354,16 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
     page = max(page, 1)
     offset = (page - 1) * page_size
     stats_range_index, range_label, range_parameters = stats_range_query(stats_range_index)
-    where_clause = "WHERE created_at >= ?" if range_parameters else ""
-    status_where_clause = f"{where_clause} AND status_code IS NOT NULL" if where_clause else "WHERE status_code IS NOT NULL"
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
-    for name in ["时间", "模型", "Key", "状态", "成功", "重试", "输入", "输出", "总Tok", "缓存", "首字", "耗时"]:
+    for name in ["时间", "来源", "模型", "Key", "状态", "成功", "重试", "输入", "输出", "总Tok", "缓存", "首字", "耗时"]:
         table.add_column(name)
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(request_metrics)").fetchall()}
+        has_caller_type = "caller_type" in columns
+        where_clause, query_parameters = stats_filter_query(range_parameters, caller_type, has_caller_type)
+        status_where_clause = f"{where_clause} AND status_code IS NOT NULL" if where_clause else "WHERE status_code IS NOT NULL"
+        caller_type_expr = "caller_type" if has_caller_type else "'local' AS caller_type"
         cached_tokens_expr = "cached_tokens" if "cached_tokens" in columns else "0 AS cached_tokens"
         cached_tokens_sum_expr = "cached_tokens" if "cached_tokens" in columns else "0"
         cache_hit_sum_expr = "cache_hit" if "cache_hit" in columns else "0"
@@ -340,7 +371,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
         first_token_ms_sum_expr = "first_token_ms" if "first_token_ms" in columns else "0"
         duration_ms_expr = "duration_ms" if "duration_ms" in columns else "0 AS duration_ms"
         duration_ms_sum_expr = "duration_ms" if "duration_ms" in columns else "0"
-        total = connection.execute(f"SELECT COUNT(*) AS total FROM request_metrics {where_clause}", range_parameters).fetchone()["total"]
+        total = connection.execute(f"SELECT COUNT(*) AS total FROM request_metrics {where_clause}", query_parameters).fetchone()["total"]
         summary = connection.execute(f"""
             SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS failures,
             COALESCE(SUM(retried), 0) AS retries, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
@@ -349,18 +380,45 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
             COALESCE(ROUND(AVG({duration_ms_sum_expr})), 0) AS avg_duration_ms, COALESCE(MAX({duration_ms_sum_expr}), 0) AS max_duration_ms, MAX(created_at) AS latest_request_at
             FROM request_metrics
             {where_clause}
-        """, range_parameters).fetchone()
-        status_rows = connection.execute(f"SELECT status_code, COUNT(*) AS total FROM request_metrics {status_where_clause} GROUP BY status_code ORDER BY status_code", range_parameters).fetchall()
+        """, query_parameters).fetchone()
+        status_rows = connection.execute(f"SELECT status_code, COUNT(*) AS total FROM request_metrics {status_where_clause} GROUP BY status_code ORDER BY status_code", query_parameters).fetchall()
         max_page = max((total + page_size - 1) // page_size, 1)
         page = min(page, max_page)
         offset = (page - 1) * page_size
-        rows = connection.execute(f"SELECT created_at, model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens, {cached_tokens_expr}, {first_token_ms_expr}, {duration_ms_expr} FROM request_metrics {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?", (*range_parameters, page_size, offset)).fetchall()
+        rows = connection.execute(f"SELECT created_at, {caller_type_expr}, model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens, {cached_tokens_expr}, {first_token_ms_expr}, {duration_ms_expr} FROM request_metrics {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?", (*query_parameters, page_size, offset)).fetchall()
     for row in rows:
-        table.add_row(short_text(row["created_at"], 19), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", str(row["prompt_tokens"]), str(row["completion_tokens"]), str(row["total_tokens"]), str(row["cached_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
+        table.add_row(short_text(row["created_at"], 19), caller_type_text(row["caller_type"]), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", str(row["prompt_tokens"]), str(row["completion_tokens"]), str(row["total_tokens"]), str(row["cached_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
     if not rows:
-        table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
-    details_title = f"请求明细 · {range_label} · 第 {page}/{max_page} 页 · {page_size}/页 · 共 {total} 条"
-    return Group(section_panel(stats_range_tabs_renderable(stats_range_index), "查询范围", "cyan", "[dim]按 Tab 切换[/dim]"), section_panel(request_stats_summary_renderable(summary, status_rows), f"总览 · {range_label}", "cyan"), section_panel(table, details_title, "blue"))
+        table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
+    caller_label = caller_type_title(caller_type)
+    details_title = f"请求明细 · {caller_label} · {range_label} · 第 {page}/{max_page} 页 · {page_size}/页 · 共 {total} 条"
+    return Group(section_panel(stats_range_tabs_renderable(stats_range_index), "查询范围", "cyan", "[dim]按 Tab 切换[/dim]"), section_panel(request_stats_summary_renderable(summary, status_rows), f"总览 · {caller_label} · {range_label}", "cyan"), section_panel(table, details_title, "blue"))
+
+
+def stats_caller_type(page: str) -> str | None:
+    return next((caller_type for page_id, _, caller_type in STATS_CALLER_PAGES if page_id == page), None)
+
+
+def stats_filter_query(range_parameters: tuple[str, ...], caller_type: str | None, has_caller_type: bool) -> tuple[str, tuple[str, ...]]:
+    filters: list[str] = []
+    parameters: list[str] = []
+    if range_parameters:
+        filters.append("created_at >= ?")
+        parameters.extend(range_parameters)
+    if caller_type and has_caller_type:
+        filters.append("caller_type = ?")
+        parameters.append(caller_type)
+    elif caller_type == "visitor":
+        filters.append("1 = 0")
+    return (f"WHERE {' AND '.join(filters)}" if filters else ""), tuple(parameters)
+
+
+def caller_type_title(caller_type: str | None) -> str:
+    return {"local": "本地调用", "visitor": "访客调用"}.get(caller_type, "全部调用")
+
+
+def caller_type_text(caller_type: str) -> str:
+    return {"local": "本地", "visitor": "访客"}.get(caller_type, caller_type or "本地")
 
 
 def stats_range_query(stats_range_index: int) -> tuple[int, str, tuple[str, ...]]:

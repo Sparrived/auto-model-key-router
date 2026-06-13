@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi import FastAPI
 from auto_model_key_router.app import _probe_cooling_keys, _stream_anthropic_messages, _stream_upstream, create_app
 from auto_model_key_router.config import VISITOR_API_KEY, KeyConfig, ModelConfig, RouterConfig, UnifiedModelConfig
 from auto_model_key_router.key_pool import KeyPool
+from auto_model_key_router.metrics import MetricsStore
 from auto_model_key_router.unified_model import switch_unified_model
 
 
@@ -148,6 +150,123 @@ def test_metrics_requires_local_auth() -> None:
         assert unauthorized.status_code == 401
         assert authorized.status_code == 200
         assert authorized.json()["total"]["requests"] == 0
+
+
+def test_metrics_group_local_and_visitor_calls(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"id": "ok", "usage": {"prompt_tokens": 3, "completion_tokens": 2}})
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("shared-key", "sk-shared", "https://upstream.test", allow_visitor=True),),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> dict[str, object]:
+            local = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "local"}]},
+            )
+            visitor = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "visitor"}]},
+            )
+            assert local.status_code == 200
+            assert visitor.status_code == 200
+            metrics = await client.get("/metrics", headers={"Authorization": "Bearer local-key"})
+            return metrics.json()
+
+        metrics = run_client(app, requests)
+
+        assert metrics["total"]["requests"] == 2
+        assert metrics["caller_types"]["local"]["requests"] == 1
+        assert metrics["caller_types"]["visitor"]["requests"] == 1
+        assert metrics["caller_types"]["local"]["total_tokens"] == 5
+        assert metrics["caller_types"]["visitor"]["total_tokens"] == 5
+
+
+def test_stream_metrics_preserve_visitor_caller_type(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}],'
+                    b'"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\n'
+                    b"data: [DONE]\n\n"
+                ),
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("visitor-key", "sk-visitor", "https://upstream.test", allow_visitor=True),),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(client: httpx.AsyncClient) -> dict[str, object]:
+            headers = {"Authorization": f"Bearer {VISITOR_API_KEY}"}
+            for path in ("chat/completions", "messages", "responses"):
+                response = await client.post(
+                    f"/v1/{path}",
+                    headers=headers,
+                    json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+                assert response.status_code == 200
+            metrics = await client.get("/metrics", headers={"Authorization": "Bearer local-key"})
+            return metrics.json()
+
+        metrics = run_client(app, requests)
+
+        assert metrics["caller_types"]["visitor"]["requests"] == 3
+        assert metrics["caller_types"]["local"]["requests"] == 0
+
+
+def test_metrics_migrates_existing_rows_to_local_calls(tmp_path: Path) -> None:
+    database_path = tmp_path / "legacy-metrics.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE request_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                requested_model_id TEXT NOT NULL,
+                key_name TEXT NOT NULL,
+                status_code INTEGER,
+                success INTEGER NOT NULL,
+                retried INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO request_metrics (
+                created_at, model_id, requested_model_id, key_name, status_code,
+                success, retried, prompt_tokens, completion_tokens, total_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("2026-06-13T12:00:00+08:00", "test-model", "alias-model", "key-1", 200, 1, 0, 2, 1, 3),
+        )
+
+    store = MetricsStore(database_path)
+    snapshot = anyio.run(store.snapshot)
+    anyio.run(store.close)
+
+    with sqlite3.connect(database_path) as connection:
+        caller_type = connection.execute("SELECT caller_type FROM request_metrics").fetchone()[0]
+
+    assert caller_type == "local"
+    assert snapshot["caller_types"]["local"]["requests"] == 1
+    assert snapshot["caller_types"]["visitor"]["requests"] == 0
 
 
 def test_visitor_key_routes_only_to_allowed_upstream_keys(visitor_feature) -> None:

@@ -125,6 +125,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         if authorization_mode is None:
             return JSONResponse({"error": {"message": "本地 API key 验证失败"}}, status_code=401)
         visitor_only = authorization_mode == "visitor"
+        caller_type = "visitor" if visitor_only else "local"
 
         body = await request.body()
         payload = _json_body(body)
@@ -200,6 +201,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                         duration_ms=duration_ms,
                         first_token_ms=duration_ms,
                         requested_model_id=requested_model_id,
+                        caller_type=caller_type,
                     )
                     await app.state.key_pool.mark_failure(model_id, key.name)
                     continue
@@ -209,7 +211,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     duration_ms = _elapsed_ms(started)
                     _debug_report("upstream-retryable-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_preview": content[:500].decode("utf-8", errors="replace")})
                     last_error = _json_error_response_from_content(response, content)
-                    await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms, retried=True)
+                    await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms, retried=True, caller_type=caller_type)
                     await response.aclose()
                     continue
 
@@ -218,24 +220,24 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     duration_ms = _elapsed_ms(started)
                     _debug_report("upstream-stream-error-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
                     await response.aclose()
-                    await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms)
+                    await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms, caller_type=caller_type)
                     return _json_error_response_from_content(response, content, anthropic=path == "messages")
 
                 if is_stream:
                     _debug_report("upstream-stream-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type")})
-                    stream = _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
+                    stream = _stream_upstream(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started, caller_type)
                     media_type = response.headers.get("content-type")
                     response_headers = _response_headers(response)
                     if _is_sse_media_type(media_type):
                         response_headers["cache-control"] = "no-cache"
                         response_headers["x-accel-buffering"] = "no"
                     if path == "messages":
-                        stream = _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
+                        stream = _stream_anthropic_messages(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started, caller_type)
                         media_type = "text/event-stream"
                         response_headers["cache-control"] = "no-cache"
                         response_headers["x-accel-buffering"] = "no"
                     elif path == "responses":
-                        stream = _stream_responses(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
+                        stream = _stream_responses(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started, caller_type)
                         media_type = "text/event-stream"
                         response_headers["cache-control"] = "no-cache"
                         response_headers["x-accel-buffering"] = "no"
@@ -252,7 +254,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 duration_ms = _elapsed_ms(started)
                 _debug_report("upstream-buffered-response", {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key.name, "status_code": response.status_code, "duration_ms": duration_ms, "content_type": response.headers.get("content-type"), "content_preview": content[:500].decode("utf-8", errors="replace")})
                 await response.aclose()
-                await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms)
+                await _record_upstream_response(app.state, model_id, key.name, requested_model_id, response, content, duration_ms, caller_type=caller_type)
 
                 if response.status_code >= 400:
                     return _json_error_response_from_content(response, content, anthropic=path == "messages")
@@ -291,6 +293,7 @@ async def _record_upstream_response(
     duration_ms: int,
     *,
     retried: bool = False,
+    caller_type: str = "local",
 ) -> None:
     await state.metrics.record(
         model_id,
@@ -301,6 +304,7 @@ async def _record_upstream_response(
         duration_ms=duration_ms,
         first_token_ms=duration_ms,
         requested_model_id=requested_model_id,
+        caller_type=caller_type,
     )
     if response.status_code < 400:
         await state.key_pool.mark_success(model_id, key_name)
@@ -804,7 +808,7 @@ async def _probe_key(client: httpx.AsyncClient, key: Any) -> bool:
         return False
 
 
-async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
+async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float, caller_type: str = "local"):
     chunk_count = 0
     byte_count = 0
     buffer = ""
@@ -852,6 +856,7 @@ async def _stream_upstream(response: httpx.Response, metrics: MetricsStore, key_
             duration_ms=_elapsed_ms(started),
             first_token_ms=first_token_ms,
             requested_model_id=requested_model_id,
+            caller_type=caller_type,
         )
         if failed or response.status_code in RETRYABLE_STATUS_CODES:
             await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
@@ -879,7 +884,7 @@ def _split_sse_events(buffer: bytes, chunk: bytes) -> tuple[bytes, list[bytes]]:
         buffer = buffer[end:]
 
 
-async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
+async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float, caller_type: str = "local"):
     chunk_count = 0
     byte_count = 0
     buffer = ""
@@ -953,6 +958,7 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
             duration_ms=_elapsed_ms(started),
             first_token_ms=first_token_ms,
             requested_model_id=requested_model_id,
+            caller_type=caller_type,
         )
         if failed or response.status_code in RETRYABLE_STATUS_CODES:
             await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
@@ -963,7 +969,7 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
         await response.aclose()
 
 
-async def _stream_responses(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
+async def _stream_responses(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float, caller_type: str = "local"):
     chunk_count = 0
     byte_count = 0
     buffer = ""
@@ -1020,6 +1026,7 @@ async def _stream_responses(response: httpx.Response, metrics: MetricsStore, key
             duration_ms=_elapsed_ms(started),
             first_token_ms=first_token_ms,
             requested_model_id=requested_model_id,
+            caller_type=caller_type,
         )
         if failed or response.status_code in RETRYABLE_STATUS_CODES:
             await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))

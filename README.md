@@ -24,7 +24,7 @@
 | 🛡️ 失败切换 | 认证、限流、服务错误或请求异常时自动尝试下一个可用 key |
 | ❄️ 冷却恢复 | 支持失败阈值、`Retry-After`、状态持久化和上游健康探测恢复 |
 | 🔌 输入兼容 | 支持 OpenAI Chat Completions，并兼容 Anthropic Messages / OpenAI Responses 风格输入 |
-| 📊 调用统计 | 记录请求、成功/失败、重试、状态码、Token、缓存命中、耗时与首 token 耗时 |
+| 📊 调用统计 | 记录本地/访客来源、成功/失败、重试、状态码、Token、缓存命中、耗时与首 token 耗时 |
 | 🖥️ Terminal UI | 使用 Rich 管理系统服务、模型 key、本地鉴权、监听配置、配置迁移、调用日志和版本更新 |
 | 🔐 本地鉴权 | 支持 `Authorization: Bearer` 与 `x-api-key` 两种本地鉴权方式 |
 | 👤 访客访问 | 可选安装；固定访客 key `amkr-visitor` 只能使用显式授权的模型上游 key |
@@ -341,7 +341,7 @@ auto-model-key-router --config router-config.json
 
 Agent 配置文件和备份可能包含鉴权 token，请不要共享这些文件。配置完成后，如果路由服务尚未运行，结果页会提示先执行“一键配置 → 路由服务”。
 
-配置迁移可在“CLI 设置 → 配置迁移”中使用：先在当前 TUI 选择“复制配置文件”将完整 JSON 配置写入剪贴板，再到另一台机器或另一个 TUI 选择“粘贴并应用”，程序会读取剪贴板、校验配置并确认覆盖当前配置文件。复制内容包含本地鉴权 key 和上游 API key，请只在可信终端之间传递。
+配置迁移可在“CLI 设置 → 配置迁移”中使用：先在当前 TUI 选择“复制 Key 配置”，再到另一台机器或另一个 TUI 选择“粘贴并应用”。迁移内容仅包含模型与上游 API key；安装了 `visitor` 扩展时还会包含各 Key 的访客访问权限。目标端的本地鉴权、监听地址、端口、超时、重试、文件路径及其他 CLI 设置会保留。上游 API key 属于敏感信息，请只在可信终端之间传递。
 
 ### 后台服务
 
@@ -403,7 +403,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、访客授权 key 数、key 指纹和 key 冷却状态 |
 | `GET /v1/models` | 不需要 | 返回 OpenAI 风格模型列表，包含真实模型 ID、aliases 和已启用的 `unified_model` |
-| `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照 |
+| `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照，包含 `caller_types.local` 和 `caller_types.visitor` 分类 |
 | `/v1/{path}` | 启用 `local_api_key` 时需要 | 代理 OpenAI-compatible 请求，支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE` |
 
 代理型 `/v1/{path}` 请求需要在 JSON 请求体中提供 `model`。缺少 `model` 会返回 `400`，模型未配置会返回 `404`，没有可用 key 会返回 `503`。
@@ -465,6 +465,7 @@ curl http://127.0.0.1:8000/metrics \
 | `started_at` | 当前服务进程启动时间 |
 | `database_path` | 当前 SQLite 存档路径 |
 | `total` | 全局累计统计 |
+| `caller_types` | 按 `local`（本地鉴权）和 `visitor`（访客鉴权）拆分的统计，两类始终返回 |
 | `models` | 按真实模型 ID 汇总的统计 |
 | `requested_models` | 按客户端请求使用的模型名或别名汇总的统计 |
 | `model_requested_models` | 在真实模型 ID 下按请求模型名或别名拆分的统计 |
@@ -481,7 +482,7 @@ curl http://127.0.0.1:8000/metrics \
 | 首 token | `total_first_token_ms`、`avg_first_token_ms`、`min_first_token_ms`、`max_first_token_ms` |
 | 状态码 | `status_codes` |
 
-统计记录会持久化保存，服务重启后 `/metrics` 会继续基于同一个 SQLite 文件聚合历史数据。Terminal UI 的调用日志可以按 `24小时`、`3天`、`7天`、`30天` 和 `全部` 查看明细；`/metrics` 当前返回 SQLite 中的全量聚合快照。
+统计记录会持久化保存，服务重启后 `/metrics` 会继续基于同一个 SQLite 文件聚合历史数据。Terminal UI 的调用日志提供“全部调用”“本地调用”“访客调用”三个统计页面，每个页面都可以按 `24小时`、`3天`、`7天`、`30天` 和 `全部` 查看明细；`/metrics` 返回 SQLite 中的全量聚合快照，并在 `caller_types` 下按调用来源拆分。
 
 ## 🧪 开发与测试
 

@@ -87,9 +87,11 @@ class MetricsStore:
         duration_ms: int = 0,
         first_token_ms: int = 0,
         requested_model_id: str | None = None,
+        caller_type: str = "local",
     ) -> None:
         usage = _normalize_usage(usage or {})
         request_model_id = requested_model_id or model_id
+        caller_type = caller_type if caller_type in {"local", "visitor"} else "local"
         failure = failed or status_code is None or status_code >= 400
         has_cache_hit = usage["cached_tokens"] > 0 or usage["cache_read_input_tokens"] > 0
         async with self._lock:
@@ -97,6 +99,7 @@ class MetricsStore:
                 """
                 INSERT INTO request_metrics (
                     created_at,
+                    caller_type,
                     model_id,
                     requested_model_id,
                     key_name,
@@ -112,10 +115,11 @@ class MetricsStore:
                     cache_hit,
                     first_token_ms,
                     duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _now_beijing().isoformat(),
+                    caller_type,
                     model_id,
                     request_model_id,
                     key_name,
@@ -139,7 +143,7 @@ class MetricsStore:
         async with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT model_id, requested_model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens,
+                SELECT caller_type, model_id, requested_model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens,
                     cached_tokens, cache_creation_input_tokens, cache_read_input_tokens, cache_hit, first_token_ms, duration_ms
                 FROM request_metrics
                 ORDER BY id ASC
@@ -147,26 +151,33 @@ class MetricsStore:
             ).fetchall()
 
         total = UsageStats()
+        caller_types: dict[str, UsageStats] = {
+            "local": UsageStats(),
+            "visitor": UsageStats(),
+        }
         models: dict[str, UsageStats] = {}
         requested_models: dict[str, UsageStats] = {}
         model_requested: dict[str, dict[str, UsageStats]] = {}
         keys: dict[str, dict[str, UsageStats]] = {}
 
         for row in rows:
+            caller_type = row["caller_type"]
             model_id = row["model_id"]
             requested_model_id = row["requested_model_id"]
             key_name = row["key_name"]
+            caller_stats = caller_types.setdefault(caller_type, UsageStats())
             model_stats = models.setdefault(model_id, UsageStats())
             requested_stats = requested_models.setdefault(requested_model_id, UsageStats())
             model_requested_stats = model_requested.setdefault(model_id, {}).setdefault(requested_model_id, UsageStats())
             key_stats = keys.setdefault(model_id, {}).setdefault(key_name, UsageStats())
-            for stats in (total, model_stats, requested_stats, model_requested_stats, key_stats):
+            for stats in (total, caller_stats, model_stats, requested_stats, model_requested_stats, key_stats):
                 _add_row(stats, row)
 
         return {
             "started_at": self._started_at.isoformat(),
             "database_path": str(self.database_path),
             "total": total.to_dict(),
+            "caller_types": {caller_type: stats.to_dict() for caller_type, stats in caller_types.items()},
             "models": {model_id: stats.to_dict() for model_id, stats in models.items()},
             "requested_models": {model_id: stats.to_dict() for model_id, stats in requested_models.items()},
             "model_requested_models": {
@@ -197,6 +208,7 @@ class MetricsStore:
             CREATE TABLE IF NOT EXISTS request_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
+                caller_type TEXT NOT NULL DEFAULT 'local',
                 model_id TEXT NOT NULL,
                 requested_model_id TEXT NOT NULL,
                 key_name TEXT NOT NULL,
@@ -215,6 +227,8 @@ class MetricsStore:
             )
             """
         )
+        self._ensure_column("caller_type", "TEXT NOT NULL DEFAULT 'local'")
+        self._connection.execute("UPDATE request_metrics SET caller_type = 'local' WHERE caller_type IS NULL OR caller_type NOT IN ('local', 'visitor')")
         self._ensure_column("requested_model_id", "TEXT NOT NULL DEFAULT ''")
         self._connection.execute("UPDATE request_metrics SET requested_model_id = model_id WHERE requested_model_id = ''")
         self._ensure_column("cached_tokens", "INTEGER NOT NULL DEFAULT 0")
@@ -227,6 +241,7 @@ class MetricsStore:
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_requested_model ON request_metrics(requested_model_id)")
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_key ON request_metrics(model_id, key_name)")
         self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_created ON request_metrics(created_at)")
+        self._connection.execute("CREATE INDEX IF NOT EXISTS idx_request_metrics_caller ON request_metrics(caller_type, created_at)")
         self._connection.commit()
 
     def _ensure_column(self, name: str, definition: str) -> None:
