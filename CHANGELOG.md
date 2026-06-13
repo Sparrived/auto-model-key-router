@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-06-14
+
 ### Added
 - 调用统计新增 `local`（本地鉴权）与 `visitor`（访客鉴权）来源分类；`/metrics` 新增 `caller_types` 聚合结果，Terminal UI 调用日志新增“全部调用”“本地调用”和“访客调用”统计页面。旧版 SQLite 统计库会自动补充来源字段，已有记录按本地调用处理。
 
