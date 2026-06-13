@@ -15,7 +15,7 @@ from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import is_service_healthy, is_system_service_registered, manage_system_service, service_status_panel, system_service_status_panel
-from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, posix_input_mode, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, content_scroll_offset, menu_table, mouse_wheel_mode, posix_input_mode, read_key_responsive, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame_state
 from .unified_model import switch_unified_model
 from .update import UpdateInstallOutcome, VersionCheckResult, check_latest_version, install_latest_version_outcome, render_update_notice, render_version_check_result, update_target_label
 
@@ -180,24 +180,44 @@ def configure_cli_interactively(config_path: Path) -> Any:
 
 
 def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0, update_result: VersionCheckResult | None = None) -> tuple[str, int]:
+    frame_offset = 0
+    frame_state = render_terminal_ui_state(config_path, config, selected, update_result, frame_offset)
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
-    with posix_input_mode(), mouse_wheel_mode(), Live(render_terminal_ui(config_path, config, selected, update_result), console=console, screen=True, auto_refresh=False) as live:
+
+    def refresh(*, ensure_selected_visible: bool) -> None:
+        nonlocal frame_offset, frame_state
+        frame_state = render_terminal_ui_state(
+            config_path,
+            config,
+            selected,
+            update_result,
+            frame_offset,
+            ensure_selected_visible=ensure_selected_visible,
+        )
+        frame_offset = frame_state.offset
+        live.update(frame_state.renderable, refresh=True)
+
+    with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
         while True:
-            key = read_key()
+            key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
             if key == "cancel":
                 return "0", next(index for index, option in enumerate(MENU_OPTIONS) if option[0] == "0")
             if key in {"scroll_up", "scroll_down"}:
                 handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
                 if not handle_wheel:
                     continue
+            if key in {"page_up", "page_down", "home", "end"} and frame_state.max_offset:
+                frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
+                refresh(ensure_selected_visible=False)
+                continue
             if key in {"up", "scroll_up"}:
                 selected = (selected - 1) % len(MENU_OPTIONS)
-                live.update(render_terminal_ui(config_path, config, selected, update_result), refresh=True)
+                refresh(ensure_selected_visible=True)
                 continue
             if key in {"down", "scroll_down"}:
                 selected = (selected + 1) % len(MENU_OPTIONS)
-                live.update(render_terminal_ui(config_path, config, selected, update_result), refresh=True)
+                refresh(ensure_selected_visible=True)
                 continue
             if key == "enter":
                 return MENU_OPTIONS[selected][0], selected
@@ -205,13 +225,33 @@ def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 
                 return key, next(index for index, option in enumerate(MENU_OPTIONS) if option[0] == key)
 
 
-def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, update_result: VersionCheckResult | None = None) -> Group:
+def render_terminal_ui_state(
+    config_path: Path,
+    config: RouterConfig,
+    selected: int,
+    update_result: VersionCheckResult | None = None,
+    frame_offset: int = 0,
+    *,
+    ensure_selected_visible: bool = True,
+) -> Any:
     update_notice = render_update_notice(update_result)
     renderables = [app_flag_title("Auto-Model-Key-Router", "OpenAI-Compatible 模型 API Key 路由控制台", __version__), *config_renderables(config, config_path)]
     if update_notice is not None:
         renderables.append(update_notice)
     renderables.append(section_panel(menu_table(MENU_OPTIONS, selected), "主菜单", "cyan", "[dim]选择要管理的模块[/dim]"))
-    return terminal_frame(renderables, shortcut_text("↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出" if sys.platform != "win32" else "↑/↓/滚轮 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 退出"))
+    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 查看概览  ·  数字快捷键  ·  Ctrl+C 退出"
+    if sys.platform == "win32":
+        shortcuts = "↑/↓/滚轮 选择  ·  Enter 确认  ·  PgUp/PgDn 查看概览  ·  数字快捷键  ·  Ctrl+C 退出"
+    return terminal_frame_state(
+        renderables,
+        shortcut_text(shortcuts),
+        offset=frame_offset,
+        focus_text="▶" if ensure_selected_visible else None,
+    )
+
+
+def render_terminal_ui(config_path: Path, config: RouterConfig, selected: int, update_result: VersionCheckResult | None = None) -> Any:
+    return render_terminal_ui_state(config_path, config, selected, update_result).renderable
 
 
 def manage_system_service_interactively(config_path: Path) -> None:

@@ -7,14 +7,13 @@ from typing import Any
 
 from rich.console import Group
 from rich.live import Live
-from rich.prompt import Prompt
 from rich.table import Table
 
 from .clipboard import paste_from_clipboard
 from .config import RouterConfig, generate_local_api_key, load_config_data, save_config_data
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
-from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, posix_input_mode, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, clear_terminal_history, confirm_choice, console, content_scroll_offset, mouse_wheel_mode, page_title, posix_input_mode, prompt_text, read_key_responsive, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame_state
 
 
 def manage_model_keys_interactively(path: Path) -> None:
@@ -104,10 +103,10 @@ def edit_selected_key_interactively(path: Path, data: dict[str, Any], model: dic
     old_config = RouterConfig.from_dict(data)
     key = model["keys"][key_index]
     old_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    key_name = Prompt.ask("Key 名称", default=old_name).strip() or old_name
+    key_name = prompt_text("编辑 Key", "Key 名称", default=old_name).strip() or old_name
     key["name"] = key_name
-    key["base_url"] = Prompt.ask("上游 base_url", default=str(key.get("base_url") or data.get("default_base_url") or "https://api.openai.com")).strip()
-    api_key = Prompt.ask("新 API key（留空则不修改）", default="", password=True).strip()
+    key["base_url"] = prompt_text("编辑 Key", "上游 base_url", default=str(key.get("base_url") or data.get("default_base_url") or "https://api.openai.com")).strip()
+    api_key = prompt_text("编辑 Key", "新 API key（留空则不修改）", default="", password=True).strip()
     if api_key:
         key["api_key"] = api_key
     new_config = RouterConfig.from_dict(data)
@@ -201,7 +200,7 @@ def paste_config_interactively(path: Path) -> Any:
 
 def select_model_id_for_new_key(models: list[dict[str, Any]]) -> str | None:
     if not models:
-        return Prompt.ask("新模型 ID").strip()
+        return prompt_text("添加 Key", "新模型 ID").strip()
 
     options = [
         (str(index + 1), f"{short_text(model.get('id') or '-', 32)} · {len(model.get('keys', []))} Key")
@@ -212,7 +211,7 @@ def select_model_id_for_new_key(models: list[dict[str, Any]]) -> str | None:
     if choice == "0":
         return None
     if choice == "n":
-        return Prompt.ask("新模型 ID").strip()
+        return prompt_text("添加 Key", "新模型 ID").strip()
     return str(models[int(choice) - 1].get("id") or "").strip()
 
 
@@ -242,7 +241,7 @@ def select_base_url_for_new_key(data: dict[str, Any], selected_model: dict[str, 
         return None
     if choice == "n":
         default_base_url = str(data.get("default_base_url") or "https://api.openai.com")
-        return Prompt.ask("新的上游 base_url", default=default_base_url).strip()
+        return prompt_text("添加 Key", "新的上游 base_url", default=default_base_url).strip()
     return base_urls[int(choice) - 1]
 
 
@@ -261,26 +260,25 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     if model is None:
         model = {"id": model_id, "aliases": [], "routing_mode": "round_robin", "keys": []}
         models.append(model)
-        console.print(f"[green]已创建模型配置:[/green] {model_id}")
 
     if is_new_model:
-        aliases_text = Prompt.ask("显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
+        aliases_text = prompt_text("添加 Key", "显示名称/别名，多个用逗号分隔", default=",".join(model.get("aliases", []))).strip()
         model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()] if aliases_text else []
-        model["routing_mode"] = Prompt.ask("路由模式：priority=优先级，round_robin=分流，only_first=仅首个", choices=["priority", "round_robin", "only_first"], default=str(model.get("routing_mode") or "round_robin")).strip()
-        reasoning_effort = Prompt.ask("推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"], default=normalize_reasoning_effort_choice(model.get("reasoning_effort"))).strip()
+        model["routing_mode"] = prompt_text("添加 Key", "路由模式", choices=["priority", "round_robin", "only_first"], default=str(model.get("routing_mode") or "round_robin")).strip()
+        reasoning_effort = prompt_text("添加 Key", "推理强度", choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"], default=normalize_reasoning_effort_choice(model.get("reasoning_effort"))).strip()
         if reasoning_effort == "downstream":
             model.pop("reasoning_effort", None)
         else:
             model["reasoning_effort"] = reasoning_effort
     keys = model.setdefault("keys", [])
     default_key_name = f"{model_id}-key-{len(keys) + 1}"
-    key_name = Prompt.ask("Key 名称", default=default_key_name).strip() or default_key_name
+    key_name = prompt_text("添加 Key", "Key 名称", default=default_key_name).strip() or default_key_name
     base_url = select_base_url_for_new_key(data, model)
     if base_url is None:
         return None
     if not base_url:
         return section_panel("[red]上游 base_url 不能为空[/red]", "添加失败", "red")
-    api_key = Prompt.ask("API key", password=True).strip()
+    api_key = prompt_text("添加 Key", "API key", password=True).strip()
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
 
@@ -301,10 +299,10 @@ def edit_api_key_interactively(path: Path) -> Any:
     old_config = RouterConfig.from_dict(data)
     key = model["keys"][key_index]
     old_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    key_name = Prompt.ask("Key 名称", default=old_name).strip() or old_name
+    key_name = prompt_text("编辑 Key", "Key 名称", default=old_name).strip() or old_name
     key["name"] = key_name
-    key["base_url"] = Prompt.ask("上游 base_url", default=str(key.get("base_url") or data.get("default_base_url") or "https://api.openai.com")).strip()
-    api_key = Prompt.ask("新 API key（留空则不修改）", default="", password=True).strip()
+    key["base_url"] = prompt_text("编辑 Key", "上游 base_url", default=str(key.get("base_url") or data.get("default_base_url") or "https://api.openai.com")).strip()
+    api_key = prompt_text("编辑 Key", "新 API key（留空则不修改）", default="", password=True).strip()
     if api_key:
         key["api_key"] = api_key
     new_config = RouterConfig.from_dict(data)
@@ -394,24 +392,37 @@ def toggle_key_enabled_interactively(path: Path) -> Any:
 
 
 def select_reorder_key_action(model: dict[str, Any], selected: int = 0) -> tuple[str, int]:
+    frame_offset = 0
+    frame_state = render_key_order_menu_state(model, selected, frame_offset)
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
-    with posix_input_mode(), mouse_wheel_mode(), Live(render_key_order_menu(model, selected), console=console, screen=True, auto_refresh=False) as live:
+
+    def refresh(*, ensure_selected_visible: bool) -> None:
+        nonlocal frame_offset, frame_state
+        frame_state = render_key_order_menu_state(model, selected, frame_offset, ensure_selected_visible=ensure_selected_visible)
+        frame_offset = frame_state.offset
+        live.update(frame_state.renderable, refresh=True)
+
+    with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
         while True:
-            key = read_key()
+            key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
             if key == "cancel":
                 return "cancel", selected
             if key in {"scroll_up", "scroll_down"}:
                 handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
                 if not handle_wheel:
                     continue
+            if key in {"page_up", "page_down", "home", "end"} and frame_state.max_offset:
+                frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
+                refresh(ensure_selected_visible=False)
+                continue
             if key in {"up", "scroll_up"}:
                 selected = max(0, selected - 1)
-                live.update(render_key_order_menu(model, selected), refresh=True)
+                refresh(ensure_selected_visible=True)
                 continue
             if key in {"down", "scroll_down"}:
                 selected = min(len(model.get("keys", [])) - 1, selected + 1)
-                live.update(render_key_order_menu(model, selected), refresh=True)
+                refresh(ensure_selected_visible=True)
                 continue
             if key in {"w", "W"}:
                 return "up", selected
@@ -421,7 +432,13 @@ def select_reorder_key_action(model: dict[str, Any], selected: int = 0) -> tuple
                 return "save", selected
 
 
-def render_key_order_menu(model: dict[str, Any], selected: int) -> Group:
+def render_key_order_menu_state(
+    model: dict[str, Any],
+    selected: int,
+    frame_offset: int = 0,
+    *,
+    ensure_selected_visible: bool = True,
+) -> Any:
     table = Table(show_header=False, box=None, padding=(0, 1), expand=True)
     table.add_column("指示", justify="center", width=3)
     table.add_column("顺序", justify="center", width=5)
@@ -434,7 +451,19 @@ def render_key_order_menu(model: dict[str, Any], selected: int) -> Group:
             table.add_row("[bold cyan]▶[/bold cyan]", f"[bold black on cyan] {index + 1} [/bold black on cyan]", f"[bold cyan]{name}[/bold cyan]", f"[bold cyan]{base_url}[/bold cyan]")
         else:
             table.add_row("", f"[dim]{index + 1}[/dim]", name, base_url)
-    return terminal_frame([page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]")], shortcut_text("↑/↓ 选择  ·  W/S 移动  ·  Enter 保存  ·  Ctrl+C 取消" if sys.platform != "win32" else "↑/↓/滚轮 选择  ·  W/S 移动  ·  Enter 保存  ·  Ctrl+C 取消"))
+    shortcuts = "↑/↓ 选择  ·  W/S 移动  ·  PgUp/PgDn 翻阅  ·  Enter 保存  ·  Ctrl+C 取消"
+    if sys.platform == "win32":
+        shortcuts = "↑/↓/滚轮 选择  ·  W/S 移动  ·  PgUp/PgDn 翻阅  ·  Enter 保存  ·  Ctrl+C 取消"
+    return terminal_frame_state(
+        [page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"), section_panel(table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]")],
+        shortcut_text(shortcuts),
+        offset=frame_offset,
+        focus_text="▶" if ensure_selected_visible else None,
+    )
+
+
+def render_key_order_menu(model: dict[str, Any], selected: int) -> Any:
+    return render_key_order_menu_state(model, selected).renderable
 
 
 def key_order_text(model: dict[str, Any]) -> str:
@@ -565,12 +594,12 @@ def set_listen_interactively(path: Path) -> Any:
     old_config = RouterConfig.from_dict(data)
     current_host = str(data.get("host") or "127.0.0.1")
     current_port = int(data.get("port") or 8000)
-    host = Prompt.ask("监听 IP/地址", default=current_host).strip()
+    host = prompt_text("监听配置", "监听 IP/地址", default=current_host).strip()
     if not host:
         return section_panel("[red]监听 IP/地址不能为空。[/red]", "监听配置", "red")
     if "://" in host or "/" in host:
         return section_panel("[red]监听地址只填写 IP 或主机名，不要包含协议或路径。[/red]", "监听配置", "red")
-    port_text = Prompt.ask("监听端口", default=str(current_port)).strip()
+    port_text = prompt_text("监听配置", "监听端口", default=str(current_port)).strip()
     try:
         port = int(port_text)
     except ValueError:

@@ -43,8 +43,11 @@ WHEEL_EVENT_INTERVAL_SECONDS = 0.16
 ESC_SEQUENCE_TIMEOUT_SECONDS = 0.2
 WHEEL_CONTENT_STEP = 1
 WHEEL_KEYS = {"scroll_up", "scroll_down"}
-MIN_RENDER_WIDTH = 20
+MIN_RENDER_WIDTH = 4
 FOLDED_CONTENT_MARKER = "… 上方内容已折叠"
+WINDOW_TITLE = " Auto Model Key Router "
+WINDOW_BORDER_STYLE = "bright_magenta"
+SELECTED_ROW_MARKER = "▶"
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,14 @@ class ResultPage:
     content: Any
     copy_text: str | None = None
     copy_label: str = "复制 key"
+
+
+@dataclass(frozen=True)
+class TerminalFrameState:
+    renderable: Any
+    offset: int
+    max_offset: int
+    viewport_height: int
 
 
 def app_flag_title(title: str, subtitle: str, version: str) -> Panel:
@@ -128,15 +139,94 @@ def fit_terminal_lines(lines: list[list[Segment]], height: int, preserve_bottom:
     return [*lines, *([Segment("")] for _ in range(height - len(lines)))]
 
 
-def terminal_frame(renderables: list[Any], footer: Any | None = None, preserve_bottom: bool = True) -> Group:
+def terminal_frame_state(
+    renderables: list[Any],
+    footer: Any | None = None,
+    *,
+    offset: int = 0,
+    focus_text: str | None = None,
+    preserve_bottom: bool = False,
+    frame_title: str = WINDOW_TITLE,
+) -> TerminalFrameState:
     width = max(console.size.width, MIN_RENDER_WIDTH)
     height = max(console.size.height, 1)
-    footer_lines = renderable_line_segments(footer, width) if footer is not None else []
-    if len(footer_lines) >= height:
-        return segment_lines_renderable(footer_lines[-height:])
-    body_height = height - len(footer_lines)
-    body_lines = renderable_line_segments(Group(*renderables), width) if renderables else []
-    return segment_lines_renderable([*fit_terminal_lines(body_lines, body_height, preserve_bottom), *footer_lines])
+    if height < 3:
+        lines = renderable_line_segments(Group(*renderables), width) if renderables else []
+        visible = fit_terminal_lines(lines, height, preserve_bottom)
+        return TerminalFrameState(segment_lines_renderable(visible), 0, max(len(lines) - height, 0), height)
+
+    content_width = max(width - 4, 1)
+    inner_height = height - 2
+    footer_lines = renderable_line_segments(footer, content_width) if footer is not None else []
+    if len(footer_lines) >= inner_height:
+        visible_footer = footer_lines[-inner_height:]
+        panel = Panel(
+            segment_lines_renderable(visible_footer),
+            title=f"[bold bright_cyan]{frame_title}[/bold bright_cyan]",
+            border_style=WINDOW_BORDER_STYLE,
+            box=box.ROUNDED,
+            padding=(0, 1),
+            width=width,
+            height=height,
+        )
+        return TerminalFrameState(panel, 0, 0, 0)
+
+    separator_height = 1 if footer_lines else 0
+    viewport_height = max(inner_height - len(footer_lines) - separator_height, 0)
+    body_lines = renderable_line_segments(Group(*renderables), content_width) if renderables else []
+    max_offset = max(len(body_lines) - viewport_height, 0)
+    offset = max_offset if preserve_bottom else min(max(offset, 0), max_offset)
+
+    if focus_text and viewport_height:
+        focus_line = next(
+            (index for index, line in enumerate(body_lines) if focus_text in "".join(segment.text for segment in line)),
+            None,
+        )
+        if focus_line is not None:
+            if focus_line < offset:
+                offset = focus_line
+            elif focus_line >= offset + viewport_height:
+                offset = min(focus_line - viewport_height + 1, max_offset)
+
+    end = min(offset + viewport_height, len(body_lines))
+    visible_body = fit_terminal_lines(body_lines[offset:end], viewport_height, preserve_bottom=False)
+    window_lines = list(visible_body)
+    if footer_lines:
+        window_lines.append([Segment("─" * content_width, Style.parse("dim cyan"))])
+        window_lines.extend(footer_lines)
+    subtitle = None
+    if max_offset:
+        subtitle = f"[dim] 第 {offset + 1}-{end} 行 / 共 {len(body_lines)} 行 · PgUp/PgDn 滚动 [/dim]"
+    panel = Panel(
+        segment_lines_renderable(window_lines),
+        title=f"[bold bright_cyan]{frame_title}[/bold bright_cyan]",
+        subtitle=subtitle,
+        border_style=WINDOW_BORDER_STYLE,
+        box=box.ROUNDED,
+        padding=(0, 1),
+        width=width,
+        height=height,
+    )
+    return TerminalFrameState(panel, offset, max_offset, viewport_height)
+
+
+def terminal_frame(
+    renderables: list[Any],
+    footer: Any | None = None,
+    preserve_bottom: bool = False,
+    *,
+    offset: int = 0,
+    focus_text: str | None = None,
+    frame_title: str = WINDOW_TITLE,
+) -> Any:
+    return terminal_frame_state(
+        renderables,
+        footer,
+        offset=offset,
+        focus_text=focus_text,
+        preserve_bottom=preserve_bottom,
+        frame_title=frame_title,
+    ).renderable
 
 
 def scrollable_content_state(content: Any, offset: int, option_count: int) -> tuple[Any, int, int, int]:
@@ -152,17 +242,32 @@ def scrollable_content_state(content: Any, offset: int, option_count: int) -> tu
     return section_panel(viewport, title, "blue", "[dim]滚轮或 PgUp/PgDn 翻阅[/dim]" if sys.platform == "win32" else "[dim]PgUp/PgDn 翻阅[/dim]"), offset, max_offset, viewport_height
 
 
-def render_option_menu(title: str, options: list[tuple[str, str]], selected: int, content: Any | None = None, content_offset: int = 0) -> Group:
+def render_option_menu_state(
+    title: str,
+    options: list[tuple[str, str]],
+    selected: int,
+    content: Any | None = None,
+    frame_offset: int = 0,
+    *,
+    ensure_selected_visible: bool = True,
+) -> TerminalFrameState:
     renderables = [page_title(title)]
-    max_content_offset = 0
     if content is not None:
-        content, _, max_content_offset, _ = scrollable_content_state(content, content_offset, len(options))
         renderables.append(content)
-    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  数字快捷键  ·  Ctrl+C 返回"
-    if max_content_offset:
-        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 翻阅内容  ·  数字快捷键  ·  Ctrl+C 返回" if sys.platform != "win32" else "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅内容  ·  数字快捷键  ·  Ctrl+C 返回"
     renderables.append(section_panel(menu_table(options, selected), "操作菜单", "cyan", "[dim]选择下一步操作[/dim]"))
-    return terminal_frame(renderables, shortcut_text(shortcuts))
+    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 翻阅窗体  ·  数字快捷键  ·  Ctrl+C 返回"
+    if sys.platform == "win32" and content is not None:
+        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅窗体  ·  数字快捷键  ·  Ctrl+C 返回"
+    return terminal_frame_state(
+        renderables,
+        shortcut_text(shortcuts),
+        offset=frame_offset,
+        focus_text=SELECTED_ROW_MARKER if ensure_selected_visible else None,
+    )
+
+
+def render_option_menu(title: str, options: list[tuple[str, str]], selected: int, content: Any | None = None, content_offset: int = 0) -> Any:
+    return render_option_menu_state(title, options, selected, content, content_offset).renderable
 
 
 def parse_sgr_mouse_sequence(sequence: str) -> str | None:
@@ -330,6 +435,20 @@ def key_pressed() -> str | None:
     return None
 
 
+def read_key_responsive(on_resize: Callable[[], None] | None = None) -> str:
+    terminal_size = console.size
+    while True:
+        key = key_pressed()
+        if key is not None:
+            return key
+        current_size = console.size
+        if current_size != terminal_size:
+            terminal_size = current_size
+            if on_resize is not None:
+                on_resize()
+        time.sleep(0.05)
+
+
 def confirm_choice(message: str, default: bool = False) -> bool:
     options = [("y", "是"), ("n", "否")]
     selected = 0 if default else 1
@@ -460,36 +579,121 @@ def read_posix_key() -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
+def prompt_text(
+    title: str,
+    prompt: str,
+    *,
+    default: str | None = None,
+    password: bool = False,
+    choices: list[str] | None = None,
+) -> str:
+    value: list[str] = []
+    status: str | None = None
+
+    def render() -> Any:
+        visible_value = "*" * len(value) if password else "".join(value)
+        max_visible = max(console.size.width - 14, 8)
+        if len(visible_value) > max_visible:
+            visible_value = "…" + visible_value[-(max_visible - 1):]
+        input_line = Text()
+        input_line.append(f"{prompt}\n", style="bold cyan")
+        input_line.append(visible_value, style="bold")
+        input_line.append("▌", style="bold bright_cyan")
+        if not value and default is not None:
+            input_line.append(f"\n默认值: {default}", style="dim")
+        if choices:
+            input_line.append(f"\n可选值: {' / '.join(choices)}", style="dim")
+        renderables: list[Any] = [page_title(title), section_panel(input_line, "输入", "cyan")]
+        if status:
+            renderables.append(section_panel(status, "提示", "yellow"))
+        return terminal_frame(
+            renderables,
+            shortcut_text("输入内容  ·  Backspace 删除  ·  Ctrl+U 清空  ·  Enter 确认  ·  Esc/Ctrl+C 取消"),
+            preserve_bottom=True,
+        )
+
+    def refresh() -> None:
+        live.update(render(), refresh=True)
+
+    with posix_input_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+        while True:
+            key = read_key_responsive(refresh)
+            if key == "cancel":
+                raise KeyboardInterrupt
+            if key == "enter":
+                result = "".join(value) if value else (default or "")
+                if choices and result not in choices:
+                    status = f"请输入以下值之一: {' / '.join(choices)}"
+                    refresh()
+                    continue
+                return result
+            if key in {"\b", "\x7f"}:
+                if value:
+                    value.pop()
+                    status = None
+                    refresh()
+                continue
+            if key == "\x15":
+                value.clear()
+                status = None
+                refresh()
+                continue
+            if key == "\x17":
+                while value and value[-1].isspace():
+                    value.pop()
+                while value and not value[-1].isspace():
+                    value.pop()
+                status = None
+                refresh()
+                continue
+            if isinstance(key, str) and len(key) == 1 and key.isprintable():
+                value.append(key)
+                status = None
+                refresh()
+
+
 def select_option(title: str, options: list[tuple[str, str]], selected: int = 0, content: Any | None = None) -> str:
-    content_offset = 0
+    frame_offset = 0
+    frame_state = render_option_menu_state(title, options, selected, content, frame_offset)
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
 
-    def render() -> Group:
-        return render_option_menu(title, options, selected, content, content_offset)
+    def refresh(*, ensure_selected_visible: bool) -> None:
+        nonlocal frame_offset, frame_state
+        frame_state = render_option_menu_state(
+            title,
+            options,
+            selected,
+            content,
+            frame_offset,
+            ensure_selected_visible=ensure_selected_visible,
+        )
+        frame_offset = frame_state.offset
+        live.update(frame_state.renderable, refresh=True)
 
-    with posix_input_mode(), mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+    with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
         while True:
-            key = read_key()
+            key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
             if key == "cancel":
                 return options[-1][0]
             if key in WHEEL_KEYS:
                 handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
                 if not handle_wheel:
                     continue
-            if content is not None and key in {"scroll_up", "scroll_down", "page_up", "page_down", "home", "end"}:
-                _, content_offset, max_content_offset, viewport_height = scrollable_content_state(content, content_offset, len(options))
-                if max_content_offset:
-                    content_offset = content_scroll_offset(key, content_offset, max_content_offset, viewport_height)
-                    live.update(render(), refresh=True)
+            scroll_keys = {"page_up", "page_down", "home", "end"}
+            if content is not None:
+                scroll_keys.update(WHEEL_KEYS)
+            if key in scroll_keys and frame_state.max_offset:
+                frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
+                refresh(ensure_selected_visible=False)
                 continue
             if key in {"up", "scroll_up"}:
                 selected = (selected - 1) % len(options)
-                live.update(render(), refresh=True)
+                refresh(ensure_selected_visible=True)
                 continue
             if key in {"down", "scroll_down"}:
                 selected = (selected + 1) % len(options)
-                live.update(render(), refresh=True)
+                refresh(ensure_selected_visible=True)
                 continue
             if key == "enter":
                 return options[selected][0]

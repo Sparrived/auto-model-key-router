@@ -368,7 +368,84 @@ def test_terminal_frame_keeps_footer_at_bottom(monkeypatch) -> None:
     lines = tui.renderable_line_segments(tui.terminal_frame([Text("a\nb\nc\nd\ne")], Text("footer")), 20)
 
     assert len(lines) == 5
-    assert "footer" in "".join(segment.text for segment in lines[-1])
+    assert "footer" in "".join(segment.text for segment in lines[-2])
+    assert "footer" not in "".join(segment.text for segment in lines[-1])
+
+
+def test_terminal_frame_scrolls_without_losing_window_chrome(monkeypatch) -> None:
+    monkeypatch.setattr(tui.console.__class__, "size", property(lambda _: ConsoleDimensions(32, 8)))
+
+    first = tui.terminal_frame_state([Text("\n".join(f"line-{index}" for index in range(12)))], Text("footer"))
+    last = tui.terminal_frame_state(
+        [Text("\n".join(f"line-{index}" for index in range(12)))],
+        Text("footer"),
+        offset=first.max_offset,
+    )
+    first_text = "\n".join("".join(segment.text for segment in line) for line in tui.renderable_line_segments(first.renderable, 32))
+    last_text = "\n".join("".join(segment.text for segment in line) for line in tui.renderable_line_segments(last.renderable, 32))
+
+    assert first.max_offset > 0
+    assert "line-0" in first_text
+    assert "line-11" in last_text
+    assert "footer" in first_text
+    assert len(tui.renderable_line_segments(first.renderable, 32)) == 8
+
+
+def test_terminal_frame_never_exceeds_narrow_terminal_width(monkeypatch) -> None:
+    monkeypatch.setattr(tui.console.__class__, "size", property(lambda _: ConsoleDimensions(12, 8)))
+
+    lines = tui.renderable_line_segments(
+        tui.terminal_frame([tui.section_panel("a very long value", "content")], Text("footer")),
+        12,
+    )
+
+    assert len(lines) == 8
+    assert all(sum(segment.cell_length for segment in line) <= 12 for line in lines)
+
+
+def test_long_option_menu_keeps_selected_row_visible(monkeypatch) -> None:
+    monkeypatch.setattr(tui.console.__class__, "size", property(lambda _: ConsoleDimensions(40, 10)))
+    options = [(str(index), f"item-{index}") for index in range(20)]
+
+    state = tui.render_option_menu_state("menu", options, selected=18)
+    text = "\n".join("".join(segment.text for segment in line) for line in tui.renderable_line_segments(state.renderable, 40))
+
+    assert state.max_offset > 0
+    assert "item-18" in text
+    assert tui.SELECTED_ROW_MARKER in text
+
+
+def test_prompt_text_edits_inside_live_window(monkeypatch) -> None:
+    keys = iter(["s", "e", "c", "r", "e", "t", "enter"])
+    live_instances = []
+
+    @contextmanager
+    def input_mode():
+        yield
+
+    class FakeLive:
+        def __init__(self, renderable, **kwargs):
+            self.renderable = renderable
+            live_instances.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def update(self, renderable, refresh=False):
+            self.renderable = renderable
+
+    monkeypatch.setattr(tui, "posix_input_mode", input_mode)
+    monkeypatch.setattr(tui, "Live", FakeLive)
+    monkeypatch.setattr(tui, "read_key_responsive", lambda on_resize=None: next(keys))
+
+    result = tui.prompt_text("edit", "API key", password=True)
+
+    assert result == "secret"
+    assert "secret" not in render_plain(live_instances[0].renderable)
+    assert "******" in render_plain(live_instances[0].renderable)
 
 
 def test_watch_logs_reads_keys_inside_posix_input_mode(monkeypatch) -> None:
@@ -770,7 +847,7 @@ def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_p
     choices = iter(["1", "1"])
     menus: list[tuple[str, list[tuple[str, str]]]] = []
 
-    def ask(prompt: str, **kwargs):
+    def ask(title: str, prompt: str, **kwargs):
         prompts.append(prompt)
         return next(answers)
 
@@ -778,7 +855,7 @@ def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_p
         menus.append((title, options))
         return next(choices)
 
-    monkeypatch.setattr(config_editor.Prompt, "ask", ask)
+    monkeypatch.setattr(config_editor, "prompt_text", ask)
     monkeypatch.setattr(config_editor, "select_option", choose)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
 
@@ -818,11 +895,11 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
     answers = iter(["new-model", "New Alias", "only_first", "low", "primary", "https://primary.example.com", "sk-primary"])
     choices = iter(["n", "n"])
 
-    def ask(prompt: str, **kwargs):
+    def ask(title: str, prompt: str, **kwargs):
         prompts.append(prompt)
         return next(answers)
 
-    monkeypatch.setattr(config_editor.Prompt, "ask", ask)
+    monkeypatch.setattr(config_editor, "prompt_text", ask)
     monkeypatch.setattr(config_editor, "select_option", lambda title, options, selected=0, content=None: next(choices))
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
 
@@ -830,7 +907,7 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
     model = data["models"][1]
-    assert prompts == ["新模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式：priority=优先级，round_robin=分流，only_first=仅首个", "推理强度：downstream=由下游决定，none=关闭 reasoning，minimal/low/medium/high/xhigh", "Key 名称", "新的上游 base_url", "API key"]
+    assert prompts == ["新模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式", "推理强度", "Key 名称", "新的上游 base_url", "API key"]
     assert model["aliases"] == ["New Alias"]
     assert model["routing_mode"] == "only_first"
     assert model["reasoning_effort"] == "low"

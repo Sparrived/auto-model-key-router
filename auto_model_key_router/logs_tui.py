@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from rich import box
 from rich.align import Align
@@ -20,7 +21,7 @@ from rich.text import Text
 from .formatting import percent, short_text
 from .log_files import archived_log_paths
 from .metrics import BEIJING_TZ
-from .tui import console, key_pressed, mouse_wheel_mode, posix_input_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame
+from .tui import console, content_scroll_offset, key_pressed, mouse_wheel_mode, posix_input_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame_state
 
 
 REQUEST_STATS_PAGE_SIZE = 10
@@ -55,14 +56,31 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
     stats_page = 1
     stats_range_index = 0
     log_index = 0
+    frame_offset = 0
     status_message: str | None = None
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
 
-    def render() -> Group:
-        return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, log_index, status_message)
+    frame_state = render_live_logs_state(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, log_index, status_message, frame_offset)
 
-    with posix_input_mode(), mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+    def refresh() -> None:
+        nonlocal frame_offset, frame_state
+        frame_state = render_live_logs_state(
+            database_path,
+            log_file_path,
+            limit,
+            page,
+            log_offset,
+            stats_page,
+            stats_range_index,
+            log_index,
+            status_message,
+            frame_offset,
+        )
+        frame_offset = frame_state.offset
+        live.update(frame_state.renderable, refresh=True)
+
+    with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
         while True:
             started = time.monotonic()
             while time.monotonic() - started < 1:
@@ -75,58 +93,80 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                     return
                 if key in {"1", "l", "L"}:
                     page = "logs"
-                    live.update(render(), refresh=True)
+                    frame_offset = 0
+                    refresh()
                     continue
                 if key in {"2", "s", "S"}:
                     page = "stats"
-                    live.update(render(), refresh=True)
+                    frame_offset = 0
+                    refresh()
                     continue
                 if page == "logs" and key in {"up", "page_up", "scroll_up", "k", "K"}:
-                    log_offset += max(limit, 1) if key == "page_up" else 1
-                    live.update(render(), refresh=True)
+                    log_offset += log_page_size(limit) if key == "page_up" else 1
+                    refresh()
                     continue
                 if page == "logs" and key in {"down", "page_down", "scroll_down", "j", "J"}:
-                    log_offset = max(0, log_offset - (max(limit, 1) if key == "page_down" else 1))
-                    live.update(render(), refresh=True)
+                    log_offset = max(0, log_offset - (log_page_size(limit) if key == "page_down" else 1))
+                    refresh()
                     continue
                 if page == "logs" and key in {"home", "g", "G"}:
                     log_offset = 0
-                    live.update(render(), refresh=True)
+                    refresh()
                     continue
                 if page == "logs" and key in {"left", "["}:
                     log_index = max(0, log_index - 1)
                     log_offset = 0
+                    frame_offset = 0
                     status_message = None
-                    live.update(render(), refresh=True)
+                    refresh()
                     continue
                 if page == "logs" and key in {"right", "]"}:
                     log_index = min(log_index + 1, len(log_file_choices(log_file_path)) - 1)
                     log_offset = 0
+                    frame_offset = 0
                     status_message = None
-                    live.update(render(), refresh=True)
+                    refresh()
                     continue
                 if page == "logs" and key in {"o", "O"}:
                     status_message = open_log_file(str(selected_log_file(log_file_path, log_index)[0]))
-                    live.update(render(), refresh=True)
+                    refresh()
                     continue
                 if page == "stats" and key in {"\t", "tab"}:
                     stats_range_index = (stats_range_index + 1) % len(STATS_TIME_RANGES)
                     stats_page = 1
-                    live.update(render(), refresh=True)
+                    frame_offset = 0
+                    refresh()
                     continue
-                if page == "stats" and key in {"left", "page_up", "up", "scroll_up", "p", "P"}:
+                if page == "stats" and key in {"up", "scroll_up", "down", "scroll_down", "page_up", "page_down", "home", "end"} and frame_state.max_offset:
+                    frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
+                    refresh()
+                    continue
+                if page == "stats" and key in {"left", "p", "P"}:
                     stats_page = max(1, stats_page - 1)
-                    live.update(render(), refresh=True)
+                    frame_offset = 0
+                    refresh()
                     continue
-                if page == "stats" and key in {"right", "page_down", "down", "scroll_down", "n", "N"}:
+                if page == "stats" and key in {"right", "n", "N"}:
                     stats_page += 1
-                    live.update(render(), refresh=True)
+                    frame_offset = 0
+                    refresh()
                     continue
                 time.sleep(0.05)
-            live.update(render(), refresh=True)
+            refresh()
 
 
-def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int, log_index: int = 0, status_message: str | None = None) -> Group:
+def render_live_logs_state(
+    database_path: str,
+    log_file_path: str,
+    limit: int,
+    page: str,
+    log_offset: int,
+    stats_page: int,
+    stats_range_index: int,
+    log_index: int = 0,
+    status_message: str | None = None,
+    frame_offset: int = 0,
+) -> Any:
     if page == "logs":
         selected_path, selected_index, choices = selected_log_file(log_file_path, log_index)
         content = service_logs_renderable(str(selected_path), log_page_size(limit), log_offset, log_file_title(selected_path, selected_index, len(choices)))
@@ -135,11 +175,15 @@ def render_live_logs(database_path: str, log_file_path: str, limit: int, page: s
     renderables = [log_header_renderable(page), content]
     if status_message:
         renderables.append(section_panel(status_message, "提示", "green" if status_message.startswith("已") else "yellow"))
-    return terminal_frame(renderables, log_help_text(page))
+    return terminal_frame_state(renderables, log_help_text(page), offset=frame_offset)
+
+
+def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int, log_index: int = 0, status_message: str | None = None) -> Any:
+    return render_live_logs_state(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, log_index, status_message).renderable
 
 
 def log_page_size(limit: int) -> int:
-    reserved_rows = 10
+    reserved_rows = 12
     return max(1, min(max(limit, 1), console.size.height - reserved_rows))
 
 
@@ -152,7 +196,7 @@ def log_header_renderable(page: str) -> Panel:
 def log_help_text(page: str) -> Align:
     if page == "logs":
         return shortcut_text("1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/Pg 滚动  ·  q 返回" if sys.platform != "win32" else "1 运行日志  ·  2 统计  ·  ←/→ 切换日志  ·  O 打开日志  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
-    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→ 翻页  ·  q 返回" if sys.platform != "win32" else "1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ←/→/滚轮 翻页  ·  q 返回")
+    return shortcut_text("1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ↑/↓/Pg 滚动  ·  ←/→ 翻页  ·  q 返回" if sys.platform != "win32" else "1 运行日志  ·  2 统计  ·  Tab 查询范围  ·  ↑/↓/滚轮/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
 
 
 def open_log_file(log_file_path: str) -> str:
