@@ -14,6 +14,7 @@ from .config import RouterConfig, generate_local_api_key, load_config_data, save
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
 from .tui import ResultPage, clear_terminal_history, confirm_choice, console, content_scroll_offset, mouse_wheel_mode, page_title, posix_input_mode, prompt_text, read_key_responsive, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame_state
+from .visitor import visitor_feature_available
 
 
 def manage_model_keys_interactively(path: Path) -> None:
@@ -55,16 +56,29 @@ def manage_selected_key_interactively(path: Path) -> None:
         key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
         enabled = key.get("enabled", True)
         status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+        visitor_allowed = bool(key.get("allow_visitor", False))
+        visitor_installed = visitor_feature_available()
+        if visitor_installed:
+            visitor_status_text = "[green]允许[/green]" if visitor_allowed else "[dim]禁止[/dim]"
+        elif visitor_allowed:
+            visitor_status_text = "[yellow]已配置，但 visitor extra 未安装[/yellow]"
+        else:
+            visitor_status_text = "[dim]功能未安装[/dim]"
 
         while True:
+            options = [("1", "编辑"), ("2", "删除"), ("3", "复制 API key"), ("4", "禁用" if enabled else "启用")]
+            if visitor_installed:
+                options.append(("5", "禁止访客访问" if visitor_allowed else "允许访客访问"))
+            options.append(("0", "返回"))
             choice = select_option(
                 f"管理 Key · {short_text(key_name, 24)}",
-                [("1", "编辑"), ("2", "删除"), ("3", "复制 API key"), ("4", "禁用" if enabled else "启用"), ("0", "返回")],
+                options,
                 content=section_panel(
                     f"模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
                     f"Key: [bold]{short_text(key_name, 32)}[/bold]\n"
                     f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]\n"
-                    f"状态: {status_text}",
+                    f"状态: {status_text}\n"
+                    f"访客访问: {visitor_status_text}",
                     "Key 信息", "cyan"
                 )
             )
@@ -83,11 +97,14 @@ def manage_selected_key_interactively(path: Path) -> None:
                 result = copy_selected_key_interactively(data, model, key_index)
             elif choice == "4":
                 result = toggle_selected_key_interactively(path, data, model, key_index)
+            elif choice == "5":
+                result = toggle_visitor_access_interactively(path, data, model, key_index)
             else:
                 continue
             if result is not None:
-                show_result_page("编辑" if choice == "1" else ("复制 API key" if choice == "3" else "Key 开关"), result)
-            if choice in ("1", "4"):
+                result_title = {"1": "编辑", "3": "复制 API key", "4": "Key 开关", "5": "访客访问"}.get(choice, "Key 管理")
+                show_result_page(result_title, result)
+            if choice in ("1", "4", "5"):
                 # 编辑或切换状态后刷新数据
                 data = load_config_data(path)
                 model = find_model(data.get("models", []), model["id"])
@@ -97,6 +114,14 @@ def manage_selected_key_interactively(path: Path) -> None:
                 key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
                 enabled = key.get("enabled", True)
                 status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+                visitor_allowed = bool(key.get("allow_visitor", False))
+                visitor_installed = visitor_feature_available()
+                if visitor_installed:
+                    visitor_status_text = "[green]允许[/green]" if visitor_allowed else "[dim]禁止[/dim]"
+                elif visitor_allowed:
+                    visitor_status_text = "[yellow]已配置，但 visitor extra 未安装[/yellow]"
+                else:
+                    visitor_status_text = "[dim]功能未安装[/dim]"
 
 
 def edit_selected_key_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int) -> Any:
@@ -152,6 +177,32 @@ def toggle_selected_key_interactively(path: Path, data: dict[str, Any], model: d
     old_status = "启用" if current_enabled else "禁用"
     new_status = "启用" if new_enabled else "禁用"
     return Group(section_panel(f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: [bold]{key_name}[/bold]\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]", "Key 开关", "green"), restart_service_after_config_change(path, old_config, new_config))
+
+
+def toggle_visitor_access_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int) -> Any:
+    if not visitor_feature_available():
+        return section_panel(
+            "访客功能未安装。请使用 auto-model-key-router[visitor] 重新安装或升级。",
+            "访客访问",
+            "yellow",
+        )
+    old_config = RouterConfig.from_dict(data)
+    key = model["keys"][key_index]
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    visitor_allowed = not bool(key.get("allow_visitor", False))
+    key["allow_visitor"] = visitor_allowed
+    new_config = RouterConfig.from_dict(data)
+    save_config_data(path, data)
+    status = "允许" if visitor_allowed else "禁止"
+    return Group(
+        section_panel(
+            f"已更新访客访问权限。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
+            f"Key: [bold]{key_name}[/bold]\n访客访问: [bold]{status}[/bold]",
+            "访客访问",
+            "green",
+        ),
+        restart_service_after_config_change(path, old_config, new_config),
+    )
 
 
 def manage_config_transfer_interactively(path: Path) -> None:

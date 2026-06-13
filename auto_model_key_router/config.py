@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .visitor import VISITOR_API_KEY
+
 
 def default_cache_dir() -> Path:
     system = platform.system().lower()
@@ -110,6 +112,7 @@ class KeyConfig:
     api_key: str
     base_url: str
     enabled: bool = True
+    allow_visitor: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,7 @@ class RouterConfig:
                     api_key=str(key["api_key"]),
                     base_url=str(key.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
                     enabled=bool(key.get("enabled", True)),
+                    allow_visitor=bool(key.get("allow_visitor", False)),
                 )
                 for index, key in enumerate(model.get("keys", []))
             )
@@ -211,6 +215,9 @@ class RouterConfig:
         return config
 
     def validate(self) -> None:
+        if self.local_api_key == VISITOR_API_KEY:
+            raise ValueError(f"local_api_key 不能使用保留的访客 key: {VISITOR_API_KEY}")
+
         model_names: set[str] = set()
         model_ids_by_name: dict[str, str] = {}
         models_by_id: dict[str, ModelConfig] = {}

@@ -28,7 +28,8 @@
         },
         {
           "name": "gpt-4o-mini-key-2",
-          "api_key": "sk-your-second-key"
+          "api_key": "sk-your-second-key",
+          "allow_visitor": true
         }
       ]
     }

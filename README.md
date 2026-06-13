@@ -27,6 +27,7 @@
 | 📊 调用统计 | 记录请求、成功/失败、重试、状态码、Token、缓存命中、耗时与首 token 耗时 |
 | 🖥️ Terminal UI | 使用 Rich 管理系统服务、模型 key、本地鉴权、监听配置、配置迁移、调用日志和版本更新 |
 | 🔐 本地鉴权 | 支持 `Authorization: Bearer` 与 `x-api-key` 两种本地鉴权方式 |
+| 👤 访客访问 | 可选安装；固定访客 key `amkr-visitor` 只能使用显式授权的模型上游 key |
 | 🚀 服务管理 | 支持后台进程、Windows 计划任务和 Linux systemd user service |
 
 ## 🚀 快速开始
@@ -47,6 +48,14 @@ pipx install auto-model-key-router
 uv tool install auto-model-key-router
 ```
 
+如需访客 key 功能，安装 `visitor` extra：
+
+```bash
+pipx install "auto-model-key-router[visitor]"
+# 或
+uv tool install "auto-model-key-router[visitor]"
+```
+
 如果只是临时试用，可以使用 uvx：
 
 ```bash
@@ -60,6 +69,12 @@ uvx --from auto-model-key-router amkr --version
 
 ```bash
 python -m pip install auto-model-key-router
+```
+
+使用 pip 安装访客功能：
+
+```bash
+python -m pip install "auto-model-key-router[visitor]"
 ```
 
 从源码开发或本地安装：
@@ -158,7 +173,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
         {
           "name": "gpt-4o-mini-key-2",
           "api_key": "sk-your-second-key",
-          "base_url": "https://api.openai.com"
+          "base_url": "https://api.openai.com",
+          "allow_visitor": true
         }
       ]
     }
@@ -181,7 +197,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `upstream_health_check_interval` | `30` | 冷却 key 的上游健康探测间隔，设为 `0` 可关闭探测 |
 | `metrics_db_path` | 缓存目录 | SQLite 计量存档路径 |
 | `log_file_path` | 缓存目录 | 服务运行日志路径 |
-| `local_api_key` | 自动生成 | 本地代理鉴权 key，留空则不启用本地鉴权 |
+| `local_api_key` | 自动生成 | 本地代理完整权限鉴权 key，不能设置为保留值 `amkr-visitor`；留空则不启用本地鉴权 |
 | `unified_model` | 未配置 | 固定虚拟模型 `unified_model` 当前指向的已有模型和可选 key |
 | `models` | `[]` | 模型、别名、路由模式、推理强度和上游 key 列表 |
 
@@ -193,7 +209,30 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `aliases` | 额外公开的模型名或显示名；客户端使用别名时仍会落到同一组 key |
 | `routing_mode` | 支持 `round_robin`、`priority` 和 `only_first`，未设置时默认 `round_robin` |
 | `reasoning_effort` | 支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`；为空、`default` 或 `downstream` 表示由下游请求决定 |
-| `keys` | 每个 key 包含 `name`、`api_key` 和可选 `base_url`；`base_url` 缺省时使用 `default_base_url` |
+| `keys` | 每个 key 包含 `name`、`api_key`、可选 `base_url` 和 `allow_visitor`；`allow_visitor` 默认为 `false` |
+
+### 访客 key
+
+访客功能不包含在默认安装中，需要使用 `auto-model-key-router[visitor]` 安装。访客鉴权 key 固定为 `amkr-visitor`，不需要也不能在配置中修改。要允许访客访问某个模型下的特定上游 key，在对应 key 上设置：
+
+```json
+{
+  "name": "gpt-4o-mini-key-2",
+  "api_key": "sk-your-second-key",
+  "allow_visitor": true
+}
+```
+
+访客请求仍可使用模型 ID、别名和 `unified_model`，但自动路由、重试和显式 `模型[key name]` 选择都只会使用 `allow_visitor: true` 且已启用的 key。未授权模型或 key 返回 `403`，访客不能访问 `/metrics`。也可以在 Terminal UI 的“模型 Key → 管理 Key”中切换访客访问权限。
+
+默认安装不会接受 `amkr-visitor`。配置文件中的 `allow_visitor` 可以保留，但只有安装了 `visitor` extra 后才会生效；这样同一份配置可以在启用和未启用访客功能的环境之间迁移。
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer amkr-visitor" \
+  -d "{\"model\":\"fast-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+```
 
 ### 统一模型快速切换
 
@@ -285,12 +324,22 @@ auto-model-key-router --config router-config.json
 
 | 菜单 | 能力 |
 | --- | --- |
-| 一键配置 | 自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key |
+| 一键配置 | 配置路由服务，或让 Claude Code / Codex 使用本项目作为 API 路由中转，并支持回退 Agent 原配置 |
 | 模型 Key | 添加、编辑、删除、排序模型和 key，并配置路由模式与推理强度 |
 | 统一模型 | 查看或切换 `unified_model` 指向的已有模型，并选择自动路由或指定已启用 key |
 | CLI 设置 | 集中管理模型服务、本地鉴权、监听配置、配置迁移和版本更新 |
 
-首页中的“一键配置”会自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key。
+首页中的“一键配置”包含：
+
+| 子菜单 | 行为 |
+| --- | --- |
+| 路由服务 | 自动注册系统服务、确保本地鉴权 key 已生成，并在结果页显示本地鉴权 key |
+| Claude Code | 更新 `~/.claude/settings.json`（或 `CLAUDE_CONFIG_DIR/settings.json`），配置 Anthropic 网关地址、鉴权 token 和 `unified_model` |
+| Codex | 更新 `~/.codex/config.toml`（或 `CODEX_HOME/config.toml`），注册 Responses API provider 并使用 `unified_model` |
+
+配置 Claude Code 或 Codex 前，需要先在主页“统一模型”中设置 `unified_model`。Agent 配置只覆盖路由所需字段，其他设置会保留；应用前的完整文件内容会缓存到 Auto Model Key Router 的系统缓存目录，可在对应 Agent 子菜单中选择“回退原配置”精确恢复。重复应用当前路由配置不会覆盖最初的回退快照；如果应用后手动修改了 Agent 配置，再次应用时会以当前内容创建新的回退快照。
+
+Agent 配置文件和备份可能包含鉴权 token，请不要共享这些文件。配置完成后，如果路由服务尚未运行，结果页会提示先执行“一键配置 → 路由服务”。
 
 配置迁移可在“CLI 设置 → 配置迁移”中使用：先在当前 TUI 选择“复制配置文件”将完整 JSON 配置写入剪贴板，再到另一台机器或另一个 TUI 选择“粘贴并应用”，程序会读取剪贴板、校验配置并确认覆盖当前配置文件。复制内容包含本地鉴权 key 和上游 API key，请只在可信终端之间传递。
 
@@ -352,7 +401,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 
 | 接口 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、key 指纹和 key 冷却状态 |
+| `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、访客授权 key 数、key 指纹和 key 冷却状态 |
 | `GET /v1/models` | 不需要 | 返回 OpenAI 风格模型列表，包含真实模型 ID、aliases 和已启用的 `unified_model` |
 | `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照 |
 | `/v1/{path}` | 启用 `local_api_key` 时需要 | 代理 OpenAI-compatible 请求，支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE` |
@@ -365,7 +414,8 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `/v1/chat/completions` | `/v1/chat/completions` | 兼容 Anthropic 顶层 `system` 和 Responses 风格 content part 类型 |
 | `/v1/messages` | `/v1/chat/completions` | Anthropic `system`、`tools`、`tool_use`、`tool_result` 转 OpenAI-compatible 请求；响应文本和工具调用转换为 Anthropic Messages 风格 JSON/SSE |
-| `/v1/responses` | `/v1/chat/completions` | `instructions` 转 system message，`input` 字符串或消息数组转 `messages` |
+| `/v1/messages/count_tokens` | 本地处理 | 为 Claude Code 返回输入 token 估算值，不访问上游 |
+| `/v1/responses` | `/v1/chat/completions` | Responses `instructions`、消息、function call、function output 和 tools 转 Chat Completions；响应文本、工具调用和 SSE 转回 Responses 风格 |
 
 参数兼容：
 
@@ -375,7 +425,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 - `stream: true` 会自动补充 `stream_options.include_usage=true`，并从 SSE `data:` chunk 中提取 `usage` 用于统计。
 
 > [!IMPORTANT]
-> `/v1/messages` 支持 Anthropic 与 OpenAI Chat Completions 之间的标准文本和工具调用双向转换，便于 Claude Code 等客户端实际执行工具；多模态输出等高级响应仍取决于上游兼容程度。`/v1/responses` 当前仍提供输入兼容，上游响应体会按原样返回，不会反向转换为 OpenAI Responses 的响应 schema。
+> `/v1/messages` 和 `/v1/responses` 支持标准文本与工具调用的双向转换，分别供 Claude Code 和 Codex 使用；多模态输出、托管工具等高级能力仍取决于上游兼容程度。`/v1/messages/count_tokens` 使用 UTF-8 内容长度进行本地估算，不等同于上游模型的精确 tokenizer 结果。
 
 模型级 `reasoning_effort` 非空时会覆盖请求中的推理强度；没有模型级覆盖时，Responses 风格的 `reasoning.effort` 会转换为 OpenAI-compatible `reasoning_effort` 后转发。
 
@@ -395,7 +445,7 @@ Authorization: Bearer your-local-api-key
 x-api-key: your-local-api-key
 ```
 
-`/health` 和 `/v1/models` 不需要本地鉴权。如果 `local_api_key` 为空，则所有本地接口都不启用本地鉴权。
+`/health` 和 `/v1/models` 不需要本地鉴权。如果 `local_api_key` 为空，则所有本地接口都不启用本地鉴权。固定访客 key `amkr-visitor` 仅可调用代理型 `/v1/{path}`，并且只会路由到配置了 `allow_visitor: true` 的上游 key。
 
 ## 📊 计量统计
 

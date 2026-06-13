@@ -14,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 
 from auto_model_key_router.app import _probe_cooling_keys, _stream_anthropic_messages, _stream_upstream, create_app
-from auto_model_key_router.config import KeyConfig, ModelConfig, RouterConfig, UnifiedModelConfig
+from auto_model_key_router.config import VISITOR_API_KEY, KeyConfig, ModelConfig, RouterConfig, UnifiedModelConfig
 from auto_model_key_router.key_pool import KeyPool
 from auto_model_key_router.unified_model import switch_unified_model
 
@@ -73,6 +73,11 @@ def make_config(tmp_path: Path, keys: tuple[KeyConfig, ...], local_api_key: str 
     )
 
 
+@pytest.fixture
+def visitor_feature(monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.visitor.VISITOR_FEATURE_AVAILABLE", True)
+
+
 def test_root_head_probe_returns_no_content(tmp_path: Path) -> None:
     config = make_config(tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
     app = create_app(config)
@@ -81,6 +86,52 @@ def test_root_head_probe_returns_no_content(tmp_path: Path) -> None:
 
     assert response.status_code == 204
     assert response.content == b""
+
+
+def test_unknown_anthropic_model_logs_requested_model(tmp_path: Path, caplog) -> None:
+    config = make_config(tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+    app = create_app(config)
+    caplog.set_level("WARNING", logger="auto_model_key_router.app")
+
+    response = run_client(
+        app,
+        lambda client: client.post(
+            "/v1/messages?beta=true",
+            headers={"x-api-key": "local-key"},
+            json={"model": "claude-haiku-test", "messages": [{"role": "user", "content": "hi"}]},
+        ),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "未配置模型: claude-haiku-test"
+    assert "path=/v1/messages" in caplog.text
+    assert "requested_model=claude-haiku-test" in caplog.text
+    assert "resolved_model=claude-haiku-test" in caplog.text
+
+
+def test_anthropic_count_tokens_is_served_locally(tmp_path: Path) -> None:
+    upstream_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(str(request.url))
+        return httpx.Response(500)
+
+    config = make_config(tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+    app = create_app(config)
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    response = run_client(
+        app,
+        lambda client: client.post(
+            "/v1/messages/count_tokens",
+            headers={"x-api-key": "local-key"},
+            json={"model": "test-model", "messages": [{"role": "user", "content": "hello"}]},
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["input_tokens"] > 0
+    assert upstream_calls == []
 
 
 def test_metrics_requires_local_auth() -> None:
@@ -97,6 +148,191 @@ def test_metrics_requires_local_auth() -> None:
         assert unauthorized.status_code == 401
         assert authorized.status_code == 200
         assert authorized.json()["total"]["requests"] == 0
+
+
+def test_visitor_key_routes_only_to_allowed_upstream_keys(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        authorization_headers: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            authorization_headers.append(request.headers["Authorization"])
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("private-key", "sk-private", "https://private.test"),
+                KeyConfig("visitor-key", "sk-visitor", "https://visitor.test", allow_visitor=True),
+            ),
+            routing_mode="only_first",
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+                json={"model": "alias-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert authorization_headers == ["Bearer sk-visitor"]
+
+
+def test_visitor_key_cannot_select_private_upstream_key(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("private-key", "sk-private", "https://private.test"),
+                KeyConfig("visitor-key", "sk-visitor", "https://visitor.test", allow_visitor=True),
+            ),
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"x-api-key": VISITOR_API_KEY},
+                json={"model": "test-model[private-key]", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(create_app(config), request)
+
+        assert response.status_code == 403
+        assert response.json()["error"]["message"] == "访客 key 无权访问模型 key: test-model[private-key]"
+
+
+def test_visitor_key_cannot_access_model_without_allowed_keys(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(Path(directory), (KeyConfig("private-key", "sk-private", "https://private.test"),))
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+                json={"model": "alias-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(create_app(config), request)
+
+        assert response.status_code == 403
+        assert response.json()["error"]["message"] == "访客 key 无权访问模型: alias-model"
+
+
+def test_full_local_key_can_still_access_private_upstream_key(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        authorization_headers: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            authorization_headers.append(request.headers["Authorization"])
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("private-key", "sk-private", "https://private.test"),
+                KeyConfig("visitor-key", "sk-visitor", "https://visitor.test", allow_visitor=True),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model[private-key]", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert authorization_headers == ["Bearer sk-private"]
+
+
+def test_visitor_key_cannot_read_metrics(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory),
+            (KeyConfig("visitor-key", "sk-visitor", "https://visitor.test", allow_visitor=True),),
+        )
+
+        response = run_client(
+            create_app(config),
+            lambda client: client.get("/metrics", headers={"Authorization": f"Bearer {VISITOR_API_KEY}"}),
+        )
+
+        assert response.status_code == 401
+
+
+def test_health_reports_visitor_access(visitor_feature) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("private-key", "sk-private", "https://private.test"),
+                KeyConfig("visitor-key", "sk-visitor", "https://visitor.test", allow_visitor=True),
+                KeyConfig("disabled-visitor-key", "sk-disabled", "https://disabled.test", enabled=False, allow_visitor=True),
+            ),
+        )
+
+        response = run_client(create_app(config), lambda client: client.get("/health"))
+
+        assert response.json()["visitor_feature_installed"] is True
+        assert response.json()["visitor_access_enabled"] is True
+        assert response.json()["visitor_key_count"] == 1
+
+
+def test_visitor_key_is_rejected_when_optional_feature_is_not_installed(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        monkeypatch.setattr("auto_model_key_router.visitor.VISITOR_FEATURE_AVAILABLE", False)
+        config = make_config(
+            Path(directory),
+            (KeyConfig("visitor-key", "sk-visitor", "https://visitor.test", allow_visitor=True),),
+        )
+        app = create_app(config)
+
+        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+            proxy = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+                json={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            health = await client.get("/health")
+            return proxy, health
+
+        proxy, health = run_client(app, requests)
+
+        assert proxy.status_code == 401
+        assert health.json()["visitor_feature_installed"] is False
+        assert health.json()["visitor_access_enabled"] is False
+        assert health.json()["visitor_key_count"] == 0
+
+
+def test_config_parses_allow_visitor_and_rejects_reserved_local_key() -> None:
+    config = RouterConfig.from_dict(
+        {
+            "local_api_key": "local-key",
+            "models": [
+                {
+                    "id": "test-model",
+                    "keys": [
+                        {"name": "private", "api_key": "sk-private"},
+                        {"name": "visitor", "api_key": "sk-visitor", "allow_visitor": True},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert config.models[0].keys[0].allow_visitor is False
+    assert config.models[0].keys[1].allow_visitor is True
+
+    with pytest.raises(ValueError, match="保留的访客 key"):
+        RouterConfig.from_dict({"local_api_key": VISITOR_API_KEY, "models": []})
 
 
 def test_config_file_changes_are_hot_reloaded() -> None:
@@ -1149,6 +1385,120 @@ def test_config_reasoning_effort_overrides_request_reasoning() -> None:
         assert response.status_code == 200
         assert upstream_bodies[0]["reasoning_effort"] == "high"
         assert "reasoning" not in upstream_bodies[0]
+
+
+def test_responses_request_and_response_are_converted_for_codex() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": "checking",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-2",
+                                        "type": "function",
+                                        "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                },
+            )
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/responses",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "test-model",
+                    "instructions": "be concise",
+                    "input": [
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+                        {"type": "function_call", "call_id": "call-1", "name": "shell", "arguments": '{"command":"pwd"}'},
+                        {"type": "function_call_output", "call_id": "call-1", "output": "D:/Code"},
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "read_file",
+                            "description": "Read a file",
+                            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                        }
+                    ],
+                    "tool_choice": {"type": "function", "name": "read_file"},
+                },
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        upstream = upstream_bodies[0]
+        assert upstream["messages"][0] == {"role": "system", "content": "be concise"}
+        assert upstream["messages"][2]["tool_calls"][0]["id"] == "call-1"
+        assert upstream["messages"][3] == {"role": "tool", "tool_call_id": "call-1", "content": "D:/Code"}
+        assert upstream["tools"][0]["function"]["name"] == "read_file"
+        assert upstream["tool_choice"] == {"type": "function", "function": {"name": "read_file"}}
+        data = response.json()
+        assert data["object"] == "response"
+        assert data["model"] == "test-model"
+        assert data["output"][0]["content"][0]["text"] == "checking"
+        assert data["output"][1]["type"] == "function_call"
+        assert data["output"][1]["call_id"] == "call-2"
+        assert data["usage"]["total_tokens"] == 14
+
+
+def test_responses_stream_is_converted_to_codex_sse() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream = "\n\n".join(
+            [
+                'data: {"choices":[{"delta":{"content":"hello "}}]}',
+                'data: {"choices":[{"delta":{"content":"world","tool_calls":[{"index":0,"id":"call-1","function":{"name":"shell","arguments":"{\\"command\\":\\"pwd\\"}"}}]},"finish_reason":"tool_calls"}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+                "data: [DONE]",
+                "",
+            ]
+        ).encode("utf-8")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=upstream, headers={"content-type": "text/event-stream"})
+
+        config = make_config(Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/responses",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "input": "hi", "stream": True},
+            )
+
+        response = run_client(app, request)
+        body = response.text
+
+        assert response.status_code == 200
+        assert "event: response.output_text.delta" in body
+        assert '"delta":"hello "' in body
+        assert '"type":"function_call"' in body
+        assert '"call_id":"call-1"' in body
+        assert "event: response.completed" in body
+        assert '"total_tokens":5' in body
 
 
 def test_downstream_reasoning_effort_is_forwarded_without_config_override() -> None:

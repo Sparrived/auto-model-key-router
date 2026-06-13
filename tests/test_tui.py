@@ -588,6 +588,7 @@ def test_service_logs_renderable_can_show_archived_log(tmp_path) -> None:
 
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
+    assert dashboard.ONE_CLICK_OPTIONS == [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("0", "返回")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
     assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
@@ -697,6 +698,19 @@ def test_configure_cli_generates_auth_key_and_installs_service(tmp_path, monkeyp
     assert isinstance(result, tui.ResultPage)
     assert result.copy_text == data["local_api_key"]
     assert actions == [(str(config_path), "install")]
+
+
+def test_one_click_config_menu_routes_to_agent_submenu(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    choices = iter(["2", "0"])
+    agents: list[str] = []
+    monkeypatch.setattr(dashboard, "select_option", lambda title, options, selected=0, content=None: next(choices))
+    monkeypatch.setattr(dashboard, "run_submodule", lambda action: action())
+    monkeypatch.setattr(dashboard, "manage_agent_config_interactively", lambda path, agent: agents.append(agent))
+
+    dashboard.manage_one_click_config_interactively(config_path)
+
+    assert agents == [dashboard.CLAUDE_CODE]
 
 
 def test_model_service_menu_moves_autostart_into_single_entry(tmp_path, monkeypatch) -> None:
@@ -1068,3 +1082,56 @@ def test_systemd_service_registration_quotes_console_script_paths(tmp_path, monk
 
     unit = (tmp_path / ".config" / "systemd" / "user" / "auto-model-key-router.service").read_text(encoding="utf-8")
     assert "ExecStart='/opt/amkr tools/auto-model-key-router' --config '/root/config dir/router-config.json' --serve-foreground" in unit
+
+
+def test_toggle_visitor_access_interactively_updates_selected_key(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    data = {
+        "local_api_key": "local-key",
+        "models": [
+            {
+                "id": "test-model",
+                "keys": [{"name": "shared", "api_key": "sk-shared", "base_url": "https://example.test"}],
+            }
+        ],
+    }
+    config_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: True)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old, new: Text("reloaded"))
+
+    result = config_editor.toggle_visitor_access_interactively(
+        config_path,
+        data,
+        data["models"][0],
+        0,
+    )
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["models"][0]["keys"][0]["allow_visitor"] is True
+    assert "允许" in render_plain(result)
+
+
+def test_toggle_visitor_access_requires_optional_feature(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    data = {
+        "local_api_key": "local-key",
+        "models": [
+            {
+                "id": "test-model",
+                "keys": [{"name": "shared", "api_key": "sk-shared", "base_url": "https://example.test"}],
+            }
+        ],
+    }
+    config_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+
+    result = config_editor.toggle_visitor_access_interactively(
+        config_path,
+        data,
+        data["models"][0],
+        0,
+    )
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "allow_visitor" not in saved["models"][0]["keys"][0]
+    assert "未安装" in render_plain(result)

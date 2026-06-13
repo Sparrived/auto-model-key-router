@@ -9,6 +9,7 @@ from rich.console import Group
 from rich.live import Live
 from rich.table import Table
 
+from .agent_config import CLAUDE_CODE, CODEX, AgentConfigError, agent_display_name, configure_agent, get_agent_config_status, rollback_agent, router_origin
 from .config import UNIFIED_MODEL_ID, RouterConfig, generate_local_api_key, load_config_data, save_config_data
 from .config_editor import manage_config_transfer_interactively, manage_model_keys_interactively, reasoning_effort_text, set_listen_interactively, set_local_api_key_interactively
 from .formatting import compact_url, short_text
@@ -18,9 +19,11 @@ from .service import is_service_healthy, is_system_service_registered, manage_sy
 from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, content_scroll_offset, menu_table, mouse_wheel_mode, posix_input_mode, read_key_responsive, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame_state
 from .unified_model import switch_unified_model
 from .update import UpdateInstallOutcome, VersionCheckResult, check_latest_version, install_latest_version_outcome, render_update_notice, render_version_check_result, update_target_label
+from .visitor import VISITOR_API_KEY, visitor_feature_available
 
 
 MENU_OPTIONS = [("1", "一键配置"), ("2", "模型 Key"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
+ONE_CLICK_OPTIONS = [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("0", "返回")]
 SETTINGS_OPTIONS = [("1", "模型服务"), ("2", "本地鉴权"), ("3", "监听配置"), ("4", "配置迁移"), ("5", "版本更新"), ("0", "返回")]
 
 
@@ -32,9 +35,7 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
         if choice == "0":
             return
         if choice == "1":
-            result = run_submodule(lambda: configure_cli_interactively(config_path))
-            if result is not None:
-                show_result_page("一键配置", result)
+            run_submodule(lambda: manage_one_click_config_interactively(config_path))
             config = RouterConfig.load(config_path)
             continue
         if choice == "2":
@@ -160,6 +161,110 @@ def manage_cli_settings_interactively(config_path: Path, update_result: VersionC
                 return result
             if isinstance(result, VersionCheckResult):
                 latest_result = result
+
+
+def manage_one_click_config_interactively(config_path: Path) -> None:
+    while True:
+        choice = select_option("一键配置", ONE_CLICK_OPTIONS)
+        if choice == "0":
+            return
+        if choice == "1":
+            result = run_submodule(lambda: configure_cli_interactively(config_path))
+            if result is not None:
+                show_result_page("路由服务", result)
+            continue
+        agent = CLAUDE_CODE if choice == "2" else CODEX
+        run_submodule(lambda: manage_agent_config_interactively(config_path, agent))
+
+
+def manage_agent_config_interactively(config_path: Path, agent: str) -> None:
+    name = agent_display_name(agent)
+    while True:
+        config = RouterConfig.load(config_path)
+        status = get_agent_config_status(agent)
+        rollback_label = "回退原配置" if status.backup_available else "回退原配置（无备份）"
+        choice = select_option(
+            f"{name} 一键配置",
+            [("1", "应用路由配置"), ("2", rollback_label), ("0", "返回")],
+            content=agent_config_status_panel(config, agent),
+        )
+        if choice == "0":
+            return
+        if choice == "1":
+            result = configure_agent_interactively(config_path, agent)
+            show_result_page(f"{name} 配置", result)
+            continue
+        if not status.backup_available:
+            show_result_page(f"{name} 回退", section_panel("当前没有可用于回退的配置备份。", f"{name} 回退", "yellow"))
+            continue
+        if not confirm_choice(f"将使用缓存内容覆盖 {status.target_path}，是否继续？"):
+            continue
+        try:
+            restored = rollback_agent(agent)
+        except (OSError, AgentConfigError) as exc:
+            result = section_panel(f"[red]{exc}[/red]", f"{name} 回退失败", "red")
+        else:
+            result = section_panel(
+                f"已恢复应用路由配置前的内容。\n配置文件: [bold]{restored.target_path}[/bold]",
+                f"{name} 已回退",
+                "green",
+            )
+        show_result_page(f"{name} 回退", result)
+
+
+def configure_agent_interactively(config_path: Path, agent: str) -> Any:
+    name = agent_display_name(agent)
+    try:
+        config = RouterConfig.load(config_path)
+        result = configure_agent(agent, config)
+    except (OSError, AgentConfigError) as exc:
+        return section_panel(f"[red]{exc}[/red]", f"{name} 配置失败", "red")
+
+    service_status = (
+        "[green]路由服务正在运行。[/green]"
+        if is_service_healthy(config.host, config.port, use_cache=False)
+        else "[yellow]路由服务当前未运行，请先在“一键配置 → 路由服务”完成服务配置。[/yellow]"
+    )
+    return Group(
+        section_panel(
+            f"已将 {name} 指向本项目路由。\n"
+            f"配置文件: [bold]{result.target_path}[/bold]\n"
+            f"路由地址: [bold]{result.router_url}[/bold]\n"
+            f"请求模型: [bold cyan]{UNIFIED_MODEL_ID}[/bold cyan]\n"
+            f"原配置缓存: [bold]{result.backup_path}[/bold]\n\n"
+            f"{service_status}",
+            f"{name} 配置完成",
+            "green",
+        )
+    )
+
+
+def agent_config_status_panel(config: RouterConfig, agent: str) -> Any:
+    name = agent_display_name(agent)
+    status = get_agent_config_status(agent)
+    if status.current_is_applied:
+        applied_status = "[green]已应用当前路由配置[/green]"
+    elif status.backup_available:
+        applied_status = "[yellow]配置已变化，仍可回退到应用前内容[/yellow]"
+    else:
+        applied_status = "[dim]尚未由本项目配置[/dim]"
+    unified_status = (
+        f"[green]{UNIFIED_MODEL_ID} → {config.unified_model.model}[/green]"
+        if config.unified_model is not None
+        else f"[yellow]未配置 {UNIFIED_MODEL_ID}，暂时不能应用[/yellow]"
+    )
+    route_url = router_origin(config)
+    if agent == CODEX:
+        route_url += "/v1"
+    return section_panel(
+        f"配置文件: [bold]{status.target_path}[/bold]\n"
+        f"路由地址: [bold]{route_url}[/bold]\n"
+        f"统一模型: {unified_status}\n"
+        f"当前状态: {applied_status}\n"
+        f"备份文件: [bold]{status.backup_path}[/bold]",
+        f"{name} 状态",
+        "cyan",
+    )
 
 
 def configure_cli_interactively(config_path: Path) -> Any:
@@ -306,6 +411,8 @@ def render_config(config: RouterConfig, path: Path) -> None:
 def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     model_count = len(config.models)
     key_count = sum(len(model.keys) for model in config.models)
+    configured_visitor_key_count = sum(1 for model in config.models for key in model.keys if key.enabled and key.allow_visitor)
+    visitor_installed = visitor_feature_available()
     upstream_count = len({key.base_url for model in config.models for key in model.keys})
     service_status = "[green]● 运行中[/green]" if is_service_healthy(config.host, config.port) else "[yellow]● 未运行[/yellow]"
     auth_status = "[green]已启用[/green]" if config.local_api_key else "[yellow]未设置[/yellow]"
@@ -315,6 +422,18 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     summary.add_column(ratio=1)
     summary.add_row(f"[dim]监听地址[/dim]\n[bold]{config.host}:{config.port}[/bold]", f"[dim]服务状态[/dim]\n[bold]{service_status}[/bold]", f"[dim]本地鉴权[/dim]\n[bold]{auth_status}[/bold]")
     summary.add_row(f"[dim]模型数量[/dim]\n[bold cyan]{model_count}[/bold cyan]", f"[dim]Key 数量[/dim]\n[bold green]{key_count}[/bold green]", f"[dim]上游数量[/dim]\n[bold magenta]{upstream_count}[/bold magenta]")
+    if visitor_installed:
+        summary.add_row(
+            f"[dim]访客 Key[/dim]\n[bold]{VISITOR_API_KEY}[/bold]",
+            f"[dim]访客可用 Key[/dim]\n[bold green]{configured_visitor_key_count}[/bold green]",
+            "",
+        )
+    elif configured_visitor_key_count:
+        summary.add_row(
+            "[dim]访客功能[/dim]\n[yellow]未安装[/yellow]",
+            f"[dim]未生效授权[/dim]\n[yellow]{configured_visitor_key_count}[/yellow]",
+            "[dim]安装[/dim]\n[bold]auto-model-key-router[visitor][/bold]",
+        )
     warning = section_panel("[bold red]⚠ 当前监听地址为 0.0.0.0，服务会接受所有可达网络的连接。[/bold red]\n[red]如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。[/red]", "公网开放风险", "red") if config.host == "0.0.0.0" else None
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("模型 ID", style="cyan", ratio=2)

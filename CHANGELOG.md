@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-13
+
+### Added
+- 主页“一键配置”新增路由服务、Claude Code 和 Codex 子菜单；可增量写入 Agent 配置，使其通过本项目的 `unified_model` 路由，并缓存应用前的完整配置用于精确回退。
+- 新增 Codex Responses 协议兼容，将 Responses 消息、function call、function output 和 tools 转换为 Chat Completions，并把普通及流式文本、工具调用和 usage 转回 Responses 风格。
+- 新增 Claude Code `/v1/messages/count_tokens` 本地兼容响应，避免 OpenAI-compatible 上游不支持 Anthropic token 计数接口时中断。
+
+### Fixed
+- 修复 Windows 独立更新器将 `uv` 写入标准错误流的成功摘要误判为 `NativeCommandError`，导致升级实际完成却显示失败的问题；现在通过独立进程重定向输出，并以真实进程退出码判断更新结果。
+- 修复 Windows 独立更新器接管后父进程已提前退出时，`Wait-Process` 抛出异常并在执行升级命令前中止的问题；现在仅在父进程仍存在时等待其退出。
+
 ## [1.5.0] - 2026-06-13
 
 ### Changed

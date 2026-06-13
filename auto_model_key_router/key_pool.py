@@ -81,7 +81,10 @@ class KeyPool:
         return {"model": self._unified_model_id, "key": self._unified_key_name}
 
     def key_count(self, model_id: str) -> int:
-        return len([k for k in self._keys.get(self.resolve_model_id(model_id), ()) if k.enabled])
+        return len(self.keys_for_model(model_id))
+
+    def visitor_key_count(self, model_id: str) -> int:
+        return len(self.keys_for_model(model_id, visitor_only=True))
 
     def routing_mode(self, model_id: str) -> str:
         return self._routing_modes.get(self.resolve_model_id(model_id), "round_robin")
@@ -89,23 +92,27 @@ class KeyPool:
     def reasoning_effort(self, model_id: str) -> str | None:
         return self._reasoning_efforts.get(self.resolve_model_id(model_id))
 
-    def keys_for_model(self, model_id: str) -> tuple[KeyConfig, ...]:
-        return tuple(key for key in self._keys.get(self.resolve_model_id(model_id), ()) if key.enabled)
+    def keys_for_model(self, model_id: str, *, visitor_only: bool = False) -> tuple[KeyConfig, ...]:
+        return tuple(
+            key
+            for key in self._keys.get(self.resolve_model_id(model_id), ())
+            if key.enabled and (not visitor_only or key.allow_visitor)
+        )
 
-    def key_by_name(self, model_id: str, key_name: str) -> KeyConfig:
+    def key_by_name(self, model_id: str, key_name: str, *, visitor_only: bool = False) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
         keys = self._keys.get(model_id)
         if not keys:
             raise KeyError(model_id)
         for key in keys:
-            if key.name == key_name and key.enabled:
+            if key.name == key_name and key.enabled and (not visitor_only or key.allow_visitor):
                 return key
         raise RuntimeError(f"模型 {model_id} 未配置 key: {key_name}")
 
-    async def next_key(self, model_id: str, excluded: set[str] | None = None) -> KeyConfig:
+    async def next_key(self, model_id: str, excluded: set[str] | None = None, *, visitor_only: bool = False) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
         excluded = excluded or set()
-        keys = [key for key in self._keys.get(model_id, ()) if key.enabled]
+        keys = list(self.keys_for_model(model_id, visitor_only=visitor_only))
         if not keys:
             raise KeyError(model_id)
 

@@ -22,10 +22,21 @@ from . import __version__
 from .config import RouterConfig
 from .key_pool import KeyPool
 from .metrics import MetricsStore, extract_usage
+from .visitor import is_visitor_api_key, visitor_feature_available
 
 
 LOGGER = logging.getLogger("auto_model_key_router.app")
 RETRYABLE_STATUS_CODES = frozenset({401, 403, 429, 500, 502, 503, 504})
+
+
+def _log_model_not_configured(path: str, requested_model_id: str, model_id: str, reason: str) -> None:
+    LOGGER.warning(
+        "model routing rejected: path=/v1/%s requested_model=%s resolved_model=%s reason=%s",
+        path,
+        requested_model_id,
+        model_id,
+        reason,
+    )
 
 
 def _new_http_client(timeout: float) -> httpx.AsyncClient:
@@ -71,12 +82,20 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     async def health() -> dict[str, Any]:
         await _reload_config_if_changed(app.state)
         local_api_key = app.state.config.local_api_key
+        visitor_key_count = sum(
+            app.state.key_pool.visitor_key_count(model_id)
+            for model_id in app.state.key_pool.model_ids
+        )
+        visitor_installed = visitor_feature_available()
         return {
             "status": "ok",
             "models": app.state.key_pool.public_model_ids,
             "config_path": app.state.config_path,
             "local_auth_enabled": bool(local_api_key),
             "local_api_key_fingerprint": _key_fingerprint(local_api_key),
+            "visitor_feature_installed": visitor_installed,
+            "visitor_access_enabled": visitor_installed and visitor_key_count > 0,
+            "visitor_key_count": visitor_key_count if visitor_installed else 0,
             "unified_model": app.state.key_pool.unified_route,
             "key_states": app.state.key_pool.key_states(),
         }
@@ -95,15 +114,17 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     @app.get("/metrics")
     async def metrics(request: Request):
         await _reload_config_if_changed(app.state)
-        if not _is_authorized(request, app.state.config.local_api_key):
+        if _authorization_mode(request, app.state.config.local_api_key) != "full":
             return JSONResponse({"error": {"message": "本地 API key 验证失败"}}, status_code=401)
         return await app.state.metrics.snapshot()
 
     @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def proxy(path: str, request: Request) -> Response:
         await _reload_config_if_changed(app.state)
-        if not _is_authorized(request, app.state.config.local_api_key):
+        authorization_mode = _authorization_mode(request, app.state.config.local_api_key)
+        if authorization_mode is None:
             return JSONResponse({"error": {"message": "本地 API key 验证失败"}}, status_code=401)
+        visitor_only = authorization_mode == "visitor"
 
         body = await request.body()
         payload = _json_body(body)
@@ -118,9 +139,15 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
         excluded: set[str] = set()
         last_error: JSONResponse | None = None
-        key_count = app.state.key_pool.key_count(model_id)
-        if key_count == 0:
+        configured_key_count = app.state.key_pool.key_count(model_id)
+        key_count = app.state.key_pool.visitor_key_count(model_id) if visitor_only else configured_key_count
+        if configured_key_count == 0:
+            _log_model_not_configured(path, requested_model_id, model_id, "no_configured_keys")
             return JSONResponse({"error": {"message": f"未配置模型: {model_id}"}}, status_code=404)
+        if key_count == 0:
+            return JSONResponse({"error": {"message": f"访客 key 无权访问模型: {requested_model_name}"}}, status_code=403)
+        if path == "messages/count_tokens":
+            return JSONResponse({"input_tokens": _estimate_anthropic_input_tokens(payload)})
 
         only_first = app.state.key_pool.routing_mode(model_id) == "only_first"
         attempts = app.state.config.max_retries + 1 if requested_key_name or only_first or key_count == 1 else key_count
@@ -128,13 +155,16 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         for attempt in range(attempts):
             try:
                 if requested_key_name:
-                    key = app.state.key_pool.key_by_name(model_id, requested_key_name)
+                    key = app.state.key_pool.key_by_name(model_id, requested_key_name, visitor_only=visitor_only)
                     await app.state.key_pool.acquire_key(model_id, key.name)
                 else:
-                    key = await app.state.key_pool.next_key(model_id, excluded)
+                    key = await app.state.key_pool.next_key(model_id, excluded, visitor_only=visitor_only)
             except KeyError:
+                _log_model_not_configured(path, requested_model_id, model_id, "key_selection_failed")
                 return JSONResponse({"error": {"message": f"未配置模型: {model_id}"}}, status_code=404)
             except RuntimeError as exc:
+                if visitor_only and requested_key_name:
+                    return JSONResponse({"error": {"message": f"访客 key 无权访问模型 key: {requested_model_name}[{requested_key_name}]"}}, status_code=403)
                 return JSONResponse({"error": {"message": str(exc)}}, status_code=503)
 
             release_key = True
@@ -204,6 +234,11 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                         media_type = "text/event-stream"
                         response_headers["cache-control"] = "no-cache"
                         response_headers["x-accel-buffering"] = "no"
+                    elif path == "responses":
+                        stream = _stream_responses(response, app.state.metrics, app.state.key_pool, model_id, key.name, requested_model_id, upstream, started)
+                        media_type = "text/event-stream"
+                        response_headers["cache-control"] = "no-cache"
+                        response_headers["x-accel-buffering"] = "no"
                     stream_response = StreamingResponse(
                         stream,
                         status_code=response.status_code,
@@ -226,6 +261,11 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                     if anthropic_response is None:
                         return JSONResponse({"type": "error", "error": {"type": "api_error", "message": "上游返回了非 JSON 响应，无法转换为 Anthropic Messages 响应"}}, status_code=502)
                     return JSONResponse(anthropic_response, status_code=response.status_code, headers=_response_headers(response))
+                if path == "responses":
+                    responses_response = _responses_response(_json_bytes(content), requested_model_id)
+                    if responses_response is None:
+                        return JSONResponse({"error": {"message": "上游返回了非 JSON 响应，无法转换为 Responses 响应"}}, status_code=502)
+                    return JSONResponse(responses_response, status_code=response.status_code, headers=_response_headers(response))
                 return Response(
                     content=content,
                     status_code=response.status_code,
@@ -344,6 +384,16 @@ def _adapt_message_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return _normalize_chat_compat_parameters(payload)
 
 
+def _estimate_anthropic_input_tokens(payload: dict[str, Any]) -> int:
+    content = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"model", "stream", "max_tokens", "max_output_tokens"}
+    }
+    encoded = json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return max(1, (len(encoded) + 3) // 4)
+
+
 def _adapt_anthropic_messages_payload(payload: dict[str, Any]) -> dict[str, Any]:
     messages = payload.get("messages")
     if not isinstance(messages, list):
@@ -375,6 +425,15 @@ def _adapt_responses_input_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if instructions:
         messages = [{"role": "system", "content": _adapt_content(instructions)}, *messages]
     adapted["messages"] = messages
+    tools = adapted.get("tools")
+    if isinstance(tools, list):
+        adapted["tools"] = [_adapt_anthropic_tool(tool) for tool in tools if isinstance(tool, dict)]
+    tool_choice = adapted.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        adapted["tool_choice"] = {
+            "type": "function",
+            "function": {"name": str(tool_choice.get("name") or "")},
+        }
     return adapted
 
 
@@ -388,7 +447,7 @@ def _normalize_chat_compat_parameters(payload: dict[str, Any]) -> dict[str, Any]
         adapted["stop"] = adapted.pop("stop_sequences")
     else:
         adapted.pop("stop_sequences", None)
-    for key in ("anthropic_version", "metadata", "reasoning", "text", "truncation", "previous_response_id"):
+    for key in ("anthropic_version", "metadata", "reasoning", "text", "truncation", "previous_response_id", "include", "store", "prompt_cache_key", "safety_identifier"):
         adapted.pop(key, None)
     return adapted
 
@@ -401,7 +460,39 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for item in value:
         if isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type == "function_call":
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": str(item.get("call_id") or item.get("id") or "call_amkr"),
+                                "type": "function",
+                                "function": {
+                                    "name": str(item.get("name") or ""),
+                                    "arguments": item.get("arguments") if isinstance(item.get("arguments"), str) else json.dumps(item.get("arguments") or {}, ensure_ascii=False, separators=(",", ":")),
+                                },
+                            }
+                        ],
+                    }
+                )
+                continue
+            if item_type == "function_call_output":
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(item.get("call_id") or ""),
+                        "content": _tool_result_text(item.get("output", "")),
+                    }
+                )
+                continue
+            if item_type == "reasoning":
+                continue
             role = str(item.get("role") or "user")
+            if role == "developer":
+                role = "system"
             content = item.get("content", item.get("text", ""))
             if item.get("type") == "message" or "role" in item or "content" in item:
                 messages.append({"role": role, "content": _adapt_content(content)})
@@ -556,13 +647,19 @@ def _upstream_headers(request: Request, api_key: str) -> dict[str, str]:
     return headers
 
 
-def _is_authorized(request: Request, local_api_key: str) -> bool:
+def _authorization_mode(request: Request, local_api_key: str) -> str | None:
     if not local_api_key:
-        return True
+        return "full"
     authorization = request.headers.get("authorization", "")
     if authorization.lower().startswith("bearer "):
-        return authorization[7:].strip() == local_api_key
-    return request.headers.get("x-api-key") == local_api_key
+        api_key = authorization[7:].strip()
+    else:
+        api_key = request.headers.get("x-api-key", "")
+    if api_key == local_api_key:
+        return "full"
+    if is_visitor_api_key(api_key):
+        return "visitor"
+    return None
 
 
 def _config_mtime(config_path: str) -> float:
@@ -866,6 +963,191 @@ async def _stream_anthropic_messages(response: httpx.Response, metrics: MetricsS
         await response.aclose()
 
 
+async def _stream_responses(response: httpx.Response, metrics: MetricsStore, key_pool: KeyPool, model_id: str, key_name: str, requested_model_id: str, upstream: str, started: float):
+    chunk_count = 0
+    byte_count = 0
+    buffer = ""
+    usage: dict[str, Any] | None = None
+    first_token_ms = 0
+    failed = False
+    stream_state: dict[str, Any] = {"text": [], "text_started": False, "tool_calls": {}}
+    try:
+        async for chunk in response.aiter_bytes():
+            chunk_count += 1
+            byte_count += len(chunk)
+            if first_token_ms == 0:
+                first_token_ms = _elapsed_ms(started)
+            buffer, events, chunk_usage = _responses_stream_events(buffer, chunk, stream_state)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            for event in events:
+                yield event
+                await _flush_stream_event()
+        if buffer.strip():
+            buffer, events, chunk_usage = _responses_stream_events(buffer, b"\n", stream_state)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            for event in events:
+                yield event
+                await _flush_stream_event()
+
+        for output_index, item in enumerate(_responses_stream_output_items(stream_state)):
+            yield _responses_sse("response.output_item.done", {"type": "response.output_item.done", "output_index": output_index, "item": item})
+            await _flush_stream_event()
+        yield _responses_sse(
+            "response.completed",
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_amkr",
+                    "model": requested_model_id,
+                    "usage": _responses_usage(usage),
+                },
+            },
+        )
+    except Exception as exc:
+        failed = True
+        payload = {"model_id": model_id, "requested_model_id": requested_model_id, "key_name": key_name, "upstream": upstream, "status_code": response.status_code, "content_type": response.headers.get("content-type"), "error_type": exc.__class__.__name__, "error": str(exc), "chunks": chunk_count, "bytes": byte_count, "duration_ms": _elapsed_ms(started)}
+        LOGGER.warning("upstream responses stream error %s", json.dumps(payload, ensure_ascii=False))
+        _debug_report("upstream-responses-stream-error", payload)
+    finally:
+        await metrics.record(
+            model_id,
+            key_name,
+            response.status_code,
+            usage,
+            failed=failed,
+            duration_ms=_elapsed_ms(started),
+            first_token_ms=first_token_ms,
+            requested_model_id=requested_model_id,
+        )
+        if failed or response.status_code in RETRYABLE_STATUS_CODES:
+            await key_pool.mark_failure(model_id, key_name, response.status_code, _retry_after_seconds(response))
+        elif response.status_code < 400:
+            await key_pool.mark_success(model_id, key_name)
+        await key_pool.release_key(model_id, key_name)
+        _debug_report("upstream-responses-stream-close", {"status_code": response.status_code, "chunks": chunk_count, "bytes": byte_count, "first_token_ms": first_token_ms, "usage": usage})
+        await response.aclose()
+
+
+def _responses_stream_events(buffer: str, chunk: bytes, stream_state: dict[str, Any]) -> tuple[str, list[bytes], dict[str, Any] | None]:
+    buffer += chunk.decode("utf-8", errors="replace")
+    events: list[bytes] = []
+    usage = None
+    while "\n" in buffer:
+        line, buffer = buffer.split("\n", 1)
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        payload = _json_text(data)
+        if not isinstance(payload, dict):
+            continue
+        chunk_usage = extract_usage(payload)
+        if chunk_usage is not None:
+            usage = chunk_usage
+        for choice in _openai_choices(payload):
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            text = _delta_text(delta)
+            if text:
+                if not stream_state["text_started"]:
+                    events.append(
+                        _responses_sse(
+                            "response.output_item.added",
+                            {
+                                "type": "response.output_item.added",
+                                "output_index": 0,
+                                "item": {
+                                    "type": "message",
+                                    "id": "msg_amkr",
+                                    "role": "assistant",
+                                    "status": "in_progress",
+                                    "content": [],
+                                },
+                            },
+                        )
+                    )
+                    events.append(
+                        _responses_sse(
+                            "response.content_part.added",
+                            {
+                                "type": "response.content_part.added",
+                                "item_id": "msg_amkr",
+                                "output_index": 0,
+                                "content_index": 0,
+                                "part": {"type": "output_text", "text": "", "annotations": []},
+                            },
+                        )
+                    )
+                    stream_state["text_started"] = True
+                stream_state["text"].append(text)
+                events.append(
+                    _responses_sse(
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": "msg_amkr",
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": text,
+                        },
+                    )
+                )
+            tool_calls = delta.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for fallback_index, tool_call in enumerate(tool_calls):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    index = int(tool_call.get("index", fallback_index))
+                    stored = stream_state["tool_calls"].setdefault(
+                        index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    if tool_call.get("id"):
+                        stored["id"] = str(tool_call["id"])
+                    function = tool_call.get("function")
+                    if isinstance(function, dict):
+                        if function.get("name"):
+                            stored["name"] += str(function["name"])
+                        arguments = function.get("arguments")
+                        if arguments is not None:
+                            stored["arguments"] += arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    return buffer, events, usage
+
+
+def _responses_stream_output_items(stream_state: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    text = "".join(stream_state["text"])
+    if text or not stream_state["tool_calls"]:
+        items.append(
+            {
+                "type": "message",
+                "id": "msg_amkr",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        )
+    for index in sorted(stream_state["tool_calls"]):
+        tool_call = stream_state["tool_calls"][index]
+        call_id = str(tool_call.get("id") or f"call_amkr_{index}")
+        items.append(
+            {
+                "type": "function_call",
+                "id": f"fc_amkr_{index}",
+                "call_id": call_id,
+                "name": str(tool_call.get("name") or ""),
+                "arguments": str(tool_call.get("arguments") or "{}"),
+            }
+        )
+    return items
+
+
+def _responses_sse(event: str, payload: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+
+
 def _anthropic_stream_events(buffer: str, chunk: bytes, stream_state: dict[str, Any]) -> tuple[str, list[bytes], dict[str, Any] | None]:
     buffer += chunk.decode("utf-8", errors="replace")
     events: list[bytes] = []
@@ -1053,6 +1335,88 @@ def _anthropic_message_response(data: Any, requested_model_id: str) -> dict[str,
             "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
             "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         },
+    }
+
+
+def _responses_response(data: Any, requested_model_id: str) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    if data.get("object") == "response" and isinstance(data.get("output"), list):
+        return data
+    choice = next(iter(_openai_choices(data)), None)
+    if choice is None:
+        return {
+            "id": str(data.get("id") or "resp_amkr"),
+            "object": "response",
+            "status": "completed",
+            "model": requested_model_id,
+            "output": [],
+            "usage": _responses_usage(data.get("usage") if isinstance(data.get("usage"), dict) else None),
+        }
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    return {
+        "id": str(data.get("id") or "resp_amkr"),
+        "object": "response",
+        "status": "completed",
+        "model": requested_model_id,
+        "output": _responses_message_output_items(message),
+        "usage": _responses_usage(data.get("usage") if isinstance(data.get("usage"), dict) else None),
+    }
+
+
+def _responses_message_output_items(message: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    text = _message_text(message.get("content", ""))
+    if text:
+        items.append(
+            {
+                "type": "message",
+                "id": "msg_amkr",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }
+        )
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        function_call = message.get("function_call")
+        tool_calls = [{"id": "call_amkr_0", "function": function_call}] if isinstance(function_call, dict) else []
+    for index, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict):
+            continue
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        items.append(
+            {
+                "type": "function_call",
+                "id": f"fc_amkr_{index}",
+                "call_id": str(tool_call.get("id") or f"call_amkr_{index}"),
+                "name": str(function.get("name") or ""),
+                "arguments": function.get("arguments") if isinstance(function.get("arguments"), str) else json.dumps(function.get("arguments") or {}, ensure_ascii=False, separators=(",", ":")),
+            }
+        )
+    if not items:
+        items.append(
+            {
+                "type": "message",
+                "id": "msg_amkr",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": ""}],
+            }
+        )
+    return items
+
+
+def _responses_usage(usage: dict[str, Any] | None) -> dict[str, Any]:
+    source = usage or {}
+    input_tokens = int(source.get("prompt_tokens") or source.get("input_tokens") or 0)
+    output_tokens = int(source.get("completion_tokens") or source.get("output_tokens") or 0)
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": int(source.get("cached_tokens") or 0)},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": int(source.get("reasoning_tokens") or 0)},
+        "total_tokens": int(source.get("total_tokens") or input_tokens + output_tokens),
     }
 
 

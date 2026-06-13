@@ -71,6 +71,10 @@ jobs:
           .release-smoke/bin/python -m pip install dist/*.whl
           .release-smoke/bin/auto-model-key-router --help
           .release-smoke/bin/amkr --help
+          .release-smoke/bin/python -c "from auto_model_key_router.visitor import visitor_feature_available; assert not visitor_feature_available()"
+          wheel=$(find dist -name '*.whl' -print -quit)
+          .release-smoke/bin/python -m pip install "${wheel}[visitor]"
+          .release-smoke/bin/python -c "from auto_model_key_router.visitor import visitor_feature_available; assert visitor_feature_available()"
 
       - name: Generate release notes
         if: steps.existing_release.outputs.exists == 'false'

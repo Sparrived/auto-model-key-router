@@ -243,7 +243,9 @@ def test_windows_update_helper_script_handshakes_retries_and_writes_log(tmp_path
     script = windows_update_helper_script(VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"), command, 123, tmp_path / "update.ready", tmp_path / "update.log", tmp_path / "stdout.log", tmp_path / "stderr.log")
 
     assert "Set-Content -LiteralPath $readyPath" in script
-    assert "Wait-Process -Id 123" in script
+    assert "$parentProcess = Get-Process -Id 123 -ErrorAction SilentlyContinue" in script
+    assert "if ($null -ne $parentProcess) { $parentProcess.WaitForExit() }" in script
+    assert "Wait-Process" not in script
     assert "for ($attempt = 1; $attempt -le $maxAttempts; $attempt++)" in script
     assert "$argumentLine = 'tool upgrade auto-model-key-router'" in script
     assert "Start-Process -FilePath $tool -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath" in script
