@@ -14,7 +14,7 @@ from .clipboard import paste_from_clipboard
 from .config import RouterConfig, generate_local_api_key, load_config_data, save_config_data
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
-from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, clear_terminal_history, confirm_choice, console, mouse_wheel_mode, page_title, posix_input_mode, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 
 
 def manage_model_keys_interactively(path: Path) -> None:
@@ -396,7 +396,7 @@ def toggle_key_enabled_interactively(path: Path) -> Any:
 def select_reorder_key_action(model: dict[str, Any], selected: int = 0) -> tuple[str, int]:
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
-    with mouse_wheel_mode(), Live(render_key_order_menu(model, selected), console=console, screen=True, auto_refresh=False) as live:
+    with posix_input_mode(), mouse_wheel_mode(), Live(render_key_order_menu(model, selected), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":

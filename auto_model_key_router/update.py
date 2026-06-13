@@ -268,6 +268,7 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
     source_line = f"来源: {version_result.source or '可用来源'}"
     target_line = f"目标: {update_target_label(version_result)}"
     command_line = f"命令: {shell_command_text(command)}"
+    argument_line = subprocess.list2cmdline(command[1:])
     post_update_lines: list[str] = []
     for index, post_update_command in enumerate(post_update_commands or []):
         post_command = resolved_update_command(post_update_command)
@@ -283,7 +284,7 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
                     "Write-Host '正在执行更新后的服务处理...'",
                     "try {",
                     f"    & $postTool{index} @postArgs{index}",
-                    f"    if ($LASTEXITCODE -ne 0) {{ $postUpdateFailed = $true; $attemptLog += @('', '[post-update warning]', \"更新后命令退出码: $LASTEXITCODE\") }}",
+                    "    if ($LASTEXITCODE -ne 0) { $postUpdateFailed = $true; $attemptLog += @('', '[post-update warning]', \"更新后命令退出码: $LASTEXITCODE\") }",
                     "} catch {",
                     "    $postUpdateFailed = $true",
                     "    $attemptLog += @('', '[post-update warning]', ($_ | Out-String))",
@@ -308,7 +309,7 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
         f"$tool = {powershell_string(command[0])}",
-        f"$commandArgs = {powershell_array(command[1:])}",
+        f"$argumentLine = {powershell_string(argument_line)}",
         f"$readyPath = {powershell_string(str(ready_path))}",
         f"$logPath = {powershell_string(str(log_path))}",
         f"$stdoutPath = {powershell_string(str(stdout_path))}",
@@ -341,8 +342,8 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {",
         "        Write-Host \"正在更新（第 $attempt/$maxAttempts 次）...\"",
         "        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue",
-        "        & $tool @commandArgs 1> $stdoutPath 2> $stderrPath",
-        "        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }",
+        "        $updateProcess = Start-Process -FilePath $tool -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath",
+        "        $exitCode = $updateProcess.ExitCode",
         "        $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }",
         "        $stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }",
         "        $attemptLog += @('', \"[attempt $attempt stdout]\", $stdoutText, '', \"[attempt $attempt stderr]\", $stderrText)",

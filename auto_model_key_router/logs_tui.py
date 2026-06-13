@@ -12,6 +12,7 @@ from pathlib import Path
 from rich import box
 from rich.align import Align
 from rich.console import Group
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -19,7 +20,7 @@ from rich.text import Text
 from .formatting import percent, short_text
 from .log_files import archived_log_paths
 from .metrics import BEIJING_TZ
-from .tui import console, key_pressed, mouse_wheel_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame
+from .tui import console, key_pressed, mouse_wheel_mode, posix_input_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame
 
 
 REQUEST_STATS_PAGE_SIZE = 10
@@ -61,71 +62,68 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
     def render() -> Group:
         return render_live_logs(database_path, log_file_path, limit, page, log_offset, stats_page, stats_range_index, log_index, status_message)
 
-    with console.screen():
-        from rich.live import Live
-
-        with mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
-            while True:
-                started = time.monotonic()
-                while time.monotonic() - started < 1:
-                    key = key_pressed()
-                    if key in {"scroll_up", "scroll_down"}:
-                        handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
-                        if not handle_wheel:
-                            continue
-                    if key in {"q", "Q", "0", "cancel"}:
-                        return
-                    if key in {"1", "l", "L"}:
-                        page = "logs"
-                        live.update(render(), refresh=True)
+    with posix_input_mode(), mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+        while True:
+            started = time.monotonic()
+            while time.monotonic() - started < 1:
+                key = key_pressed()
+                if key in {"scroll_up", "scroll_down"}:
+                    handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                    if not handle_wheel:
                         continue
-                    if key in {"2", "s", "S"}:
-                        page = "stats"
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "logs" and key in {"up", "page_up", "scroll_up", "k", "K"}:
-                        log_offset += max(limit, 1) if key == "page_up" else 1
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "logs" and key in {"down", "page_down", "scroll_down", "j", "J"}:
-                        log_offset = max(0, log_offset - (max(limit, 1) if key == "page_down" else 1))
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "logs" and key in {"home", "g", "G"}:
-                        log_offset = 0
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "logs" and key in {"left", "["}:
-                        log_index = max(0, log_index - 1)
-                        log_offset = 0
-                        status_message = None
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "logs" and key in {"right", "]"}:
-                        log_index = min(log_index + 1, len(log_file_choices(log_file_path)) - 1)
-                        log_offset = 0
-                        status_message = None
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "logs" and key in {"o", "O"}:
-                        status_message = open_log_file(str(selected_log_file(log_file_path, log_index)[0]))
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "stats" and key in {"\t", "tab"}:
-                        stats_range_index = (stats_range_index + 1) % len(STATS_TIME_RANGES)
-                        stats_page = 1
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "stats" and key in {"left", "page_up", "up", "scroll_up", "p", "P"}:
-                        stats_page = max(1, stats_page - 1)
-                        live.update(render(), refresh=True)
-                        continue
-                    if page == "stats" and key in {"right", "page_down", "down", "scroll_down", "n", "N"}:
-                        stats_page += 1
-                        live.update(render(), refresh=True)
-                        continue
-                    time.sleep(0.05)
-                live.update(render(), refresh=True)
+                if key in {"q", "Q", "0", "cancel"}:
+                    return
+                if key in {"1", "l", "L"}:
+                    page = "logs"
+                    live.update(render(), refresh=True)
+                    continue
+                if key in {"2", "s", "S"}:
+                    page = "stats"
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "logs" and key in {"up", "page_up", "scroll_up", "k", "K"}:
+                    log_offset += max(limit, 1) if key == "page_up" else 1
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "logs" and key in {"down", "page_down", "scroll_down", "j", "J"}:
+                    log_offset = max(0, log_offset - (max(limit, 1) if key == "page_down" else 1))
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "logs" and key in {"home", "g", "G"}:
+                    log_offset = 0
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "logs" and key in {"left", "["}:
+                    log_index = max(0, log_index - 1)
+                    log_offset = 0
+                    status_message = None
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "logs" and key in {"right", "]"}:
+                    log_index = min(log_index + 1, len(log_file_choices(log_file_path)) - 1)
+                    log_offset = 0
+                    status_message = None
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "logs" and key in {"o", "O"}:
+                    status_message = open_log_file(str(selected_log_file(log_file_path, log_index)[0]))
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "stats" and key in {"\t", "tab"}:
+                    stats_range_index = (stats_range_index + 1) % len(STATS_TIME_RANGES)
+                    stats_page = 1
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "stats" and key in {"left", "page_up", "up", "scroll_up", "p", "P"}:
+                    stats_page = max(1, stats_page - 1)
+                    live.update(render(), refresh=True)
+                    continue
+                if page == "stats" and key in {"right", "page_down", "down", "scroll_down", "n", "N"}:
+                    stats_page += 1
+                    live.update(render(), refresh=True)
+                    continue
+                time.sleep(0.05)
+            live.update(render(), refresh=True)
 
 
 def render_live_logs(database_path: str, log_file_path: str, limit: int, page: str, log_offset: int, stats_page: int, stats_range_index: int, log_index: int = 0, status_message: str | None = None) -> Group:

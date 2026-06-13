@@ -15,7 +15,7 @@ from .formatting import compact_url, short_text
 from . import __version__
 from .logs_tui import watch_logs
 from .service import is_service_healthy, is_system_service_registered, manage_system_service, service_status_panel, system_service_status_panel
-from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
+from .tui import ResultPage, app_flag_title, clear_terminal_history, confirm_choice, console, menu_table, mouse_wheel_mode, posix_input_mode, read_key, run_submodule, section_panel, select_option, shortcut_text, should_handle_wheel, show_result_page, terminal_frame
 from .unified_model import switch_unified_model
 from .update import UpdateInstallOutcome, VersionCheckResult, check_latest_version, install_latest_version_outcome, render_update_notice, render_version_check_result, update_target_label
 
@@ -182,7 +182,7 @@ def configure_cli_interactively(config_path: Path) -> Any:
 def select_menu_option(config_path: Path, config: RouterConfig, selected: int = 0, update_result: VersionCheckResult | None = None) -> tuple[str, int]:
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
-    with mouse_wheel_mode(), Live(render_terminal_ui(config_path, config, selected, update_result), console=console, screen=True, auto_refresh=False) as live:
+    with posix_input_mode(), mouse_wheel_mode(), Live(render_terminal_ui(config_path, config, selected, update_result), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":

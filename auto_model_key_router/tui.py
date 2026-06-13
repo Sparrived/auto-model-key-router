@@ -302,23 +302,23 @@ def mouse_wheel_mode(enabled: bool = True) -> Iterator[None]:
         restore_input_mode()
 
 
-_posix_raw_mode_active = False
+_posix_input_mode_active = False
 
 
 @contextmanager
-def posix_raw_mode() -> Iterator[None]:
-    global _posix_raw_mode_active
-    if sys.platform == "win32" or _posix_raw_mode_active:
+def posix_input_mode() -> Iterator[None]:
+    global _posix_input_mode_active
+    if sys.platform == "win32" or _posix_input_mode_active:
         yield
         return
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
-    tty.setraw(fd)
-    _posix_raw_mode_active = True
+    tty.setcbreak(fd)
+    _posix_input_mode_active = True
     try:
         yield
     finally:
-        _posix_raw_mode_active = False
+        _posix_input_mode_active = False
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
@@ -444,7 +444,7 @@ def _read_posix_key_impl() -> str:
 
 
 def read_posix_key() -> str:
-    if _posix_raw_mode_active:
+    if _posix_input_mode_active:
         try:
             return _read_posix_key_impl()
         except KeyboardInterrupt:
@@ -468,7 +468,7 @@ def select_option(title: str, options: list[tuple[str, str]], selected: int = 0,
     def render() -> Group:
         return render_option_menu(title, options, selected, content, content_offset)
 
-    with posix_raw_mode(), mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+    with posix_input_mode(), mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":

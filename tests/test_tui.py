@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from io import StringIO
 import json
 from pathlib import Path, PurePosixPath
@@ -83,6 +84,48 @@ def test_mouse_wheel_mode_is_disabled_on_linux(monkeypatch) -> None:
         pass
 
     assert output.getvalue() == ""
+
+
+def test_posix_input_mode_uses_cbreak_and_restores_terminal(monkeypatch) -> None:
+    original_settings = object()
+    calls: list[tuple] = []
+
+    class FakeStdin:
+        def fileno(self):
+            return 7
+
+    class FakeTermios:
+        TCSADRAIN = "drain"
+
+        def tcgetattr(self, fd):
+            calls.append(("get", fd))
+            return original_settings
+
+        def tcsetattr(self, fd, when, settings):
+            calls.append(("restore", fd, when, settings))
+
+    class FakeTty:
+        def setcbreak(self, fd):
+            calls.append(("cbreak", fd))
+
+        def setraw(self, fd):
+            raise AssertionError("persistent TUI input must not disable output processing")
+
+    monkeypatch.setattr(tui.sys, "platform", "linux")
+    monkeypatch.setattr(tui.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(tui, "termios", FakeTermios(), raising=False)
+    monkeypatch.setattr(tui, "tty", FakeTty(), raising=False)
+    monkeypatch.setattr(tui, "_posix_input_mode_active", False)
+
+    with tui.posix_input_mode():
+        assert tui._posix_input_mode_active
+
+    assert calls == [
+        ("get", 7),
+        ("cbreak", 7),
+        ("restore", 7, "drain", original_settings),
+    ]
+    assert not tui._posix_input_mode_active
 
 
 def test_read_key_windows_single_escape_returns_cancel(monkeypatch) -> None:
@@ -326,6 +369,49 @@ def test_terminal_frame_keeps_footer_at_bottom(monkeypatch) -> None:
 
     assert len(lines) == 5
     assert "footer" in "".join(segment.text for segment in lines[-1])
+
+
+def test_watch_logs_reads_keys_inside_posix_input_mode(monkeypatch) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def input_mode():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    @contextmanager
+    def mouse_mode():
+        yield
+
+    class FakeLive:
+        def __init__(self, renderable, **kwargs):
+            self.renderable = renderable
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def update(self, renderable, refresh=False):
+            self.renderable = renderable
+
+    def key_pressed():
+        assert events == ["enter"]
+        return "q"
+
+    monkeypatch.setattr(logs_tui, "posix_input_mode", input_mode)
+    monkeypatch.setattr(logs_tui, "mouse_wheel_mode", mouse_mode)
+    monkeypatch.setattr(logs_tui, "Live", FakeLive)
+    monkeypatch.setattr(logs_tui, "key_pressed", key_pressed)
+    monkeypatch.setattr(logs_tui, "render_live_logs", lambda *args, **kwargs: Text("logs"))
+
+    logs_tui.watch_logs("requests.db", "service.log", 10)
+
+    assert events == ["enter", "exit"]
 
 
 def test_open_log_file_reports_missing_file(tmp_path) -> None:

@@ -245,7 +245,10 @@ def test_windows_update_helper_script_handshakes_retries_and_writes_log(tmp_path
     assert "Set-Content -LiteralPath $readyPath" in script
     assert "Wait-Process -Id 123" in script
     assert "for ($attempt = 1; $attempt -le $maxAttempts; $attempt++)" in script
-    assert "& $tool @commandArgs" in script
+    assert "$argumentLine = 'tool upgrade auto-model-key-router'" in script
+    assert "Start-Process -FilePath $tool -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath" in script
+    assert "$exitCode = $updateProcess.ExitCode" in script
+    assert "& $tool @commandArgs" not in script
     assert "命令: uv tool upgrade auto-model-key-router" in script
     assert "Save-UpdateLog '更新失败'" in script
     assert "Read-Host '按 Enter 关闭更新器'" in script
