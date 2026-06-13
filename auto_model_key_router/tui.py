@@ -302,6 +302,26 @@ def mouse_wheel_mode(enabled: bool = True) -> Iterator[None]:
         restore_input_mode()
 
 
+_posix_raw_mode_active = False
+
+
+@contextmanager
+def posix_raw_mode() -> Iterator[None]:
+    global _posix_raw_mode_active
+    if sys.platform == "win32" or _posix_raw_mode_active:
+        yield
+        return
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    tty.setraw(fd)
+    _posix_raw_mode_active = True
+    try:
+        yield
+    finally:
+        _posix_raw_mode_active = False
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 def key_pressed() -> str | None:
     if sys.platform == "win32" and msvcrt.kbhit():
         return read_key()
@@ -377,53 +397,63 @@ def read_key() -> str:
     return key
 
 
+def _read_posix_key_impl() -> str:
+    fd = sys.stdin.fileno()
+    ch = os.read(fd, 1)
+    if not ch:
+        return "ignore"
+    key = ch.decode("utf-8", errors="ignore")
+    if key == "\x03":
+        return "cancel"
+    if key in {"\r", "\n"}:
+        return "enter"
+    if key == "\x1b":
+        second = read_posix_char_if_available()
+        if second is None:
+            return "ignore"
+        third = read_posix_char_if_available() if second in {"[", "O"} else ""
+        if second in {"[", "O"}:
+            if third is None:
+                return "ignore"
+            if third == "<":
+                mouse_key = parse_sgr_mouse_sequence(read_posix_until({"M", "m"}))
+                if mouse_key:
+                    return mouse_key
+                return "ignore"
+            if third == "M" and second == "[":
+                read_posix_chars_if_available(3)
+                return "ignore"
+            if third == "A":
+                return "up"
+            if third == "B":
+                return "down"
+            if third == "D":
+                return "left"
+            if third == "C":
+                return "right"
+            if third == "5":
+                return "page_up" if read_posix_char_if_available() == "~" else "ignore"
+            if third == "6":
+                return "page_down" if read_posix_char_if_available() == "~" else "ignore"
+            if third == "H":
+                return "home"
+            if third == "F":
+                return "end"
+        return "ignore"
+    return key
+
+
 def read_posix_key() -> str:
+    if _posix_raw_mode_active:
+        try:
+            return _read_posix_key_impl()
+        except KeyboardInterrupt:
+            return "cancel"
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = os.read(fd, 1)
-        if not ch:
-            return "ignore"
-        key = ch.decode("utf-8", errors="ignore")
-        if key == "\x03":
-            return "cancel"
-        if key in {"\r", "\n"}:
-            return "enter"
-        if key == "\x1b":
-            second = read_posix_char_if_available()
-            if second is None:
-                return "ignore"
-            third = read_posix_char_if_available() if second in {"[", "O"} else ""
-            if second in {"[", "O"}:
-                if third is None:
-                    return "ignore"
-                if third == "<":
-                    mouse_key = parse_sgr_mouse_sequence(read_posix_until({"M", "m"}))
-                    if mouse_key:
-                        return mouse_key
-                    return "ignore"
-                if third == "M" and second == "[":
-                    read_posix_chars_if_available(3)
-                    return "ignore"
-                if third == "A":
-                    return "up"
-                if third == "B":
-                    return "down"
-                if third == "D":
-                    return "left"
-                if third == "C":
-                    return "right"
-                if third == "5":
-                    return "page_up" if read_posix_char_if_available() == "~" else "ignore"
-                if third == "6":
-                    return "page_down" if read_posix_char_if_available() == "~" else "ignore"
-                if third == "H":
-                    return "home"
-                if third == "F":
-                    return "end"
-            return "ignore"
-        return key
+        return _read_posix_key_impl()
     except KeyboardInterrupt:
         return "cancel"
     finally:
@@ -438,7 +468,7 @@ def select_option(title: str, options: list[tuple[str, str]], selected: int = 0,
     def render() -> Group:
         return render_option_menu(title, options, selected, content, content_offset)
 
-    with mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
+    with posix_raw_mode(), mouse_wheel_mode(), Live(render(), console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key()
             if key == "cancel":
