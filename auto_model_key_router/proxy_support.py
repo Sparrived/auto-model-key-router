@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any
+from urllib.request import Request as UrlRequest, urlopen
+
+import httpx
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+from .config import RouterConfig
+from .protocol_compat import _adapt_message_payload
+from .visitor import is_visitor_api_key
+
+
+LOGGER = logging.getLogger("auto_model_key_router.app")
+
+
+def _log_model_not_configured(
+    path: str, requested_model_id: str, model_id: str, reason: str
+) -> None:
+    LOGGER.warning(
+        "model routing rejected: path=/v1/%s requested_model=%s resolved_model=%s reason=%s",
+        path,
+        requested_model_id,
+        model_id,
+        reason,
+    )
+
+
+def _json_body(body: bytes) -> dict[str, Any]:
+    if not body:
+        return {}
+    try:
+        import json
+
+        data = json.loads(body.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _resolve_model_id(path: str, payload: dict[str, Any]) -> str | None:
+    if path == "models":
+        return ""
+    model = payload.get("model")
+    return str(model) if model else None
+
+
+def _split_requested_model_key(model_id: str) -> tuple[str, str | None]:
+    match = re.fullmatch(r"(.+)\[([^\[\]]+)\]", model_id)
+    if not match:
+        return model_id, None
+    return match.group(1), match.group(2).strip()
+
+
+def _is_stream_request(payload: dict[str, Any]) -> bool:
+    return payload.get("stream") is True
+
+
+def _upstream_body(
+    body: bytes,
+    payload: dict[str, Any],
+    model_id: str,
+    config: RouterConfig | None = None,
+    stream: bool = False,
+) -> bytes:
+    if not payload or "model" not in payload:
+        return body
+    upstream_payload = dict(payload)
+    upstream_payload["model"] = model_id
+    upstream_payload = _apply_reasoning_effort(upstream_payload, model_id, config)
+    upstream_payload = _adapt_message_payload(upstream_payload)
+    if stream:
+        stream_options = upstream_payload.get("stream_options")
+        if not isinstance(stream_options, dict):
+            stream_options = {}
+        stream_options["include_usage"] = True
+        upstream_payload["stream_options"] = stream_options
+    return json.dumps(
+        upstream_payload, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _apply_reasoning_effort(
+    payload: dict[str, Any], model_id: str, config: RouterConfig | None
+) -> dict[str, Any]:
+    adapted = dict(payload)
+    reasoning_effort = (
+        config.reasoning_effort_by_model.get(model_id) if config is not None else None
+    )
+    if reasoning_effort:
+        adapted["reasoning_effort"] = reasoning_effort
+        return adapted
+    reasoning = adapted.get("reasoning")
+    if (
+        "reasoning_effort" not in adapted
+        and isinstance(reasoning, dict)
+        and reasoning.get("effort")
+    ):
+        adapted["reasoning_effort"] = reasoning["effort"]
+    return adapted
+
+
+def _upstream_path(path: str, payload: dict[str, Any]) -> str:
+    if (
+        path in {"messages", "responses"}
+        and isinstance(payload, dict)
+        and payload.get("model")
+    ):
+        return "chat/completions"
+    return path
+
+
+def _join_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _upstream_headers(request: Request, api_key: str) -> dict[str, str]:
+    blocked = {
+        "authorization",
+        "host",
+        "content-length",
+        "destination-addr",
+        "x-api-key",
+        "anthropic-version",
+        "anthropic-beta",
+    }
+    headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in blocked
+    }
+    headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _authorization_mode(request: Request, local_api_key: str) -> str | None:
+    if not local_api_key:
+        return "full"
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        api_key = authorization[7:].strip()
+    else:
+        api_key = request.headers.get("x-api-key", "")
+    if api_key == local_api_key:
+        return "full"
+    if is_visitor_api_key(api_key):
+        return "visitor"
+    return None
+
+
+def _response_headers(response: httpx.Response) -> dict[str, str]:
+    blocked = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+    return {
+        key: value
+        for key, value in response.headers.items()
+        if key.lower() not in blocked
+    }
+
+
+def _upstream_timeout(config: RouterConfig, stream: bool) -> httpx.Timeout | None:
+    if not stream:
+        return None
+    return httpx.Timeout(config.request_timeout, read=None)
+
+
+async def _send_upstream(
+    client: httpx.AsyncClient,
+    request: Request,
+    upstream: str,
+    headers: dict[str, str],
+    body: bytes,
+    stream: bool = False,
+    timeout: httpx.Timeout | None = None,
+) -> httpx.Response:
+    request_kwargs: dict[str, Any] = {
+        "params": request.query_params,
+        "headers": headers,
+        "content": body,
+    }
+    if timeout is not None:
+        request_kwargs["timeout"] = timeout
+    response = await client.send(
+        client.build_request(
+            request.method,
+            upstream,
+            **request_kwargs,
+        ),
+        stream=True,
+    )
+    try:
+        if not stream:
+            await response.aread()
+    except Exception:
+        await response.aclose()
+        raise
+    return response
+
+
+def _debug_report(event: str, payload: dict[str, Any]) -> None:
+    env_path = Path.cwd() / ".dbg" / "upstream-request-failed.env"
+    try:
+        values = dict(
+            line.strip().split("=", 1)
+            for line in env_path.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+        url = values.get("DEBUG_SERVER_URL")
+        if not url:
+            return
+        body = json.dumps(
+            {"event": event, "runId": "pre", "payload": payload}, ensure_ascii=False
+        ).encode("utf-8")
+        request = UrlRequest(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urlopen(request, timeout=0.2):
+            pass
+    except Exception:
+        return
+
+
+def _json_error_response_from_content(
+    response: httpx.Response, content: bytes, anthropic: bool = False
+) -> JSONResponse:
+    data = _json_bytes(content)
+    if data is None:
+        message = (
+            content.decode("utf-8", errors="replace")
+            or f"上游返回 HTTP {response.status_code}，且响应体为空"
+        )
+        if anthropic:
+            data = {"type": "error", "error": {"type": "api_error", "message": message}}
+        else:
+            data = {"error": {"message": message}}
+    elif anthropic:
+        data = _anthropic_error_response(data)
+    return JSONResponse(data, status_code=response.status_code)
+
+
+def _anthropic_error_response(data: Any) -> dict[str, Any]:
+    if (
+        isinstance(data, dict)
+        and data.get("type") == "error"
+        and isinstance(data.get("error"), dict)
+    ):
+        return data
+    message = "上游请求失败"
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or message)
+        elif isinstance(error, str):
+            message = error
+        elif data.get("message"):
+            message = str(data["message"])
+    return {"type": "error", "error": {"type": "api_error", "message": message}}
+
+
+def _json_bytes(content: bytes) -> Any:
+    if not content:
+        return None
+    try:
+        import json
+
+        return json.loads(content.decode("utf-8"))
+    except ValueError:
+        return None
