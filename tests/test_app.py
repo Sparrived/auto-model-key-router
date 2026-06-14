@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from auto_model_key_router.app import _probe_cooling_keys, create_app
 from auto_model_key_router.config import (
+    UNIFIED_MODEL_ID,
     VISITOR_API_KEY,
     KeyConfig,
     ModelConfig,
@@ -233,7 +234,7 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
         visitor_unified = await client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
-            json={"model": "unified_model", "messages": []},
+            json={"model": UNIFIED_MODEL_ID, "messages": []},
         )
         visitor_public_model = await client.post(
             "/v1/chat/completions",
@@ -268,7 +269,7 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
         "internal-gpt-latest",
         "internal-private-alias",
         "private-model",
-        "unified_model",
+        UNIFIED_MODEL_ID,
     }
     assert [model["id"] for model in visitor_models.json()["data"]] == [
         "amkr-external-public-model",
@@ -277,7 +278,7 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
     assert visitor_unified.status_code == 403
     assert (
         visitor_unified.json()["error"]["message"]
-        == "访客 key 无权访问模型: unified_model"
+        == f"访客 key 无权访问模型: {UNIFIED_MODEL_ID}"
     )
     assert visitor_public_model.status_code == 200
     assert visitor_internal_alias.status_code == 403
@@ -1034,6 +1035,59 @@ def test_retryable_response_cools_down_failed_key() -> None:
         )
 
 
+def test_cloudflare_521_retries_and_returns_structured_error() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(
+                521,
+                content=b"<html><title>Web server is down</title></html>",
+                headers={"content-type": "text/html"},
+            )
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "alias-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 521
+        assert response.headers["content-type"].startswith("application/json")
+        assert calls == [
+            "https://upstream-one.test/v1/chat/completions",
+            "https://upstream-two.test/v1/chat/completions",
+        ]
+        assert response.json() == {
+            "error": {
+                "message": "上游服务不可用：Cloudflare 521 Web Server Is Down：Cloudflare 无法连接到上游源站，通常表示源站服务离线、端口未监听或防火墙拒绝 Cloudflare 连接。",
+                "type": "upstream_cloudflare_error",
+                "code": "cloudflare_521",
+                "status_code": 521,
+                "reason": "Cloudflare 无法连接到上游源站，通常表示源站服务离线、端口未监听或防火墙拒绝 Cloudflare 连接。",
+            }
+        }
+
+
 def test_stream_request_disables_upstream_read_timeout() -> None:
     with tempfile.TemporaryDirectory() as directory:
         upstream_timeouts: list[dict[str, object]] = []
@@ -1546,6 +1600,52 @@ def test_messages_non_json_upstream_error_returns_anthropic_json() -> None:
         }
 
 
+def test_messages_cloudflare_521_returns_structured_anthropic_json() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                521,
+                content=b"<html><title>Web server is down</title></html>",
+                headers={"content-type": "text/html"},
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+            max_retries=0,
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 521
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "上游服务不可用：Cloudflare 521 Web Server Is Down：Cloudflare 无法连接到上游源站，通常表示源站服务离线、端口未监听或防火墙拒绝 Cloudflare 连接。",
+                "code": "cloudflare_521",
+                "status_code": 521,
+                "reason": "Cloudflare 无法连接到上游源站，通常表示源站服务离线、端口未监听或防火墙拒绝 Cloudflare 连接。",
+            },
+        }
+
+
 def test_keys_for_model_excludes_disabled_keys() -> None:
     with tempfile.TemporaryDirectory() as directory:
         enabled_key = KeyConfig("enabled-key", "sk-enabled", "https://enabled.test")
@@ -1624,6 +1724,47 @@ def test_cooled_down_key_is_skipped_on_next_request() -> None:
 
         assert response.status_code == 200
         assert calls == ["https://upstream-two.test/v1/chat/completions"]
+
+
+def test_disabled_after_repeated_failures_key_is_not_retried() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+            for _ in range(5):
+                await app.state.key_pool.mark_failure("test-model", "key-1", 429, 10)
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            health = await client.get("/health")
+            return response, health
+
+        response, health = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert calls == ["https://upstream-two.test/v1/chat/completions"]
+        assert health.json()["key_states"]["test-model:key-1"]["disabled"] is True
 
 
 def test_only_first_retries_only_first_key_until_max_retries() -> None:
@@ -1737,7 +1878,7 @@ def test_unified_model_routes_to_configured_model_and_key() -> None:
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
                 json={
-                    "model": "unified_model",
+                    "model": UNIFIED_MODEL_ID,
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
@@ -1746,7 +1887,7 @@ def test_unified_model_routes_to_configured_model_and_key() -> None:
         models, health, response = run_client(app, requests)
 
         assert response.status_code == 200
-        assert "unified_model" in {model["id"] for model in models.json()["data"]}
+        assert UNIFIED_MODEL_ID in {model["id"] for model in models.json()["data"]}
         assert health.json()["unified_model"] == {"model": "test-model", "key": "key-2"}
         assert upstream_bodies[0]["model"] == "test-model"
         assert authorization_headers == ["Bearer sk-2"]
@@ -1816,7 +1957,7 @@ def test_switch_unified_model_hot_reloads_model_and_key() -> None:
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
                 json={
-                    "model": "unified_model",
+                    "model": UNIFIED_MODEL_ID,
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
@@ -1831,7 +1972,7 @@ def test_switch_unified_model_hot_reloads_model_and_key() -> None:
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
                 json={
-                    "model": "unified_model",
+                    "model": UNIFIED_MODEL_ID,
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )

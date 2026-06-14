@@ -36,6 +36,26 @@ from .tui import (
 from .visitor import visitor_feature_available
 
 
+VISITOR_KEY_STYLE = "bold bright_magenta"
+
+
+def key_display_name(key: dict[str, Any], fallback: str, width: int = 28) -> str:
+    name = str(key.get("name") or fallback)
+    if key.get("allow_visitor", False):
+        return f"[{VISITOR_KEY_STYLE}]{short_text(name, width)}[/]"
+    return short_text(name, width)
+
+
+def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -> str:
+    if visitor_installed:
+        return (
+            f"[{VISITOR_KEY_STYLE}]允许[/]" if visitor_allowed else "[dim]禁止[/dim]"
+        )
+    if visitor_allowed:
+        return f"[{VISITOR_KEY_STYLE}]已配置，但 visitor extra 未安装[/]"
+    return "[dim]功能未安装[/dim]"
+
+
 def manage_model_keys_interactively(path: Path) -> None:
     while True:
         choice = select_option(
@@ -283,14 +303,9 @@ def manage_selected_key_interactively(path: Path) -> None:
         status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
         visitor_allowed = bool(key.get("allow_visitor", False))
         visitor_installed = visitor_feature_available()
-        if visitor_installed:
-            visitor_status_text = (
-                "[green]允许[/green]" if visitor_allowed else "[dim]禁止[/dim]"
-            )
-        elif visitor_allowed:
-            visitor_status_text = "[yellow]已配置，但 visitor extra 未安装[/yellow]"
-        else:
-            visitor_status_text = "[dim]功能未安装[/dim]"
+        visitor_status_text = format_visitor_status_text(
+            visitor_allowed, visitor_installed
+        )
 
         while True:
             options = [
@@ -309,7 +324,7 @@ def manage_selected_key_interactively(path: Path) -> None:
                 options,
                 content=section_panel(
                     f"模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
-                    f"Key: [bold]{short_text(key_name, 32)}[/bold]\n"
+                    f"Key: {key_display_name(key, key_name, 32)}\n"
                     f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]\n"
                     f"状态: {status_text}\n"
                     f"访客访问: {visitor_status_text}",
@@ -358,16 +373,9 @@ def manage_selected_key_interactively(path: Path) -> None:
                 status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
                 visitor_allowed = bool(key.get("allow_visitor", False))
                 visitor_installed = visitor_feature_available()
-                if visitor_installed:
-                    visitor_status_text = (
-                        "[green]允许[/green]" if visitor_allowed else "[dim]禁止[/dim]"
-                    )
-                elif visitor_allowed:
-                    visitor_status_text = (
-                        "[yellow]已配置，但 visitor extra 未安装[/yellow]"
-                    )
-                else:
-                    visitor_status_text = "[dim]功能未安装[/dim]"
+                visitor_status_text = format_visitor_status_text(
+                    visitor_allowed, visitor_installed
+                )
 
 
 def edit_selected_key_interactively(
@@ -438,7 +446,7 @@ def copy_selected_key_interactively(
         key.get("base_url") or data.get("default_base_url") or "-", 48
     )
     content = section_panel(
-        f"模型: [bold]{short_text(model['id'], 48)}[/bold]\nKey: [bold]{short_text(key_name, 48)}[/bold]\n上游: [bold]{base_url}[/bold]\n指纹: [bold]{key_fingerprint(api_key)}[/bold]\n\n选择“复制 API key”即可写入剪贴板。",
+        f"模型: [bold]{short_text(model['id'], 48)}[/bold]\nKey: {key_display_name(key, key_name, 48)}\n上游: [bold]{base_url}[/bold]\n指纹: [bold]{key_fingerprint(api_key)}[/bold]\n\n选择“复制 API key”即可写入剪贴板。",
         "复制 API key",
         "green",
     )
@@ -459,7 +467,7 @@ def toggle_selected_key_interactively(
     new_status = "启用" if new_enabled else "禁用"
     return Group(
         section_panel(
-            f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: [bold]{key_name}[/bold]\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]",
+            f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: {key_display_name(key, key_name, 32)}\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]",
             "Key 开关",
             "green",
         ),
@@ -482,11 +490,10 @@ def toggle_visitor_access_interactively(
     visitor_allowed = not bool(key.get("allow_visitor", False))
     key["allow_visitor"] = visitor_allowed
     new_config = commit_config_data(path, data, old_config).new_config
-    status = "允许" if visitor_allowed else "禁止"
     return Group(
         section_panel(
             f"已更新访客访问权限。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
-            f"Key: [bold]{key_name}[/bold]\n访客访问: [bold]{status}[/bold]",
+            f"Key: {key_display_name(key, key_name, 32)}\n访客访问: {format_visitor_status_text(visitor_allowed, True)}",
             "访客访问",
             "green",
         ),
@@ -1028,13 +1035,18 @@ def render_key_order_menu_state(
     table.add_column("Key", ratio=1)
     table.add_column("上游", ratio=1)
     for index, key in enumerate(model.get("keys", [])):
-        name = short_text(key.get("name") or f"{model['id']}-{index + 1}", 28)
+        name = key_display_name(key, f"{model['id']}-{index + 1}")
         base_url = compact_url(key.get("base_url") or "-", 28)
         if index == selected:
+            selected_name = (
+                name
+                if key.get("allow_visitor", False)
+                else f"[bold cyan]{name}[/bold cyan]"
+            )
             table.add_row(
                 "[bold cyan]▶[/bold cyan]",
                 f"[bold black on cyan] {index + 1} [/bold black on cyan]",
-                f"[bold cyan]{name}[/bold cyan]",
+                selected_name,
                 f"[bold cyan]{base_url}[/bold cyan]",
             )
         else:
@@ -1064,7 +1076,7 @@ def render_key_order_menu(model: dict[str, Any], selected: int) -> Any:
 def key_order_text(model: dict[str, Any]) -> str:
     lines = [f"模型: [bold]{short_text(model['id'], 32)}[/bold]", "当前顺序:"]
     for index, key in enumerate(model.get("keys", [])):
-        name = short_text(key.get("name") or f"{model['id']}-{index + 1}", 32)
+        name = key_display_name(key, f"{model['id']}-{index + 1}", 32)
         base_url = compact_url(key.get("base_url") or "-", 32)
         lines.append(f"{index + 1}. {name} · {base_url}")
     return "\n".join(lines)
@@ -1248,7 +1260,7 @@ def select_api_key(
     model = selectable_models[int(model_choice) - 1]
     key_options = []
     for index, key in enumerate(model.get("keys", [])):
-        name = short_text(key.get("name") or f"{model['id']}-{index + 1}", 28)
+        name = key_display_name(key, f"{model['id']}-{index + 1}")
         base_url = compact_url(
             key.get("base_url") or data.get("default_base_url") or "-", 28
         )

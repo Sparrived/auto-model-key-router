@@ -878,6 +878,41 @@ def test_copy_api_key_interactively_returns_copyable_result(tmp_path, monkeypatc
     assert "sk-secret" not in output
 
 
+def test_select_api_key_highlights_visitor_enabled_key(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "test-model",
+                        "keys": [
+                            {"name": "local", "api_key": "sk-local"},
+                            {"name": "guest", "api_key": "sk-guest", "allow_visitor": True},
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "2"])
+    menus: list[list[tuple[str, str]]] = []
+
+    def choose(title, options, selected=0, content=None):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(config_editor, "select_option", choose)
+
+    _, _, key_index = config_editor.select_api_key(config_path, "选择 Key")
+
+    assert key_index == 1
+    assert "[bold bright_magenta]guest[/]" in menus[1][1][1]
+    assert "[bold bright_magenta]local[/]" not in menus[1][0][1]
+
+
 def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(

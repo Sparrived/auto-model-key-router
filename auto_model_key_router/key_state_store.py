@@ -30,6 +30,7 @@ class KeyStateStore:
                 if state.failures
                 or state.cooldown_until
                 or state.last_status_code is not None
+                or state.disabled
             ],
         }
         async with self._write_lock:

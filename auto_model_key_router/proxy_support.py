@@ -19,6 +19,16 @@ from .visitor import is_visitor_api_key
 LOGGER = logging.getLogger("auto_model_key_router.app")
 
 
+CLOUDFLARE_UPSTREAM_ERROR_REASONS = {
+    521: {
+        "code": "cloudflare_521",
+        "type": "upstream_cloudflare_error",
+        "message": "上游服务不可用：Cloudflare 521 Web Server Is Down",
+        "reason": "Cloudflare 无法连接到上游源站，通常表示源站服务离线、端口未监听或防火墙拒绝 Cloudflare 连接。",
+    }
+}
+
+
 def _log_model_not_configured(
     path: str, requested_model_id: str, model_id: str, reason: str
 ) -> None:
@@ -229,17 +239,50 @@ def _json_error_response_from_content(
 ) -> JSONResponse:
     data = _json_bytes(content)
     if data is None:
-        message = (
-            content.decode("utf-8", errors="replace")
-            or f"上游返回 HTTP {response.status_code}，且响应体为空"
-        )
-        if anthropic:
-            data = {"type": "error", "error": {"type": "api_error", "message": message}}
+        reason = CLOUDFLARE_UPSTREAM_ERROR_REASONS.get(response.status_code)
+        if reason is not None:
+            data = _structured_upstream_error(reason, response.status_code, anthropic)
         else:
-            data = {"error": {"message": message}}
+            message = (
+                content.decode("utf-8", errors="replace")
+                or f"上游返回 HTTP {response.status_code}，且响应体为空"
+            )
+            if anthropic:
+                data = {
+                    "type": "error",
+                    "error": {"type": "api_error", "message": message},
+                }
+            else:
+                data = {"error": {"message": message}}
     elif anthropic:
         data = _anthropic_error_response(data)
     return JSONResponse(data, status_code=response.status_code)
+
+
+def _structured_upstream_error(
+    reason: dict[str, str], status_code: int, anthropic: bool
+) -> dict[str, Any]:
+    message = f"{reason['message']}：{reason['reason']}"
+    if anthropic:
+        return {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": message,
+                "code": reason["code"],
+                "status_code": status_code,
+                "reason": reason["reason"],
+            },
+        }
+    return {
+        "error": {
+            "message": message,
+            "type": reason["type"],
+            "code": reason["code"],
+            "status_code": status_code,
+            "reason": reason["reason"],
+        }
+    }
 
 
 def _anthropic_error_response(data: Any) -> dict[str, Any]:

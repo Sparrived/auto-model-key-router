@@ -11,11 +11,15 @@ from .key_state_store import KeyStateStore
 from .visitor import VISITOR_MODEL_PREFIX
 
 
+MAX_CONSECUTIVE_KEY_FAILURES = 5
+
+
 @dataclass
 class KeyState:
     failures: int = 0
     cooldown_until: float = 0.0
     last_status_code: int | None = None
+    disabled: bool = False
 
 
 class KeyPool:
@@ -136,10 +140,22 @@ class KeyPool:
         return {"model": self._unified_model_id, "key": self._unified_key_name}
 
     def key_count(self, model_id: str) -> int:
-        return len(self.keys_for_model(model_id))
+        return len(
+            tuple(
+                key
+                for key in self._keys.get(self.resolve_model_id(model_id), ())
+                if key.enabled
+            )
+        )
 
     def visitor_key_count(self, model_id: str) -> int:
-        return len(self.keys_for_model(model_id, visitor_only=True))
+        return len(
+            tuple(
+                key
+                for key in self._keys.get(self.resolve_model_id(model_id), ())
+                if key.enabled and key.allow_visitor
+            )
+        )
 
     def routing_mode(self, model_id: str) -> str:
         return self._routing_modes.get(self.resolve_model_id(model_id), "round_robin")
@@ -150,10 +166,13 @@ class KeyPool:
     def keys_for_model(
         self, model_id: str, *, visitor_only: bool = False
     ) -> tuple[KeyConfig, ...]:
+        model_id = self.resolve_model_id(model_id)
         return tuple(
             key
-            for key in self._keys.get(self.resolve_model_id(model_id), ())
-            if key.enabled and (not visitor_only or key.allow_visitor)
+            for key in self._keys.get(model_id, ())
+            if key.enabled
+            and not self._is_disabled(model_id, key.name)
+            and (not visitor_only or key.allow_visitor)
         )
 
     def key_by_name(
@@ -167,6 +186,7 @@ class KeyPool:
             if (
                 key.name == key_name
                 and key.enabled
+                and not self._is_disabled(model_id, key.name)
                 and (not visitor_only or key.allow_visitor)
             ):
                 return key
@@ -183,6 +203,8 @@ class KeyPool:
         excluded = excluded or set()
         keys = list(self.keys_for_model(model_id, visitor_only=visitor_only))
         if not keys:
+            if self._keys.get(model_id):
+                raise RuntimeError(f"模型 {model_id} 没有可用 key")
             raise KeyError(model_id)
 
         if self.routing_mode(model_id) == "only_first":
@@ -253,6 +275,7 @@ class KeyPool:
                 state.failures
                 or state.cooldown_until
                 or state.last_status_code is not None
+                or state.disabled
             ):
                 self._states[state_key] = KeyState()
                 changed = True
@@ -271,11 +294,13 @@ class KeyPool:
             state = self._states[(model_id, key_name)]
             state.failures += 1
             state.last_status_code = status_code
-            cooldown_seconds = (
-                retry_after if retry_after is not None else self._cooldown_seconds
-            )
+            if state.failures >= MAX_CONSECUTIVE_KEY_FAILURES:
+                state.disabled = True
+                state.cooldown_until = 0.0
+            cooldown_seconds = self._failure_cooldown_seconds(state, retry_after)
             if cooldown_seconds > 0 and (
-                status_code == 429 or state.failures >= self._failure_threshold
+                not state.disabled
+                and (status_code == 429 or state.failures >= self._failure_threshold)
             ):
                 state.cooldown_until = max(
                     state.cooldown_until, time() + cooldown_seconds
@@ -289,9 +314,24 @@ class KeyPool:
                 "failures": state.failures,
                 "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)),
                 "last_status_code": state.last_status_code,
+                "disabled": state.disabled,
             }
             for (model_id, key_name), state in self._states.items()
         }
+
+    def _failure_cooldown_seconds(
+        self, state: KeyState, retry_after: float | None
+    ) -> float:
+        cooldown_seconds = (
+            retry_after if retry_after is not None else self._cooldown_seconds
+        )
+        if cooldown_seconds <= 0:
+            return 0.0
+        return cooldown_seconds * max(1, state.failures)
+
+    def _is_disabled(self, model_id: str, key_name: str) -> bool:
+        state = self._states.get((model_id, key_name))
+        return state.disabled if state is not None else False
 
     def _is_cooling_down(self, model_id: str, key_name: str) -> bool:
         return self._states[(model_id, key_name)].cooldown_until > time()
@@ -316,6 +356,7 @@ class KeyPool:
                 failures=max(0, int(item.get("failures") or 0)),
                 cooldown_until=max(0.0, float(item.get("cooldown_until") or 0.0)),
                 last_status_code=item.get("last_status_code"),
+                disabled=bool(item.get("disabled", False)),
             )
 
     async def _persist_states(self) -> None:
@@ -326,6 +367,7 @@ class KeyPool:
                         failures=state.failures,
                         cooldown_until=state.cooldown_until,
                         last_status_code=state.last_status_code,
+                        disabled=state.disabled,
                     )
                     for key, state in self._states.items()
                 }

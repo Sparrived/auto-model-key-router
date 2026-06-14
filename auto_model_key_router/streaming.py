@@ -12,7 +12,7 @@ from .key_pool import KeyPool
 from .metrics import MetricsStore
 
 
-RETRYABLE_STATUS_CODES = frozenset({401, 403, 429, 500, 502, 503, 504})
+RETRYABLE_STATUS_CODES = frozenset({401, 403, 429, 500, 502, 503, 504, 521})
 
 
 @dataclass
