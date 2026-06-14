@@ -19,7 +19,7 @@ from .visitor import visitor_feature_available
 
 def manage_model_keys_interactively(path: Path) -> None:
     while True:
-        choice = select_option("模型 Key", [("1", "添加 Key"), ("2", "管理 Key"), ("3", "Key 排序"), ("4", "路由模式"), ("5", "推理强度"), ("0", "返回")])
+        choice = select_option("模型 Key", [("1", "添加 Key"), ("2", "管理 Key"), ("3", "Key 排序"), ("4", "路由模式"), ("5", "推理强度"), ("6", "模型别称"), ("0", "返回")])
         if choice == "0":
             return
         if choice == "1":
@@ -44,6 +44,159 @@ def manage_model_keys_interactively(path: Path) -> None:
             result = set_model_reasoning_effort_interactively(path)
             if result is not None:
                 show_result_page("推理强度", result)
+        elif choice == "6":
+            run_submodule(lambda: manage_model_aliases_interactively(path))
+
+
+def manage_model_aliases_interactively(path: Path) -> None:
+    while True:
+        data = load_config_data(path)
+        models = data.get("models", [])
+        if not models:
+            show_result_page("模型别称", section_panel("[yellow]暂无可设置别称的模型。[/yellow]", "模型别称", "yellow"))
+            return
+
+        options = []
+        for index, model in enumerate(models):
+            aliases = model.get("aliases", [])
+            alias_summary = short_text(", ".join(str(alias) for alias in aliases), 28) if aliases else "无别称"
+            options.append((str(index + 1), f"{short_text(model.get('id') or '-', 28)} · {alias_summary}"))
+        options.append(("0", "返回"))
+        choice = select_option("选择要设置别称的模型", options)
+        if choice == "0":
+            return
+        model_id = str(models[int(choice) - 1].get("id") or "")
+        run_submodule(lambda: manage_selected_model_aliases_interactively(path, model_id))
+
+
+def manage_selected_model_aliases_interactively(path: Path, model_id: str) -> None:
+    while True:
+        data = load_config_data(path)
+        model = find_model(data.get("models", []), model_id)
+        if model is None:
+            show_result_page("模型别称", section_panel(f"[red]模型不存在: {model_id}[/red]", "模型别称", "red"))
+            return
+        aliases = model.setdefault("aliases", [])
+        options = [("1", "添加别称")]
+        if aliases:
+            options.extend([("2", "编辑别称"), ("3", "删除别称")])
+        options.append(("0", "返回"))
+        choice = select_option(
+            f"模型别称 · {short_text(model_id, 28)}",
+            options,
+            content=model_aliases_panel(model),
+        )
+        if choice == "0":
+            return
+
+        clear_terminal_history()
+        if choice == "1":
+            result = add_model_alias_interactively(path, data, model)
+            title = "添加别称"
+        else:
+            alias_index = select_model_alias(model, "选择要编辑的别称" if choice == "2" else "选择要删除的别称")
+            if alias_index is None:
+                continue
+            if choice == "2":
+                result = edit_model_alias_interactively(path, data, model, alias_index)
+                title = "编辑别称"
+            else:
+                result = delete_model_alias_interactively(path, data, model, alias_index)
+                title = "删除别称"
+        if result is not None:
+            show_result_page(title, result)
+
+
+def model_aliases_panel(model: dict[str, Any]) -> Any:
+    aliases = model.get("aliases", [])
+    aliases_text = "\n".join(f"{index}. [bold]{short_text(str(alias), 64)}[/bold]" for index, alias in enumerate(aliases, 1))
+    if not aliases_text:
+        aliases_text = "[dim]暂无别称[/dim]"
+    return section_panel(
+        f"模型 ID: [bold cyan]{short_text(model.get('id') or '-', 48)}[/bold cyan]\n\n{aliases_text}",
+        "当前别称",
+        "cyan",
+    )
+
+
+def select_model_alias(model: dict[str, Any], title: str) -> int | None:
+    aliases = model.get("aliases", [])
+    options = [(str(index + 1), short_text(str(alias), 48)) for index, alias in enumerate(aliases)]
+    options.append(("0", "返回"))
+    choice = select_option(title, options, content=model_aliases_panel(model))
+    if choice == "0":
+        return None
+    return int(choice) - 1
+
+
+def add_model_alias_interactively(path: Path, data: dict[str, Any], model: dict[str, Any]) -> Any:
+    alias = prompt_text("添加别称", "新别称").strip()
+    if not alias:
+        return section_panel("[red]模型别称不能为空。[/red]", "添加失败", "red")
+    old_config = RouterConfig.from_dict(data)
+    model.setdefault("aliases", []).append(alias)
+    return save_model_alias_change(path, data, old_config, model, f"已添加别称: [bold]{alias}[/bold]", "添加完成")
+
+
+def edit_model_alias_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], alias_index: int) -> Any:
+    aliases = model.setdefault("aliases", [])
+    old_alias = str(aliases[alias_index])
+    alias = prompt_text("编辑别称", "模型别称", default=old_alias).strip()
+    if not alias:
+        return section_panel("[red]模型别称不能为空。[/red]", "编辑失败", "red")
+    if alias == old_alias:
+        return section_panel("[yellow]别称未变化。[/yellow]", "编辑别称", "yellow")
+    old_config = RouterConfig.from_dict(data)
+    aliases[alias_index] = alias
+    replace_unified_model_alias(data, model, old_alias)
+    return save_model_alias_change(
+        path,
+        data,
+        old_config,
+        model,
+        f"原别称: [bold]{old_alias}[/bold]\n新别称: [bold]{alias}[/bold]",
+        "编辑完成",
+    )
+
+
+def delete_model_alias_interactively(path: Path, data: dict[str, Any], model: dict[str, Any], alias_index: int) -> Any:
+    aliases = model.setdefault("aliases", [])
+    alias = str(aliases[alias_index])
+    if not confirm_choice(f"确认删除模型 {model['id']} 的别称 {alias}？", default=False):
+        return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
+    old_config = RouterConfig.from_dict(data)
+    del aliases[alias_index]
+    replace_unified_model_alias(data, model, alias)
+    return save_model_alias_change(path, data, old_config, model, f"已删除别称: [bold]{alias}[/bold]", "删除完成")
+
+
+def replace_unified_model_alias(data: dict[str, Any], model: dict[str, Any], alias: str) -> None:
+    unified_model = data.get("unified_model")
+    if isinstance(unified_model, dict) and unified_model.get("model") == alias:
+        unified_model["model"] = model["id"]
+
+
+def save_model_alias_change(
+    path: Path,
+    data: dict[str, Any],
+    old_config: RouterConfig,
+    model: dict[str, Any],
+    message: str,
+    title: str,
+) -> Any:
+    try:
+        new_config = RouterConfig.from_dict(data)
+    except ValueError as exc:
+        return section_panel(f"[red]{exc}[/red]", "别称设置失败", "red")
+    save_config_data(path, data)
+    return Group(
+        section_panel(
+            f"{message}\n模型: [bold]{model['id']}[/bold]\n配置文件: [bold]{path}[/bold]",
+            title,
+            "green",
+        ),
+        restart_service_after_config_change(path, old_config, new_config),
+    )
 
 
 def manage_selected_key_interactively(path: Path) -> None:

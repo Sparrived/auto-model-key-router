@@ -1116,6 +1116,100 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
     assert model["keys"] == [{"name": "primary", "api_key": "sk-primary", "base_url": "https://primary.example.com"}]
 
 
+def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
+    choices = iter(["6", "0"])
+    menus: list[list[tuple[str, str]]] = []
+    opened: list[Path] = []
+
+    def choose(title, options, selected=0, content=None):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(config_editor, "select_option", choose)
+    monkeypatch.setattr(config_editor, "run_submodule", lambda action: action())
+    monkeypatch.setattr(config_editor, "manage_model_aliases_interactively", lambda path: opened.append(path))
+
+    config_editor.manage_model_keys_interactively(tmp_path / "router-config.json")
+
+    assert ("6", "模型别称") in menus[0]
+    assert opened == [tmp_path / "router-config.json"]
+
+
+def test_model_aliases_panel_lists_current_aliases() -> None:
+    panel = config_editor.model_aliases_panel({"id": "model-one", "aliases": ["first", "second"]})
+
+    text = render_plain(panel)
+    assert "model-one" in text
+    assert "1. first" in text
+    assert "2. second" in text
+
+
+def test_model_alias_crud_updates_config_and_preserves_unified_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "local_api_key": "local-key",
+                "unified_model": {"model": "old-alias"},
+                "models": [
+                    {
+                        "id": "model-one",
+                        "aliases": ["old-alias"],
+                        "keys": [{"name": "main", "api_key": "sk-main", "base_url": "https://upstream.example.com"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    answers = iter(["new-alias", "renamed-alias"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(answers))
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+
+    data = config_editor.load_config_data(config_path)
+    model = data["models"][0]
+    config_editor.add_model_alias_interactively(config_path, data, model)
+
+    data = config_editor.load_config_data(config_path)
+    model = data["models"][0]
+    config_editor.edit_model_alias_interactively(config_path, data, model, 0)
+
+    data = config_editor.load_config_data(config_path)
+    model = data["models"][0]
+    config_editor.delete_model_alias_interactively(config_path, data, model, 1)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["models"][0]["aliases"] == ["renamed-alias"]
+    assert saved["unified_model"] == {"model": "model-one"}
+
+
+def test_add_model_alias_rejects_name_collision_without_saving(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    original = {
+        "local_api_key": "local-key",
+        "models": [
+            {
+                "id": "model-one",
+                "keys": [{"name": "one", "api_key": "sk-one", "base_url": "https://one.example.com"}],
+            },
+            {
+                "id": "model-two",
+                "keys": [{"name": "two", "api_key": "sk-two", "base_url": "https://two.example.com"}],
+            },
+        ],
+    }
+    config_path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "model-two")
+
+    data = config_editor.load_config_data(config_path)
+    result = config_editor.add_model_alias_interactively(config_path, data, data["models"][0])
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+    assert "模型名称重复: model-two" in render_plain(result)
+
+
 def test_windows_user_service_registration_is_user_limited() -> None:
     result = service.manage_windows_task.__globals__["registration_result"]
     commands: list[list[str]] = []
