@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-14
+
+### Added
+- 新增 `/v1/{path}` WebSocket 入口，支持 Trae 等客户端通过 WebSocket 提交 OpenAI-compatible 请求；复用现有鉴权、模型与 Key 路由、失败重试、协议转换及调用统计，并支持流式 SSE 事件和非流式 JSON 响应。
+- 增加 `websockets` 运行时依赖，确保 Uvicorn 可以处理 WebSocket 协议升级。
+
+### Changed
+- 重构 FastAPI 应用模块，将 Anthropic Messages、OpenAI Responses 请求/响应及 SSE 事件转换迁移到 `protocol_compat.py`，将 WebSocket 握手和帧适配迁移到 `websocket_proxy.py`，精简 `app.py` 并保持原有代理行为不变。
+
 ## [1.6.1.post2] - 2026-06-14
 
 ### Added

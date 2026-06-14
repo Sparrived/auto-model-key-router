@@ -12,7 +12,8 @@ from typing import TypeVar
 import anyio
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocketDisconnect
+from fastapi.testclient import TestClient
 
 from auto_model_key_router.app import _probe_cooling_keys, _stream_anthropic_messages, _stream_upstream, create_app
 from auto_model_key_router.config import VISITOR_API_KEY, KeyConfig, ModelConfig, RouterConfig, UnifiedModelConfig
@@ -88,6 +89,94 @@ def test_root_head_probe_returns_no_content(tmp_path: Path) -> None:
 
     assert response.status_code == 204
     assert response.content == b""
+
+
+def test_websocket_proxy_forwards_complete_sse_events(tmp_path: Path) -> None:
+    config = make_config(tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+    app = create_app(config)
+    upstream_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=ChunkedStream(
+                (
+                    b'data: {"id":"first"}\n',
+                    b'\ndata: {"id":"second"}\n\n',
+                    b"data: [DONE]\n\n",
+                )
+            ),
+        )
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/completions?trace=1",
+            headers={"Authorization": "Bearer local-key"},
+        ) as websocket:
+            websocket.send_json({"model": "alias-model", "stream": True, "messages": []})
+            assert websocket.receive_text() == 'data: {"id":"first"}\n\n'
+            assert websocket.receive_text() == 'data: {"id":"second"}\n\n'
+            assert websocket.receive_text() == "data: [DONE]\n\n"
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                websocket.receive_text()
+
+    assert exc_info.value.code == 1000
+    assert len(upstream_requests) == 1
+    request = upstream_requests[0]
+    assert request.method == "POST"
+    assert request.url == "https://upstream.test/v1/chat/completions?trace=1"
+    assert request.headers["authorization"] == "Bearer sk-1"
+    assert "upgrade" not in request.headers
+    assert "sec-websocket-key" not in request.headers
+    assert json.loads(request.content) == {
+        "model": "test-model",
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "messages": [],
+    }
+
+
+def test_websocket_proxy_preserves_non_stream_request(tmp_path: Path) -> None:
+    config = make_config(tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+    app = create_app(config)
+    upstream_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "ok"})
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/chat/completions",
+            headers={"x-api-key": "local-key"},
+        ) as websocket:
+            websocket.send_json({"model": "test-model", "messages": []})
+            assert websocket.receive_json() == {"id": "ok"}
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                websocket.receive_text()
+
+    assert exc_info.value.code == 1000
+    assert upstream_payloads == [{"model": "test-model", "messages": []}]
+
+
+def test_websocket_proxy_rejects_invalid_local_key(tmp_path: Path) -> None:
+    config = make_config(tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),))
+    app = create_app(config)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/chat/completions") as websocket:
+            websocket.send_json({"model": "test-model", "stream": True, "messages": []})
+            assert websocket.receive_json() == {"error": {"message": "本地 API key 验证失败"}}
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                websocket.receive_text()
+
+    assert exc_info.value.code == 1008
 
 
 def test_unknown_anthropic_model_logs_requested_model(tmp_path: Path, caplog) -> None:
