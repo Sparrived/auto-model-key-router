@@ -32,7 +32,7 @@ def default_config_path() -> Path:
 
 LEGACY_CONFIG_PATH = Path("router-config.json")
 DEFAULT_CONFIG_PATH = default_config_path()
-UNIFIED_MODEL_ID = "unified_model"
+UNIFIED_MODEL_ID = "unified-model"
 
 
 def default_metrics_db_path() -> str:
