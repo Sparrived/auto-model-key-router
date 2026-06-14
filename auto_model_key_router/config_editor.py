@@ -10,7 +10,6 @@ from rich.console import Group
 from rich.live import Live
 from rich.table import Table
 
-from .clipboard import paste_from_clipboard
 from .config import RouterConfig, generate_local_api_key, load_config_data, save_config_data
 from .formatting import compact_url, key_fingerprint, short_text
 from .service import restart_service_after_config_change
@@ -246,7 +245,7 @@ def export_config_interactively(path: Path) -> ResultPage:
     data = load_config_data(path)
     visitor_installed = visitor_feature_available()
     transfer_data = transferable_key_config(data, include_visitor=visitor_installed)
-    config_text = json.dumps(transfer_data, indent=2, ensure_ascii=False) + "\n"
+    config_text = json.dumps(transfer_data, ensure_ascii=False, separators=(",", ":"))
     model_count = len(transfer_data["models"])
     key_count = sum(len(model.get("keys", [])) for model in transfer_data["models"])
     visitor_message = "包含访客访问权限。" if visitor_installed else "visitor 扩展未安装，不包含访客访问权限。"
@@ -254,7 +253,7 @@ def export_config_interactively(path: Path) -> ResultPage:
         f"配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\n"
         f"Key 数量: [bold]{key_count}[/bold]\n\n"
         f"[bold yellow]复制内容仅包含模型与上游 API key，{visitor_message}请仅粘贴到可信终端。[/bold yellow]\n\n"
-        "本地鉴权、监听地址、端口及其他 CLI 设置不会复制。\n\n"
+        "复制内容为单行 JSON。本地鉴权、监听地址、端口及其他 CLI 设置不会复制。\n\n"
         "在另一台机器或另一个 TUI 中进入“CLI 设置 → 配置迁移 → 粘贴并应用”即可导入。",
         "复制 Key 配置",
         "green",
@@ -263,21 +262,21 @@ def export_config_interactively(path: Path) -> ResultPage:
 
 
 def paste_config_interactively(path: Path) -> Any:
-    pasted, text = paste_from_clipboard()
-    if not pasted:
-        return section_panel(text, "粘贴失败", "yellow")
+    text = prompt_text("粘贴并应用", "请粘贴单行 Key 配置 JSON，然后按 Enter").strip()
+    if not text:
+        return section_panel("未输入配置内容。", "应用取消", "yellow")
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        return section_panel(f"剪贴板内容不是有效 JSON: {exc.msg}", "应用失败", "red")
+        return section_panel(f"粘贴内容不是有效 JSON: {exc.msg}", "应用失败", "red")
     if not isinstance(data, dict):
-        return section_panel("剪贴板内容必须是配置对象。", "应用失败", "red")
+        return section_panel("粘贴内容必须是配置对象。", "应用失败", "red")
     try:
         transfer_data = transferable_key_config(data, include_visitor=visitor_feature_available())
         RouterConfig.from_dict(transfer_data)
     except (KeyError, TypeError, ValueError) as exc:
         return section_panel(f"配置校验失败: {exc}", "应用失败", "red")
-    if not confirm_choice(f"将用剪贴板配置替换当前模型 Key，并保留本机 CLI 设置：{path.resolve()}，是否继续？", default=False):
+    if not confirm_choice(f"将用粘贴的配置替换当前模型 Key，并保留本机 CLI 设置：{path.resolve()}，是否继续？", default=False):
         return section_panel("配置未变化。", "应用取消", "yellow")
     current_data = load_config_data(path)
     old_config = RouterConfig.from_dict(current_data)
@@ -291,7 +290,7 @@ def paste_config_interactively(path: Path) -> Any:
     model_count = len(new_config.models)
     key_count = sum(len(model.keys) for model in new_config.models)
     content = section_panel(
-        f"已应用剪贴板 Key 配置，并保留本机 CLI 设置。\n配置文件: [bold]{path.resolve()}[/bold]\n"
+        f"已应用粘贴的 Key 配置，并保留本机 CLI 设置。\n配置文件: [bold]{path.resolve()}[/bold]\n"
         f"模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]",
         "应用完成",
         "green",

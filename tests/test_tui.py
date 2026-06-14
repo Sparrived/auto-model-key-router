@@ -905,6 +905,7 @@ def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_
     result = config_editor.export_config_interactively(config_path)
 
     assert isinstance(result, tui.ResultPage)
+    assert "\n" not in (result.copy_text or "")
     assert json.loads(result.copy_text or "") == {
         "models": [
             {
@@ -976,7 +977,7 @@ def test_paste_config_interactively_applies_only_key_config(tmp_path, monkeypatc
         "models": [{"id": "new-model", "keys": [{"name": "new", "api_key": "sk-new", "base_url": "https://new.example.com", "allow_visitor": True}]}],
     }
     config_path.write_text(json.dumps(old_data, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_editor, "paste_from_clipboard", lambda: (True, json.dumps(new_data, ensure_ascii=False)))
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: json.dumps(new_data, ensure_ascii=False))
     monkeypatch.setattr(config_editor, "confirm_choice", lambda message, default=False: True)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
     monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
@@ -996,19 +997,31 @@ def test_paste_config_interactively_applies_only_key_config(tmp_path, monkeypatc
     output = render_plain(result)
     assert "new-model" not in output
     assert "sk-new" not in output
-    assert "已应用剪贴板 Key 配置，并保留本机 CLI 设置" in output
+    assert "已应用粘贴的 Key 配置，并保留本机 CLI 设置" in output
 
 
-def test_paste_config_interactively_rejects_invalid_clipboard_config(tmp_path, monkeypatch) -> None:
+def test_paste_config_interactively_rejects_invalid_pasted_config(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     old_text = json.dumps({"local_api_key": "old-local", "models": []}, ensure_ascii=False)
     config_path.write_text(old_text, encoding="utf-8")
-    monkeypatch.setattr(config_editor, "paste_from_clipboard", lambda: (True, "not json"))
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "not json")
 
     result = config_editor.paste_config_interactively(config_path)
 
     assert config_path.read_text(encoding="utf-8") == old_text
-    assert "剪贴板内容不是有效 JSON" in render_plain(result)
+    assert "粘贴内容不是有效 JSON" in render_plain(result)
+
+
+def test_paste_config_interactively_rejects_empty_input(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    old_text = json.dumps({"local_api_key": "old-local", "models": []}, ensure_ascii=False)
+    config_path.write_text(old_text, encoding="utf-8")
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "  ")
+
+    result = config_editor.paste_config_interactively(config_path)
+
+    assert config_path.read_text(encoding="utf-8") == old_text
+    assert "未输入配置内容" in render_plain(result)
 
 
 def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:
