@@ -4,6 +4,7 @@ import hmac
 
 
 VISITOR_API_KEY = "amkr-visitor"
+VISITOR_MODEL_PREFIX = "amkr-"
 
 try:
     import itsdangerous as _visitor_dependency

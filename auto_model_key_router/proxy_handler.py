@@ -157,9 +157,21 @@ async def _prepare_proxy_request(
             {"error": {"message": f"访客 key 无权访问模型: {UNIFIED_MODEL_ID}"}},
             status_code=403,
         )
-    model_id, requested_key_name = runtime.key_pool.resolve_route(
-        requested_model_name, requested_key_name
-    )
+    if visitor_only:
+        model_id = runtime.key_pool.resolve_visitor_model_id(requested_model_name)
+        if model_id is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "message": f"访客 key 无权访问模型: {requested_model_name}"
+                    }
+                },
+                status_code=403,
+            )
+    else:
+        model_id, requested_key_name = runtime.key_pool.resolve_route(
+            requested_model_name, requested_key_name
+        )
     configured_key_count = runtime.key_pool.key_count(model_id)
     key_count = (
         runtime.key_pool.visitor_key_count(model_id)

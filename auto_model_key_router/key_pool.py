@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import UNIFIED_MODEL_ID, KeyConfig, RouterConfig
 from .key_state_store import KeyStateStore
+from .visitor import VISITOR_MODEL_PREFIX
 
 
 @dataclass
@@ -75,6 +76,18 @@ class KeyPool:
             for model in config.models
             for name in (model.id, *model.aliases)
         }
+        self._visitor_routes = {
+            f"{VISITOR_MODEL_PREFIX}{model_id}": model_id
+            for model_id in self._keys
+            if not model_id.startswith(VISITOR_MODEL_PREFIX)
+        }
+        self._visitor_routes.update(
+            {
+                model_id: model_id
+                for model_id in self._keys
+                if model_id.startswith(VISITOR_MODEL_PREFIX)
+            }
+        )
         self._unified_model_id = None
         self._unified_key_name = None
         if config.unified_model is not None:
@@ -93,10 +106,9 @@ class KeyPool:
     def available_model_ids(self, *, visitor_only: bool = False) -> list[str]:
         if visitor_only:
             return sorted(
-                model_id
-                for model_id in self._keys
-                if model_id.startswith("amkr-")
-                and self.keys_for_model(model_id, visitor_only=True)
+                public_model_id
+                for public_model_id, model_id in self._visitor_routes.items()
+                if self.keys_for_model(model_id, visitor_only=True)
             )
         return sorted(
             name
@@ -106,6 +118,9 @@ class KeyPool:
 
     def resolve_model_id(self, model_id: str) -> str:
         return self._aliases.get(model_id, model_id)
+
+    def resolve_visitor_model_id(self, public_model_id: str) -> str | None:
+        return self._visitor_routes.get(public_model_id)
 
     def resolve_route(
         self, model_id: str, key_name: str | None = None

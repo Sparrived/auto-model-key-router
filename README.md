@@ -402,7 +402,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | 接口 | 鉴权 | 说明 |
 | --- | --- | --- |
 | `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、访客授权 key 数、key 指纹和 key 冷却状态 |
-| `GET /v1/models` | 需要本地或 visitor API key | 返回该 API key 可访问的 OpenAI 风格模型列表；visitor 只看到有访问权限的 `amkr-` 原始模型 ID，不暴露内部 aliases 或 `unified_model` |
+| `GET /v1/models` | 需要本地或 visitor API key | 返回该 API key 可访问的 OpenAI 风格模型列表；visitor 只看到按 `amkr-{真实模型ID}` 生成的公共模型 ID，不暴露内部 aliases 或 `unified_model` |
 | `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照，包含 `caller_types.local` 和 `caller_types.visitor` 分类 |
 | `/v1/{path}` | 启用 `local_api_key` 时需要 | 代理 OpenAI-compatible 请求，支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE` |
 
@@ -445,7 +445,7 @@ Authorization: Bearer your-local-api-key
 x-api-key: your-local-api-key
 ```
 
-`/health` 不需要本地鉴权。如果 `local_api_key` 为空，则所有本地接口都不启用本地鉴权。固定 visitor key `amkr-visitor` 可调用 `/v1/models` 和代理型 `/v1/{path}`：模型列表直接从真实模型配置中筛选，只返回以 `amkr-` 开头且至少包含一个 `allow_visitor: true` Key 的原始模型 ID，不使用或暴露内部 aliases；代理请求也只会路由到 visitor 可用的上游 Key，并且不支持 `unified_model`。
+`/health` 不需要本地鉴权。如果 `local_api_key` 为空，则所有本地接口都不启用本地鉴权。固定 visitor key `amkr-visitor` 可调用 `/v1/models` 和代理型 `/v1/{path}`：模型列表直接从真实模型配置中筛选，并将有 visitor 权限的真实模型 ID 转换为 `amkr-{真实模型ID}`，例如 `gpt-5.5` 对外显示为 `amkr-gpt-5.5`。这些公共 ID 会直接映射回真实模型，不经过或暴露内部 aliases；visitor 也不能使用真实模型 ID、内部 aliases 或 `unified_model`。
 
 ## 📊 计量统计
 

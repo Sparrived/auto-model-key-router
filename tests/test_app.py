@@ -159,11 +159,11 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
                     allow_visitor=True,
                 ),
             ),
-            unified_model=UnifiedModelConfig(model="amkr-gpt-5.5"),
+            unified_model=UnifiedModelConfig(model="gpt-5.5"),
         ),
         models=(
             ModelConfig(
-                id="amkr-gpt-5.5",
+                id="gpt-5.5",
                 aliases=("internal-gpt-latest",),
                 keys=(
                     KeyConfig(
@@ -175,12 +175,12 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
                 ),
             ),
             ModelConfig(
-                id="amkr-private-model",
+                id="private-model",
                 aliases=("internal-private-alias",),
                 keys=(KeyConfig("private-key", "sk-private", "https://private.test"),),
             ),
             ModelConfig(
-                id="amkr-disabled-model",
+                id="disabled-model",
                 keys=(
                     KeyConfig(
                         "disabled-key",
@@ -210,13 +210,19 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
 
     def handler(request: httpx.Request) -> httpx.Response:
         upstream_calls.append(request)
-        return httpx.Response(200, json={"id": "unexpected"})
+        return httpx.Response(200, json={"id": "ok"})
 
     app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     async def requests(
         client: httpx.AsyncClient,
-    ) -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+    ) -> tuple[
+        httpx.Response,
+        httpx.Response,
+        httpx.Response,
+        httpx.Response,
+        httpx.Response,
+    ]:
         local_models = await client.get(
             "/v1/models", headers={"Authorization": "Bearer local-key"}
         )
@@ -229,26 +235,55 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
             headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
             json={"model": "unified_model", "messages": []},
         )
-        return local_models, visitor_models, visitor_unified
+        visitor_public_model = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+            json={"model": "amkr-gpt-5.5", "messages": []},
+        )
+        visitor_internal_alias = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+            json={"model": "internal-gpt-latest", "messages": []},
+        )
+        return (
+            local_models,
+            visitor_models,
+            visitor_unified,
+            visitor_public_model,
+            visitor_internal_alias,
+        )
 
-    local_models, visitor_models, visitor_unified = run_client(app, requests)
+    (
+        local_models,
+        visitor_models,
+        visitor_unified,
+        visitor_public_model,
+        visitor_internal_alias,
+    ) = run_client(app, requests)
 
     assert {model["id"] for model in local_models.json()["data"]} == {
-        "amkr-gpt-5.5",
-        "amkr-private-model",
         "external-public-model",
+        "gpt-5.5",
         "internal-external-alias",
         "internal-gpt-latest",
         "internal-private-alias",
+        "private-model",
         "unified_model",
     }
-    assert [model["id"] for model in visitor_models.json()["data"]] == ["amkr-gpt-5.5"]
+    assert [model["id"] for model in visitor_models.json()["data"]] == [
+        "amkr-external-public-model",
+        "amkr-gpt-5.5",
+    ]
     assert visitor_unified.status_code == 403
     assert (
         visitor_unified.json()["error"]["message"]
         == "访客 key 无权访问模型: unified_model"
     )
-    assert upstream_calls == []
+    assert visitor_public_model.status_code == 200
+    assert visitor_internal_alias.status_code == 403
+    assert json.loads(upstream_calls[0].content)["model"] == "gpt-5.5"
+    assert upstream_calls[0].headers["authorization"] == "Bearer sk-visitor"
+    assert len(upstream_calls) == 1
 
 
 def test_websocket_proxy_forwards_complete_sse_events(tmp_path: Path) -> None:
@@ -468,7 +503,7 @@ def test_metrics_group_local_and_visitor_calls(visitor_feature) -> None:
                 "/v1/chat/completions",
                 headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
                 json={
-                    "model": "test-model",
+                    "model": "amkr-test-model",
                     "messages": [{"role": "user", "content": "visitor"}],
                 },
             )
@@ -525,7 +560,7 @@ def test_stream_metrics_preserve_visitor_caller_type(visitor_feature) -> None:
                     f"/v1/{path}",
                     headers=headers,
                     json={
-                        "model": "test-model",
+                        "model": "amkr-test-model",
                         "messages": [{"role": "user", "content": "hi"}],
                         "stream": True,
                     },
@@ -628,7 +663,7 @@ def test_visitor_key_routes_only_to_allowed_upstream_keys(visitor_feature) -> No
                 "/v1/chat/completions",
                 headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
                 json={
-                    "model": "alias-model",
+                    "model": "amkr-test-model",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
@@ -659,7 +694,7 @@ def test_visitor_key_cannot_select_private_upstream_key(visitor_feature) -> None
                 "/v1/chat/completions",
                 headers={"x-api-key": VISITOR_API_KEY},
                 json={
-                    "model": "test-model[private-key]",
+                    "model": "amkr-test-model[private-key]",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
@@ -669,7 +704,7 @@ def test_visitor_key_cannot_select_private_upstream_key(visitor_feature) -> None
         assert response.status_code == 403
         assert (
             response.json()["error"]["message"]
-            == "访客 key 无权访问模型 key: test-model[private-key]"
+            == "访客 key 无权访问模型 key: amkr-test-model[private-key]"
         )
 
 
@@ -685,7 +720,7 @@ def test_visitor_key_cannot_access_model_without_allowed_keys(visitor_feature) -
                 "/v1/chat/completions",
                 headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
                 json={
-                    "model": "alias-model",
+                    "model": "amkr-test-model",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
@@ -694,7 +729,8 @@ def test_visitor_key_cannot_access_model_without_allowed_keys(visitor_feature) -
 
         assert response.status_code == 403
         assert (
-            response.json()["error"]["message"] == "访客 key 无权访问模型: alias-model"
+            response.json()["error"]["message"]
+            == "访客 key 无权访问模型: amkr-test-model"
         )
 
 
@@ -819,7 +855,7 @@ def test_visitor_key_is_rejected_when_optional_feature_is_not_installed(
                 "/v1/chat/completions",
                 headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
                 json={
-                    "model": "test-model",
+                    "model": "amkr-test-model",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
