@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-06-14
+
 ### Changed
+- `/v1/models` 现在要求提供本地或 visitor API key，并按该 Key 的访问权限返回实际可用模型；visitor 列表只包含有权限的 `amkr-` 原始模型 ID，不再暴露内部别名或支持调用 `unified_model`。
 - 重构代理请求处理，将请求准备、Key 选择、重试策略、上游调用、流式响应生命周期和错误转换拆分为独立模块，降低 `app.py` 的职责和复杂度。
 - 按 Anthropic Messages、OpenAI Responses 和通用请求转换拆分协议兼容层，同时保留原有 `protocol_compat.py` 兼容入口。
 - 重构配置写入流程，统一执行校验和原子提交；将系统服务状态采集与 Terminal UI 渲染解耦。

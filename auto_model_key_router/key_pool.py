@@ -91,11 +91,17 @@ class KeyPool:
         return sorted(self._aliases)
 
     def available_model_ids(self, *, visitor_only: bool = False) -> list[str]:
+        if visitor_only:
+            return sorted(
+                model_id
+                for model_id in self._keys
+                if model_id.startswith("amkr-")
+                and self.keys_for_model(model_id, visitor_only=True)
+            )
         return sorted(
             name
             for name, model_id in self._aliases.items()
-            if (not visitor_only or name != UNIFIED_MODEL_ID)
-            and self.keys_for_model(model_id, visitor_only=visitor_only)
+            if self.keys_for_model(model_id)
         )
 
     def resolve_model_id(self, model_id: str) -> str:

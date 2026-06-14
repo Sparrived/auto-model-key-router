@@ -159,12 +159,12 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
                     allow_visitor=True,
                 ),
             ),
-            unified_model=UnifiedModelConfig(model="test-model"),
+            unified_model=UnifiedModelConfig(model="amkr-gpt-5.5"),
         ),
         models=(
             ModelConfig(
-                id="test-model",
-                aliases=("alias-model",),
+                id="amkr-gpt-5.5",
+                aliases=("internal-gpt-latest",),
                 keys=(
                     KeyConfig(
                         "visitor-key",
@@ -175,22 +175,30 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
                 ),
             ),
             ModelConfig(
-                id="private-model",
-                aliases=("private-alias",),
-                keys=(
-                    KeyConfig(
-                        "private-key", "sk-private", "https://private.test"
-                    ),
-                ),
+                id="amkr-private-model",
+                aliases=("internal-private-alias",),
+                keys=(KeyConfig("private-key", "sk-private", "https://private.test"),),
             ),
             ModelConfig(
-                id="disabled-model",
+                id="amkr-disabled-model",
                 keys=(
                     KeyConfig(
                         "disabled-key",
                         "sk-disabled",
                         "https://disabled.test",
                         enabled=False,
+                        allow_visitor=True,
+                    ),
+                ),
+            ),
+            ModelConfig(
+                id="external-public-model",
+                aliases=("internal-external-alias",),
+                keys=(
+                    KeyConfig(
+                        "external-visitor-key",
+                        "sk-external",
+                        "https://external.test",
                         allow_visitor=True,
                     ),
                 ),
@@ -226,16 +234,15 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
     local_models, visitor_models, visitor_unified = run_client(app, requests)
 
     assert {model["id"] for model in local_models.json()["data"]} == {
-        "alias-model",
-        "private-alias",
-        "private-model",
-        "test-model",
+        "amkr-gpt-5.5",
+        "amkr-private-model",
+        "external-public-model",
+        "internal-external-alias",
+        "internal-gpt-latest",
+        "internal-private-alias",
         "unified_model",
     }
-    assert {model["id"] for model in visitor_models.json()["data"]} == {
-        "alias-model",
-        "test-model",
-    }
+    assert [model["id"] for model in visitor_models.json()["data"]] == ["amkr-gpt-5.5"]
     assert visitor_unified.status_code == 403
     assert (
         visitor_unified.json()["error"]["message"]

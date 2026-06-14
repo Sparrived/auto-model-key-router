@@ -402,7 +402,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | 接口 | 鉴权 | 说明 |
 | --- | --- | --- |
 | `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、访客授权 key 数、key 指纹和 key 冷却状态 |
-| `GET /v1/models` | 不需要 | 返回 OpenAI 风格模型列表，包含真实模型 ID、aliases 和已启用的 `unified_model` |
+| `GET /v1/models` | 需要本地或 visitor API key | 返回该 API key 可访问的 OpenAI 风格模型列表；visitor 只看到有访问权限的 `amkr-` 原始模型 ID，不暴露内部 aliases 或 `unified_model` |
 | `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照，包含 `caller_types.local` 和 `caller_types.visitor` 分类 |
 | `/v1/{path}` | 启用 `local_api_key` 时需要 | 代理 OpenAI-compatible 请求，支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE` |
 
@@ -433,7 +433,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 
 首次生成配置文件时会自动生成 `local_api_key`。如果旧配置中该字段为空，程序加载配置时也会自动补齐。也可以在 Terminal UI 中通过“本地鉴权”生成、重置或清空本地 API key。
 
-设置后，客户端访问 `/metrics` 和代理型 `/v1/{path}` 接口时需要传入：
+设置后，客户端访问 `/v1/models`、`/metrics` 和代理型 `/v1/{path}` 接口时需要传入：
 
 ```bash
 Authorization: Bearer your-local-api-key
@@ -445,7 +445,7 @@ Authorization: Bearer your-local-api-key
 x-api-key: your-local-api-key
 ```
 
-`/health` 和 `/v1/models` 不需要本地鉴权。如果 `local_api_key` 为空，则所有本地接口都不启用本地鉴权。固定访客 key `amkr-visitor` 仅可调用代理型 `/v1/{path}`，并且只会路由到配置了 `allow_visitor: true` 的上游 key。
+`/health` 不需要本地鉴权。如果 `local_api_key` 为空，则所有本地接口都不启用本地鉴权。固定 visitor key `amkr-visitor` 可调用 `/v1/models` 和代理型 `/v1/{path}`：模型列表直接从真实模型配置中筛选，只返回以 `amkr-` 开头且至少包含一个 `allow_visitor: true` Key 的原始模型 ID，不使用或暴露内部 aliases；代理请求也只会路由到 visitor 可用的上游 Key，并且不支持 `unified_model`。
 
 ## 📊 计量统计
 
