@@ -960,7 +960,7 @@ def test_export_config_interactively_includes_visitor_access_when_installed(tmp_
     assert "包含访客访问权限" in render_plain(result.content)
 
 
-def test_paste_config_interactively_applies_only_key_config(tmp_path, monkeypatch) -> None:
+def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     old_data = {
         "host": "127.0.0.1",
@@ -988,6 +988,16 @@ def test_paste_config_interactively_applies_only_key_config(tmp_path, monkeypatc
         **old_data,
         "models": [
             {
+                "id": "old-model",
+                "keys": [
+                    {
+                        "name": "old",
+                        "api_key": "sk-old",
+                        "base_url": "https://old.example.com",
+                    }
+                ],
+            },
+            {
                 "id": "new-model",
                 "routing_mode": "round_robin",
                 "keys": [{"name": "new", "api_key": "sk-new", "base_url": "https://new.example.com"}],
@@ -997,7 +1007,93 @@ def test_paste_config_interactively_applies_only_key_config(tmp_path, monkeypatc
     output = render_plain(result)
     assert "new-model" not in output
     assert "sk-new" not in output
-    assert "已应用粘贴的 Key 配置，并保留本机 CLI 设置" in output
+    assert "已追加粘贴的 Key 配置，并保留现有模型和本机 CLI 设置" in output
+    assert "新增模型: 1" in output
+    assert "新增 Key: 1" in output
+
+
+def test_paste_config_interactively_appends_keys_without_overwriting_model_settings(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    old_data = {
+        "local_api_key": "old-local",
+        "models": [
+            {
+                "id": "shared-model",
+                "aliases": ["local-alias"],
+                "routing_mode": "priority",
+                "keys": [
+                    {
+                        "name": "main",
+                        "api_key": "sk-old",
+                        "base_url": "https://old.example.com",
+                    }
+                ],
+            }
+        ],
+    }
+    pasted_data = {
+        "models": [
+            {
+                "id": "shared-model",
+                "aliases": ["remote-alias"],
+                "routing_mode": "only_first",
+                "keys": [
+                    {
+                        "name": "duplicate",
+                        "api_key": "sk-old",
+                        "base_url": "https://old.example.com",
+                    },
+                    {
+                        "name": "main",
+                        "api_key": "sk-new",
+                        "base_url": "https://new.example.com",
+                    },
+                ],
+            }
+        ]
+    }
+    config_path.write_text(json.dumps(old_data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(
+        config_editor,
+        "prompt_text",
+        lambda *args, **kwargs: json.dumps(pasted_data, ensure_ascii=False),
+    )
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda message, default=False: True)
+    monkeypatch.setattr(
+        config_editor,
+        "restart_service_after_config_change",
+        lambda path, old_config, new_config: Text("reloaded"),
+    )
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+
+    result = config_editor.paste_config_interactively(config_path)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["models"] == [
+        {
+            "id": "shared-model",
+            "aliases": ["local-alias"],
+            "routing_mode": "priority",
+            "keys": [
+                {
+                    "name": "main",
+                    "api_key": "sk-old",
+                    "base_url": "https://old.example.com",
+                },
+                {
+                    "name": "main-2",
+                    "api_key": "sk-new",
+                    "base_url": "https://new.example.com",
+                },
+            ],
+        }
+    ]
+    output = render_plain(result)
+    assert "新增模型: 0" in output
+    assert "新增 Key: 1" in output
+    assert "跳过重复 Key: 1" in output
 
 
 def test_paste_config_interactively_rejects_invalid_pasted_config(tmp_path, monkeypatch) -> None:

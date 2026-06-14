@@ -538,6 +538,65 @@ def transferable_key_config(
     return {"models": models}
 
 
+def merge_transferable_key_config(
+    current_data: dict[str, Any], transfer_data: dict[str, Any]
+) -> tuple[dict[str, Any], int, int, int]:
+    merged_data = deepcopy(current_data)
+    models = merged_data.setdefault("models", [])
+    default_base_url = str(
+        current_data.get("default_base_url") or "https://api.openai.com"
+    )
+    added_models = 0
+    added_keys = 0
+    skipped_keys = 0
+
+    for transferred_model in transfer_data["models"]:
+        model_id = str(transferred_model["id"])
+        current_model = find_model(models, model_id)
+        if current_model is None:
+            models.append(deepcopy(transferred_model))
+            added_models += 1
+            added_keys += len(transferred_model.get("keys", []))
+            continue
+
+        current_keys = current_model.setdefault("keys", [])
+        used_names = {
+            str(key.get("name") or f"{model_id}-{index + 1}")
+            for index, key in enumerate(current_keys)
+        }
+        existing_key_targets = {
+            (
+                str(key.get("api_key") or ""),
+                str(key.get("base_url") or default_base_url),
+            )
+            for key in current_keys
+        }
+
+        for index, transferred_key in enumerate(transferred_model.get("keys", [])):
+            key_target = (
+                str(transferred_key.get("api_key") or ""),
+                str(transferred_key.get("base_url") or default_base_url),
+            )
+            if key_target in existing_key_targets:
+                skipped_keys += 1
+                continue
+
+            key = deepcopy(transferred_key)
+            base_name = str(key.get("name") or f"{model_id}-{index + 1}")
+            key_name = base_name
+            suffix = 2
+            while key_name in used_names:
+                key_name = f"{base_name}-{suffix}"
+                suffix += 1
+            key["name"] = key_name
+            current_keys.append(key)
+            used_names.add(key_name)
+            existing_key_targets.add(key_target)
+            added_keys += 1
+
+    return merged_data, added_models, added_keys, skipped_keys
+
+
 def export_config_interactively(path: Path) -> ResultPage:
     data = load_config_data(path)
     visitor_installed = visitor_feature_available()
@@ -577,17 +636,19 @@ def paste_config_interactively(path: Path) -> Any:
             data, include_visitor=visitor_feature_available()
         )
         RouterConfig.from_dict(transfer_data)
+        current_data = load_config_data(path)
+        old_config = RouterConfig.from_dict(current_data)
+        merged_data, added_models, added_keys, skipped_keys = (
+            merge_transferable_key_config(current_data, transfer_data)
+        )
+        RouterConfig.from_dict(merged_data)
     except (KeyError, TypeError, ValueError) as exc:
         return section_panel(f"配置校验失败: {exc}", "应用失败", "red")
     if not confirm_choice(
-        f"将用粘贴的配置替换当前模型 Key，并保留本机 CLI 设置：{path.resolve()}，是否继续？",
+        f"将追加粘贴的 Key 配置，并保留现有模型和本机 CLI 设置：{path.resolve()}，是否继续？",
         default=False,
     ):
         return section_panel("配置未变化。", "应用取消", "yellow")
-    current_data = load_config_data(path)
-    old_config = RouterConfig.from_dict(current_data)
-    merged_data = deepcopy(current_data)
-    merged_data["models"] = transfer_data["models"]
     try:
         new_config = commit_config_data(path, merged_data, old_config).new_config
     except (KeyError, TypeError, ValueError) as exc:
@@ -595,8 +656,10 @@ def paste_config_interactively(path: Path) -> Any:
     model_count = len(new_config.models)
     key_count = sum(len(model.keys) for model in new_config.models)
     content = section_panel(
-        f"已应用粘贴的 Key 配置，并保留本机 CLI 设置。\n配置文件: [bold]{path.resolve()}[/bold]\n"
-        f"模型数量: [bold]{model_count}[/bold]\nKey 数量: [bold]{key_count}[/bold]",
+        f"已追加粘贴的 Key 配置，并保留现有模型和本机 CLI 设置。\n配置文件: [bold]{path.resolve()}[/bold]\n"
+        f"新增模型: [bold]{added_models}[/bold]\n新增 Key: [bold]{added_keys}[/bold]\n"
+        f"跳过重复 Key: [bold]{skipped_keys}[/bold]\n"
+        f"当前模型数量: [bold]{model_count}[/bold]\n当前 Key 数量: [bold]{key_count}[/bold]",
         "应用完成",
         "green",
     )

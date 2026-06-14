@@ -341,7 +341,7 @@ auto-model-key-router --config router-config.json
 
 Agent 配置文件和备份可能包含鉴权 token，请不要共享这些文件。配置完成后，如果路由服务尚未运行，结果页会提示先执行“一键配置 → 路由服务”。
 
-配置迁移可在“CLI 设置 → 配置迁移”中使用：先在当前 TUI 选择“复制 Key 配置”，再到另一台机器或另一个 TUI 选择“粘贴并应用”。迁移内容仅包含模型与上游 API key；安装了 `visitor` 扩展时还会包含各 Key 的访客访问权限。目标端的本地鉴权、监听地址、端口、超时、重试、文件路径及其他 CLI 设置会保留。上游 API key 属于敏感信息，请只在可信终端之间传递。
+配置迁移可在“CLI 设置 → 配置迁移”中使用：先在当前 TUI 选择“复制 Key 配置”，再到另一台机器或另一个 TUI 选择“粘贴并应用”。迁移内容仅包含模型与上游 API key；安装了 `visitor` 扩展时还会包含各 Key 的访客访问权限。粘贴时会向目标端追加模型和 Key，不覆盖已有模型设置；完全相同的上游 Key 会跳过，同名但内容不同的 Key 会自动添加数字后缀。目标端的本地鉴权、监听地址、端口、超时、重试、文件路径及其他 CLI 设置也会保留。上游 API key 属于敏感信息，请只在可信终端之间传递。
 
 ### 后台服务
 
@@ -404,9 +404,45 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 | `GET /health` | 不需要 | 返回服务状态、公开模型列表、配置路径、本地鉴权状态、访客授权 key 数、key 指纹和 key 冷却状态 |
 | `GET /v1/models` | 需要本地或 visitor API key | 返回该 API key 可访问的 OpenAI 风格模型列表；visitor 只看到按 `amkr-{真实模型ID}` 生成的公共模型 ID，不暴露内部 aliases 或 `unified_model` |
 | `GET /metrics` | 启用 `local_api_key` 时需要 | 返回 SQLite 聚合统计快照，包含 `caller_types.local` 和 `caller_types.visitor` 分类 |
+| `GET/POST /api/models` | 仅本地 API key | 查询或新增模型配置 |
+| `GET/PUT/DELETE /api/models/{model_id}` | 仅本地 API key | 查询、修改或删除指定模型 |
+| `GET/POST /api/models/{model_id}/keys` | 仅本地 API key | 查询或新增指定模型的上游 key |
+| `GET/PUT/DELETE /api/models/{model_id}/keys/{key_name}` | 仅本地 API key | 查询、修改或删除指定上游 key |
 | `/v1/{path}` | 启用 `local_api_key` 时需要 | 代理 OpenAI-compatible 请求，支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE` |
 
 代理型 `/v1/{path}` 请求需要在 JSON 请求体中提供 `model`。缺少 `model` 会返回 `400`，模型未配置会返回 `404`，没有可用 key 会返回 `503`。
+
+### 模型与 Key 管理 API
+
+管理 API 使用当前配置文件作为持久化存储，写入后立即热重载。创建模型时至少需要提供一个 key；更新 key 时可以省略 `api_key` 以保留原密钥。查询响应不会返回上游密钥明文，只返回 `api_key_fingerprint`。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/models \
+  -H "Authorization: Bearer your-local-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "gpt-5.5",
+    "aliases": ["gpt"],
+    "routing_mode": "round_robin",
+    "keys": [{
+      "name": "main",
+      "api_key": "sk-upstream",
+      "base_url": "https://api.openai.com",
+      "allow_visitor": false
+    }]
+  }'
+```
+
+通过更新 key 的 `allow_visitor` 字段配置访客可用性：
+
+```bash
+curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
+  -H "Authorization: Bearer your-local-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"allow_visitor": true}'
+```
+
+visitor key 不能访问管理 API。删除模型的最后一个 key 会返回 `409`，应直接删除该模型；未通过配置文件路径启动的嵌入式应用可以查询配置，但写操作会返回 `409`，避免重启后丢失修改。
 
 ## 🧩 请求兼容
 
@@ -433,7 +469,7 @@ auto-model-key-router --config router-config.json --host 0.0.0.0 --port 8000
 
 首次生成配置文件时会自动生成 `local_api_key`。如果旧配置中该字段为空，程序加载配置时也会自动补齐。也可以在 Terminal UI 中通过“本地鉴权”生成、重置或清空本地 API key。
 
-设置后，客户端访问 `/v1/models`、`/metrics` 和代理型 `/v1/{path}` 接口时需要传入：
+设置后，客户端访问 `/v1/models`、`/metrics`、`/api/*` 和代理型 `/v1/{path}` 接口时需要传入：
 
 ```bash
 Authorization: Bearer your-local-api-key

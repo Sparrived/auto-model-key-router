@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from . import __version__
 from .config import RouterConfig
 from .key_pool import KeyPool
+from .management_api import register_management_api
 from .metrics import MetricsStore
 from .proxy_handler import handle_proxy_request
 from .proxy_support import (
@@ -70,6 +71,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     )
     app.state.config_mtime = _config_mtime(app.state.config_path)
     app.state.config_reload_lock = asyncio.Lock()
+    app.state.config_write_lock = asyncio.Lock()
     app.state.key_pool = KeyPool(config)
     app.state.metrics = MetricsStore(config.metrics_db_path)
     app.state.http_client = _new_http_client(config.request_timeout)
@@ -79,6 +81,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         )
     )
     app.state.health_probe_task = None
+    register_management_api(app, _reload_config_if_changed)
 
     @app.head("/", include_in_schema=False)
     async def root_probe() -> Response:
