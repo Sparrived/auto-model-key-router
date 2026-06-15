@@ -15,7 +15,7 @@ from auto_model_key_router.agent_config import (
     rollback_agent,
     router_origin,
 )
-from auto_model_key_router.config import RouterConfig
+from auto_model_key_router.config import UNIFIED_MODEL_ID, RouterConfig
 
 
 def make_config(*, host: str = "127.0.0.1", port: int = 8000, local_api_key: str = "local-key") -> RouterConfig:
@@ -49,7 +49,7 @@ def test_configure_claude_code_preserves_settings_and_rolls_back_exactly(tmp_pat
     assert configured["env"]["EXISTING"] == "yes"
     assert configured["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
     assert configured["env"]["ANTHROPIC_AUTH_TOKEN"] == "local-key"
-    assert configured["env"]["ANTHROPIC_MODEL"] == "unified_model"
+    assert configured["env"]["ANTHROPIC_MODEL"] == UNIFIED_MODEL_ID
     assert result.router_url == "http://127.0.0.1:8000"
     assert get_agent_config_status(CLAUDE_CODE, target_path=target, backup_path=backup).current_is_applied
 
@@ -73,7 +73,7 @@ def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: 
     provider = configured["model_providers"]["auto_model_key_router"]
     assert configured["sandbox_mode"] == "workspace-write"
     assert configured["features"]["web_search"] is True
-    assert configured["model"] == "unified_model"
+    assert configured["model"] == UNIFIED_MODEL_ID
     assert configured["model_provider"] == "auto_model_key_router"
     assert provider["base_url"] == "http://127.0.0.1:8000/v1"
     assert provider["wire_api"] == "responses"
@@ -110,7 +110,7 @@ def test_configure_agent_requires_unified_model(tmp_path: Path) -> None:
         }
     )
 
-    with pytest.raises(AgentConfigError, match="unified_model"):
+    with pytest.raises(AgentConfigError, match=UNIFIED_MODEL_ID):
         configure_agent(CODEX, config, target_path=tmp_path / "config.toml", backup_path=tmp_path / "backup.json")
 
 

@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-06-15
+
 ### Added
 - 新增模型与上游 key 的 REST 管理 API，支持增删改查、配置 `allow_visitor` 访客可用性、原子持久化和运行时热重载；查询结果仅返回 key 指纹，不暴露上游密钥明文。
+- 新增 Key 连续失败自动禁用机制：同一上游 Key 连续 5 次请求失败后会自动标记为禁用并持久化状态，后续请求分发会排除已禁用 Key。
+- 新增 Cloudflare 521 上游错误识别，将 521 纳入可重试状态码，并为 OpenAI/Anthropic 兼容错误响应返回结构化错误信息。
+- 新增官方 CLI 使用文档、API 接口文档和完整使用指南，覆盖命令行参数、管理接口、安装配置、路由、访客访问、WebSocket、统计与维护流程。
 
 ### Changed
 - 配置迁移的“粘贴并应用”改为追加模型 Key，不再覆盖目标端已有模型；重复 Key 会跳过，同名的新 Key 会自动生成唯一名称。
+- Key 失败冷却时间会随连续失败次数放大，多 Key 路由会优先避开冷却或已禁用的 Key，提升上游故障时的自动切换能力。
+- Terminal UI 的模型 Key 列表、管理、复制和排序界面会高亮展示允许访客访问的 Key，并统一访客访问状态展示。
+- 官方文档迁移到 `docs/` 目录，README 改为项目概览与文档入口，避免在首页重复维护完整使用说明。
 
 ## [2.0.0.post1] - 2026-06-14
 
@@ -16,7 +24,7 @@
 ## [2.0.0] - 2026-06-14
 
 ### Changed
-- `/v1/models` 现在要求提供本地或 visitor API key，并按该 Key 的访问权限返回实际可用模型；visitor 列表只包含有权限的 `amkr-` 原始模型 ID，不再暴露内部别名或支持调用 `unified_model`。
+- `/v1/models` 现在要求提供本地或 visitor API key，并按该 Key 的访问权限返回实际可用模型；visitor 列表只包含有权限的 `amkr-` 原始模型 ID，不再暴露内部别名或支持调用 `unified-model`。
 - 重构代理请求处理，将请求准备、Key 选择、重试策略、上游调用、流式响应生命周期和错误转换拆分为独立模块，降低 `app.py` 的职责和复杂度。
 - 按 Anthropic Messages、OpenAI Responses 和通用请求转换拆分协议兼容层，同时保留原有 `protocol_compat.py` 兼容入口。
 - 重构配置写入流程，统一执行校验和原子提交；将系统服务状态采集与 Terminal UI 渲染解耦。
@@ -56,7 +64,7 @@
 ## [1.6.0] - 2026-06-13
 
 ### Added
-- 主页“一键配置”新增路由服务、Claude Code 和 Codex 子菜单；可增量写入 Agent 配置，使其通过本项目的 `unified_model` 路由，并缓存应用前的完整配置用于精确回退。
+- 主页“一键配置”新增路由服务、Claude Code 和 Codex 子菜单；可增量写入 Agent 配置，使其通过本项目的 `unified-model` 路由，并缓存应用前的完整配置用于精确回退。
 - 新增 Codex Responses 协议兼容，将 Responses 消息、function call、function output 和 tools 转换为 Chat Completions，并把普通及流式文本、工具调用和 usage 转回 Responses 风格。
 - 新增 Claude Code `/v1/messages/count_tokens` 本地兼容响应，避免 OpenAI-compatible 上游不支持 Anthropic token 计数接口时中断。
 
@@ -94,7 +102,7 @@
 ## [1.4.0] - 2026-06-13
 
 ### Added
-- 新增固定虚拟模型 `unified_model`，可引用已有模型和可选 key；调用端无需修改请求模型名，即可通过 `--switch-model`、`--switch-key` 和 `--show-unified-model` 快速切换或查看当前路由。
+- 新增固定虚拟模型 `unified-model`，可引用已有模型和可选 key；调用端无需修改请求模型名，即可通过 `--switch-model`、`--switch-key` 和 `--show-unified-model` 快速切换或查看当前路由。
 - `unified_model` 配置变更支持原子写入和服务热加载，并可在 TUI 首页的“统一模型”中选择模型、自动路由或指定已启用 key，同时在 `/health`、`/v1/models` 和配置摘要中展示。
 - 新增根路径 `HEAD /` 探活接口，返回 `204 No Content`，便于负载均衡器和托管平台执行轻量健康检查。
 
