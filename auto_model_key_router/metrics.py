@@ -4,13 +4,14 @@ import asyncio
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any
 
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+RATE_WINDOW_SECONDS = 60
 
 
 @dataclass
@@ -182,6 +183,10 @@ class MetricsStore:
 
     def _snapshot_sync(self) -> dict[str, Any]:
         total = self._query_stats(())[()]
+        current_window_started_at = (
+            _now_beijing() - timedelta(seconds=RATE_WINDOW_SECONDS)
+        ).isoformat()
+        recent = self._query_stats((), since_created_at=current_window_started_at)[()]
         caller_types = self._query_stats(("caller_type",))
         caller_types.setdefault(("local",), UsageStats())
         caller_types.setdefault(("visitor",), UsageStats())
@@ -193,6 +198,9 @@ class MetricsStore:
         return {
             "started_at": self._started_at.isoformat(),
             "database_path": str(self.database_path),
+            "rate_window_seconds": RATE_WINDOW_SECONDS,
+            "current_rpm": recent.requests,
+            "current_tpm": recent.total_tokens,
             "total": total.to_dict(),
             "caller_types": {
                 key[0]: stats.to_dict() for key, stats in caller_types.items()
@@ -206,10 +214,12 @@ class MetricsStore:
         }
 
     def _query_stats(
-        self, dimensions: tuple[str, ...]
+        self, dimensions: tuple[str, ...], since_created_at: str | None = None
     ) -> dict[tuple[str, ...], UsageStats]:
         dimension_sql = ", ".join(dimensions)
         select_prefix = f"{dimension_sql}, " if dimension_sql else ""
+        where_sql = " WHERE created_at >= ?" if since_created_at is not None else ""
+        parameters = (since_created_at,) if since_created_at is not None else ()
         group_sql = f" GROUP BY {dimension_sql}" if dimension_sql else ""
         order_sql = f" ORDER BY {dimension_sql}" if dimension_sql else ""
         rows = self._connection.execute(
@@ -232,8 +242,9 @@ class MetricsStore:
                 COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms,
                 MIN(first_token_ms) AS min_first_token_ms,
                 COALESCE(MAX(first_token_ms), 0) AS max_first_token_ms
-            FROM request_metrics{group_sql}{order_sql}
-            """
+            FROM request_metrics{where_sql}{group_sql}{order_sql}
+            """,
+            parameters,
         ).fetchall()
         result: dict[tuple[str, ...], UsageStats] = {}
         for row in rows:
@@ -242,14 +253,20 @@ class MetricsStore:
         if not dimensions and not result:
             result[()] = UsageStats()
 
+        status_where_sql = (
+            " WHERE status_code IS NOT NULL"
+            if since_created_at is None
+            else " WHERE created_at >= ? AND status_code IS NOT NULL"
+        )
         status_rows = self._connection.execute(
             f"""
             SELECT {select_prefix}status_code, COUNT(*) AS total
             FROM request_metrics
-            WHERE status_code IS NOT NULL
+            {status_where_sql}
             {group_sql + (", status_code" if group_sql else " GROUP BY status_code")}
             {order_sql + (", status_code" if order_sql else " ORDER BY status_code")}
-            """
+            """,
+            parameters,
         ).fetchall()
         for row in status_rows:
             key = tuple(str(row[dimension]) for dimension in dimensions)

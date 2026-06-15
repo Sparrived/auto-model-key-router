@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from io import StringIO
 import json
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 import sqlite3
 import subprocess
@@ -24,6 +25,55 @@ def render_plain(renderable) -> str:
     console = Console(file=buffer, force_terminal=False, width=180)
     console.print(renderable)
     return buffer.getvalue()
+
+
+def test_request_stats_renderable_shows_current_rpm_and_tpm(tmp_path: Path, monkeypatch) -> None:
+    database_path = tmp_path / "metrics.db"
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=logs_tui.BEIJING_TZ)
+    monkeypatch.setattr(logs_tui, "datetime", type("FrozenDateTime", (), {"now": staticmethod(lambda tz=None: now)}))
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE request_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                caller_type TEXT NOT NULL DEFAULT 'local',
+                model_id TEXT NOT NULL,
+                key_name TEXT NOT NULL,
+                status_code INTEGER,
+                success INTEGER NOT NULL,
+                retried INTEGER NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_hit INTEGER NOT NULL DEFAULT 0,
+                first_token_ms INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        rows = [
+            ((now - timedelta(seconds=30)).isoformat(), "local", "model-a", "key-a", 200, 1, 0, 3, 7, 10, 0, 0, 100, 500),
+            ((now - timedelta(seconds=90)).isoformat(), "local", "model-a", "key-a", 200, 1, 0, 5, 5, 10, 0, 0, 120, 550),
+        ]
+        connection.executemany(
+            """
+            INSERT INTO request_metrics (
+                created_at, caller_type, model_id, key_name, status_code, success, retried,
+                prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_hit,
+                first_token_ms, duration_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        connection.commit()
+
+    output = render_plain(logs_tui.request_stats_renderable(str(database_path), 1, 10))
+
+    assert "近1分钟 RPM" in output
+    assert "近1分钟 TPM" in output
+    assert "10" in output
 
 
 def test_parse_sgr_mouse_sequence_reads_wheel_events() -> None:

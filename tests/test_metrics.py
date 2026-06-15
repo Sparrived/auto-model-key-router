@@ -35,6 +35,9 @@ def test_snapshot_aggregates_dimensions_in_sql(tmp_path: Path) -> None:
         return snapshot
 
     snapshot = anyio.run(run)
+    assert snapshot["rate_window_seconds"] == 60
+    assert snapshot["current_rpm"] == 2
+    assert snapshot["current_tpm"] == 10
     total = snapshot["total"]
     assert total["requests"] == 2
     assert total["successes"] == 1

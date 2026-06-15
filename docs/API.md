@@ -243,6 +243,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | --- | --- |
 | `started_at` | 当前统计存储实例启动时间 |
 | `database_path` | SQLite 文件路径 |
+| `rate_window_seconds` | 当前 RPM/TPM 统计窗口秒数，默认 `60` |
+| `current_rpm` | 当前窗口内请求数，即近 1 分钟 RPM |
+| `current_tpm` | 当前窗口内 token 总数，即近 1 分钟 TPM |
 | `total` | 全局累计统计 |
 | `caller_types` | 按 `local`、`visitor` 拆分 |
 | `models` | 按真实模型 ID 拆分 |

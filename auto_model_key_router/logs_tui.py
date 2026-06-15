@@ -20,7 +20,7 @@ from rich.text import Text
 
 from .formatting import percent, short_text
 from .log_files import archived_log_paths
-from .metrics import BEIJING_TZ
+from .metrics import BEIJING_TZ, RATE_WINDOW_SECONDS
 from .tui import console, content_scroll_offset, key_pressed, mouse_wheel_mode, posix_input_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame_state
 
 
@@ -381,6 +381,13 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
             FROM request_metrics
             {where_clause}
         """, query_parameters).fetchone()
+        rate_since = (datetime.now(BEIJING_TZ) - timedelta(seconds=RATE_WINDOW_SECONDS)).isoformat()
+        rate_where_clause, rate_query_parameters = stats_filter_query((rate_since,), caller_type, has_caller_type)
+        rate_summary = connection.execute(f"""
+            SELECT COUNT(*) AS rpm, COALESCE(SUM(total_tokens), 0) AS tpm
+            FROM request_metrics
+            {rate_where_clause}
+        """, rate_query_parameters).fetchone()
         status_rows = connection.execute(f"SELECT status_code, COUNT(*) AS total FROM request_metrics {status_where_clause} GROUP BY status_code ORDER BY status_code", query_parameters).fetchall()
         max_page = max((total + page_size - 1) // page_size, 1)
         page = min(page, max_page)
@@ -392,7 +399,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
         table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
     caller_label = caller_type_title(caller_type)
     details_title = f"请求明细 · {caller_label} · {range_label} · 第 {page}/{max_page} 页 · {page_size}/页 · 共 {total} 条"
-    return Group(section_panel(stats_range_tabs_renderable(stats_range_index), "查询范围", "cyan", "[dim]按 Tab 切换[/dim]"), section_panel(request_stats_summary_renderable(summary, status_rows), f"总览 · {caller_label} · {range_label}", "cyan"), section_panel(table, details_title, "blue"))
+    return Group(section_panel(stats_range_tabs_renderable(stats_range_index), "查询范围", "cyan", "[dim]按 Tab 切换[/dim]"), section_panel(request_stats_summary_renderable(summary, status_rows, rate_summary), f"总览 · {caller_label} · {range_label}", "cyan"), section_panel(table, details_title, "blue"))
 
 
 def stats_caller_type(page: str) -> str | None:
@@ -436,7 +443,7 @@ def stats_range_tabs_renderable(active_index: int) -> Align:
     return Align.center("    ".join(labels))
 
 
-def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sqlite3.Row]) -> Table:
+def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sqlite3.Row], rate_summary: sqlite3.Row | None = None) -> Table:
     requests = int(summary["requests"])
     successes = int(summary["successes"])
     failures = int(summary["failures"])
@@ -450,6 +457,9 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     max_first_token_ms = int(summary["max_first_token_ms"])
     avg_duration_ms = int(summary["avg_duration_ms"])
     max_duration_ms = int(summary["max_duration_ms"])
+    current_rpm = int(rate_summary["rpm"]) if rate_summary is not None else 0
+    current_tpm = int(rate_summary["tpm"]) if rate_summary is not None else 0
+    rate_window_label = f"近{RATE_WINDOW_SECONDS // 60}分钟" if RATE_WINDOW_SECONDS % 60 == 0 else f"近{RATE_WINDOW_SECONDS}秒"
     status_codes = ", ".join(f"{row['status_code']}:{row['total']}" for row in status_rows) or "-"
     table = Table(show_header=False, show_lines=False, box=None, expand=True)
     table.add_column("指标", style="cyan")
@@ -460,6 +470,7 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     table.add_column("值", justify="right")
     table.add_row("总请求", str(requests), "成功率", percent(successes, requests), "成功/失败", f"{successes}/{failures}")
     table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{prompt_tokens}/{completion_tokens}", "总 Tok", str(total_tokens))
-    table.add_row("缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "状态码", short_text(status_codes, 36))
-    table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
+    table.add_row(f"{rate_window_label} RPM", str(current_rpm), f"{rate_window_label} TPM", str(current_tpm), "状态码", short_text(status_codes, 36))
+    table.add_row("缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
+    table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "", "")
     return table
