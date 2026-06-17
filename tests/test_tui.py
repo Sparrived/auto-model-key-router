@@ -763,7 +763,7 @@ def test_tui_switches_unified_model_and_key(tmp_path, monkeypatch) -> None:
     choices = iter(["2", "2"])
     menus: list[list[tuple[str, str]]] = []
 
-    def choose(title, options, selected=0, content=None):
+    def choose(title, options, selected=0, content=None, *, on_key=None):
         menus.append(options)
         return next(choices)
 
@@ -799,7 +799,7 @@ def test_tui_can_restore_unified_model_auto_routing(tmp_path, monkeypatch) -> No
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(dashboard, "select_option", lambda title, options, selected=0, content=None: "a")
+    monkeypatch.setattr(dashboard, "select_option", lambda title, options, selected=0, content=None, **kw: "a")
 
     result = dashboard.switch_unified_model_interactively(config_path, choose_model=False)
 
@@ -840,7 +840,7 @@ def test_one_click_config_menu_routes_to_agent_submenu(tmp_path, monkeypatch) ->
     config_path = tmp_path / "router-config.json"
     choices = iter(["2", "0"])
     agents: list[str] = []
-    monkeypatch.setattr(dashboard, "select_option", lambda title, options, selected=0, content=None: next(choices))
+    monkeypatch.setattr(dashboard, "select_option", lambda title, options, selected=0, content=None, **kw: next(choices))
     monkeypatch.setattr(dashboard, "run_submodule", lambda action: action())
     monkeypatch.setattr(dashboard, "manage_agent_config_interactively", lambda path, agent: agents.append(agent))
 
@@ -854,7 +854,7 @@ def test_model_service_menu_moves_autostart_into_single_entry(tmp_path, monkeypa
     config_path.write_text(json.dumps({"models": []}, ensure_ascii=False), encoding="utf-8")
     menus: list[list[tuple[str, str]]] = []
 
-    def choose(title, options, selected=0, content=None):
+    def choose(title, options, selected=0, content=None, *, on_key=None):
         menus.append(options)
         return "0"
 
@@ -872,7 +872,7 @@ def test_autostart_menu_installs_boot_or_login_when_unregistered(tmp_path, monke
     menus: list[list[tuple[str, str]]] = []
     actions: list[str] = []
 
-    def choose(title, options, selected=0, content=None):
+    def choose(title, options, selected=0, content=None, *, on_key=None):
         menus.append(options)
         return next(choices)
 
@@ -895,7 +895,7 @@ def test_autostart_menu_shows_uninstall_when_registered(tmp_path, monkeypatch) -
     menus: list[list[tuple[str, str]]] = []
     actions: list[str] = []
 
-    def choose(title, options, selected=0, content=None):
+    def choose(title, options, selected=0, content=None, *, on_key=None):
         menus.append(options)
         return next(choices)
 
@@ -1300,7 +1300,7 @@ def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
     menus: list[list[tuple[str, str]]] = []
     opened: list[Path] = []
 
-    def choose(title, options, selected=0, content=None):
+    def choose(title, options, selected=0, content=None, *, on_key=None):
         menus.append(options)
         return next(choices)
 

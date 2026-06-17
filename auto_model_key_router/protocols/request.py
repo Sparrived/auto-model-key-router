@@ -104,7 +104,6 @@ def _normalize_chat_compat_parameters(payload: dict[str, Any]) -> dict[str, Any]
         "previous_response_id",
         "include",
         "store",
-        "prompt_cache_key",
         "safety_identifier",
     ):
         adapted.pop(key, None)

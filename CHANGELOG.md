@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Claude Code 配置生成自动在 `env` 中添加 `CLAUDE_CODE_ATTRIBUTION_HEADER: false`，禁用 CCH（Claude Code Attribution Header）以避免第三方 API 服务的缓存失效问题。
+
 ## [2.1.0] - 2026-06-17
 
 ### Added

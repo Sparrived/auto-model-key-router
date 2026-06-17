@@ -122,6 +122,7 @@ class ModelConfig:
     aliases: tuple[str, ...] = ()
     routing_mode: str = "round_robin"
     reasoning_effort: str | None = None
+    native_first: bool = True
 
 
 @dataclass(frozen=True)
@@ -183,7 +184,8 @@ class RouterConfig:
             reasoning_effort = str(model.get("reasoning_effort") or "").strip() or None
             if reasoning_effort in {"default", "downstream"}:
                 reasoning_effort = None
-            models.append(ModelConfig(id=str(model["id"]), keys=keys, aliases=aliases, routing_mode=routing_mode, reasoning_effort=reasoning_effort))
+            native_first = bool(model.get("native_first", True))
+            models.append(ModelConfig(id=str(model["id"]), keys=keys, aliases=aliases, routing_mode=routing_mode, reasoning_effort=reasoning_effort, native_first=native_first))
 
         unified_model = None
         raw_unified_model = raw.get("unified_model")
@@ -266,3 +268,9 @@ class RouterConfig:
             if model_name == model.id or model_name in model.aliases:
                 return model.id
         return None
+
+    def native_first_for_model(self, model_id: str) -> bool:
+        for model in self.models:
+            if model.id == model_id:
+                return model.native_first
+        return True

@@ -4,8 +4,10 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
+import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 if sys.platform == "win32":
@@ -652,7 +654,14 @@ def prompt_text(
                 refresh()
 
 
-def select_option(title: str, options: list[tuple[str, str]], selected: int = 0, content: Any | None = None) -> str:
+def select_option(
+    title: str,
+    options: list[tuple[str, str]],
+    selected: int = 0,
+    content: Any | None = None,
+    *,
+    on_key: Callable[[str], str | None] | None = None,
+) -> str:
     frame_offset = 0
     frame_state = render_option_menu_state(title, options, selected, content, frame_offset)
     last_wheel_key: str | None = None
@@ -674,6 +683,10 @@ def select_option(title: str, options: list[tuple[str, str]], selected: int = 0,
     with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
         while True:
             key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
+            if on_key is not None:
+                result = on_key(key)
+                if result is not None:
+                    return result
             if key == "cancel":
                 return options[-1][0]
             if key in WHEEL_KEYS:
@@ -850,3 +863,19 @@ def show_result_page(title: str, content: Any) -> None:
             status = section_panel(message, "复制结果", "green" if copied else "yellow")
             continue
         return
+
+
+def open_config_file(config_path: Path) -> str:
+    path = Path(config_path)
+    if not path.exists():
+        return f"配置文件不存在: {path}"
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-t", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (AttributeError, OSError, ValueError) as exc:
+        return f"无法打开配置文件: {exc}"
+    return f"已使用默认文本编辑器打开: {path}"

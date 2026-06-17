@@ -122,7 +122,13 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `POST /v1/messages`
 
-请求会转换为上游 `/v1/chat/completions`，响应再转换为 Anthropic Messages JSON 或 SSE。
+请求会优先以原生 Anthropic 格式发送到上游 `/v1/messages`，保留所有原生字段（包括 `cache_control`、`prompt_cache_key` 等）。如果上游不支持原生端点（返回 404/405/501），自动回退到转换为 `/v1/chat/completions` 格式。
+
+**原生优先模式**（默认启用）：
+- 首次请求时自动测试上游是否支持 `/v1/messages` 端点
+- 测试结果缓存在 key_state 中，避免重复测试
+- 支持原生端点时保留所有 Anthropic 原生字段，提高缓存命中率
+- 可通过配置 `native_first: false` 禁用
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -134,10 +140,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `tool_choice` | object | 否 | 支持 `auto`、`none`、`any` 和指定 `tool` |
 | `stop_sequences` | array | 否 | 转换为 `stop` |
 | `stream` | boolean | 否 | 返回 Anthropic 风格 SSE |
+| `prompt_cache_key` | string | 否 | 原生模式下保留，用于缓存路由 |
+| `cache_control` | object | 否 | 原生模式下保留在 content block 中 |
 
-以下 Anthropic 或 Responses 顶层字段在转发前会移除：
+以下字段仅在回退到 chat/completions 模式时移除：
 
-`anthropic_version`、`metadata`、`reasoning`、`text`、`truncation`、`previous_response_id`、`include`、`store`、`prompt_cache_key`、`safety_identifier`。
+`anthropic_version`、`metadata`、`reasoning`、`text`、`truncation`、`previous_response_id`、`include`、`store`、`safety_identifier`。
 
 ### Token 估算
 

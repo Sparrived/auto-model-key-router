@@ -77,11 +77,16 @@ def _upstream_body(
     model_id: str,
     config: RouterConfig | None = None,
     stream: bool = False,
+    native: bool = False,
 ) -> bytes:
     if not payload or "model" not in payload:
         return body
     upstream_payload = dict(payload)
     upstream_payload["model"] = model_id
+    if native:
+        return json.dumps(
+            upstream_payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
     upstream_payload = _apply_reasoning_effort(upstream_payload, model_id, config)
     upstream_payload = _adapt_message_payload(upstream_payload)
     if stream:
@@ -115,7 +120,9 @@ def _apply_reasoning_effort(
     return adapted
 
 
-def _upstream_path(path: str, payload: dict[str, Any]) -> str:
+def _upstream_path(path: str, payload: dict[str, Any], native: bool = False) -> str:
+    if native:
+        return path
     if (
         path in {"messages", "responses"}
         and isinstance(payload, dict)
@@ -313,3 +320,60 @@ def _json_bytes(content: bytes) -> Any:
         return json.loads(content.decode("utf-8"))
     except ValueError:
         return None
+
+
+# 不支持原生 Anthropic 端点的状态码
+UNSUPPORTED_ENDPOINT_STATUS_CODES = {404, 405, 501}
+
+
+async def test_native_messages_support(
+    client: httpx.AsyncClient,
+    base_url: str,
+    api_key: str,
+    model_id: str,
+) -> bool:
+    """测试上游是否支持原生 /v1/messages 端点
+    
+    发送一个最小化的测试请求，根据响应判断是否支持。
+    返回 True 表示支持，False 表示不支持。
+    """
+    test_url = f"{base_url.rstrip('/')}/v1/messages"
+    test_body = {
+        "model": model_id,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "test"}],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    try:
+        response = await client.post(
+            test_url,
+            json=test_body,
+            headers=headers,
+            timeout=httpx.Timeout(10.0),
+        )
+        # 如果返回这些状态码，说明端点不存在或不支持
+        if response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
+            LOGGER.info(
+                "endpoint %s returned %d, native messages not supported",
+                test_url,
+                response.status_code,
+            )
+            return False
+        # 其他状态码（包括认证错误、参数错误等）说明端点存在
+        LOGGER.info(
+            "endpoint %s returned %d, native messages supported",
+            test_url,
+            response.status_code,
+        )
+        return True
+    except httpx.RequestError as exc:
+        LOGGER.warning(
+            "endpoint %s test failed: %s, assuming native messages not supported",
+            test_url,
+            exc,
+        )
+        return False

@@ -270,6 +270,29 @@ AMKR 会在转发给上游前把请求体里的模型名改写为真实模型 ID
 - 冷却状态会写入 `key-state.json`，服务重启后仍能保留。
 - `upstream_health_check_interval` 大于 `0` 时，冷却中的 Key 会被健康探测恢复。
 
+### 原生 Anthropic 端点优先
+
+对于 Anthropic Messages 请求（`/v1/messages`），可设置 `native_first` 控制是否优先使用原生格式：
+
+```json
+{
+  "id": "claude-3-opus",
+  "native_first": true,
+  "keys": [...]
+}
+```
+
+| 设置 | 行为 |
+| --- | --- |
+| `true`（默认） | 优先以原生格式发送到上游 `/v1/messages`，保留所有 Anthropic 字段（`cache_control`、`prompt_cache_key` 等），提高缓存命中率 |
+| `false` | 直接转换为 `/v1/chat/completions` 格式 |
+
+原生优先模式工作流程：
+1. 首次请求时自动测试上游是否支持 `/v1/messages` 端点
+2. 测试结果按上游 URL 记录在 `key-state.json` 的 `url_native_support` 中（同一 URL 的所有 key 共享结果）
+3. 如果上游返回 404/405/501，自动回退到 `chat/completions` 格式并记录结果
+4. 如需重新测试，可删除 `key-state.json` 中对应的 `url_native_support` 条目
+
 ---
 
 ## 8. 统一模型 `unified-model`

@@ -52,6 +52,7 @@ from .tui import (
     content_scroll_offset,
     menu_table,
     mouse_wheel_mode,
+    open_config_file,
     posix_input_mode,
     read_key_responsive,
     run_submodule,
@@ -143,13 +144,21 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             config = RouterConfig.load(config_path)
 
 
+def _open_config_on_key(config_path: Path, key: str) -> str | None:
+    if key in {"o", "O"}:
+        open_config_file(config_path)
+    return None
+
+
 def manage_unified_model_interactively(config_path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(config_path, key)
     while True:
         config = RouterConfig.load(config_path)
         choice = select_option(
             "统一模型",
             [("1", "切换模型和 Key"), ("2", "仅切换 Key"), ("0", "返回")],
             content=unified_model_status_panel(config),
+            on_key=on_key,
         )
         if choice == "0":
             return
@@ -269,8 +278,9 @@ def manage_cli_settings_interactively(
     config_path: Path, update_result: VersionCheckResult | None = None
 ) -> VersionCheckResult | UpdateInstallOutcome | None:
     latest_result = update_result
+    on_key = lambda key: _open_config_on_key(config_path, key)
     while True:
-        choice = select_option("CLI 设置", SETTINGS_OPTIONS)
+        choice = select_option("CLI 设置", SETTINGS_OPTIONS, on_key=on_key)
         if choice == "0":
             return latest_result
         if choice == "1":
@@ -300,8 +310,9 @@ def manage_cli_settings_interactively(
 
 
 def manage_one_click_config_interactively(config_path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(config_path, key)
     while True:
-        choice = select_option("一键配置", ONE_CLICK_OPTIONS)
+        choice = select_option("一键配置", ONE_CLICK_OPTIONS, on_key=on_key)
         if choice == "0":
             return
         if choice == "1":
@@ -456,6 +467,7 @@ def select_menu_option(
     )
     last_wheel_key: str | None = None
     last_wheel_at = 0.0
+    status_message: str | None = None
 
     def refresh(*, ensure_selected_visible: bool) -> None:
         nonlocal frame_offset, frame_state
@@ -466,6 +478,7 @@ def select_menu_option(
             update_result,
             frame_offset,
             ensure_selected_visible=ensure_selected_visible,
+            status_message=status_message,
         )
         frame_offset = frame_state.offset
         live.update(frame_state.renderable, refresh=True)
@@ -485,6 +498,10 @@ def select_menu_option(
                     for index, option in enumerate(MENU_OPTIONS)
                     if option[0] == "0"
                 )
+            if key in {"o", "O"}:
+                status_message = open_config_file(config_path)
+                refresh(ensure_selected_visible=False)
+                continue
             if key in {"scroll_up", "scroll_down"}:
                 handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(
                     key, last_wheel_key, last_wheel_at
@@ -529,6 +546,7 @@ def render_terminal_ui_state(
     frame_offset: int = 0,
     *,
     ensure_selected_visible: bool = True,
+    status_message: str | None = None,
 ) -> Any:
     update_notice = render_update_notice(update_result)
     renderables = [
@@ -541,6 +559,8 @@ def render_terminal_ui_state(
     ]
     if update_notice is not None:
         renderables.append(update_notice)
+    if status_message:
+        renderables.append(section_panel(status_message, "提示", "green" if status_message.startswith("已") else "yellow"))
     renderables.append(
         section_panel(
             menu_table(MENU_OPTIONS, selected),
@@ -550,10 +570,10 @@ def render_terminal_ui_state(
         )
     )
     shortcuts = (
-        "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 查看概览  ·  数字快捷键  ·  Ctrl+C 退出"
+        "↑/↓ 选择  ·  Enter 确认  ·  O 打开配置文件  ·  PgUp/PgDn 查看概览  ·  数字快捷键  ·  Ctrl+C 退出"
     )
     if sys.platform == "win32":
-        shortcuts = "↑/↓/滚轮 选择  ·  Enter 确认  ·  PgUp/PgDn 查看概览  ·  数字快捷键  ·  Ctrl+C 退出"
+        shortcuts = "↑/↓/滚轮 选择  ·  Enter 确认  ·  O 打开配置文件  ·  PgUp/PgDn 查看概览  ·  数字快捷键  ·  Ctrl+C 退出"
     return terminal_frame_state(
         renderables,
         shortcut_text(shortcuts),
@@ -574,6 +594,7 @@ def render_terminal_ui(
 
 
 def manage_system_service_interactively(config_path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(config_path, key)
     while True:
         choice = select_option(
             "模型服务",
@@ -586,6 +607,7 @@ def manage_system_service_interactively(config_path: Path) -> None:
                 ("0", "返回"),
             ],
             selected=4,
+            on_key=on_key,
         )
         actions = {"2": "start", "3": "stop", "4": "restart", "5": "status"}
         if choice == "0":

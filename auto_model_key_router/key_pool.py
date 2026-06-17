@@ -28,6 +28,7 @@ class KeyPool:
         self._cursors = defaultdict(int)
         self._active_requests = defaultdict(int)
         self._states = defaultdict(KeyState)
+        self._url_native_support: dict[str, bool] = {}  # base_url -> 是否支持原生端点
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
         self._load_states()
@@ -319,6 +320,20 @@ class KeyPool:
             for (model_id, key_name), state in self._states.items()
         }
 
+    def url_native_support_states(self) -> dict[str, bool]:
+        """返回所有 URL 的原生端点支持状态"""
+        return dict(self._url_native_support)
+
+    def supports_native_messages(self, base_url: str) -> bool | None:
+        """返回 None=未测试, True/False=已测试结果"""
+        return self._url_native_support.get(base_url.rstrip("/"))
+
+    async def update_native_support(self, base_url: str, supported: bool) -> None:
+        key = base_url.rstrip("/")
+        async with self._lock:
+            self._url_native_support[key] = supported
+        await self._persist_states()
+
     def _failure_cooldown_seconds(
         self, state: KeyState, retry_after: float | None
     ) -> float:
@@ -345,7 +360,8 @@ class KeyPool:
 
     def _load_states(self) -> None:
         valid_keys = self._valid_state_keys()
-        for item in self._state_store.load():
+        keys_data, url_native_support = self._state_store.load()
+        for item in keys_data:
             if not isinstance(item, dict):
                 continue
             model_id = str(item.get("model_id") or "")
@@ -358,6 +374,10 @@ class KeyPool:
                 last_status_code=item.get("last_status_code"),
                 disabled=bool(item.get("disabled", False)),
             )
+        # 加载 URL 级别的原生支持数据
+        for url, supported in url_native_support.items():
+            if isinstance(supported, bool):
+                self._url_native_support[url] = supported
 
     async def _persist_states(self) -> None:
         async with self._persist_lock:
@@ -371,4 +391,5 @@ class KeyPool:
                     )
                     for key, state in self._states.items()
                 }
-            await self._state_store.save(states)
+                url_native_support = dict(self._url_native_support)
+            await self._state_store.save(states, url_native_support)

@@ -13,17 +13,25 @@ class KeyStateStore:
         self.path = Path(path)
         self._write_lock = asyncio.Lock()
 
-    def load(self) -> list[dict[str, Any]]:
+    def load(self) -> tuple[list[dict[str, Any]], dict[str, bool]]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return []
+            return [], {}
         keys = raw.get("keys", [])
-        return keys if isinstance(keys, list) else []
+        url_native_support = raw.get("url_native_support", {})
+        return (
+            keys if isinstance(keys, list) else [],
+            url_native_support if isinstance(url_native_support, dict) else {},
+        )
 
-    async def save(self, states: dict[tuple[str, str], Any]) -> None:
+    async def save(
+        self,
+        states: dict[tuple[str, str], Any],
+        url_native_support: dict[str, bool] | None = None,
+    ) -> None:
         payload = {
-            "version": 1,
+            "version": 2,
             "keys": [
                 {"model_id": model_id, "key_name": key_name, **asdict(state)}
                 for (model_id, key_name), state in sorted(states.items())
@@ -33,6 +41,8 @@ class KeyStateStore:
                 or state.disabled
             ],
         }
+        if url_native_support:
+            payload["url_native_support"] = dict(sorted(url_native_support.items()))
         async with self._write_lock:
             await asyncio.to_thread(self._write_atomic, payload)
 

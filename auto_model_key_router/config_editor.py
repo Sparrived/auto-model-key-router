@@ -23,6 +23,7 @@ from .tui import (
     console,
     content_scroll_offset,
     mouse_wheel_mode,
+    open_config_file,
     page_title,
     posix_input_mode,
     prompt_text,
@@ -59,7 +60,14 @@ def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -
     return "[dim]功能未安装[/dim]"
 
 
+def _open_config_on_key(path: Path, key: str) -> str | None:
+    if key in {"o", "O"}:
+        open_config_file(path)
+    return None
+
+
 def manage_model_keys_interactively(path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(path, key)
     while True:
         choice = select_option(
             "模型 Key",
@@ -72,6 +80,7 @@ def manage_model_keys_interactively(path: Path) -> None:
                 ("6", "模型别称"),
                 ("0", "返回"),
             ],
+            on_key=on_key,
         )
         if choice == "0":
             return
@@ -102,6 +111,7 @@ def manage_model_keys_interactively(path: Path) -> None:
 
 
 def manage_model_aliases_interactively(path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(path, key)
     while True:
         data = load_config_data(path)
         models = data.get("models", [])
@@ -129,7 +139,7 @@ def manage_model_aliases_interactively(path: Path) -> None:
                 )
             )
         options.append(("0", "返回"))
-        choice = select_option("选择要设置别称的模型", options)
+        choice = select_option("选择要设置别称的模型", options, on_key=on_key)
         if choice == "0":
             return
         model_id = str(models[int(choice) - 1].get("id") or "")
@@ -139,6 +149,7 @@ def manage_model_aliases_interactively(path: Path) -> None:
 
 
 def manage_selected_model_aliases_interactively(path: Path, model_id: str) -> None:
+    on_key = lambda key: _open_config_on_key(path, key)
     while True:
         data = load_config_data(path)
         model = find_model(data.get("models", []), model_id)
@@ -157,6 +168,7 @@ def manage_selected_model_aliases_interactively(path: Path, model_id: str) -> No
             f"模型别称 · {short_text(model_id, 28)}",
             options,
             content=model_aliases_panel(model),
+            on_key=on_key,
         )
         if choice == "0":
             return
@@ -295,6 +307,7 @@ def save_model_alias_change(
 
 
 def manage_selected_key_interactively(path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(path, key)
     while True:
         selection = select_api_key(path, "选择要管理的 Key")
         if selection is None:
@@ -334,6 +347,7 @@ def manage_selected_key_interactively(path: Path) -> None:
                     "Key 信息",
                     "cyan",
                 ),
+                on_key=on_key,
             )
             if choice == "0":
                 break
@@ -505,9 +519,11 @@ def toggle_visitor_access_interactively(
 
 
 def manage_config_transfer_interactively(path: Path) -> None:
+    on_key = lambda key: _open_config_on_key(path, key)
     while True:
         choice = select_option(
-            "配置迁移", [("1", "复制 Key 配置"), ("2", "粘贴并应用"), ("0", "返回")]
+            "配置迁移", [("1", "复制 Key 配置"), ("2", "粘贴并应用"), ("0", "返回")],
+            on_key=on_key,
         )
         if choice == "0":
             return

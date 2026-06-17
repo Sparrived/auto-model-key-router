@@ -29,6 +29,7 @@ from .protocol_compat import (
     _stream_usage,
 )
 from .proxy_support import (
+    UNSUPPORTED_ENDPOINT_STATUS_CODES,
     _authorization_mode,
     _debug_report,
     _is_stream_request,
@@ -45,6 +46,7 @@ from .proxy_support import (
     _upstream_headers,
     _upstream_path,
     _upstream_timeout,
+    test_native_messages_support,
 )
 from .runtime import RuntimeResources
 from .routing import RetryPolicy
@@ -68,9 +70,11 @@ class ProxyRequestContext:
     requested_key_name: str | None
     model_id: str
     upstream_body: bytes
+    original_body: bytes  # 原始请求体，用于原生模式
     key_count: int
     only_first: bool
     attempts: int
+    use_native: bool = False  # 是否使用原生 Anthropic 格式
 
 
 @dataclass(frozen=True)
@@ -199,6 +203,11 @@ async def _prepare_proxy_request(
         requested_key_name=requested_key_name,
         only_first=only_first,
     )
+    # 判断是否使用原生 Anthropic 格式
+    use_native = (
+        path == "messages"
+        and runtime.config.native_first_for_model(model_id)
+    )
     return ProxyRequestContext(
         path=path,
         request=request,
@@ -214,9 +223,11 @@ async def _prepare_proxy_request(
         upstream_body=_upstream_body(
             body, payload, model_id, runtime.config, stream=is_stream
         ),
+        original_body=body,
         key_count=key_count,
         only_first=only_first,
         attempts=attempts,
+        use_native=use_native,
     )
 
 
@@ -266,10 +277,35 @@ async def _execute_attempt(
     context: ProxyRequestContext, key: KeyConfig, attempt: int
 ) -> AttemptOutcome:
     runtime = context.runtime
+    
+    # 确定是否对这个 key 使用原生格式
+    use_native = context.use_native
+    if use_native:
+        # 检查这个 base_url 的原生支持状态（URL 级别）
+        native_support = runtime.key_pool.supports_native_messages(key.base_url)
+        if native_support is None:
+            # 未测试过，先测试
+            native_support = await test_native_messages_support(
+                runtime.http_client, key.base_url, key.api_key, context.model_id
+            )
+            await runtime.key_pool.update_native_support(key.base_url, native_support)
+        use_native = native_support
+    
     upstream = _join_url(
-        key.base_url, f"/v1/{_upstream_path(context.path, context.payload)}"
+        key.base_url, f"/v1/{_upstream_path(context.path, context.payload, native=use_native)}"
     )
+    # 根据是否原生模式选择 body
+    if use_native:
+        upstream_body = _upstream_body(
+            context.original_body, context.payload, context.model_id, native=True
+        )
+    else:
+        upstream_body = context.upstream_body
+    
     headers = _upstream_headers(context.request, key.api_key)
+    if use_native:
+        headers["anthropic-version"] = "2023-06-01"
+    
     _debug_report(
         "upstream-attempt",
         {
@@ -278,6 +314,7 @@ async def _execute_attempt(
             "requested_model_id": context.requested_model_id,
             "key_name": key.name,
             "stream": context.is_stream,
+            "native": use_native,
         },
     )
     started = perf_counter()
@@ -287,7 +324,7 @@ async def _execute_attempt(
             context.request,
             upstream,
             headers,
-            context.upstream_body,
+            upstream_body,
             stream=context.is_stream,
             timeout=_upstream_timeout(runtime.config, context.is_stream),
         )
@@ -302,6 +339,7 @@ async def _execute_attempt(
                 "error_type": exc.__class__.__name__,
                 "error": str(exc),
                 "duration_ms": duration_ms,
+                "native": use_native,
             },
         )
         await runtime.metrics.record(
@@ -324,6 +362,67 @@ async def _execute_attempt(
         )
 
     duration_ms = _elapsed_ms(started)
+    
+    # 原生模式下遇到不支持的状态码，回退到非原生模式
+    if use_native and response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
+        content = await response.aread()
+        await response.aclose()
+        LOGGER.info(
+            "native messages endpoint returned %d for %s, falling back to chat/completions",
+            response.status_code,
+            key.base_url,
+        )
+        # 标记该 URL 不支持原生端点
+        await runtime.key_pool.update_native_support(key.base_url, False)
+        # 使用非原生模式重试
+        fallback_path = _upstream_path(context.path, context.payload, native=False)
+        fallback_upstream = _join_url(key.base_url, f"/v1/{fallback_path}")
+        fallback_body = context.upstream_body
+        fallback_headers = _upstream_headers(context.request, key.api_key)
+        _debug_report(
+            "upstream-fallback",
+            {
+                "upstream": fallback_upstream,
+                "model_id": context.model_id,
+                "key_name": key.name,
+                "original_status": response.status_code,
+            },
+        )
+        fallback_started = perf_counter()
+        try:
+            fallback_response = await _send_upstream(
+                runtime.http_client,
+                context.request,
+                fallback_upstream,
+                fallback_headers,
+                fallback_body,
+                stream=context.is_stream,
+                timeout=_upstream_timeout(runtime.config, context.is_stream),
+            )
+        except httpx.RequestError as exc:
+            fallback_duration_ms = _elapsed_ms(fallback_started)
+            await runtime.metrics.record(
+                context.model_id,
+                key.name,
+                None,
+                retried=True,
+                failed=True,
+                duration_ms=fallback_duration_ms,
+                first_token_ms=fallback_duration_ms,
+                requested_model_id=context.requested_model_id,
+                caller_type=context.caller_type,
+            )
+            await runtime.key_pool.mark_failure(context.model_id, key.name)
+            return AttemptOutcome(
+                retry_error=JSONResponse(
+                    {"error": {"message": f"上游请求失败: {exc.__class__.__name__}"}},
+                    status_code=502,
+                )
+            )
+        # 使用回退响应继续处理
+        response = fallback_response
+        duration_ms = _elapsed_ms(started)
+    
     if (
         response.status_code in RETRYABLE_STATUS_CODES
         and attempt + 1 < context.attempts
