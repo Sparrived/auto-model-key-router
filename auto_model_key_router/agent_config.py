@@ -209,6 +209,7 @@ def _configure_claude_code(current: bytes, config: RouterConfig) -> bytes:
             "ANTHROPIC_DEFAULT_OPUS_MODEL": UNIFIED_MODEL_ID,
         }
     )
+    data["anthropic_attribution_header"] = False
     return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
 
 
