@@ -93,6 +93,7 @@ def make_config(
                 aliases=("alias-model",),
                 routing_mode=routing_mode,
                 reasoning_effort=reasoning_effort,
+                native_first=False,
                 keys=keys,
             ),
         ),

@@ -37,7 +37,7 @@ def test_success_without_failure_does_not_persist_empty_state(
     pool = make_pool(tmp_path)
     writes: list[dict[tuple[str, str], object]] = []
 
-    async def save(states):
+    async def save(states, url_native_support=None):
         writes.append(states)
 
     monkeypatch.setattr(pool._state_store, "save", save)
@@ -53,7 +53,7 @@ def test_failure_and_recovery_persist_state_transitions(
     pool = make_pool(tmp_path)
     writes: list[dict[tuple[str, str], object]] = []
 
-    async def save(states):
+    async def save(states, url_native_support=None):
         writes.append(states)
 
     monkeypatch.setattr(pool._state_store, "save", save)

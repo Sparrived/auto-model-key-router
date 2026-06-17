@@ -439,13 +439,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"标签 {tag} 已存在。")
     step(STEP_TITLES["install"])
     install_dev_environment()
+    if not args.skip_tests:
+        step(STEP_TITLES["tests"])
+        run_command([sys.executable, "-m", "pytest"])
     notes = args.notes if args.notes is not None else prompt_notes()
     write_project_version(next_version)
     update_changelog(next_version, date.today().isoformat(), notes)
     success("已更新 pyproject.toml 和 CHANGELOG.md")
-    if not args.skip_tests:
-        step(STEP_TITLES["tests"])
-        run_command([sys.executable, "-m", "pytest"])
     if not args.skip_build:
         step(STEP_TITLES["build"])
         run_command([sys.executable, "-m", "build"])
