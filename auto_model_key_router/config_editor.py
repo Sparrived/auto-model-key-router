@@ -768,7 +768,7 @@ def discover_upstream_models(
             response.raise_for_status()
             data = response.json()
         model_ids = [item["id"] for item in data.get("data", [])]
-        return sorted(mid for mid in model_ids if mid not in existing_model_ids)
+        return sorted(model_ids)
     except (httpx.RequestError, httpx.HTTPStatusError, KeyError, TypeError, ValueError):
         return []
 
@@ -880,15 +880,19 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
 
     added_by_discovery = 0
     if discovered_new_models:
+        skip_marker = "__skip__"
+        multi_options = [(mid, mid) for mid in discovered_new_models]
+        multi_options.append((skip_marker, "跳过，不批量添加"))
         selected_multi = select_multiple(
             "快速添加其他模型",
-            [(mid, mid) for mid in discovered_new_models],
+            multi_options,
             content=section_panel(
                 f"探测到 [bold]{len(discovered_new_models)}[/bold] 个其他模型，选择要一同添加的模型。",
                 "批量添加",
                 "cyan",
             ),
         )
+        selected_multi = [mid for mid in selected_multi if mid != skip_marker]
         if selected_multi:
             added_by_discovery = _add_discovered_models(path, selected_multi, api_key, base_url)
             if added_by_discovery > 0:

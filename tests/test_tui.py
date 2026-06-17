@@ -1634,7 +1634,7 @@ def test_discover_upstream_models_success(monkeypatch) -> None:
         "https://api.example.com", "sk-test", {"existing-model"}
     )
 
-    assert result == ["gpt-3.5-turbo", "gpt-4o"]
+    assert result == ["existing-model", "gpt-3.5-turbo", "gpt-4o"]
 
 
 def test_discover_upstream_models_failure(monkeypatch) -> None:
