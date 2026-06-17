@@ -50,6 +50,7 @@ def test_configure_claude_code_preserves_settings_and_rolls_back_exactly(tmp_pat
     assert configured["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
     assert configured["env"]["ANTHROPIC_AUTH_TOKEN"] == "local-key"
     assert configured["env"]["ANTHROPIC_MODEL"] == UNIFIED_MODEL_ID
+    assert configured["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert result.router_url == "http://127.0.0.1:8000"
     assert get_agent_config_status(CLAUDE_CODE, target_path=target, backup_path=backup).current_is_applied
 

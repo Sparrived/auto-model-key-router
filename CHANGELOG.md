@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-06-17
+
+### Added
+- 新增上游模型自动探测功能，通过调用兼容 OpenAI 格式的 `/v1/models` 接口获取可用模型列表，支持批量多选添加探测到的新模型。
+- 新增 TUI 多选菜单组件，支持带复选框的表格展示、完整的快捷键操作（空格切换选中、A 键全选/取消、上下/翻页导航等）。
+- 新增近 1 分钟 RPM 和 TPM 实时统计功能，在 TUI 总览界面展示当前 RPM 和 TPM 数据，默认统计窗口为 60 秒。
+
+### Changed
+- Claude Code 配置生成自动添加 `anthropic_attribution_header: false`，禁用 CCH（Claude Code Attribution Header）以避免第三方 API 服务的缓存失效问题。
+
 ## [2.0.2] - 2026-06-15
 
 ### Added

@@ -207,6 +207,7 @@ def _configure_claude_code(current: bytes, config: RouterConfig) -> bytes:
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": UNIFIED_MODEL_ID,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": UNIFIED_MODEL_ID,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": UNIFIED_MODEL_ID,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
     )
     data["anthropic_attribution_header"] = False
