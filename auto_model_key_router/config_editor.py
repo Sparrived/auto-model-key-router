@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 from rich.console import Group
 from rich.live import Live
 from rich.table import Table
@@ -13,6 +14,7 @@ from rich.table import Table
 from .config import RouterConfig, generate_local_api_key, load_config_data
 from .config_service import commit_config_data
 from .formatting import compact_url, key_fingerprint, short_text
+from .proxy_support import _join_url
 from .service import restart_service_after_config_change
 from .tui import (
     ResultPage,
@@ -27,6 +29,7 @@ from .tui import (
     read_key_responsive,
     run_submodule,
     section_panel,
+    select_multiple,
     select_option,
     shortcut_text,
     should_handle_wheel,
@@ -734,11 +737,78 @@ def select_base_url_for_new_key(
     return base_urls[int(choice) - 1]
 
 
+def discover_upstream_models(
+    base_url: str,
+    api_key: str,
+    existing_model_ids: set[str],
+    timeout: float = 15.0,
+) -> list[str]:
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(
+                _join_url(base_url, "/v1/models"),
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+        model_ids = [item["id"] for item in data.get("data", [])]
+        return sorted(mid for mid in model_ids if mid not in existing_model_ids)
+    except (httpx.RequestError, httpx.HTTPStatusError, KeyError, TypeError, ValueError):
+        return []
+
+
+def _select_model_with_discovery(
+    models: list[dict[str, Any]],
+    base_url: str,
+    api_key: str,
+) -> tuple[str | None, list[str]]:
+    existing_ids = {str(model.get("id") or "") for model in models}
+    with console.status("[cyan]正在探测上游可用模型...[/cyan]", spinner="dots"):
+        discovered = discover_upstream_models(base_url, api_key, existing_ids)
+    available = [mid for mid in discovered if find_model(models, mid) is not None]
+    new_models = [mid for mid in discovered if mid not in existing_ids]
+    manual_entry = ("n", "自定义添加新的模型 ID")
+    return_entry = ("0", "返回")
+
+    if available or new_models:
+        options: list[tuple[str, str]] = []
+        for mid in available:
+            model = find_model(models, mid)
+            options.append((mid, f"{short_text(mid, 32)} · 已有 · {len(model.get('keys', []))} Key"))
+        for mid in new_models:
+            options.append((mid, f"{short_text(mid, 32)} · 新模型"))
+        options.extend([manual_entry, return_entry])
+        content = section_panel(
+            f"已探测到 [bold]{len(discovered)}[/bold] 个上游模型，直接选择即可为已有模型添加 Key，或选择新模型。",
+            "发现上游模型",
+            "cyan",
+        )
+        choice = select_option("选择模型", options, content=content)
+    else:
+        return select_model_id_for_new_key(models), []
+
+    if choice == "0":
+        return None, []
+    if choice == "n":
+        return prompt_text("添加 Key", "新模型 ID").strip(), new_models
+    return choice, new_models
+
+
 def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     data = load_config_data(path)
     old_config = RouterConfig.from_dict(data)
     models = data.setdefault("models", [])
-    model_id = select_model_id_for_new_key(models)
+
+    base_url = select_base_url_for_new_key(data, {"keys": []})
+    if base_url is None:
+        return None
+    if not base_url:
+        return section_panel("[red]上游 base_url 不能为空[/red]", "添加失败", "red")
+    api_key = prompt_text("添加 Key", "API key", password=True).strip()
+    if not api_key:
+        return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
+
+    model_id, discovered_new_models = _select_model_with_discovery(models, base_url, api_key)
     if model_id is None:
         return None
     if not model_id:
@@ -788,20 +858,32 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
         prompt_text("添加 Key", "Key 名称", default=default_key_name).strip()
         or default_key_name
     )
-    base_url = select_base_url_for_new_key(data, model)
-    if base_url is None:
-        return None
-    if not base_url:
-        return section_panel("[red]上游 base_url 不能为空[/red]", "添加失败", "red")
-    api_key = prompt_text("添加 Key", "API key", password=True).strip()
-    if not api_key:
-        return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
 
     keys.append({"name": key_name, "api_key": api_key, "base_url": base_url})
     new_config = commit_config_data(path, data, old_config).new_config
+
+    added_by_discovery = 0
+    if discovered_new_models:
+        selected_multi = select_multiple(
+            "快速添加其他模型",
+            [(mid, mid) for mid in discovered_new_models],
+            content=section_panel(
+                f"探测到 [bold]{len(discovered_new_models)}[/bold] 个其他模型，选择要一同添加的模型。",
+                "批量添加",
+                "cyan",
+            ),
+        )
+        if selected_multi:
+            added_by_discovery = _add_discovered_models(path, selected_multi, api_key, base_url)
+            if added_by_discovery > 0:
+                new_config = RouterConfig.load(path)
+
+    discovery_note = ""
+    if added_by_discovery > 0:
+        discovery_note = f"\n上游自动发现并添加: [bold]{added_by_discovery}[/bold] 个模型"
     result = Group(
         section_panel(
-            f"已写入配置文件: [bold]{path}[/bold]\n模型: [bold]{model_id}[/bold]\nKey: [bold]{key_name}[/bold]",
+            f"已写入配置文件: [bold]{path}[/bold]\n模型: [bold]{model_id}[/bold]\nKey: [bold]{key_name}[/bold]{discovery_note}",
             "添加完成",
             "green",
         ),
@@ -810,6 +892,29 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     if ask_continue and not confirm_choice("继续启动服务？", default=False):
         raise SystemExit(0)
     return result
+
+
+def _add_discovered_models(path: Path, model_ids: list[str], api_key: str, base_url: str) -> int:
+    added = 0
+    for mid in model_ids:
+        data = load_config_data(path)
+        old_config = RouterConfig.from_dict(data)
+        models = data.setdefault("models", [])
+        if find_model(models, mid) is not None:
+            continue
+        new_model = {
+            "id": mid,
+            "aliases": [],
+            "routing_mode": "round_robin",
+            "keys": [{"name": f"{mid}-key-1", "api_key": api_key, "base_url": base_url}],
+        }
+        models.append(new_model)
+        try:
+            commit_config_data(path, data, old_config)
+            added += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return added
 
 
 def edit_api_key_interactively(path: Path) -> Any:

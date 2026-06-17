@@ -1226,8 +1226,7 @@ def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_p
         encoding="utf-8",
     )
     prompts: list[str] = []
-    answers = iter(["extra", "sk-extra"])
-    choices = iter(["1", "1"])
+    answers = iter(["sk-extra", "extra"])
     menus: list[tuple[str, list[tuple[str, str]]]] = []
 
     def ask(title: str, prompt: str, **kwargs):
@@ -1236,21 +1235,20 @@ def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_p
 
     def choose(title, options, selected=0, content=None):
         menus.append((title, options))
-        return next(choices)
+        return "1"
 
     monkeypatch.setattr(config_editor, "prompt_text", ask)
     monkeypatch.setattr(config_editor, "select_option", choose)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+    monkeypatch.setattr(config_editor, "_select_model_with_discovery", lambda models, base_url, api_key: ("existing-model", []))
 
     config_editor.add_config_interactively(config_path, ask_continue=False)
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
     model = data["models"][0]
-    assert prompts == ["Key 名称", "API key"]
-    assert menus[0][0] == "选择模型"
-    assert menus[0][1][-2:] == [("n", "自定义添加新的模型 ID"), ("0", "返回")]
-    assert menus[1][0] == "选择上游 URL"
-    assert menus[1][1][0][1] == "upstream.example.com"
+    assert prompts == ["API key", "Key 名称"]
+    assert menus[0][0] == "选择上游 URL"
+    assert menus[0][1][0][1] == "upstream.example.com"
     assert model["aliases"] == ["Existing"]
     assert model["routing_mode"] == "priority"
     assert model["reasoning_effort"] == "high"
@@ -1275,26 +1273,26 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
         encoding="utf-8",
     )
     prompts: list[str] = []
-    answers = iter(["new-model", "New Alias", "only_first", "low", "primary", "https://primary.example.com", "sk-primary"])
-    choices = iter(["n", "n"])
+    answers = iter(["sk-primary", "new-model", "New Alias", "only_first", "low", "primary"])
 
     def ask(title: str, prompt: str, **kwargs):
         prompts.append(prompt)
         return next(answers)
 
     monkeypatch.setattr(config_editor, "prompt_text", ask)
-    monkeypatch.setattr(config_editor, "select_option", lambda title, options, selected=0, content=None: next(choices))
+    monkeypatch.setattr(config_editor, "select_option", lambda title, options, selected=0, content=None: "n")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+    monkeypatch.setattr(config_editor, "_select_model_with_discovery", lambda models, base_url, api_key: ("new-model", []))
 
     config_editor.add_config_interactively(config_path, ask_continue=False)
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
     model = data["models"][1]
-    assert prompts == ["新模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式", "推理强度", "Key 名称", "新的上游 base_url", "API key"]
+    assert prompts == ["API key", "新模型 ID", "显示名称/别名，多个用逗号分隔", "路由模式", "推理强度", "Key 名称"]
     assert model["aliases"] == ["New Alias"]
     assert model["routing_mode"] == "only_first"
     assert model["reasoning_effort"] == "low"
-    assert model["keys"] == [{"name": "primary", "api_key": "sk-primary", "base_url": "https://primary.example.com"}]
+    assert model["keys"] == [{"name": "primary", "api_key": "sk-primary", "base_url": "https://upstream.example.com"}]
 
 
 def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
@@ -1598,3 +1596,110 @@ def test_toggle_visitor_access_requires_optional_feature(tmp_path, monkeypatch) 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert "allow_visitor" not in saved["models"][0]["keys"][0]
     assert "未安装" in render_plain(result)
+
+
+def test_discover_upstream_models_success(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "object": "list",
+                "data": [
+                    {"id": "gpt-4o", "object": "model"},
+                    {"id": "gpt-3.5-turbo", "object": "model"},
+                    {"id": "existing-model", "object": "model"},
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, headers=None):
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
+
+    result = config_editor.discover_upstream_models(
+        "https://api.example.com", "sk-test", {"existing-model"}
+    )
+
+    assert result == ["gpt-3.5-turbo", "gpt-4o"]
+
+
+def test_discover_upstream_models_failure(monkeypatch) -> None:
+    class FailingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, headers=None):
+            raise config_editor.httpx.ConnectError("connection refused")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FailingClient)
+
+    result = config_editor.discover_upstream_models(
+        "https://api.example.com", "sk-test", set()
+    )
+
+    assert result == []
+
+
+def test_add_config_with_discovery_adds_selected_models(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "default_base_url": "https://default.example.com",
+                "models": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    answers = iter(["https://api.example.com", "sk-test-key", "gpt-4o", "", "round_robin", "downstream"])
+    choices = iter(["n", "n"])
+
+    def ask(title: str, prompt: str, **kwargs):
+        return next(answers)
+
+    def choose(title, options, selected=0, content=None):
+        return next(choices)
+
+    monkeypatch.setattr(config_editor, "prompt_text", ask)
+    monkeypatch.setattr(config_editor, "select_option", choose)
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: False)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
+    monkeypatch.setattr(config_editor, "discover_upstream_models", lambda base_url, api_key, existing_ids, timeout=15.0: ["gpt-4o", "gpt-4o-mini"])
+    monkeypatch.setattr(config_editor, "select_multiple", lambda title, options, content=None: ["gpt-4o-mini"])
+
+    config_editor.add_config_interactively(config_path, ask_continue=False)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    model_ids = [m["id"] for m in data["models"]]
+    assert "gpt-4o" in model_ids
+    assert "gpt-4o-mini" in model_ids
+
+    gpt4o_model = next(m for m in data["models"] if m["id"] == "gpt-4o")
+    assert gpt4o_model["routing_mode"] == "round_robin"
+    assert gpt4o_model["keys"][0]["api_key"] == "sk-test-key"
+    assert gpt4o_model["keys"][0]["base_url"] == "https://api.example.com"
+
+    gpt4o_mini_model = next(m for m in data["models"] if m["id"] == "gpt-4o-mini")
+    assert gpt4o_mini_model["routing_mode"] == "round_robin"
+    assert gpt4o_mini_model["keys"][0]["api_key"] == "sk-test-key"

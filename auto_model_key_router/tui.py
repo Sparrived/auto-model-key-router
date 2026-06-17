@@ -704,6 +704,119 @@ def select_option(title: str, options: list[tuple[str, str]], selected: int = 0,
                 return key.lower()
 
 
+def checkbox_menu_table(options: list[tuple[str, str]], selected: int, checked: set[int]) -> Table:
+    table = Table(show_header=False, box=None, padding=(0, 1), expand=True)
+    table.add_column("指示", justify="center", width=3)
+    table.add_column("✓", justify="center", width=3)
+    table.add_column("编号", justify="center", width=5)
+    table.add_column("操作", ratio=1)
+    for index, (value, label) in enumerate(options):
+        check_mark = "[bold green]✓[/bold green]" if index in checked else "[dim] [/dim]"
+        if index == selected:
+            table.add_row(
+                "[bold cyan]▶[/bold cyan]",
+                check_mark,
+                f"[bold black on cyan] {value} [/bold black on cyan]",
+                f"[bold cyan]{label}[/bold cyan]",
+            )
+        else:
+            table.add_row("", check_mark, f"[dim]{value}[/dim]", label)
+    return table
+
+
+def render_multi_select_state(
+    title: str,
+    options: list[tuple[str, str]],
+    selected: int,
+    checked: set[int],
+    content: Any | None = None,
+    frame_offset: int = 0,
+    *,
+    ensure_selected_visible: bool = True,
+) -> TerminalFrameState:
+    renderables = [page_title(title)]
+    if content is not None:
+        renderables.append(content)
+    renderables.append(section_panel(checkbox_menu_table(options, selected, checked), "操作菜单", "cyan", "[dim]Space 切换 · A 全选/取消[/dim]"))
+    shortcuts = "↑/↓ 选择  ·  Space 切换  ·  A 全选/取消  ·  Enter 确认  ·  PgUp/PgDn 翻阅  ·  Ctrl+C 跳过"
+    if sys.platform == "win32" and content is not None:
+        shortcuts = "↑/↓ 选择  ·  Space 切换  ·  A 全选/取消  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅  ·  Ctrl+C 跳过"
+    return terminal_frame_state(
+        renderables,
+        shortcut_text(shortcuts),
+        offset=frame_offset,
+        focus_text=SELECTED_ROW_MARKER if ensure_selected_visible else None,
+    )
+
+
+def select_multiple(
+    title: str,
+    options: list[tuple[str, str]],
+    content: Any | None = None,
+) -> list[str]:
+    selected = 0
+    checked: set[int] = set()
+    frame_offset = 0
+    frame_state = render_multi_select_state(title, options, selected, checked, content, frame_offset)
+    last_wheel_key: str | None = None
+    last_wheel_at = 0.0
+
+    def refresh(*, ensure_selected_visible: bool) -> None:
+        nonlocal frame_offset, frame_state
+        frame_state = render_multi_select_state(
+            title,
+            options,
+            selected,
+            checked,
+            content,
+            frame_offset,
+            ensure_selected_visible=ensure_selected_visible,
+        )
+        frame_offset = frame_state.offset
+        live.update(frame_state.renderable, refresh=True)
+
+    with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
+        while True:
+            key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
+            if key == "cancel":
+                return []
+            if key in WHEEL_KEYS:
+                handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                if not handle_wheel:
+                    continue
+            scroll_keys = {"page_up", "page_down", "home", "end"}
+            if content is not None:
+                scroll_keys.update(WHEEL_KEYS)
+            if key in scroll_keys and frame_state.max_offset:
+                frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
+                refresh(ensure_selected_visible=False)
+                continue
+            if key in {"up", "scroll_up"}:
+                selected = (selected - 1) % len(options)
+                refresh(ensure_selected_visible=True)
+                continue
+            if key in {"down", "scroll_down"}:
+                selected = (selected + 1) % len(options)
+                refresh(ensure_selected_visible=True)
+                continue
+            if key == " ":
+                if selected in checked:
+                    checked.discard(selected)
+                else:
+                    checked.add(selected)
+                refresh(ensure_selected_visible=False)
+                continue
+            if key in {"a", "A"}:
+                if len(checked) == len(options):
+                    checked.clear()
+                else:
+                    checked = set(range(len(options)))
+                refresh(ensure_selected_visible=False)
+                continue
+            if key == "enter":
+                return [options[i][0] for i in sorted(checked)]
+
+
 def clear_terminal_history() -> None:
     if sys.stdout is None:
         return
