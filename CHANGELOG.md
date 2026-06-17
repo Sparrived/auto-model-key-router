@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-06-17
+
+### Added
+- 新增 Anthropic 原生 `/v1/messages` 端点自动探测与回退功能，首次请求自动测试上游支持情况，不支持则自动回退到 `/v1/chat/completions` 格式。
+- 新增模型配置项 `native_first`，控制是否启用原生优先模式，默认开启；支持持久化存储上游端点支持状态，减少重复探测开销。
+- 保留 Anthropic 原生请求字段（如 `prompt_cache_key`、`cache_control`）转发至上游，提升缓存命中率。
+- Terminal UI 模型管理新增 `O` 快捷键快速打开配置文件。
+
+### Changed
+- Claude Code 配置生成改为在 `env` 中自动添加 `CLAUDE_CODE_ATTRIBUTION_HEADER: false`，禁用 CCH 以避免第三方 API 缓存失效。
+- 上游模型探测结果不再自动过滤已存在的模型，批量添加菜单新增跳过选项，避免误覆盖已有配置。
+- 更新 API 与使用文档，补充原生优先模式的配置说明。
 
 ## [2.1.0] - 2026-06-17
 
