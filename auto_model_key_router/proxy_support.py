@@ -11,7 +11,11 @@ import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .config import RouterConfig
+from .config import (
+    UPSTREAM_ROUTE_DEFAULT_PATHS,
+    RouterConfig,
+    upstream_route_path,
+)
 from .protocol_compat import _adapt_message_payload
 from .visitor import is_visitor_api_key
 
@@ -120,16 +124,34 @@ def _apply_reasoning_effort(
     return adapted
 
 
-def _upstream_path(path: str, payload: dict[str, Any], native: bool = False) -> str:
-    if native:
-        return path
+def _upstream_mode(path: str) -> str | None:
+    if path == "chat/completions":
+        return "openai"
+    if path == "messages":
+        return "anthropic"
+    if path == "responses":
+        return "responses"
+    return None
+
+
+def _upstream_path(
+    path: str,
+    payload: dict[str, Any],
+    native: bool = False,
+    upstream_routes: dict[str, str] | None = None,
+) -> str:
+    mode = _upstream_mode(path)
+    if native and mode is not None:
+        return upstream_route_path(upstream_routes, mode)
     if (
         path in {"messages", "responses"}
         and isinstance(payload, dict)
         and payload.get("model")
     ):
-        return "chat/completions"
-    return path
+        return upstream_route_path(upstream_routes, "openai")
+    if mode == "openai":
+        return upstream_route_path(upstream_routes, "openai")
+    return f"v1/{path}"
 
 
 def _join_url(base_url: str, path: str) -> str:
@@ -331,13 +353,16 @@ async def test_native_messages_support(
     base_url: str,
     api_key: str,
     model_id: str,
+    route_path: str | None = None,
 ) -> bool:
     """测试上游是否支持原生 /v1/messages 端点
     
     发送一个最小化的测试请求，根据响应判断是否支持。
     返回 True 表示支持，False 表示不支持。
     """
-    test_url = f"{base_url.rstrip('/')}/v1/messages"
+    test_url = _join_url(
+        base_url, route_path or UPSTREAM_ROUTE_DEFAULT_PATHS["anthropic"]
+    )
     test_body = {
         "model": model_id,
         "max_tokens": 1,

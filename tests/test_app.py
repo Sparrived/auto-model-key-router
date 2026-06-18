@@ -2177,6 +2177,70 @@ def test_anthropic_auth_headers_are_not_forwarded() -> None:
         assert "anthropic-beta" not in upstream_headers[0]
 
 
+def test_custom_anthropic_upstream_route_uses_native_messages_path() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_calls: list[tuple[str, dict[str, object], httpx.Headers]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_calls.append(
+                (
+                    str(request.url),
+                    json.loads(request.content.decode("utf-8")),
+                    request.headers,
+                )
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg-native",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "test-model",
+                    "content": [{"type": "text", "text": "hello"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        key = KeyConfig(
+            "key-1",
+            "sk-1",
+            "https://upstream.test",
+            upstream_routes={"anthropic": "anthropic/"},
+        )
+        config = make_config(Path(directory), (key,))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/messages",
+                headers={
+                    "x-api-key": "local-key",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "alias-model",
+                    "system": "be brief",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert [url for url, _, _ in upstream_calls] == [
+            "https://upstream.test/anthropic/v1/messages",
+            "https://upstream.test/anthropic/v1/messages",
+        ]
+        assert upstream_calls[1][1]["model"] == "test-model"
+        assert upstream_calls[1][1]["system"] == "be brief"
+        assert upstream_calls[1][2]["anthropic-version"] == "2023-06-01"
+
+
 def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(
@@ -2540,6 +2604,61 @@ def test_responses_request_and_response_are_converted_for_codex() -> None:
         assert data["output"][1]["type"] == "function_call"
         assert data["output"][1]["call_id"] == "call-2"
         assert data["usage"]["total_tokens"] == 14
+
+
+def test_custom_responses_upstream_route_uses_native_responses_path() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_calls: list[tuple[str, dict[str, object]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_calls.append(
+                (str(request.url), json.loads(request.content.decode("utf-8")))
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "resp-native",
+                    "object": "response",
+                    "model": "test-model",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 0,
+                        "total_tokens": 1,
+                    },
+                },
+            )
+
+        key = KeyConfig(
+            "key-1",
+            "sk-1",
+            "https://upstream.test",
+            upstream_routes={"responses": "responses/"},
+        )
+        config = make_config(Path(directory), (key,))
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/responses",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "alias-model", "input": "inspect"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert upstream_calls == [
+            (
+                "https://upstream.test/responses/v1/responses",
+                {"model": "test-model", "input": "inspect"},
+            )
+        ]
+        assert response.json()["object"] == "response"
+        assert response.json()["id"] == "resp-native"
 
 
 def test_responses_stream_is_converted_to_codex_sse() -> None:

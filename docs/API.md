@@ -126,9 +126,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **原生优先模式**（默认启用）：
 - 首次请求时自动测试上游是否支持 `/v1/messages` 端点
-- 测试结果缓存在 key_state 中，避免重复测试
+- 测试结果按“上游 URL + 实际原生路径”缓存在 key_state 中，避免重复测试
 - 支持原生端点时保留所有 Anthropic 原生字段，提高缓存命中率
 - 可通过配置 `native_first: false` 禁用
+
+如果上游的 Anthropic 入口需要额外路径前缀，可在 Key 上配置 `upstream_routes.anthropic`，例如 `"anthropic": "anthropic/"` 会转发到 `base_url/anthropic/v1/messages`。
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -163,7 +165,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `POST /v1/responses`
 
-请求会转换为上游 `/v1/chat/completions`，响应再转换为 Responses JSON 或 SSE。
+请求默认会转换为上游 `/v1/chat/completions`，响应再转换为 Responses JSON 或 SSE。配置 `upstream_routes.responses` 后会改为原生 Responses 路径透传，不支持时仍会回退到 `/v1/chat/completions`。
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -304,12 +306,13 @@ status_codes
 | `base_url` | string/null | 否 | 使用配置的 `default_base_url`，否则为 `https://api.openai.com` |
 | `enabled` | boolean | 否 | `true` |
 | `allow_visitor` | boolean | 否 | `false` |
+| `upstream_routes` | object/null | 否 | 按模式覆盖上游原生路径；模式为 `openai`、`anthropic`、`responses` |
 
-`base_url` 最终必须以 `http://` 或 `https://` 开头。
+`base_url` 最终必须以 `http://` 或 `https://` 开头。`upstream_routes` 的值只能是相对路径或路径前缀，例如 `{"anthropic": "anthropic/"}` 会规范化为 `anthropic/v1/messages`。
 
 #### KeyUpdate
 
-字段与 KeyCreate 相同，全部可省略，但请求中至少需要出现一个字段。省略 `api_key` 会保留原密钥；`name`、`api_key`、`enabled`、`allow_visitor` 不能为 `null`。`base_url: null` 会恢复为配置的默认上游地址。
+字段与 KeyCreate 相同，全部可省略，但请求中至少需要出现一个字段。省略 `api_key` 会保留原密钥；`name`、`api_key`、`enabled`、`allow_visitor` 不能为 `null`。`base_url: null` 会恢复为配置的默认上游地址；`upstream_routes: null` 或 `{}` 会清空自定义路由。
 
 #### ModelResponse
 
@@ -332,6 +335,9 @@ status_codes
   "base_url": "https://api.openai.com",
   "enabled": true,
   "allow_visitor": true,
+  "upstream_routes": {
+    "anthropic": "anthropic/v1/messages"
+  },
   "api_key_fingerprint": "0123456789ab"
 }
 ```
@@ -441,4 +447,3 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 ```
 
 Anthropic Messages 错误可能使用 Anthropic 风格的 `type` 和 `error` 对象。
-

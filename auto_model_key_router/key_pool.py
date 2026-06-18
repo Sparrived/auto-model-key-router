@@ -28,7 +28,7 @@ class KeyPool:
         self._cursors = defaultdict(int)
         self._active_requests = defaultdict(int)
         self._states = defaultdict(KeyState)
-        self._url_native_support: dict[str, bool] = {}  # base_url -> 是否支持原生端点
+        self._url_native_support: dict[str, bool] = {}
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
         self._load_states()
@@ -324,15 +324,28 @@ class KeyPool:
         """返回所有 URL 的原生端点支持状态"""
         return dict(self._url_native_support)
 
-    def supports_native_messages(self, base_url: str) -> bool | None:
+    def supports_native_messages(
+        self, base_url: str, route_path: str = "v1/messages"
+    ) -> bool | None:
         """返回 None=未测试, True/False=已测试结果"""
-        return self._url_native_support.get(base_url.rstrip("/"))
+        key = self._native_support_key(base_url, route_path)
+        if route_path.strip("/") == "v1/messages":
+            return self._url_native_support.get(
+                key, self._url_native_support.get(base_url.rstrip("/"))
+            )
+        return self._url_native_support.get(key)
 
-    async def update_native_support(self, base_url: str, supported: bool) -> None:
-        key = base_url.rstrip("/")
+    async def update_native_support(
+        self, base_url: str, supported: bool, route_path: str = "v1/messages"
+    ) -> None:
+        key = self._native_support_key(base_url, route_path)
         async with self._lock:
             self._url_native_support[key] = supported
         await self._persist_states()
+
+    def _native_support_key(self, base_url: str, route_path: str) -> str:
+        route = route_path.strip("/") or "v1/messages"
+        return f"{base_url.rstrip('/')}|{route}"
 
     def _failure_cooldown_seconds(
         self, state: KeyState, retry_after: float | None

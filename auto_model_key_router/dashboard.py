@@ -20,6 +20,9 @@ from .agent_config import (
     router_origin,
 )
 from .config import (
+    UPSTREAM_ROUTE_DEFAULT_PATHS,
+    UPSTREAM_ROUTE_LABELS,
+    UPSTREAM_ROUTE_MODES,
     UNIFIED_MODEL_ID,
     RouterConfig,
     generate_local_api_key,
@@ -685,6 +688,41 @@ def render_config(config: RouterConfig, path: Path) -> None:
         console.print(renderable)
 
 
+def upstream_mode_summary(items: list[tuple[Any, Any]], mode: str) -> str:
+    custom_paths = sorted(
+        {key.upstream_routes[mode] for _, key in items if mode in key.upstream_routes}
+    )
+    if custom_paths:
+        paths = "\n".join(short_text(path, 34) for path in custom_paths[:3])
+        if len(custom_paths) > 3:
+            paths = f"{paths}\n[dim]+{len(custom_paths) - 3} more[/dim]"
+        return f"[green]自定义原生[/green]\n{paths}"
+    if mode == "openai":
+        return f"[green]原生[/green]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"
+    if mode == "anthropic" and any(model.native_first for model, _ in items):
+        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"
+    return f"[yellow]转换[/yellow]\n{UPSTREAM_ROUTE_DEFAULT_PATHS['openai']}"
+
+
+def upstream_native_support_table(config: RouterConfig) -> Any | None:
+    upstreams: dict[str, list[tuple[Any, Any]]] = {}
+    for model in config.models:
+        for key in model.keys:
+            upstreams.setdefault(key.base_url, []).append((model, key))
+    if not upstreams:
+        return None
+    table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
+    table.add_column("上游 URL", ratio=2)
+    for mode in UPSTREAM_ROUTE_MODES:
+        table.add_column(UPSTREAM_ROUTE_LABELS[mode], ratio=1)
+    for base_url, items in sorted(upstreams.items()):
+        table.add_row(
+            compact_url(base_url, 42),
+            *(upstream_mode_summary(items, mode) for mode in UPSTREAM_ROUTE_MODES),
+        )
+    return table
+
+
 def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     model_count = len(config.models)
     key_count = sum(len(model.keys) for model in config.models)
@@ -779,4 +817,9 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
             )
         )
     renderables.append(section_panel(table, "模型路由", "blue"))
+    native_support_table = upstream_native_support_table(config)
+    if native_support_table is not None:
+        renderables.append(
+            section_panel(native_support_table, "上游原生支持", "magenta")
+        )
     return tuple(renderables)

@@ -1314,6 +1314,32 @@ def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
     assert opened == [tmp_path / "router-config.json"]
 
 
+def test_upstream_routes_panel_shows_three_mode_support() -> None:
+    data = {
+        "models": [
+            {
+                "id": "test-model",
+                "keys": [
+                    {
+                        "name": "main",
+                        "api_key": "sk-main",
+                        "base_url": "https://upstream.example.com",
+                        "upstream_routes": {"anthropic": "anthropic/v1/messages"},
+                    }
+                ],
+            }
+        ]
+    }
+    model = data["models"][0]
+
+    output = render_plain(config_editor.upstream_routes_panel(data, model, 0))
+
+    assert "OpenAI Chat" in output
+    assert "Anthropic Messages" in output
+    assert "OpenAI Responses" in output
+    assert "anthropic/v1/messages" in output
+
+
 def test_model_aliases_panel_lists_current_aliases() -> None:
     panel = config_editor.model_aliases_panel({"id": "model-one", "aliases": ["first", "second"]})
 

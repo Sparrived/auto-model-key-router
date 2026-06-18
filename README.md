@@ -7,7 +7,7 @@
 - **多 Key 路由**：同一模型可配置多个 Key，支持 `round_robin`、`priority`、`only_first`。
 - **失败切换与冷却**：遇到 `401/403/429/5xx` 等可重试错误时自动重试或切换 Key，并持久化冷却状态。
 - **统一模型名**：客户端固定请求 `unified-model`，真实模型和固定 Key 可在路由器侧随时切换。
-- **OpenAI-compatible 代理**：支持 `/v1/chat/completions`、`/v1/models`，并兼容 Claude Code 的 `/v1/messages` 与 Codex 的 `/v1/responses`。
+- **OpenAI-compatible 代理**：支持 `/v1/chat/completions`、`/v1/models`，并兼容 Claude Code 的 `/v1/messages` 与 Codex 的 `/v1/responses`；可为不同协议模式配置上游额外路径。
 - **Terminal UI 管理**：在 TUI 中配置模型、Key、统一模型、服务注册和客户端接入。
 - **访客 Key**：安装 `visitor` extra 后，可用固定访客 Key 暴露受限公共模型。
 - **统计与日志**：记录本地/访客调用、模型、Key、状态码、token、重试、延迟等指标。
@@ -142,7 +142,13 @@ auto-model-key-router --config router-config.json --switch-key auto
       "routing_mode": "round_robin",
       "keys": [
         {"name": "openai-main", "api_key": "sk-your-first-upstream-key"},
-        {"name": "openai-backup", "api_key": "sk-your-second-upstream-key"}
+        {"name": "openai-backup", "api_key": "sk-your-second-upstream-key"},
+        {
+          "name": "mimo-tokenplan",
+          "api_key": "sk-your-third-upstream-key",
+          "base_url": "https://example.com/tokenplan",
+          "upstream_routes": {"anthropic": "anthropic/"}
+        }
       ]
     }
   ]

@@ -33,6 +33,82 @@ def default_config_path() -> Path:
 LEGACY_CONFIG_PATH = Path("router-config.json")
 DEFAULT_CONFIG_PATH = default_config_path()
 UNIFIED_MODEL_ID = "unified-model"
+UPSTREAM_ROUTE_MODES = ("openai", "anthropic", "responses")
+UPSTREAM_ROUTE_LABELS = {
+    "openai": "OpenAI Chat",
+    "anthropic": "Anthropic Messages",
+    "responses": "OpenAI Responses",
+}
+UPSTREAM_ROUTE_DEFAULT_PATHS = {
+    "openai": "v1/chat/completions",
+    "anthropic": "v1/messages",
+    "responses": "v1/responses",
+}
+UPSTREAM_ROUTE_MODE_ALIASES = {
+    "chat": "openai",
+    "chat_completions": "openai",
+    "chat-completions": "openai",
+    "openai_chat": "openai",
+    "openai-chat": "openai",
+    "messages": "anthropic",
+    "anthropic_messages": "anthropic",
+    "anthropic-messages": "anthropic",
+    "codex": "responses",
+}
+
+
+def normalize_upstream_route_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    mode = UPSTREAM_ROUTE_MODE_ALIASES.get(mode, mode)
+    if mode not in UPSTREAM_ROUTE_MODES:
+        raise ValueError(
+            "upstream_routes 模式必须是 openai、anthropic 或 responses"
+        )
+    return mode
+
+
+def normalize_upstream_route_path(mode: str, value: Any) -> str:
+    mode = normalize_upstream_route_mode(mode)
+    route = str(value or "").strip().replace("\\", "/")
+    if not route:
+        raise ValueError("upstream_routes 路径不能为空")
+    if "://" in route:
+        raise ValueError("upstream_routes 只能配置相对路径或路径前缀")
+    if "?" in route or "#" in route:
+        raise ValueError("upstream_routes 不能包含 query string 或 fragment")
+    while "//" in route:
+        route = route.replace("//", "/")
+    route = route.strip("/")
+    if not route:
+        raise ValueError("upstream_routes 路径不能为空")
+    endpoint = UPSTREAM_ROUTE_DEFAULT_PATHS[mode]
+    if route == endpoint or route.endswith(f"/{endpoint}"):
+        return route
+    if route == "v1" or route.endswith("/v1"):
+        return f"{route}/{endpoint.removeprefix('v1/')}"
+    return f"{route}/{endpoint}"
+
+
+def normalize_upstream_routes(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("upstream_routes 必须是对象")
+    routes: dict[str, str] = {}
+    for raw_mode, raw_route in raw.items():
+        if raw_route is None or not str(raw_route).strip():
+            continue
+        mode = normalize_upstream_route_mode(raw_mode)
+        routes[mode] = normalize_upstream_route_path(mode, raw_route)
+    return routes
+
+
+def upstream_route_path(
+    upstream_routes: dict[str, str] | None, mode: str
+) -> str:
+    mode = normalize_upstream_route_mode(mode)
+    routes = upstream_routes or {}
+    return routes.get(mode) or UPSTREAM_ROUTE_DEFAULT_PATHS[mode]
 
 
 def default_metrics_db_path() -> str:
@@ -113,6 +189,14 @@ class KeyConfig:
     base_url: str
     enabled: bool = True
     allow_visitor: bool = False
+    upstream_routes: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "upstream_routes",
+            normalize_upstream_routes(self.upstream_routes),
+        )
 
 
 @dataclass(frozen=True)
@@ -176,6 +260,7 @@ class RouterConfig:
                     base_url=str(key.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
                     enabled=bool(key.get("enabled", True)),
                     allow_visitor=bool(key.get("allow_visitor", False)),
+                    upstream_routes=normalize_upstream_routes(key.get("upstream_routes")),
                 )
                 for index, key in enumerate(model.get("keys", []))
             )
@@ -249,6 +334,8 @@ class RouterConfig:
                     raise ValueError(f"模型 {model.id} 存在空 api_key")
                 if not key.base_url.startswith(("http://", "https://")):
                     raise ValueError(f"模型 {model.id} 的 base_url 必须以 http:// 或 https:// 开头")
+                for route_mode, route_path in key.upstream_routes.items():
+                    normalize_upstream_route_path(route_mode, route_path)
 
         if self.unified_model is None:
             return

@@ -11,7 +11,16 @@ from rich.console import Group
 from rich.live import Live
 from rich.table import Table
 
-from .config import RouterConfig, generate_local_api_key, load_config_data
+from .config import (
+    UPSTREAM_ROUTE_DEFAULT_PATHS,
+    UPSTREAM_ROUTE_LABELS,
+    UPSTREAM_ROUTE_MODES,
+    RouterConfig,
+    generate_local_api_key,
+    load_config_data,
+    normalize_upstream_route_path,
+    upstream_route_path,
+)
 from .config_service import commit_config_data
 from .formatting import compact_url, key_fingerprint, short_text
 from .proxy_support import _join_url
@@ -60,6 +69,61 @@ def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -
     return "[dim]功能未安装[/dim]"
 
 
+def key_upstream_routes(key: dict[str, Any]) -> dict[str, str]:
+    routes = key.get("upstream_routes")
+    return dict(routes) if isinstance(routes, dict) else {}
+
+
+def upstream_route_support_text(
+    key: dict[str, Any], mode: str, *, native_first: bool = True
+) -> str:
+    routes = key_upstream_routes(key)
+    path = upstream_route_path(routes, mode)
+    if mode in routes:
+        return f"[green]自定义原生[/green] {path}"
+    if mode == "openai":
+        return f"[green]原生[/green] {path}"
+    if mode == "anthropic" and native_first:
+        return f"[cyan]自动探测[/cyan] {path}"
+    return (
+        f"[yellow]转换[/yellow] {UPSTREAM_ROUTE_DEFAULT_PATHS['openai']}"
+    )
+
+
+def upstream_routes_panel(
+    data: dict[str, Any], model: dict[str, Any], key_index: int
+) -> Any:
+    key = model["keys"][key_index]
+    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    native_first = bool(model.get("native_first", True))
+    table = Table(show_header=True, box=None, expand=True)
+    table.add_column("模式", style="cyan", ratio=1)
+    table.add_column("原生支持/上游路径", ratio=3)
+    for mode in UPSTREAM_ROUTE_MODES:
+        table.add_row(
+            UPSTREAM_ROUTE_LABELS[mode],
+            upstream_route_support_text(key, mode, native_first=native_first),
+        )
+    base_url = compact_url(
+        key.get("base_url") or data.get("default_base_url") or "-", 56
+    )
+    return Group(
+        section_panel(
+            f"模型: [bold]{short_text(model['id'], 48)}[/bold]\n"
+            f"Key: {key_display_name(key, key_name, 48)}\n"
+            f"上游: [bold]{base_url}[/bold]",
+            "Key 信息",
+            "cyan",
+        ),
+        section_panel(
+            table,
+            "三种模式原生支持",
+            "magenta",
+            "[dim]自定义值可填路径前缀，如 anthropic/，或完整路径 anthropic/v1/messages[/dim]",
+        ),
+    )
+
+
 def _open_config_on_key(path: Path, key: str) -> str | None:
     if key in {"o", "O"}:
         open_config_file(path)
@@ -78,6 +142,7 @@ def manage_model_keys_interactively(path: Path) -> None:
                 ("4", "路由模式"),
                 ("5", "推理强度"),
                 ("6", "模型别称"),
+                ("7", "上游路由"),
                 ("0", "返回"),
             ],
             on_key=on_key,
@@ -108,6 +173,8 @@ def manage_model_keys_interactively(path: Path) -> None:
                 show_result_page("推理强度", result)
         elif choice == "6":
             run_submodule(lambda: manage_model_aliases_interactively(path))
+        elif choice == "7":
+            run_submodule(lambda: manage_upstream_routes_interactively(path))
 
 
 def manage_model_aliases_interactively(path: Path) -> None:
@@ -395,6 +462,91 @@ def manage_selected_key_interactively(path: Path) -> None:
                 )
 
 
+def manage_upstream_routes_interactively(path: Path) -> None:
+    selection = select_api_key(path, "选择要配置上游路由的 Key")
+    if selection is None:
+        return
+    data, model, key_index = selection
+    while True:
+        key = model["keys"][key_index]
+        key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+        options = [
+            (
+                str(index + 1),
+                f"{UPSTREAM_ROUTE_LABELS[mode]} · {short_text(upstream_route_path(key_upstream_routes(key), mode), 36)}",
+            )
+            for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
+        ]
+        options.extend([("c", "清空自定义路由"), ("0", "返回")])
+        choice = select_option(
+            f"上游路由 · {short_text(key_name, 24)}",
+            options,
+            content=upstream_routes_panel(data, model, key_index),
+        )
+        if choice == "0":
+            return
+
+        old_config = RouterConfig.from_dict(data)
+        routes = key_upstream_routes(key)
+        try:
+            if choice == "c":
+                routes = {}
+                message = "已清空自定义上游路由，恢复默认路径。"
+            else:
+                mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
+                current_path = routes.get(mode, "")
+                raw_path = prompt_text(
+                    "上游路由",
+                    f"{UPSTREAM_ROUTE_LABELS[mode]} 路径/前缀（留空恢复默认）",
+                    default=current_path,
+                ).strip()
+                if raw_path:
+                    routes[mode] = normalize_upstream_route_path(mode, raw_path)
+                    message = (
+                        f"已设置 {UPSTREAM_ROUTE_LABELS[mode]}: "
+                        f"[bold]{routes[mode]}[/bold]"
+                    )
+                else:
+                    routes.pop(mode, None)
+                    message = f"已恢复 {UPSTREAM_ROUTE_LABELS[mode]} 默认路径。"
+        except (IndexError, ValueError) as exc:
+            show_result_page(
+                "上游路由",
+                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
+            )
+            continue
+
+        if routes:
+            key["upstream_routes"] = routes
+        else:
+            key.pop("upstream_routes", None)
+        try:
+            new_config = commit_config_data(path, data, old_config).new_config
+        except (KeyError, TypeError, ValueError) as exc:
+            show_result_page(
+                "上游路由",
+                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
+            )
+            continue
+        show_result_page(
+            "上游路由",
+            Group(
+                section_panel(
+                    f"已更新配置文件: [bold]{path}[/bold]\n"
+                    f"模型: [bold]{model['id']}[/bold]\n"
+                    f"Key: [bold]{key_name}[/bold]\n{message}",
+                    "配置完成",
+                    "green",
+                ),
+                restart_service_after_config_change(path, old_config, new_config),
+            ),
+        )
+        data = load_config_data(path)
+        model = find_model(data.get("models", []), model["id"])
+        if model is None or key_index >= len(model.get("keys", [])):
+            return
+
+
 def edit_selected_key_interactively(
     path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
 ) -> Any:
@@ -594,6 +746,7 @@ def merge_transferable_key_config(
             (
                 str(key.get("api_key") or ""),
                 str(key.get("base_url") or default_base_url),
+                json.dumps(key.get("upstream_routes") or {}, sort_keys=True),
             )
             for key in current_keys
         }
@@ -602,6 +755,9 @@ def merge_transferable_key_config(
             key_target = (
                 str(transferred_key.get("api_key") or ""),
                 str(transferred_key.get("base_url") or default_base_url),
+                json.dumps(
+                    transferred_key.get("upstream_routes") or {}, sort_keys=True
+                ),
             )
             if key_target in existing_key_targets:
                 skipped_keys += 1

@@ -246,6 +246,36 @@ def test_key_update_preserves_secret_and_last_key_cannot_be_deleted(
     assert saved_key["allow_visitor"] is True
 
 
+def test_key_update_persists_and_clears_upstream_routes(tmp_path: Path) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(
+        client: httpx.AsyncClient,
+    ) -> tuple[httpx.Response, httpx.Response]:
+        updated = await client.put(
+            "/api/models/model-a/keys/key-a",
+            headers=AUTH_HEADERS,
+            json={"upstream_routes": {"anthropic": "anthropic/"}},
+        )
+        cleared = await client.put(
+            "/api/models/model-a/keys/key-a",
+            headers=AUTH_HEADERS,
+            json={"upstream_routes": None},
+        )
+        return updated, cleared
+
+    updated, cleared = run_client(app, requests)
+
+    assert updated.status_code == 200
+    assert updated.json()["upstream_routes"] == {
+        "anthropic": "anthropic/v1/messages"
+    }
+    assert cleared.status_code == 200
+    assert "upstream_routes" not in cleared.json()
+    saved_key = json.loads(path.read_text(encoding="utf-8"))["models"][0]["keys"][0]
+    assert saved_key["upstream_routes"] == {}
+
+
 def test_management_writes_require_a_config_file_path(tmp_path: Path) -> None:
     config = RouterConfig(
         host="127.0.0.1",

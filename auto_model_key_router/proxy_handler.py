@@ -277,39 +277,62 @@ async def _execute_attempt(
     context: ProxyRequestContext, key: KeyConfig, attempt: int
 ) -> AttemptOutcome:
     runtime = context.runtime
-    
-    # 确定是否对这个 key 使用原生格式
-    use_native = context.use_native
-    if use_native:
-        # 检查这个 base_url 的原生支持状态（URL 级别）
-        native_support = runtime.key_pool.supports_native_messages(key.base_url)
-        if native_support is None:
-            # 未测试过，先测试
-            native_support = await test_native_messages_support(
-                runtime.http_client, key.base_url, key.api_key, context.model_id
-            )
-            await runtime.key_pool.update_native_support(key.base_url, native_support)
-        use_native = native_support
-    
-    upstream = _join_url(
-        key.base_url, f"/v1/{_upstream_path(context.path, context.payload, native=use_native)}"
+
+    custom_native_route = (
+        (context.path == "messages" and "anthropic" in key.upstream_routes)
+        or (context.path == "responses" and "responses" in key.upstream_routes)
     )
-    # 根据是否原生模式选择 body
+    use_native = context.use_native or custom_native_route
+    native_route_path = _upstream_path(
+        context.path,
+        context.payload,
+        native=True,
+        upstream_routes=key.upstream_routes,
+    )
+    if context.path == "messages" and use_native:
+        native_support = runtime.key_pool.supports_native_messages(
+            key.base_url, native_route_path
+        )
+        if native_support is None:
+            native_support = await test_native_messages_support(
+                runtime.http_client,
+                key.base_url,
+                key.api_key,
+                context.model_id,
+                native_route_path,
+            )
+            await runtime.key_pool.update_native_support(
+                key.base_url, native_support, native_route_path
+            )
+        use_native = native_support
+    elif context.path == "responses":
+        use_native = custom_native_route
+
+    upstream_path = _upstream_path(
+        context.path,
+        context.payload,
+        native=use_native,
+        upstream_routes=key.upstream_routes,
+    )
+    upstream = _join_url(
+        key.base_url,
+        upstream_path,
+    )
     if use_native:
         upstream_body = _upstream_body(
             context.original_body, context.payload, context.model_id, native=True
         )
     else:
         upstream_body = context.upstream_body
-    
+
     headers = _upstream_headers(context.request, key.api_key)
-    if use_native:
+    if use_native and context.path == "messages":
         anthropic_version = context.request.headers.get("anthropic-version", "2023-06-01")
         headers["anthropic-version"] = anthropic_version
         anthropic_beta = context.request.headers.get("anthropic-beta")
         if anthropic_beta:
             headers["anthropic-beta"] = anthropic_beta
-    
+
     _debug_report(
         "upstream-attempt",
         {
@@ -367,20 +390,26 @@ async def _execute_attempt(
 
     duration_ms = _elapsed_ms(started)
     
-    # 原生模式下遇到不支持的状态码，回退到非原生模式
     if use_native and response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
         content = await response.aread()
         await response.aclose()
         LOGGER.info(
-            "native messages endpoint returned %d for %s, falling back to chat/completions",
+            "native endpoint returned %d for %s/%s, falling back to chat/completions",
             response.status_code,
             key.base_url,
+            upstream_path,
         )
-        # 标记该 URL 不支持原生端点
-        await runtime.key_pool.update_native_support(key.base_url, False)
-        # 使用非原生模式重试
-        fallback_path = _upstream_path(context.path, context.payload, native=False)
-        fallback_upstream = _join_url(key.base_url, f"/v1/{fallback_path}")
+        if context.path == "messages":
+            await runtime.key_pool.update_native_support(
+                key.base_url, False, native_route_path
+            )
+        fallback_path = _upstream_path(
+            context.path,
+            context.payload,
+            native=False,
+            upstream_routes=key.upstream_routes,
+        )
+        fallback_upstream = _join_url(key.base_url, fallback_path)
         fallback_body = context.upstream_body
         fallback_headers = _upstream_headers(context.request, key.api_key)
         _debug_report(
@@ -476,11 +505,15 @@ async def _execute_attempt(
 
     if context.is_stream:
         return AttemptOutcome(
-            response=_streaming_response(context, key, response, upstream, started),
+            response=_streaming_response(
+                context, key, response, upstream, started, native_upstream=use_native
+            ),
             stream_owns_key=True,
         )
     return AttemptOutcome(
-        response=await _buffered_response(context, key, response, duration_ms)
+        response=await _buffered_response(
+            context, key, response, duration_ms, native_upstream=use_native
+        )
     )
 
 
@@ -490,6 +523,8 @@ def _streaming_response(
     response: httpx.Response,
     upstream: str,
     started: float,
+    *,
+    native_upstream: bool = False,
 ) -> StreamingResponse:
     runtime = context.runtime
     _debug_report(
@@ -518,7 +553,7 @@ def _streaming_response(
     response_headers = _response_headers(response)
     if _is_sse_media_type(media_type):
         _set_streaming_headers(response_headers)
-    if context.path == "messages":
+    if context.path == "messages" and not native_upstream:
         stream = _stream_anthropic_messages(
             response,
             runtime.metrics,
@@ -532,7 +567,7 @@ def _streaming_response(
         )
         media_type = "text/event-stream"
         _set_streaming_headers(response_headers)
-    elif context.path == "responses":
+    elif context.path == "responses" and not native_upstream:
         stream = _stream_responses(
             response,
             runtime.metrics,
@@ -559,6 +594,8 @@ async def _buffered_response(
     key: KeyConfig,
     response: httpx.Response,
     duration_ms: int,
+    *,
+    native_upstream: bool = False,
 ) -> Response:
     content = await response.aread()
     _debug_report(
@@ -602,7 +639,7 @@ async def _buffered_response(
             status_code=response.status_code,
             headers=_response_headers(response),
         )
-    if context.path == "responses":
+    if context.path == "responses" and not native_upstream:
         converted = _responses_response(
             _json_bytes(content), context.requested_model_id
         )

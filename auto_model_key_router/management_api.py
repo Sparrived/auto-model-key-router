@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 if hasattr(BaseModel, "model_fields"):
     from pydantic import ConfigDict
 
-from .config import KeyConfig, ModelConfig, RouterConfig
+from .config import KeyConfig, ModelConfig, RouterConfig, normalize_upstream_routes
 from .config_service import ConfigService
 from .proxy_support import _authorization_mode
 
@@ -38,6 +38,7 @@ class KeyCreate(APIModel):
     base_url: str | None = None
     enabled: bool = True
     allow_visitor: bool = False
+    upstream_routes: dict[str, str | None] | None = None
 
 
 class KeyUpdate(APIModel):
@@ -46,6 +47,7 @@ class KeyUpdate(APIModel):
     base_url: str | None = None
     enabled: bool | None = None
     allow_visitor: bool | None = None
+    upstream_routes: dict[str, str | None] | None = None
 
 
 class ModelCreate(APIModel):
@@ -305,6 +307,12 @@ def _normalize_key_updates(data: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="api_key 不能为空")
     if "base_url" in data and data["base_url"] is not None:
         data["base_url"] = str(data["base_url"]).strip()
+    if "upstream_routes" in data:
+        routes = normalize_upstream_routes(data["upstream_routes"])
+        if routes:
+            data["upstream_routes"] = routes
+        else:
+            data["upstream_routes"] = {}
 
 
 def _payload_dict(payload: BaseModel) -> dict[str, Any]:
@@ -336,7 +344,7 @@ def _model_response(model: ModelConfig) -> dict[str, Any]:
 
 
 def _key_response(key: KeyConfig) -> dict[str, Any]:
-    return {
+    response = {
         "name": key.name,
         "base_url": key.base_url,
         "enabled": key.enabled,
@@ -345,6 +353,9 @@ def _key_response(key: KeyConfig) -> dict[str, Any]:
             :12
         ],
     }
+    if key.upstream_routes:
+        response["upstream_routes"] = dict(key.upstream_routes)
+    return response
 
 
 def _find_model(config: RouterConfig, model_id: str) -> ModelConfig:

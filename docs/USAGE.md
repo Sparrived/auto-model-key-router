@@ -289,9 +289,24 @@ AMKR 会在转发给上游前把请求体里的模型名改写为真实模型 ID
 
 原生优先模式工作流程：
 1. 首次请求时自动测试上游是否支持 `/v1/messages` 端点
-2. 测试结果按上游 URL 记录在 `key-state.json` 的 `url_native_support` 中（同一 URL 的所有 key 共享结果）
+2. 测试结果按“上游 URL + 实际原生路径”记录在 `key-state.json` 的 `url_native_support` 中
 3. 如果上游返回 404/405/501，自动回退到 `chat/completions` 格式并记录结果
 4. 如需重新测试，可删除 `key-state.json` 中对应的 `url_native_support` 条目
+
+如果某个上游的 Anthropic 入口不是 `base_url/v1/messages`，可以在对应 Key 上配置额外路由：
+
+```json
+{
+  "name": "mimo-tokenplan",
+  "api_key": "sk-your-upstream-key",
+  "base_url": "https://example.com/tokenplan",
+  "upstream_routes": {
+    "anthropic": "anthropic/"
+  }
+}
+```
+
+`anthropic/` 会被规范化为 `anthropic/v1/messages`，请求会发到 `https://example.com/tokenplan/anthropic/v1/messages`。也可以直接写完整相对路径，例如 `anthropic/v1/messages`。
 
 ---
 
@@ -574,9 +589,9 @@ AMKR 的代理入口是 `/v1/{path}`，主要兼容：
 | 客户端入口 | 实际转发 | 说明 |
 | --- | --- | --- |
 | `/v1/chat/completions` | `/v1/chat/completions` | OpenAI-compatible 主路径 |
-| `/v1/messages` | `/v1/chat/completions` | Anthropic Messages 转 Chat Completions，响应再转回 Messages 风格 |
+| `/v1/messages` | 默认原生 `/v1/messages`，不支持时回退 `/v1/chat/completions` | Anthropic Messages 原生优先；可用 `upstream_routes.anthropic` 改原生路径 |
 | `/v1/messages/count_tokens` | 本地处理 | 返回 token 估算，不访问上游 |
-| `/v1/responses` | `/v1/chat/completions` | Responses 转 Chat Completions，响应再转回 Responses 风格 |
+| `/v1/responses` | 默认 `/v1/chat/completions`；配置 `upstream_routes.responses` 时走原生 Responses 路径 | Responses 转 Chat Completions 或原生透传 |
 
 兼容转换包括：
 
