@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-06-19
+
 ### Added
 - 新增上游路由自定义配置 `upstream_routes`，支持分别配置 Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses 的上游请求路径，并在管理 API、Terminal UI 与 Dashboard 中查看和维护。
 - 新增请求缓存亲和路由，轮询 Key 模式可基于 `prompt_cache_key` 或请求内容哈希将同一缓存会话绑定到同一上游 Key，提升 prompt cache 命中稳定性。
