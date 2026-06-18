@@ -232,11 +232,19 @@ def _responses_usage(usage: dict[str, Any] | None) -> dict[str, Any]:
     output_tokens = int(
         source.get("completion_tokens") or source.get("output_tokens") or 0
     )
+    input_details = source.get("input_tokens_details")
+    if not isinstance(input_details, dict):
+        input_details = {}
+    cached_tokens = int(
+        source.get("cached_tokens")
+        or source.get("cache_read_input_tokens")
+        or input_details.get("cached_tokens")
+        or input_details.get("cache_read_input_tokens")
+        or 0
+    )
     return {
         "input_tokens": input_tokens,
-        "input_tokens_details": {
-            "cached_tokens": int(source.get("cached_tokens") or 0)
-        },
+        "input_tokens_details": {"cached_tokens": cached_tokens},
         "output_tokens": output_tokens,
         "output_tokens_details": {
             "reasoning_tokens": int(source.get("reasoning_tokens") or 0)

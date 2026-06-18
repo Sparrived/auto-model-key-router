@@ -28,6 +28,7 @@ class KeyPool:
         self._cursors = defaultdict(int)
         self._active_requests = defaultdict(int)
         self._states = defaultdict(KeyState)
+        self._sticky_keys: dict[tuple[str, bool, str], str] = {}
         self._url_native_support: dict[str, bool] = {}
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
@@ -62,6 +63,12 @@ class KeyPool:
                     if key in valid_keys
                 },
             )
+            self._sticky_keys = {
+                sticky_key: key_name
+                for sticky_key, key_name in self._sticky_keys.items()
+                if sticky_key[0] in self._keys
+                and (sticky_key[0], key_name) in valid_keys
+            }
             if self._state_path != old_state_path:
                 self._states = defaultdict(KeyState)
                 self._load_states()
@@ -199,6 +206,7 @@ class KeyPool:
         excluded: set[str] | None = None,
         *,
         visitor_only: bool = False,
+        affinity_key: str | None = None,
     ) -> KeyConfig:
         model_id = self.resolve_model_id(model_id)
         excluded = excluded or set()
@@ -234,7 +242,19 @@ class KeyPool:
                         return candidate
             raise RuntimeError(f"模型 {model_id} 没有可用 key")
 
+        sticky_key = None
+        if affinity_key and self.routing_mode(model_id) == "round_robin":
+            sticky_key = (model_id, visitor_only, affinity_key)
+
         async with self._lock:
+            if sticky_key is not None:
+                sticky_key_name = self._sticky_keys.get(sticky_key)
+                for candidate in available:
+                    if candidate.name == sticky_key_name:
+                        self._active_requests[(model_id, candidate.name)] += 1
+                        return candidate
+                self._sticky_keys.pop(sticky_key, None)
+
             lowest_active = min(
                 self._active_requests.get((model_id, key.name), 0) for key in available
             )
@@ -248,6 +268,8 @@ class KeyPool:
                     == lowest_active
                 ):
                     self._active_requests[(model_id, candidate.name)] += 1
+                    if sticky_key is not None:
+                        self._sticky_keys[sticky_key] = candidate.name
                     return candidate
 
         raise RuntimeError(f"模型 {model_id} 没有可用 key")
@@ -335,6 +357,12 @@ class KeyPool:
             )
         return self._url_native_support.get(key)
 
+    def supports_native_endpoint(
+        self, base_url: str, route_path: str
+    ) -> bool | None:
+        """Return None for untested, otherwise the cached native endpoint support."""
+        return self.supports_native_messages(base_url, route_path)
+
     async def update_native_support(
         self, base_url: str, supported: bool, route_path: str = "v1/messages"
     ) -> None:
@@ -342,6 +370,11 @@ class KeyPool:
         async with self._lock:
             self._url_native_support[key] = supported
         await self._persist_states()
+
+    async def update_native_endpoint(
+        self, base_url: str, supported: bool, route_path: str
+    ) -> None:
+        await self.update_native_support(base_url, supported, route_path)
 
     def _native_support_key(self, base_url: str, route_path: str) -> str:
         route = route_path.strip("/") or "v1/messages"

@@ -360,7 +360,12 @@ def extract_usage(data: Any) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     usage = data.get("usage")
-    return usage if isinstance(usage, dict) else None
+    if isinstance(usage, dict):
+        return usage
+    message = data.get("message")
+    if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+        return message["usage"]
+    return None
 
 
 def _now_beijing() -> datetime:
@@ -417,18 +422,27 @@ def _normalize_usage(usage: dict[str, Any]) -> dict[str, int]:
     prompt_details = usage.get("prompt_tokens_details")
     if not isinstance(prompt_details, dict):
         prompt_details = {}
-    cached_tokens = _int_value(usage.get("cached_tokens")) or _int_value(
-        prompt_details.get("cached_tokens")
+    input_details = usage.get("input_tokens_details")
+    if not isinstance(input_details, dict):
+        input_details = {}
+    cache_read_input_tokens = _int_value(
+        usage.get("cache_read_input_tokens")
+    ) or _int_value(input_details.get("cache_read_input_tokens"))
+    cache_creation_input_tokens = _int_value(
+        usage.get("cache_creation_input_tokens")
+    ) or _int_value(input_details.get("cache_creation_input_tokens"))
+    cached_tokens = (
+        _int_value(usage.get("cached_tokens"))
+        or _int_value(prompt_details.get("cached_tokens"))
+        or _int_value(input_details.get("cached_tokens"))
+        or cache_read_input_tokens
     )
-    cache_read_input_tokens = _int_value(usage.get("cache_read_input_tokens"))
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "cached_tokens": cached_tokens,
-        "cache_creation_input_tokens": _int_value(
-            usage.get("cache_creation_input_tokens")
-        ),
+        "cache_creation_input_tokens": cache_creation_input_tokens,
         "cache_read_input_tokens": cache_read_input_tokens,
     }
 

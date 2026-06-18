@@ -402,3 +402,52 @@ async def test_native_messages_support(
             exc,
         )
         return False
+
+
+async def test_native_responses_support(
+    client: httpx.AsyncClient,
+    base_url: str,
+    api_key: str,
+    model_id: str,
+    route_path: str | None = None,
+) -> bool:
+    """Test whether the upstream supports a native Responses endpoint."""
+    test_url = _join_url(
+        base_url, route_path or UPSTREAM_ROUTE_DEFAULT_PATHS["responses"]
+    )
+    test_body = {
+        "model": model_id,
+        "input": "test",
+        "max_output_tokens": 1,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = await client.post(
+            test_url,
+            json=test_body,
+            headers=headers,
+            timeout=httpx.Timeout(10.0),
+        )
+        if response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
+            LOGGER.info(
+                "endpoint %s returned %d, native responses not supported",
+                test_url,
+                response.status_code,
+            )
+            return False
+        LOGGER.info(
+            "endpoint %s returned %d, native responses supported",
+            test_url,
+            response.status_code,
+        )
+        return True
+    except httpx.RequestError as exc:
+        LOGGER.warning(
+            "endpoint %s test failed: %s, assuming native responses not supported",
+            test_url,
+            exc,
+        )
+        return False

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from .proxy_support import (
     _upstream_path,
     _upstream_timeout,
     test_native_messages_support,
+    test_native_responses_support,
 )
 from .runtime import RuntimeResources
 from .routing import RetryPolicy
@@ -74,6 +76,7 @@ class ProxyRequestContext:
     key_count: int
     only_first: bool
     attempts: int
+    cache_affinity_key: str | None = None
     use_native: bool = False  # 是否使用原生 Anthropic 格式
 
 
@@ -227,8 +230,50 @@ async def _prepare_proxy_request(
         key_count=key_count,
         only_first=only_first,
         attempts=attempts,
+        cache_affinity_key=_cache_affinity_key(path, payload, model_id),
         use_native=use_native,
     )
+
+
+def _cache_affinity_key(
+    path: str, payload: dict[str, Any], model_id: str
+) -> str | None:
+    if path != "messages" or not isinstance(payload, dict):
+        return None
+    prompt_cache_key = payload.get("prompt_cache_key")
+    if isinstance(prompt_cache_key, str) and prompt_cache_key.strip():
+        return f"prompt_cache_key:{prompt_cache_key.strip()}"
+
+    basis = {
+        "path": path,
+        "model": model_id,
+        "system": payload.get("system"),
+        "tools": payload.get("tools"),
+        "tool_choice": payload.get("tool_choice"),
+        "messages": _cache_affinity_messages(payload.get("messages")),
+    }
+    encoded = json.dumps(
+        basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return f"messages:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _cache_affinity_messages(messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    affinity_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        affinity_messages.append(
+            {
+                "role": message.get("role"),
+                "content": message.get("content"),
+            }
+        )
+        if len(affinity_messages) >= 1:
+            break
+    return affinity_messages
 
 
 async def _select_key(
@@ -244,7 +289,10 @@ async def _select_key(
             await context.runtime.key_pool.acquire_key(context.model_id, key.name)
             return key
         return await context.runtime.key_pool.next_key(
-            context.model_id, excluded, visitor_only=context.visitor_only
+            context.model_id,
+            excluded,
+            visitor_only=context.visitor_only,
+            affinity_key=context.cache_affinity_key,
         )
     except KeyError:
         _log_model_not_configured(
@@ -305,8 +353,22 @@ async def _execute_attempt(
                 key.base_url, native_support, native_route_path
             )
         use_native = native_support
-    elif context.path == "responses":
-        use_native = custom_native_route
+    elif context.path == "responses" and use_native:
+        native_support = runtime.key_pool.supports_native_endpoint(
+            key.base_url, native_route_path
+        )
+        if native_support is None:
+            native_support = await test_native_responses_support(
+                runtime.http_client,
+                key.base_url,
+                key.api_key,
+                context.model_id,
+                native_route_path,
+            )
+            await runtime.key_pool.update_native_endpoint(
+                key.base_url, native_support, native_route_path
+            )
+        use_native = native_support
 
     upstream_path = _upstream_path(
         context.path,
@@ -399,8 +461,8 @@ async def _execute_attempt(
             key.base_url,
             upstream_path,
         )
-        if context.path == "messages":
-            await runtime.key_pool.update_native_support(
+        if context.path in {"messages", "responses"}:
+            await runtime.key_pool.update_native_endpoint(
                 key.base_url, False, native_route_path
             )
         fallback_path = _upstream_path(
@@ -688,6 +750,16 @@ def _set_streaming_headers(headers: dict[str, str]) -> None:
     headers["x-accel-buffering"] = "no"
 
 
+def _merge_usage(
+    current: dict[str, Any] | None, update: dict[str, Any]
+) -> dict[str, Any]:
+    if current is None:
+        return dict(update)
+    merged = dict(current)
+    merged.update(update)
+    return merged
+
+
 async def _record_upstream_response(
     state: RuntimeResources,
     model_id: str,
@@ -754,7 +826,7 @@ async def _stream_upstream(
             lifecycle.observe_chunk(chunk)
             buffer, chunk_usage = _stream_usage(buffer, chunk)
             if chunk_usage is not None:
-                lifecycle.usage = chunk_usage
+                lifecycle.usage = _merge_usage(lifecycle.usage, chunk_usage)
             if is_sse:
                 sse_buffer, events = _split_sse_events(sse_buffer, chunk)
                 for event in events:
@@ -861,7 +933,7 @@ async def _stream_anthropic_messages(
                 buffer, chunk, stream_state
             )
             if chunk_usage is not None:
-                lifecycle.usage = chunk_usage
+                lifecycle.usage = _merge_usage(lifecycle.usage, chunk_usage)
             for event in events:
                 yield event
                 await _flush_stream_event()
@@ -870,7 +942,7 @@ async def _stream_anthropic_messages(
                 buffer, b"\n", stream_state
             )
             if chunk_usage is not None:
-                lifecycle.usage = chunk_usage
+                lifecycle.usage = _merge_usage(lifecycle.usage, chunk_usage)
             for event in events:
                 yield event
                 await _flush_stream_event()
@@ -962,7 +1034,7 @@ async def _stream_responses(
                 buffer, chunk, stream_state
             )
             if chunk_usage is not None:
-                lifecycle.usage = chunk_usage
+                lifecycle.usage = _merge_usage(lifecycle.usage, chunk_usage)
             for event in events:
                 yield event
                 await _flush_stream_event()
@@ -971,7 +1043,7 @@ async def _stream_responses(
                 buffer, b"\n", stream_state
             )
             if chunk_usage is not None:
-                lifecycle.usage = chunk_usage
+                lifecycle.usage = _merge_usage(lifecycle.usage, chunk_usage)
             for event in events:
                 yield event
                 await _flush_stream_event()

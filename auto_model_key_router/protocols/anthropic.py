@@ -230,13 +230,39 @@ def _anthropic_sse(event: str, payload: dict[str, Any]) -> bytes:
 
 
 def _anthropic_stream_usage(usage: dict[str, Any] | None) -> dict[str, int]:
-    return {
-        "output_tokens": int(
-            (usage or {}).get("completion_tokens")
-            or (usage or {}).get("output_tokens")
-            or 0
+    return _anthropic_usage(usage, include_input=True)
+
+
+def _anthropic_usage(
+    usage: dict[str, Any] | None, *, include_input: bool = True
+) -> dict[str, int]:
+    source = usage or {}
+    result: dict[str, int] = {}
+    if include_input:
+        result["input_tokens"] = _usage_int(
+            source.get("prompt_tokens") or source.get("input_tokens")
         )
-    }
+    result["output_tokens"] = _usage_int(
+        source.get("completion_tokens") or source.get("output_tokens")
+    )
+    for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+        value = _usage_int(source.get(key))
+        if value:
+            result[key] = value
+    cached_tokens = _usage_int(source.get("cached_tokens"))
+    if cached_tokens and "cache_read_input_tokens" not in result:
+        result["cache_read_input_tokens"] = cached_tokens
+    return result
+
+
+def _usage_int(value: Any) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
 
 
 def _anthropic_message_response(
@@ -269,14 +295,7 @@ def _anthropic_message_response(
             any(block.get("type") == "tool_use" for block in content),
         ),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": int(
-                usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-            ),
-            "output_tokens": int(
-                usage.get("completion_tokens") or usage.get("output_tokens") or 0
-            ),
-        },
+        "usage": _anthropic_usage(usage),
     }
 
 
