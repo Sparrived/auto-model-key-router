@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- 新增上游路由自定义配置 `upstream_routes`，支持分别配置 Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses 的上游请求路径，并在管理 API、Terminal UI 与 Dashboard 中查看和维护。
+- 新增请求缓存亲和路由，轮询 Key 模式可基于 `prompt_cache_key` 或请求内容哈希将同一缓存会话绑定到同一上游 Key，提升 prompt cache 命中稳定性。
+- 新增 OpenAI Responses 原生接口探测与失败回退处理，支持按自定义路由缓存原生支持状态并在不支持时回退到兼容转发。
+
+### Changed
+- 上游路由配置会自动规范化并补全标准路径前缀；Key 的原生支持状态缓存改为按“上游 URL + 路由路径”维度存储，避免不同自定义路由状态互相污染。
+- 优化令牌使用统计，兼容 Anthropic 缓存读取和缓存创建 token 的多种返回格式，并调整日志 TUI 统计表布局。
+
+### Fixed
+- 修复 Anthropic 请求转发头处理，改为保留客户端传入的 `anthropic-version`，并透传 `anthropic-beta`。
+- 修复请求统计中输入 token 未扣除缓存 token 导致统计偏差的问题。
+
 ## [2.1.1] - 2026-06-17
 
 ### Added

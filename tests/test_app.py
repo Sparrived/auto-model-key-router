@@ -1446,6 +1446,62 @@ def test_messages_round_robin_sticks_by_prompt_cache_key() -> None:
         ]
 
 
+def test_messages_round_robin_affinity_uses_full_message_list() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_authorizations: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_authorizations.append(request.headers["authorization"])
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-1",
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+                },
+            )
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-a", "sk-a", "https://upstream.test"),
+                KeyConfig("key-b", "sk-b", "https://upstream.test"),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> list[int]:
+            statuses = []
+            for branch in ("branch a", "branch b"):
+                response = await client.post(
+                    "/v1/messages",
+                    headers={"Authorization": "Bearer local-key"},
+                    json={
+                        "model": "test-model",
+                        "messages": [
+                            {"role": "user", "content": "same opening"},
+                            {"role": "assistant", "content": branch},
+                        ],
+                    },
+                )
+                statuses.append(response.status_code)
+            return statuses
+
+        assert run_client(app, requests) == [200, 200]
+        assert upstream_authorizations == [
+            "Bearer sk-a",
+            "Bearer sk-b",
+        ]
+
+
 def test_messages_stream_is_converted_to_anthropic_sse() -> None:
     with tempfile.TemporaryDirectory() as directory:
 
@@ -2520,6 +2576,8 @@ def test_config_reasoning_effort_overrides_request_reasoning() -> None:
         upstream_bodies: list[dict[str, object]] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://upstream.test/v1/responses":
+                return httpx.Response(404, json={"error": {"message": "missing"}})
             upstream_bodies.append(json.loads(request.content.decode("utf-8")))
             return httpx.Response(200, json={"id": "ok"})
 
@@ -2556,6 +2614,8 @@ def test_responses_request_and_response_are_converted_for_codex() -> None:
         upstream_bodies: list[dict[str, object]] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://upstream.test/v1/responses":
+                return httpx.Response(404, json={"error": {"message": "missing"}})
             upstream_bodies.append(json.loads(request.content.decode("utf-8")))
             return httpx.Response(
                 200,
@@ -2659,6 +2719,75 @@ def test_responses_request_and_response_are_converted_for_codex() -> None:
         assert data["output"][1]["type"] == "function_call"
         assert data["output"][1]["call_id"] == "call-2"
         assert data["usage"]["total_tokens"] == 14
+
+
+def test_responses_default_route_probes_native_before_fallback() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_calls: list[tuple[str, dict[str, object]]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            body = json.loads(request.content.decode("utf-8"))
+            upstream_calls.append((url, body))
+            if url == "https://upstream.test/v1/responses":
+                return httpx.Response(404, json={"error": {"message": "missing"}})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-fallback",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "fallback",
+                            },
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 1,
+                        "total_tokens": 3,
+                    },
+                },
+            )
+
+        config = make_config(
+            Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/responses",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "alias-model", "input": "inspect"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert upstream_calls == [
+            (
+                "https://upstream.test/v1/responses",
+                {
+                    "model": "test-model",
+                    "input": "test",
+                    "max_output_tokens": 1,
+                },
+            ),
+            (
+                "https://upstream.test/v1/chat/completions",
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "inspect"}],
+                },
+            ),
+        ]
+        assert response.json()["output"][0]["content"][0]["text"] == "fallback"
 
 
 def test_custom_responses_upstream_route_uses_native_responses_path() -> None:
@@ -2813,6 +2942,8 @@ def test_responses_stream_is_converted_to_codex_sse() -> None:
         ).encode("utf-8")
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://upstream.test/v1/responses":
+                return httpx.Response(404, json={"error": {"message": "missing"}})
             return httpx.Response(
                 200, content=upstream, headers={"content-type": "text/event-stream"}
             )
@@ -2849,6 +2980,8 @@ def test_downstream_reasoning_effort_is_forwarded_without_config_override() -> N
         upstream_bodies: list[dict[str, object]] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == "https://upstream.test/v1/responses":
+                return httpx.Response(404, json={"error": {"message": "missing"}})
             upstream_bodies.append(json.loads(request.content.decode("utf-8")))
             return httpx.Response(200, json={"id": "ok"})
 

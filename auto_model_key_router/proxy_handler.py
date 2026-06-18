@@ -271,8 +271,6 @@ def _cache_affinity_messages(messages: Any) -> list[dict[str, Any]]:
                 "content": message.get("content"),
             }
         )
-        if len(affinity_messages) >= 1:
-            break
     return affinity_messages
 
 
@@ -353,7 +351,7 @@ async def _execute_attempt(
                 key.base_url, native_support, native_route_path
             )
         use_native = native_support
-    elif context.path == "responses" and use_native:
+    elif context.path == "responses":
         native_support = runtime.key_pool.supports_native_endpoint(
             key.base_url, native_route_path
         )
