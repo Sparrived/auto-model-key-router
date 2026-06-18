@@ -304,7 +304,11 @@ async def _execute_attempt(
     
     headers = _upstream_headers(context.request, key.api_key)
     if use_native:
-        headers["anthropic-version"] = "2023-06-01"
+        anthropic_version = context.request.headers.get("anthropic-version", "2023-06-01")
+        headers["anthropic-version"] = anthropic_version
+        anthropic_beta = context.request.headers.get("anthropic-beta")
+        if anthropic_beta:
+            headers["anthropic-beta"] = anthropic_beta
     
     _debug_report(
         "upstream-attempt",
