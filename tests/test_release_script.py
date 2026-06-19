@@ -97,3 +97,35 @@ def test_preview_plan_renders_rich_release_summary(capsys) -> None:
     assert "目标版本" in output
     assert "1.2.4" in output
     assert "仅本地" in output
+
+
+def test_classify_commits_by_conventional_type() -> None:
+    commits = [
+        "feat(api): 新增 unified-model 端点",
+        "fix(ui): 修复统计页面显示",
+        "refactor: 移除缓存命中次数统计",
+        "docs: 更新 README",
+        "普通提交没有前缀",
+    ]
+
+    groups = release_script.classify_commits(commits)
+
+    assert groups["Added"] == ["- 新增 unified-model 端点"]
+    assert groups["Fixed"] == ["- 修复统计页面显示"]
+    assert "- 移除缓存命中次数统计" in groups["Changed"]
+    assert "- 更新 README" in groups["Changed"]
+    assert "- 普通提交没有前缀" in groups["Changed"]
+
+
+def test_classify_commits_skips_empty_groups() -> None:
+    commits = ["feat: 新功能"]
+
+    groups = release_script.classify_commits(commits)
+
+    assert "Added" in groups
+    assert "Changed" not in groups
+    assert "Fixed" not in groups
+
+
+def test_classify_commits_empty_input() -> None:
+    assert release_script.classify_commits([]) == {}
