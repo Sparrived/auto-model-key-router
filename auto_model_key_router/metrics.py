@@ -410,14 +410,10 @@ def _nested_stats(
 
 
 def _normalize_usage(usage: dict[str, Any]) -> dict[str, int]:
-    prompt_tokens = _int_value(usage.get("prompt_tokens")) or _int_value(
-        usage.get("input_tokens")
-    )
+    prompt_tokens = _int_value(usage.get("prompt_tokens"))
+    input_tokens = _int_value(usage.get("input_tokens"))
     completion_tokens = _int_value(usage.get("completion_tokens")) or _int_value(
         usage.get("output_tokens")
-    )
-    total_tokens = (
-        _int_value(usage.get("total_tokens")) or prompt_tokens + completion_tokens
     )
     prompt_details = usage.get("prompt_tokens_details")
     if not isinstance(prompt_details, dict):
@@ -436,6 +432,12 @@ def _normalize_usage(usage: dict[str, Any]) -> dict[str, int]:
         or _int_value(prompt_details.get("cached_tokens"))
         or _int_value(input_details.get("cached_tokens"))
         or cache_read_input_tokens
+    )
+    # Anthropic: input_tokens excludes cached tokens, add them back
+    if input_tokens and not prompt_tokens:
+        prompt_tokens = input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+    total_tokens = (
+        _int_value(usage.get("total_tokens")) or prompt_tokens + completion_tokens
     )
     return {
         "prompt_tokens": prompt_tokens,
