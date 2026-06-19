@@ -375,3 +375,55 @@ def test_management_rejects_null_for_non_nullable_update_fields(
     assert blank_name.status_code == 400
     assert blank_name.json()["detail"] == "key 名称不能为空"
     assert path.read_text(encoding="utf-8") == original
+
+
+def test_get_key_stats_returns_key_specific_metrics(
+    tmp_path: Path,
+) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(
+        client: httpx.AsyncClient,
+    ) -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
+        # Record some metrics directly via the store
+        state = app.state
+        await state.runtime_manager.current.metrics.record(
+            "model-a", "key-a", 200,
+            {"prompt_tokens": 10, "completion_tokens": 5},
+            duration_ms=30, first_token_ms=10,
+        )
+        await state.runtime_manager.current.metrics.record(
+            "model-a", "key-a", 200,
+            {"prompt_tokens": 20, "completion_tokens": 8},
+            duration_ms=40, first_token_ms=15,
+        )
+        ok = await client.get(
+            "/api/models/model-a/keys/key-a/stats", headers=AUTH_HEADERS
+        )
+        missing_key = await client.get(
+            "/api/models/model-a/keys/nonexistent/stats", headers=AUTH_HEADERS
+        )
+        unauthorized = await client.get(
+            "/api/models/model-a/keys/key-a/stats"
+        )
+        with_hours = await client.get(
+            "/api/models/model-a/keys/key-a/stats?hours=24",
+            headers=AUTH_HEADERS,
+        )
+        return ok, missing_key, unauthorized, with_hours
+
+    ok, missing_key, unauthorized, with_hours = run_client(app, requests)
+
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["model_id"] == "model-a"
+    assert body["key_name"] == "key-a"
+    assert body["stats"]["requests"] == 2
+    assert body["stats"]["successes"] == 2
+    assert body["stats"]["prompt_tokens"] == 30
+    assert body["stats"]["completion_tokens"] == 13
+    assert "recent_requests" in body
+    assert len(body["recent_requests"]) == 2
+    assert missing_key.status_code == 404
+    assert unauthorized.status_code == 401
+    assert with_hours.status_code == 200

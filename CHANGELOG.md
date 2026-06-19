@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+- 新增单个 Key 统计页面，TUI 管理 Key 菜单中可查看指定 Key 的请求量、成功率、Token 用量、延迟等指标，支持时间范围切换和请求明细翻页。
+- 新增 `GET /api/models/{model_id}/keys/{key_name}/stats` REST API 端点，返回指定 Key 的统计数据，支持 `hours` 参数过滤时间范围。
+
 ## [2.1.6] - 2026-06-19
 
 ### Added

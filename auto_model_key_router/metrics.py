@@ -181,6 +181,134 @@ class MetricsStore:
         async with self._lock:
             return await asyncio.to_thread(self._snapshot_sync, hours)
 
+    async def key_stats(
+        self,
+        model_id: str,
+        key_name: str,
+        hours: float | None = None,
+    ) -> dict[str, Any]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._key_stats_sync, model_id, key_name, hours
+            )
+
+    def _key_stats_sync(
+        self,
+        model_id: str,
+        key_name: str,
+        hours: float | None = None,
+    ) -> dict[str, Any]:
+        since: str | None = None
+        if hours is not None:
+            since = (_now_beijing() - timedelta(hours=hours)).isoformat()
+
+        stats = self._query_key_stats(model_id, key_name, since)
+
+        current_window_started_at = (
+            _now_beijing() - timedelta(seconds=RATE_WINDOW_SECONDS)
+        ).isoformat()
+        rate = self._query_key_stats(model_id, key_name, current_window_started_at)
+
+        where_parts = ["model_id = ?", "key_name = ?"]
+        params: list[str | None] = [model_id, key_name]
+        if since is not None:
+            where_parts.append("created_at >= ?")
+            params.append(since)
+        where_sql = " AND ".join(where_parts)
+        recent_rows = self._connection.execute(
+            f"""
+            SELECT created_at, status_code, success, retried,
+                   prompt_tokens, completion_tokens, total_tokens,
+                   cached_tokens, first_token_ms, duration_ms
+            FROM request_metrics
+            WHERE {where_sql}
+            ORDER BY id DESC LIMIT 50
+            """,
+            params,
+        ).fetchall()
+
+        return {
+            "model_id": model_id,
+            "key_name": key_name,
+            "stats": stats.to_dict(),
+            "current_rpm": rate.requests,
+            "current_tpm": rate.total_tokens,
+            "recent_requests": [
+                {
+                    "created_at": row["created_at"],
+                    "status_code": row["status_code"],
+                    "success": row["success"],
+                    "retried": row["retried"],
+                    "prompt_tokens": row["prompt_tokens"],
+                    "completion_tokens": row["completion_tokens"],
+                    "total_tokens": row["total_tokens"],
+                    "cached_tokens": row["cached_tokens"],
+                    "first_token_ms": row["first_token_ms"],
+                    "duration_ms": row["duration_ms"],
+                }
+                for row in recent_rows
+            ],
+        }
+
+    def _query_key_stats(
+        self,
+        model_id: str,
+        key_name: str,
+        since_created_at: str | None = None,
+    ) -> UsageStats:
+        where_parts = ["model_id = ?", "key_name = ?"]
+        params: list[str | None] = [model_id, key_name]
+        if since_created_at is not None:
+            where_parts.append("created_at >= ?")
+            params.append(since_created_at)
+        where_sql = " AND ".join(where_parts)
+        row = self._connection.execute(
+            f"""
+            SELECT
+                COUNT(*) AS requests,
+                COALESCE(SUM(success), 0) AS successes,
+                COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS failures,
+                COALESCE(SUM(retried), 0) AS retries,
+                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+                COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
+                COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
+                COALESCE(SUM(cache_hit), 0) AS cache_hits,
+                COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
+                MIN(duration_ms) AS min_duration_ms,
+                COALESCE(MAX(duration_ms), 0) AS max_duration_ms,
+                COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms,
+                MIN(first_token_ms) AS min_first_token_ms,
+                COALESCE(MAX(first_token_ms), 0) AS max_first_token_ms
+            FROM request_metrics
+            WHERE {where_sql}
+            """,
+            params,
+        ).fetchone()
+        stats = _stats_from_aggregate(row)
+
+        status_params: list[str | None] = [model_id, key_name]
+        status_where = "model_id = ? AND key_name = ? AND status_code IS NOT NULL"
+        if since_created_at is not None:
+            status_where += " AND created_at >= ?"
+            status_params.append(since_created_at)
+        status_rows = self._connection.execute(
+            f"""
+            SELECT status_code, COUNT(*) AS total
+            FROM request_metrics
+            WHERE {status_where}
+            GROUP BY status_code ORDER BY status_code
+            """,
+            status_params,
+        ).fetchall()
+        for status_row in status_rows:
+            stats.status_codes[str(status_row["status_code"])] = int(
+                status_row["total"]
+            )
+        return stats
+
     def _snapshot_sync(self, hours: float | None = None) -> dict[str, Any]:
         since: str | None = None
         if hours is not None:

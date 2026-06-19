@@ -406,6 +406,140 @@ def stats_caller_type(page: str) -> str | None:
     return next((caller_type for page_id, _, caller_type in STATS_CALLER_PAGES if page_id == page), None)
 
 
+def key_stats_renderable(database_path: str, model_id: str, key_name: str, page: int, page_size: int, stats_range_index: int = 0) -> Group | Panel:
+    path = Path(database_path)
+    if not path.exists():
+        return section_panel(f"[yellow]统计数据库不存在: {path}[/yellow]", "Key 统计", "yellow")
+    page_size = max(page_size, 1)
+    page = max(page, 1)
+    offset = (page - 1) * page_size
+    stats_range_index, range_label, range_parameters = stats_range_query(stats_range_index)
+    table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
+    for name in ["时间", "状态", "成功", "重试", "输入", "缓存", "输出", "总Tok", "首字", "耗时"]:
+        table.add_column(name)
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(request_metrics)").fetchall()}
+        cached_tokens_expr = "cached_tokens" if "cached_tokens" in columns else "0 AS cached_tokens"
+        cached_tokens_sum_expr = "cached_tokens" if "cached_tokens" in columns else "0"
+        cache_hit_sum_expr = "cache_hit" if "cache_hit" in columns else "0"
+        first_token_ms_expr = "first_token_ms" if "first_token_ms" in columns else "0 AS first_token_ms"
+        first_token_ms_sum_expr = "first_token_ms" if "first_token_ms" in columns else "0"
+        duration_ms_expr = "duration_ms" if "duration_ms" in columns else "0 AS duration_ms"
+        duration_ms_sum_expr = "duration_ms" if "duration_ms" in columns else "0"
+        key_where_parts = ["model_id = ?", "key_name = ?"]
+        key_params: list[str] = [model_id, key_name]
+        if range_parameters:
+            key_where_parts.append("created_at >= ?")
+            key_params.extend(range_parameters)
+        key_where = " AND ".join(key_where_parts)
+        total = connection.execute(f"SELECT COUNT(*) AS total FROM request_metrics WHERE {key_where}", key_params).fetchone()["total"]
+        summary = connection.execute(f"""
+            SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS failures,
+            COALESCE(SUM(retried), 0) AS retries, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM({cached_tokens_sum_expr}), 0) AS cached_tokens, COALESCE(SUM({cache_hit_sum_expr}), 0) AS cache_hits,
+            COALESCE(ROUND(AVG({first_token_ms_sum_expr})), 0) AS avg_first_token_ms, COALESCE(MAX({first_token_ms_sum_expr}), 0) AS max_first_token_ms,
+            COALESCE(ROUND(AVG({duration_ms_sum_expr})), 0) AS avg_duration_ms, COALESCE(MAX({duration_ms_sum_expr}), 0) AS max_duration_ms, MAX(created_at) AS latest_request_at
+            FROM request_metrics
+            WHERE {key_where}
+        """, key_params).fetchone()
+        rate_since = (datetime.now(BEIJING_TZ) - timedelta(seconds=RATE_WINDOW_SECONDS)).isoformat()
+        rate_where = f"model_id = ? AND key_name = ? AND created_at >= ?"
+        rate_params: list[str] = [model_id, key_name, rate_since]
+        rate_summary = connection.execute(f"""
+            SELECT COUNT(*) AS rpm, COALESCE(SUM(total_tokens), 0) AS tpm
+            FROM request_metrics
+            WHERE {rate_where}
+        """, rate_params).fetchone()
+        status_where = f"{key_where} AND status_code IS NOT NULL"
+        status_rows = connection.execute(f"SELECT status_code, COUNT(*) AS total FROM request_metrics WHERE {status_where} GROUP BY status_code ORDER BY status_code", key_params).fetchall()
+        max_page = max((total + page_size - 1) // page_size, 1)
+        page = min(page, max_page)
+        offset = (page - 1) * page_size
+        rows = connection.execute(f"SELECT created_at, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens, {cached_tokens_expr}, {first_token_ms_expr}, {duration_ms_expr} FROM request_metrics WHERE {key_where} ORDER BY id DESC LIMIT ? OFFSET ?", (*key_params, page_size, offset)).fetchall()
+    for row in rows:
+        table.add_row(short_text(row["created_at"], 19), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", abbreviate_number(row["prompt_tokens"] - row["cached_tokens"]), abbreviate_number(row["cached_tokens"]), abbreviate_number(row["completion_tokens"]), abbreviate_number(row["total_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
+    if not rows:
+        table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-")
+    key_label = f"{short_text(model_id, 24)} / {short_text(key_name, 20)}"
+    details_title = f"请求明细 · {key_label} · {range_label} · 第 {page}/{max_page} 页 · 共 {total} 条"
+    return Group(section_panel(stats_range_tabs_renderable(stats_range_index), "查询范围", "cyan", "[dim]按 Tab 切换[/dim]"), section_panel(request_stats_summary_renderable(summary, status_rows, rate_summary), f"总览 · {key_label} · {range_label}", "cyan"), section_panel(table, details_title, "blue"))
+
+
+def watch_key_stats(database_path: str, model_id: str, key_name: str) -> None:
+    page = 1
+    stats_range_index = 0
+    frame_offset = 0
+    last_wheel_key: str | None = None
+    last_wheel_at = 0.0
+
+    frame_state = terminal_frame_state(
+        [key_stats_header_renderable(model_id, key_name), key_stats_renderable(database_path, model_id, key_name, page, REQUEST_STATS_PAGE_SIZE, stats_range_index)],
+        key_stats_help_text(),
+        offset=frame_offset,
+    )
+
+    def refresh() -> None:
+        nonlocal frame_offset, frame_state
+        frame_state = terminal_frame_state(
+            [key_stats_header_renderable(model_id, key_name), key_stats_renderable(database_path, model_id, key_name, page, REQUEST_STATS_PAGE_SIZE, stats_range_index)],
+            key_stats_help_text(),
+            offset=frame_offset,
+        )
+        frame_offset = frame_state.offset
+        live.update(frame_state.renderable, refresh=True)
+
+    with posix_input_mode(), mouse_wheel_mode(), Live(frame_state.renderable, console=console, screen=True, auto_refresh=False) as live:
+        while True:
+            started = time.monotonic()
+            while time.monotonic() - started < 1:
+                key = key_pressed()
+                if key in {"scroll_up", "scroll_down"}:
+                    handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
+                    if not handle_wheel:
+                        continue
+                if key in {"q", "Q", "0", "cancel"}:
+                    return
+                if key in {"\t", "tab"}:
+                    stats_range_index = (stats_range_index + 1) % len(STATS_TIME_RANGES)
+                    page = 1
+                    frame_offset = 0
+                    refresh()
+                    continue
+                if key in {"up", "scroll_up", "down", "scroll_down", "page_up", "page_down", "home", "end"} and frame_state.max_offset:
+                    frame_offset = content_scroll_offset(key, frame_offset, frame_state.max_offset, frame_state.viewport_height)
+                    refresh()
+                    continue
+                if key in {"left", "p", "P"}:
+                    page = max(1, page - 1)
+                    frame_offset = 0
+                    refresh()
+                    continue
+                if key in {"right", "n", "N"}:
+                    page += 1
+                    frame_offset = 0
+                    refresh()
+                    continue
+                time.sleep(0.05)
+            refresh()
+
+
+def key_stats_header_renderable(model_id: str, key_name: str) -> Panel:
+    return section_panel(
+        Align.center(f"模型: [bold]{short_text(model_id, 32)}[/bold]    Key: [bold]{short_text(key_name, 32)}[/bold]"),
+        "Key 统计",
+        "cyan",
+        "[dim]查看单个 Key 的调用统计[/dim]",
+    )
+
+
+def key_stats_help_text() -> Align:
+    if sys.platform != "win32":
+        return shortcut_text("Tab 时间范围  ·  ↑/↓/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
+    return shortcut_text("Tab 时间范围  ·  ↑/↓/滚轮/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
+    return next((caller_type for page_id, _, caller_type in STATS_CALLER_PAGES if page_id == page), None)
+
+
 def stats_filter_query(range_parameters: tuple[str, ...], caller_type: str | None, has_caller_type: bool) -> tuple[str, tuple[str, ...]]:
     filters: list[str] = []
     parameters: list[str] = []

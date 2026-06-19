@@ -79,3 +79,68 @@ def test_snapshot_counts_anthropic_cache_read_tokens_as_cached(
     assert total["cache_creation_input_tokens"] == 20
     assert total["cache_read_input_tokens"] == 80
     assert total["cache_hits"] == 1
+
+
+def test_key_stats_returns_key_specific_data(tmp_path: Path) -> None:
+    async def run() -> dict[str, object]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        await store.record(
+            "model-a",
+            "key-a",
+            200,
+            {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 2},
+            duration_ms=30,
+            first_token_ms=10,
+        )
+        await store.record(
+            "model-a",
+            "key-a",
+            200,
+            {"prompt_tokens": 20, "completion_tokens": 8},
+            duration_ms=40,
+            first_token_ms=15,
+        )
+        await store.record(
+            "model-a",
+            "key-b",
+            429,
+            {"prompt_tokens": 100, "completion_tokens": 50},
+            retried=True,
+            duration_ms=50,
+            first_token_ms=20,
+        )
+        result = await store.key_stats("model-a", "key-a")
+        await store.close()
+        return result
+
+    result = anyio.run(run)
+    assert result["model_id"] == "model-a"
+    assert result["key_name"] == "key-a"
+    stats = result["stats"]
+    assert stats["requests"] == 2
+    assert stats["successes"] == 2
+    assert stats["failures"] == 0
+    assert stats["prompt_tokens"] == 30
+    assert stats["completion_tokens"] == 13
+    assert stats["cached_tokens"] == 2
+    assert stats["status_codes"] == {"200": 2}
+    assert len(result["recent_requests"]) == 2
+
+
+def test_key_stats_respects_hours_filter(tmp_path: Path) -> None:
+    async def run() -> tuple[dict[str, object], dict[str, object]]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        await store.record(
+            "model-a",
+            "key-a",
+            200,
+            {"prompt_tokens": 10, "completion_tokens": 5},
+        )
+        all_result = await store.key_stats("model-a", "key-a")
+        none_result = await store.key_stats("model-a", "key-a", hours=0.0)
+        await store.close()
+        return all_result, none_result
+
+    all_result, none_result = anyio.run(run)
+    assert all_result["stats"]["requests"] == 1
+    assert none_result["stats"]["requests"] == 0

@@ -191,6 +191,27 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         config = await _authorized_config(request, reload_config)
         return _key_response(_find_key(_find_model(config, model_id), key_name))
 
+    @app.get("/api/models/{model_id}/keys/{key_name}/stats", tags=["management"])
+    async def get_key_stats(request: Request, model_id: str, key_name: str) -> dict[str, Any]:
+        state = request.app.state
+        await reload_config(state)
+        lease = await state.runtime_manager.acquire()
+        try:
+            config = lease.resources.config
+            if _authorization_mode(request, config.local_api_key) != "full":
+                raise HTTPException(status_code=401, detail="本地 API key 验证失败")
+            _find_key(_find_model(config, model_id), key_name)
+            hours: float | None = None
+            hours_param = request.query_params.get("hours")
+            if hours_param:
+                try:
+                    hours = float(hours_param)
+                except ValueError:
+                    pass
+            return await lease.resources.metrics.key_stats(model_id, key_name, hours=hours)
+        finally:
+            await lease.release()
+
     @app.put("/api/models/{model_id}/keys/{key_name}", tags=["management"])
     async def update_key(
         request: Request, model_id: str, key_name: str, payload: KeyUpdate

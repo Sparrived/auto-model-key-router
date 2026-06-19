@@ -16,6 +16,7 @@ from .config import (
     UPSTREAM_ROUTE_LABELS,
     UPSTREAM_ROUTE_MODES,
     RouterConfig,
+    default_metrics_db_path,
     generate_local_api_key,
     load_config_data,
     normalize_upstream_base_url,
@@ -465,10 +466,11 @@ def manage_selected_key_interactively(path: Path) -> None:
                 ("2", "删除"),
                 ("3", "复制 API key"),
                 ("4", "禁用" if enabled else "启用"),
+                ("5", "统计"),
             ]
             if visitor_installed:
                 options.append(
-                    ("5", "禁止访客访问" if visitor_allowed else "允许访客访问")
+                    ("6", "禁止访客访问" if visitor_allowed else "允许访客访问")
                 )
             options.append(("0", "返回"))
             choice = select_option(
@@ -487,6 +489,12 @@ def manage_selected_key_interactively(path: Path) -> None:
             )
             if choice == "0":
                 break
+            if choice == "5":
+                from .logs_tui import watch_key_stats
+                config_data = load_config_data(path)
+                db_path = str(config_data.get("metrics_db_path") or default_metrics_db_path())
+                run_submodule(lambda: watch_key_stats(db_path, model["id"], key_name))
+                continue
             clear_terminal_history()
             if choice == "1":
                 result = edit_selected_key_interactively(path, data, model, key_index)
@@ -500,7 +508,7 @@ def manage_selected_key_interactively(path: Path) -> None:
                 result = copy_selected_key_interactively(data, model, key_index)
             elif choice == "4":
                 result = toggle_selected_key_interactively(path, data, model, key_index)
-            elif choice == "5":
+            elif choice == "6":
                 result = toggle_visitor_access_interactively(
                     path, data, model, key_index
                 )
@@ -511,10 +519,10 @@ def manage_selected_key_interactively(path: Path) -> None:
                     "1": "编辑",
                     "3": "复制 API key",
                     "4": "Key 开关",
-                    "5": "访客访问",
+                    "6": "访客访问",
                 }.get(choice, "Key 管理")
                 show_result_page(result_title, result)
-            if choice in ("1", "4", "5"):
+            if choice in ("1", "4", "6"):
                 # 编辑或切换状态后刷新数据
                 data = load_config_data(path)
                 model = find_model(data.get("models", []), model["id"])
