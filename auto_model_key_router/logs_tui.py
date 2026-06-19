@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .formatting import percent, short_text
+from .formatting import abbreviate_number, percent, short_text
 from .log_files import archived_log_paths
 from .metrics import BEIJING_TZ, RATE_WINDOW_SECONDS
 from .tui import console, content_scroll_offset, key_pressed, mouse_wheel_mode, posix_input_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame_state
@@ -394,7 +394,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
         offset = (page - 1) * page_size
         rows = connection.execute(f"SELECT created_at, {caller_type_expr}, model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens, {cached_tokens_expr}, {first_token_ms_expr}, {duration_ms_expr} FROM request_metrics {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?", (*query_parameters, page_size, offset)).fetchall()
     for row in rows:
-        table.add_row(short_text(row["created_at"], 19), caller_type_text(row["caller_type"]), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", str(row["prompt_tokens"] - row["cached_tokens"]), str(row["cached_tokens"]), str(row["completion_tokens"]), str(row["total_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
+        table.add_row(short_text(row["created_at"], 19), caller_type_text(row["caller_type"]), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", abbreviate_number(row["prompt_tokens"] - row["cached_tokens"]), abbreviate_number(row["cached_tokens"]), abbreviate_number(row["completion_tokens"]), abbreviate_number(row["total_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
     if not rows:
         table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
     caller_label = caller_type_title(caller_type)
@@ -469,7 +469,7 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     table.add_column("指标", style="cyan")
     table.add_column("值", justify="right")
     table.add_row("总请求", str(requests), "成功率", percent(successes, requests), "成功/失败", f"{successes}/{failures}")
-    table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{prompt_tokens}/{completion_tokens}", "缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})")
-    table.add_row(f"{rate_window_label} 流量", f"{current_rpm} RPM / {current_tpm:,} TPM", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "状态码", short_text(status_codes, 36))
+    table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{abbreviate_number(prompt_tokens)}/{abbreviate_number(completion_tokens)}", "缓存 Tok", f"{abbreviate_number(cached_tokens)} ({percent(cached_tokens, prompt_tokens)})")
+    table.add_row(f"{rate_window_label} 流量", f"{current_rpm} RPM / {abbreviate_number(current_tpm)} TPM", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "状态码", short_text(status_codes, 36))
     table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
     return table

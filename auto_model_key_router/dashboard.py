@@ -39,7 +39,7 @@ from .config_editor import (
     set_listen_interactively,
     set_local_api_key_interactively,
 )
-from .formatting import compact_url, short_text
+from .formatting import abbreviate_number, compact_url, short_text
 from . import __version__
 from .metrics import BEIJING_TZ, RATE_WINDOW_SECONDS
 from .logs_tui import watch_logs
@@ -758,9 +758,9 @@ def quick_metrics_items(db_path: str) -> list[str]:
     return [
         f"[dim]请求[/dim] [bold cyan]{requests:,}[/bold cyan]",
         f"[dim]成功率[/dim] [bold green]{success_rate}[/bold green]",
-        f"[dim]Token[/dim] [bold magenta]{total['total_tokens']:,}[/bold magenta]",
+        f"[dim]Token[/dim] [bold magenta]{abbreviate_number(total['total_tokens'])}[/bold magenta]",
         f"[dim]RPM[/dim] [bold]{recent['rpm']}[/bold]",
-        f"[dim]TPM[/dim] [bold]{recent['tpm']:,}[/bold]",
+        f"[dim]TPM[/dim] [bold]{abbreviate_number(recent['tpm'])}[/bold]",
     ]
 
 

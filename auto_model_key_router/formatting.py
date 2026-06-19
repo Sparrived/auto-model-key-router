@@ -36,3 +36,13 @@ def percent(numerator: int, denominator: int) -> str:
     if denominator <= 0:
         return "0%"
     return f"{numerator / denominator:.1%}"
+
+
+def abbreviate_number(value: int) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
