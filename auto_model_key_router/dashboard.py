@@ -798,6 +798,9 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
         items.append(f"[dim]访客可用[/dim] [bold green]{configured_visitor_key_count}[/bold green]")
     elif configured_visitor_key_count:
         items.append(f"[dim]未生效授权[/dim] [yellow]{configured_visitor_key_count}[/yellow]")
+    if config.unified_model is not None:
+        key_text = config.unified_model.key or "自动路由"
+        items.append(f"[dim]统一模型[/dim] [bold cyan]{short_text(config.unified_model.model, 20)}[/bold cyan] [dim]Key[/dim] [bold green]{key_text}[/bold green]")
     items.extend(quick_metrics_items(config.metrics_db_path))
     summary = Text(no_wrap=True, overflow="ellipsis")
     for i, item in enumerate(items):
@@ -820,6 +823,7 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     table.add_column("推理强度")
     table.add_column("Keys", justify="right", style="green")
     table.add_column("上游", ratio=2)
+    table.add_column("原生支持")
     for model in config.models:
         upstreams = sorted({compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
@@ -828,6 +832,18 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
             "priority": "优先级",
             "only_first": "仅首个",
         }.get(model.routing_mode, "分流")
+        native_items = []
+        for base_url in sorted({key.base_url for key in model.keys}):
+            routes = config.upstream_routes_for_base_url(base_url)
+            if routes.get("anthropic"):
+                native_items.append("[cyan]Anth[/cyan]")
+            elif model.native_first:
+                native_items.append("[cyan]Anth[/cyan]")
+            if routes.get("openai"):
+                native_items.append("[green]OAI[/green]")
+            if routes.get("responses"):
+                native_items.append("[magenta]Resp[/magenta]")
+        native_summary = " ".join(native_items) if native_items else "[dim]-[/dim]"
         table.add_row(
             short_text(model.id, 28),
             short_text(display_names, 24),
@@ -835,25 +851,12 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
             reasoning_effort_text(model.reasoning_effort),
             str(len(model.keys)),
             "\n".join(upstreams),
+            native_summary,
         )
     if not config.models:
-        table.add_row("未配置", "-", "-", "-", "0", "-")
+        table.add_row("未配置", "-", "-", "-", "0", "-", "-")
     renderables = [section_panel(summary, "运行概览", "cyan")]
     if warning is not None:
         renderables.append(warning)
-    if config.unified_model is not None:
-        key_text = config.unified_model.key or "自动路由"
-        renderables.append(
-            section_panel(
-                f"[bold cyan]{UNIFIED_MODEL_ID}[/bold cyan] → [bold]{config.unified_model.model}[/bold]\nKey: [bold green]{key_text}[/bold green]",
-                "统一模型",
-                "cyan",
-            )
-        )
     renderables.append(section_panel(table, "模型路由", "blue"))
-    native_support_table = upstream_native_support_table(config)
-    if native_support_table is not None:
-        renderables.append(
-            section_panel(native_support_table, "上游原生支持", "magenta")
-        )
     return tuple(renderables)
