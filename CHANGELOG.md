@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-06-19
+
 ### Added
 - 新增 `GET/PUT/DELETE /api/unified-model` REST API 端点，支持通过 API 查询、设置和移除 unified-model 配置，`PUT` 支持按模型 ID 或别名指定目标模型及可选 key。
 
