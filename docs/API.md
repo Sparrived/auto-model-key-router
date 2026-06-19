@@ -269,7 +269,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 requests, successes, failures, retries
 prompt_tokens, completion_tokens, total_tokens
 cached_tokens, cache_creation_input_tokens, cache_read_input_tokens
-cache_hits, cache_misses, cache_hit_rate, cached_token_rate
+cached_token_rate
 total_duration_ms, avg_duration_ms, min_duration_ms, max_duration_ms
 total_first_token_ms, avg_first_token_ms, min_first_token_ms, max_first_token_ms
 status_codes

@@ -47,23 +47,22 @@ def test_request_stats_renderable_shows_current_rpm_and_tpm(tmp_path: Path, monk
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 total_tokens INTEGER NOT NULL DEFAULT 0,
                 cached_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_hit INTEGER NOT NULL DEFAULT 0,
                 first_token_ms INTEGER NOT NULL DEFAULT 0,
                 duration_ms INTEGER NOT NULL DEFAULT 0
             )
             """
         )
         rows = [
-            ((now - timedelta(seconds=30)).isoformat(), "local", "model-a", "key-a", 200, 1, 0, 3, 7, 10, 0, 0, 100, 500),
-            ((now - timedelta(seconds=90)).isoformat(), "local", "model-a", "key-a", 200, 1, 0, 5, 5, 10, 0, 0, 120, 550),
+            ((now - timedelta(seconds=30)).isoformat(), "local", "model-a", "key-a", 200, 1, 0, 3, 7, 10, 0, 100, 500),
+            ((now - timedelta(seconds=90)).isoformat(), "local", "model-a", "key-a", 200, 1, 0, 5, 5, 10, 0, 120, 550),
         ]
         connection.executemany(
             """
             INSERT INTO request_metrics (
                 created_at, caller_type, model_id, key_name, status_code, success, retried,
-                prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_hit,
+                prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                 first_token_ms, duration_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -655,7 +654,6 @@ def test_request_stats_pages_filter_local_and_visitor_calls(tmp_path) -> None:
                 completion_tokens INTEGER NOT NULL,
                 total_tokens INTEGER NOT NULL,
                 cached_tokens INTEGER NOT NULL,
-                cache_hit INTEGER NOT NULL,
                 first_token_ms INTEGER NOT NULL,
                 duration_ms INTEGER NOT NULL
             )
@@ -666,12 +664,12 @@ def test_request_stats_pages_filter_local_and_visitor_calls(tmp_path) -> None:
             INSERT INTO request_metrics (
                 created_at, caller_type, model_id, key_name, status_code, success,
                 retried, prompt_tokens, completion_tokens, total_tokens,
-                cached_tokens, cache_hit, first_token_ms, duration_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cached_tokens, first_token_ms, duration_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                ("2026-06-13T12:00:00+08:00", "local", "local-model", "local-key", 200, 1, 0, 2, 1, 3, 0, 0, 10, 20),
-                ("2026-06-13T12:01:00+08:00", "visitor", "visitor-model", "visitor-key", 200, 1, 0, 4, 2, 6, 1, 1, 15, 30),
+                ("2026-06-13T12:00:00+08:00", "local", "local-model", "local-key", 200, 1, 0, 2, 1, 3, 0, 10, 20),
+                ("2026-06-13T12:01:00+08:00", "visitor", "visitor-model", "visitor-key", 200, 1, 0, 4, 2, 6, 1, 15, 30),
             ],
         )
 

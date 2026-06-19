@@ -78,7 +78,6 @@ def test_snapshot_counts_anthropic_cache_read_tokens_as_cached(
     assert total["cached_tokens"] == 80
     assert total["cache_creation_input_tokens"] == 20
     assert total["cache_read_input_tokens"] == 80
-    assert total["cache_hits"] == 1
 
 
 def test_key_stats_returns_key_specific_data(tmp_path: Path) -> None:

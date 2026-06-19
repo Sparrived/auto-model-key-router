@@ -366,7 +366,6 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
         caller_type_expr = "caller_type" if has_caller_type else "'local' AS caller_type"
         cached_tokens_expr = "cached_tokens" if "cached_tokens" in columns else "0 AS cached_tokens"
         cached_tokens_sum_expr = "cached_tokens" if "cached_tokens" in columns else "0"
-        cache_hit_sum_expr = "cache_hit" if "cache_hit" in columns else "0"
         first_token_ms_expr = "first_token_ms" if "first_token_ms" in columns else "0 AS first_token_ms"
         first_token_ms_sum_expr = "first_token_ms" if "first_token_ms" in columns else "0"
         duration_ms_expr = "duration_ms" if "duration_ms" in columns else "0 AS duration_ms"
@@ -375,7 +374,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
         summary = connection.execute(f"""
             SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS failures,
             COALESCE(SUM(retried), 0) AS retries, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-            COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM({cached_tokens_sum_expr}), 0) AS cached_tokens, COALESCE(SUM({cache_hit_sum_expr}), 0) AS cache_hits,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM({cached_tokens_sum_expr}), 0) AS cached_tokens,
             COALESCE(ROUND(AVG({first_token_ms_sum_expr})), 0) AS avg_first_token_ms, COALESCE(MAX({first_token_ms_sum_expr}), 0) AS max_first_token_ms,
             COALESCE(ROUND(AVG({duration_ms_sum_expr})), 0) AS avg_duration_ms, COALESCE(MAX({duration_ms_sum_expr}), 0) AS max_duration_ms, MAX(created_at) AS latest_request_at
             FROM request_metrics
@@ -422,7 +421,6 @@ def key_stats_renderable(database_path: str, model_id: str, key_name: str, page:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(request_metrics)").fetchall()}
         cached_tokens_expr = "cached_tokens" if "cached_tokens" in columns else "0 AS cached_tokens"
         cached_tokens_sum_expr = "cached_tokens" if "cached_tokens" in columns else "0"
-        cache_hit_sum_expr = "cache_hit" if "cache_hit" in columns else "0"
         first_token_ms_expr = "first_token_ms" if "first_token_ms" in columns else "0 AS first_token_ms"
         first_token_ms_sum_expr = "first_token_ms" if "first_token_ms" in columns else "0"
         duration_ms_expr = "duration_ms" if "duration_ms" in columns else "0 AS duration_ms"
@@ -437,7 +435,7 @@ def key_stats_renderable(database_path: str, model_id: str, key_name: str, page:
         summary = connection.execute(f"""
             SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0) AS failures,
             COALESCE(SUM(retried), 0) AS retries, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-            COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM({cached_tokens_sum_expr}), 0) AS cached_tokens, COALESCE(SUM({cache_hit_sum_expr}), 0) AS cache_hits,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM({cached_tokens_sum_expr}), 0) AS cached_tokens,
             COALESCE(ROUND(AVG({first_token_ms_sum_expr})), 0) AS avg_first_token_ms, COALESCE(MAX({first_token_ms_sum_expr}), 0) AS max_first_token_ms,
             COALESCE(ROUND(AVG({duration_ms_sum_expr})), 0) AS avg_duration_ms, COALESCE(MAX({duration_ms_sum_expr}), 0) AS max_duration_ms, MAX(created_at) AS latest_request_at
             FROM request_metrics
@@ -586,7 +584,6 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     completion_tokens = int(summary["completion_tokens"])
     total_tokens = int(summary["total_tokens"])
     cached_tokens = int(summary["cached_tokens"])
-    cache_hits = int(summary["cache_hits"])
     avg_first_token_ms = int(summary["avg_first_token_ms"])
     max_first_token_ms = int(summary["max_first_token_ms"])
     avg_duration_ms = int(summary["avg_duration_ms"])
@@ -604,6 +601,6 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     table.add_column("值", justify="right")
     table.add_row("总请求", str(requests), "成功率", percent(successes, requests), "成功/失败", f"{successes}/{failures}")
     table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{abbreviate_number(prompt_tokens)}/{abbreviate_number(completion_tokens)}", "缓存 Tok", f"{abbreviate_number(cached_tokens)} ({percent(cached_tokens, prompt_tokens)})")
-    table.add_row(f"{rate_window_label} 流量", f"{current_rpm} RPM / {abbreviate_number(current_tpm)} TPM", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "状态码", short_text(status_codes, 36))
+    table.add_row(f"{rate_window_label} 流量", f"{current_rpm} RPM / {abbreviate_number(current_tpm)} TPM", "缓存 Tok 比例", percent(cached_tokens, prompt_tokens), "状态码", short_text(status_codes, 36))
     table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
     return table

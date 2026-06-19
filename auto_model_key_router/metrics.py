@@ -26,8 +26,6 @@ class UsageStats:
     cached_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
-    cache_hits: int = 0
-    cache_misses: int = 0
     total_duration_ms: int = 0
     min_duration_ms: int | None = None
     max_duration_ms: int = 0
@@ -48,11 +46,6 @@ class UsageStats:
             "cached_tokens": self.cached_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
-            "cache_hits": self.cache_hits,
-            "cache_misses": self.cache_misses,
-            "cache_hit_rate": _rate(
-                self.cache_hits, self.cache_hits + self.cache_misses
-            ),
             "cached_token_rate": _rate(self.cached_tokens, self.prompt_tokens),
             "total_duration_ms": self.total_duration_ms,
             "avg_duration_ms": round(self.total_duration_ms / self.requests)
@@ -100,9 +93,6 @@ class MetricsStore:
         request_model_id = requested_model_id or model_id
         caller_type = caller_type if caller_type in {"local", "visitor"} else "local"
         failure = failed or status_code is None or status_code >= 400
-        has_cache_hit = (
-            usage["cached_tokens"] > 0 or usage["cache_read_input_tokens"] > 0
-        )
         async with self._lock:
             await asyncio.to_thread(
                 self._record_sync,
@@ -116,7 +106,6 @@ class MetricsStore:
                 first_token_ms,
                 request_model_id,
                 caller_type,
-                has_cache_hit,
             )
 
     def _record_sync(
@@ -131,7 +120,6 @@ class MetricsStore:
         first_token_ms: int,
         request_model_id: str,
         caller_type: str,
-        has_cache_hit: bool,
     ) -> None:
         self._connection.execute(
             """
@@ -150,10 +138,9 @@ class MetricsStore:
                     cached_tokens,
                     cache_creation_input_tokens,
                     cache_read_input_tokens,
-                    cache_hit,
                     first_token_ms,
                     duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
             (
                 _now_beijing().isoformat(),
@@ -170,7 +157,6 @@ class MetricsStore:
                 usage["cached_tokens"],
                 usage["cache_creation_input_tokens"],
                 usage["cache_read_input_tokens"],
-                1 if has_cache_hit else 0,
                 max(first_token_ms, 0),
                 max(duration_ms, 0),
             ),
@@ -275,7 +261,6 @@ class MetricsStore:
                 COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                 COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
                 COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
-                COALESCE(SUM(cache_hit), 0) AS cache_hits,
                 COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
                 MIN(duration_ms) AS min_duration_ms,
                 COALESCE(MAX(duration_ms), 0) AS max_duration_ms,
@@ -367,7 +352,6 @@ class MetricsStore:
                 COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                 COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_input_tokens,
                 COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_input_tokens,
-                COALESCE(SUM(cache_hit), 0) AS cache_hits,
                 COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
                 MIN(duration_ms) AS min_duration_ms,
                 COALESCE(MAX(duration_ms), 0) AS max_duration_ms,
@@ -438,7 +422,6 @@ class MetricsStore:
                 cached_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_hit INTEGER NOT NULL DEFAULT 0,
                 first_token_ms INTEGER NOT NULL DEFAULT 0,
                 duration_ms INTEGER NOT NULL DEFAULT 0
             )
@@ -455,7 +438,6 @@ class MetricsStore:
         self._ensure_column("cached_tokens", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("cache_creation_input_tokens", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("cache_read_input_tokens", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("cache_hit", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("first_token_ms", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("duration_ms", "INTEGER NOT NULL DEFAULT 0")
         self._connection.execute(
@@ -517,8 +499,6 @@ def _stats_from_aggregate(row: sqlite3.Row) -> UsageStats:
         cached_tokens=int(row["cached_tokens"]),
         cache_creation_input_tokens=int(row["cache_creation_input_tokens"]),
         cache_read_input_tokens=int(row["cache_read_input_tokens"]),
-        cache_hits=int(row["cache_hits"]),
-        cache_misses=requests - int(row["cache_hits"]),
         total_duration_ms=int(row["total_duration_ms"]),
         min_duration_ms=None
         if row["min_duration_ms"] is None
