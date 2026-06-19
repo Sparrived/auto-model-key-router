@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,7 @@ from .config_editor import (
     set_local_api_key_interactively,
 )
 from .formatting import compact_url, short_text
+from .metrics import BEIJING_TZ, RATE_WINDOW_SECONDS
 from . import __version__
 from .logs_tui import watch_logs
 from .service import (
@@ -728,6 +731,48 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
     return table
 
 
+def quick_metrics_panel(db_path: str) -> Any:
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        total = connection.execute(
+            "SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, "
+            "COALESCE(SUM(total_tokens), 0) AS total_tokens FROM request_metrics"
+        ).fetchone()
+        rate_since = (
+            datetime.now(BEIJING_TZ) - timedelta(seconds=RATE_WINDOW_SECONDS)
+        ).isoformat()
+        recent = connection.execute(
+            "SELECT COUNT(*) AS rpm, COALESCE(SUM(total_tokens), 0) AS tpm "
+            "FROM request_metrics WHERE created_at >= ?",
+            (rate_since,),
+        ).fetchone()
+    requests = total["requests"]
+    if requests == 0:
+        return None
+    successes = total["successes"]
+    success_rate = f"{successes / requests:.1%}"
+    grid = Table.grid(expand=True)
+    grid.add_column(ratio=1)
+    grid.add_column(ratio=1)
+    grid.add_column(ratio=1)
+    grid.add_row(
+        "[dim]总请求数[/dim]\n[bold cyan]{:,}[/bold cyan]".format(requests),
+        "[dim]成功率[/dim]\n[bold green]{}[/bold green]".format(success_rate),
+        "[dim]总 Token[/dim]\n[bold magenta]{:,}[/bold magenta]".format(
+            total["total_tokens"]
+        ),
+    )
+    grid.add_row(
+        "[dim]近 1 分钟 RPM[/dim]\n[bold]{}[/bold]".format(recent["rpm"]),
+        "[dim]近 1 分钟 TPM[/dim]\n[bold]{}[/bold]".format(recent["tpm"]),
+        "",
+    )
+    return section_panel(grid, "运行统计", "green")
+
+
 def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     model_count = len(config.models)
     key_count = sum(len(model.keys) for model in config.models)
@@ -810,6 +855,9 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     if not config.models:
         table.add_row("未配置", "-", "-", "-", "0", "-")
     renderables = [section_panel(summary, "运行概览", "cyan")]
+    metrics_panel = quick_metrics_panel(config.metrics_db_path)
+    if metrics_panel is not None:
+        renderables.append(metrics_panel)
     if warning is not None:
         renderables.append(warning)
     if config.unified_model is not None:
