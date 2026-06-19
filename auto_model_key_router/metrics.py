@@ -177,23 +177,27 @@ class MetricsStore:
         )
         self._connection.commit()
 
-    async def snapshot(self) -> dict[str, Any]:
+    async def snapshot(self, hours: float | None = None) -> dict[str, Any]:
         async with self._lock:
-            return await asyncio.to_thread(self._snapshot_sync)
+            return await asyncio.to_thread(self._snapshot_sync, hours)
 
-    def _snapshot_sync(self) -> dict[str, Any]:
-        total = self._query_stats(())[()]
+    def _snapshot_sync(self, hours: float | None = None) -> dict[str, Any]:
+        since: str | None = None
+        if hours is not None:
+            since = (_now_beijing() - timedelta(hours=hours)).isoformat()
+
+        total = self._query_stats((), since_created_at=since)[()]
         current_window_started_at = (
             _now_beijing() - timedelta(seconds=RATE_WINDOW_SECONDS)
         ).isoformat()
         recent = self._query_stats((), since_created_at=current_window_started_at)[()]
-        caller_types = self._query_stats(("caller_type",))
+        caller_types = self._query_stats(("caller_type",), since_created_at=since)
         caller_types.setdefault(("local",), UsageStats())
         caller_types.setdefault(("visitor",), UsageStats())
-        models = self._query_stats(("model_id",))
-        requested_models = self._query_stats(("requested_model_id",))
-        model_requested = self._query_stats(("model_id", "requested_model_id"))
-        keys = self._query_stats(("model_id", "key_name"))
+        models = self._query_stats(("model_id",), since_created_at=since)
+        requested_models = self._query_stats(("requested_model_id",), since_created_at=since)
+        model_requested = self._query_stats(("model_id", "requested_model_id"), since_created_at=since)
+        keys = self._query_stats(("model_id", "key_name"), since_created_at=since)
 
         return {
             "started_at": self._started_at.isoformat(),

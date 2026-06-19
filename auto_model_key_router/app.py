@@ -157,7 +157,14 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 return JSONResponse(
                     {"error": {"message": "本地 API key 验证失败"}}, status_code=401
                 )
-            return await lease.resources.metrics.snapshot()
+            hours: float | None = None
+            hours_param = request.query_params.get("hours")
+            if hours_param:
+                try:
+                    hours = float(hours_param)
+                except ValueError:
+                    pass
+            return await lease.resources.metrics.snapshot(hours=hours)
         finally:
             await lease.release()
 
