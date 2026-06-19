@@ -71,6 +71,11 @@ class ModelUpdate(APIModel):
     reasoning_effort: str | None = None
 
 
+class UnifiedModelUpdate(APIModel):
+    model: str = Field(min_length=1)
+    key: str | None = None
+
+
 class ManagementAPIError(Exception):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
@@ -79,6 +84,65 @@ class ManagementAPIError(Exception):
 
 
 def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
+    @app.get("/api/unified-model", tags=["management"])
+    async def get_unified_model(request: Request) -> dict[str, Any]:
+        config = await _authorized_config(request, reload_config)
+        if config.unified_model is None:
+            return {"unified_model": None}
+        return {
+            "unified_model": {
+                "model": config.unified_model.model,
+                "key": config.unified_model.key,
+            }
+        }
+
+    @app.put("/api/unified-model", tags=["management"])
+    async def update_unified_model(
+        request: Request, payload: UnifiedModelUpdate
+    ) -> dict[str, Any]:
+        target_model = payload.model.strip()
+        target_key = payload.key.strip() if payload.key else None
+
+        def mutation(data: dict[str, Any]) -> None:
+            models = _raw_models(data)
+            resolved_id = _resolve_model_id(models, target_model)
+            if resolved_id is None:
+                raise ManagementAPIError(404, f"未配置模型或别名: {target_model}")
+            if target_key is not None:
+                model = _find_raw_model(models, resolved_id)
+                if model is None:
+                    raise ManagementAPIError(404, f"模型不存在: {resolved_id}")
+                keys = _raw_keys(model)
+                if _find_raw_key(keys, resolved_id, target_key) is None:
+                    raise ManagementAPIError(
+                        404, f"模型 {resolved_id} 的 key 不存在: {target_key}"
+                    )
+            unified_data: dict[str, Any] = {"model": resolved_id}
+            if target_key:
+                unified_data["key"] = target_key
+            data["unified_model"] = unified_data
+
+        config = await _update_config(request, reload_config, mutation)
+        return {
+            "unified_model": {
+                "model": config.unified_model.model,
+                "key": config.unified_model.key,
+            }
+        }
+
+    @app.delete(
+        "/api/unified-model",
+        tags=["management"],
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
+    async def delete_unified_model(request: Request) -> Response:
+        def mutation(data: dict[str, Any]) -> None:
+            data.pop("unified_model", None)
+
+        await _update_config(request, reload_config, mutation)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
     @app.get("/api/models", tags=["management"])
     async def list_models(request: Request) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
@@ -452,6 +516,19 @@ def _raw_keys(model: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(keys, list):
         raise ValueError(f"模型 {model.get('id', '')} 的 keys 必须是数组")
     return keys
+
+
+def _resolve_model_id(
+    models: list[dict[str, Any]], model_name: str
+) -> str | None:
+    for model in models:
+        model_id = str(model.get("id") or "")
+        if model_name == model_id:
+            return model_id
+        aliases = model.get("aliases")
+        if isinstance(aliases, list) and model_name in aliases:
+            return model_id
+    return None
 
 
 def _find_raw_model(

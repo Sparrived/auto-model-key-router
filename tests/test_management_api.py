@@ -427,3 +427,64 @@ def test_get_key_stats_returns_key_specific_metrics(
     assert missing_key.status_code == 404
     assert unauthorized.status_code == 401
     assert with_hours.status_code == 200
+
+
+def test_unified_model_crud_via_api(tmp_path: Path) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(
+        client: httpx.AsyncClient,
+    ) -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
+        # Initially no unified model
+        get_empty = await client.get("/api/unified-model", headers=AUTH_HEADERS)
+        # Set unified model
+        set_ok = await client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "model-a"},
+        )
+        # Read back
+        get_after_set = await client.get("/api/unified-model", headers=AUTH_HEADERS)
+        # Update with key
+        update_with_key = await client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "model-a", "key": "key-a"},
+        )
+        # Delete
+        delete_ok = await client.delete("/api/unified-model", headers=AUTH_HEADERS)
+        return get_empty, set_ok, get_after_set, update_with_key, delete_ok
+
+    get_empty, set_ok, get_after_set, update_with_key, delete_ok = run_client(
+        app, requests
+    )
+
+    assert get_empty.status_code == 200
+    assert get_empty.json()["unified_model"] is None
+    assert set_ok.status_code == 200
+    assert set_ok.json()["unified_model"]["model"] == "model-a"
+    assert set_ok.json()["unified_model"]["key"] is None
+    assert get_after_set.status_code == 200
+    assert get_after_set.json()["unified_model"]["model"] == "model-a"
+    assert update_with_key.status_code == 200
+    assert update_with_key.json()["unified_model"]["key"] == "key-a"
+    assert delete_ok.status_code == 204
+    # Verify deleted
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "unified_model" not in saved
+
+
+def test_unified_model_rejects_unknown_model(tmp_path: Path) -> None:
+    app, _ = create_file_backed_app(tmp_path)
+
+    response = run_client(
+        app,
+        lambda client: client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "nonexistent"},
+        ),
+    )
+
+    assert response.status_code == 404
+    assert "未配置模型" in response.json()["detail"]
