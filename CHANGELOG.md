@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `/metrics` 接口新增 `hours` 参数，支持获取指定时间段的监控指标。
+
+### Changed
+- Token 数量显示改用 K/M/B 缩写，优化大数值可读性。
+
 ## [2.1.5.post1] - 2026-06-19
 
 ### Changed
