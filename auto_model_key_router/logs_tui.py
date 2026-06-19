@@ -469,9 +469,7 @@ def request_stats_summary_renderable(summary: sqlite3.Row, status_rows: list[sql
     table.add_column("指标", style="cyan")
     table.add_column("值", justify="right")
     table.add_row("总请求", str(requests), "成功率", percent(successes, requests), "成功/失败", f"{successes}/{failures}")
-    input_tokens = prompt_tokens - cached_tokens
-    table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{input_tokens}/{completion_tokens}", "缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})")
-    table.add_row(f"{rate_window_label} RPM", str(current_rpm), f"{rate_window_label} TPM", str(current_tpm), "状态码", short_text(status_codes, 36))
-    table.add_row("总 Tok", str(total_tokens), "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
-    table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "", "")
+    table.add_row("重试", f"{retries} ({percent(retries, requests)})", "输入/输出 Tok", f"{prompt_tokens}/{completion_tokens}", "缓存 Tok", f"{cached_tokens} ({percent(cached_tokens, prompt_tokens)})")
+    table.add_row(f"{rate_window_label} 流量", f"{current_rpm} RPM / {current_tpm:,} TPM", "缓存命中", f"{cache_hits} ({percent(cache_hits, requests)})", "状态码", short_text(status_codes, 36))
+    table.add_row("平均/最长首字", f"{avg_first_token_ms}/{max_first_token_ms} ms", "平均/最长耗时", f"{avg_duration_ms}/{max_duration_ms} ms", "最新请求", short_text(summary["latest_request_at"] or "-", 19))
     return table

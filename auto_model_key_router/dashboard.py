@@ -796,8 +796,6 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     if visitor_installed:
         items.append(f"[dim]访客Key[/dim] [bold]{VISITOR_API_KEY}[/bold]")
         items.append(f"[dim]访客可用[/dim] [bold green]{configured_visitor_key_count}[/bold green]")
-    elif configured_visitor_key_count:
-        items.append(f"[dim]未生效授权[/dim] [yellow]{configured_visitor_key_count}[/yellow]")
     items.extend(quick_metrics_items(config.metrics_db_path))
     summary = Text(no_wrap=True, overflow="ellipsis")
     for i, item in enumerate(items):

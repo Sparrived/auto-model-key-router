@@ -71,9 +71,9 @@ def test_request_stats_renderable_shows_current_rpm_and_tpm(tmp_path: Path, monk
 
     output = render_plain(logs_tui.request_stats_renderable(str(database_path), 1, 10))
 
-    assert "近1分钟 RPM" in output
-    assert "近1分钟 TPM" in output
-    assert "10" in output
+    assert "近1分钟 流量" in output
+    assert "1 RPM" in output
+    assert "10 TPM" in output
 
 
 def test_parse_sgr_mouse_sequence_reads_wheel_events() -> None:
