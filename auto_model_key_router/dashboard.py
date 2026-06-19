@@ -738,6 +738,7 @@ def quick_metrics_items(db_path: str) -> list[str]:
         return []
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
+        # 新增时间范围参数支持
         total = connection.execute(
             "SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, "
             "COALESCE(SUM(total_tokens), 0) AS total_tokens FROM request_metrics"

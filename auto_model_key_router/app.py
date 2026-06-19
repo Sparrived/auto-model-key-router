@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__
 from .config import RouterConfig
+from .event_bus import EventBus
 from .key_pool import KeyPool
 from .management_api import register_management_api
 from .metrics import MetricsStore
@@ -81,6 +82,16 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         )
     )
     app.state.health_probe_task = None
+    app.state.event_bus = EventBus()
+
+    async def _on_key_state_change(model_id: str, key_name: str, info: dict) -> None:
+        await app.state.event_bus.broadcast(
+            "key_state_change",
+            {"model_id": model_id, "key_name": key_name, "state": info},
+        )
+
+    app.state.key_pool.on_key_state_change = _on_key_state_change
+    app.state._on_key_state_change = _on_key_state_change
     register_management_api(app, _reload_config_if_changed)
 
     @app.head("/", include_in_schema=False)
@@ -168,6 +179,22 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         finally:
             await lease.release()
 
+    @app.websocket("/ws/events")
+    async def ws_events(websocket: WebSocket) -> None:
+        token = websocket.query_params.get("token", "")
+        event_bus: EventBus = app.state.event_bus
+        if not await event_bus.authenticate(websocket, token, app.state.config.local_api_key):
+            return
+        try:
+            await websocket.send_json({"type": "connected", "data": {}})
+            while True:
+                try:
+                    await websocket.receive_text()
+                except Exception:
+                    break
+        finally:
+            await event_bus.disconnect(websocket)
+
     async def proxy(path: str, request: Request) -> Response:
         await _reload_config_if_changed(app.state)
         lease = await _acquire_runtime(app.state)
@@ -240,12 +267,16 @@ async def _reload_config_if_changed(state: Any) -> None:
                 state.health_probe_task = None
         state.config = config
         state.key_pool = await asyncio.to_thread(KeyPool, config)
+        state.key_pool.on_key_state_change = getattr(state, "_on_key_state_change", None)
         state.http_client = http_client
         state.metrics = metrics
         await state.runtime_manager.replace(
             RuntimeResources(config, state.key_pool, metrics, http_client)
         )
         state.config_mtime = _config_mtime(config_path) or mtime
+        event_bus: EventBus = state.event_bus
+        if event_bus.client_count > 0:
+            await event_bus.broadcast("config_change", {"reloaded": True})
 
 
 async def _acquire_runtime(state: Any) -> RuntimeLease:

@@ -59,6 +59,7 @@ class RuntimeResources:
     metrics: MetricsStore
     http_client: httpx.AsyncClient
     endpoint_cache: EndpointAvailabilityCache = field(default_factory=EndpointAvailabilityCache)
+    event_bus: Any = None
     active_leases: int = 0
     retired: bool = False
     detached: bool = False
@@ -183,6 +184,7 @@ def resources_from_state(state: Any, previous: RuntimeResources | None = None) -
         metrics=state.metrics,
         http_client=state.http_client,
         endpoint_cache=previous.endpoint_cache if previous else EndpointAvailabilityCache(),
+        event_bus=getattr(state, "event_bus", None),
     )
 
 

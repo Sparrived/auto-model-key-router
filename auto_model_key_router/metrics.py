@@ -318,6 +318,7 @@ class MetricsStore:
             "rate_window_seconds": RATE_WINDOW_SECONDS,
             "current_rpm": recent.requests,
             "current_tpm": recent.total_tokens,
+            "router_status": _router_status(recent),
             "total": total.to_dict(),
             "caller_types": {
                 key[0]: stats.to_dict() for key, stats in caller_types.items()
@@ -575,3 +576,16 @@ def _rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return round(numerator / denominator, 6)
+
+
+def _router_status(recent: UsageStats) -> str:
+    """从最近 60 秒指标推导路由器当前健康状态：green / yellow / red。"""
+    if recent.requests == 0:
+        return "green"
+    success_rate = recent.successes / recent.requests
+    retry_rate = recent.retries / recent.requests
+    if success_rate < 0.80:
+        return "red"
+    if success_rate < 0.95 or retry_rate > 0.5:
+        return "yellow"
+    return "green"

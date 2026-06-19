@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import time
 from typing import Any
@@ -33,6 +34,7 @@ class KeyPool:
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
         self._load_states()
+        self.on_key_state_change: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
 
     async def reconfigure(self, config: RouterConfig) -> None:
         async with self._lock:
@@ -304,6 +306,7 @@ class KeyPool:
                 changed = True
         if changed:
             await self._persist_states()
+            await self._notify_state_change(model_id, key_name)
 
     async def mark_failure(
         self,
@@ -329,6 +332,24 @@ class KeyPool:
                     state.cooldown_until, time() + cooldown_seconds
                 )
         await self._persist_states()
+        await self._notify_state_change(model_id, key_name)
+
+    async def _notify_state_change(self, model_id: str, key_name: str) -> None:
+        if self.on_key_state_change is None:
+            return
+        state_key = (self.resolve_model_id(model_id), key_name)
+        state = self._states.get(state_key)
+        now = time()
+        info = {
+            "failures": state.failures if state else 0,
+            "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)) if state else 0,
+            "last_status_code": state.last_status_code if state else None,
+            "disabled": state.disabled if state else False,
+        }
+        try:
+            await self.on_key_state_change(model_id, key_name, info)
+        except Exception:
+            pass
 
     def key_states(self) -> dict[str, dict[str, Any]]:
         now = time()
