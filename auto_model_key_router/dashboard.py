@@ -697,7 +697,7 @@ def upstream_mode_summary(
     if custom_paths:
         paths = "\n".join(short_text(path, 34) for path in custom_paths[:3])
         if len(custom_paths) > 3:
-            paths = f"{paths}\n[dim]+{len(custom_paths) - 3} more[/dim]"
+            paths = f"{paths}\n[dim]+{len(custom_paths) - 3} 更多[/dim]"
         return f"[green]自定义原生[/green]\n{paths}"
     if mode == "openai":
         return f"[green]原生[/green]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"

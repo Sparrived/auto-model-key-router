@@ -536,17 +536,17 @@ def manage_upstream_routes_interactively(path: Path) -> None:
     base_urls = configured_base_urls(data, {})
     if not base_urls:
         show_result_page(
-            "Upstream routes",
-            section_panel("[yellow]No upstream URL configured[/yellow]", "Upstream", "yellow"),
+            "上游路由",
+            section_panel("[yellow]未配置上游 URL[/yellow]", "上游", "yellow"),
         )
         return
     base_url_choice = select_option(
-        "Upstream routes",
+        "上游路由",
         [
             (str(index + 1), compact_url(base_url, 56))
             for index, base_url in enumerate(base_urls)
         ]
-        + [("0", "Back")],
+        + [("0", "返回")],
     )
     if base_url_choice == "0":
         return
@@ -564,9 +564,9 @@ def manage_upstream_routes_interactively(path: Path) -> None:
             )
             for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
         ]
-        options.extend([("c", "Clear custom routes"), ("0", "Back")])
+        options.extend([("c", "清空自定义路由"), ("0", "返回")])
         choice = select_option(
-            f"Upstream routes - {short_text(base_url, 32)}",
+            f"上游路由 · {short_text(base_url, 32)}",
             options,
             content=upstream_routes_panel(data, base_url),
         )
@@ -577,28 +577,28 @@ def manage_upstream_routes_interactively(path: Path) -> None:
         try:
             if choice == "c":
                 routes = {}
-                message = "Cleared custom upstream routes."
+                message = "已清空自定义上游路由。"
             else:
                 mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
                 current_path = routes.get(mode, "")
                 raw_path = prompt_text(
-                    "Upstream routes",
-                    f"{UPSTREAM_ROUTE_LABELS[mode]} path/prefix (blank restores default)",
+                    "上游路由",
+                    f"{UPSTREAM_ROUTE_LABELS[mode]} 路径/前缀（留空恢复默认）",
                     default=current_path,
                 ).strip()
                 if raw_path:
                     routes[mode] = normalize_upstream_route_path(mode, raw_path)
                     message = (
-                        f"Set {UPSTREAM_ROUTE_LABELS[mode]}: "
+                        f"已设置 {UPSTREAM_ROUTE_LABELS[mode]}: "
                         f"[bold]{routes[mode]}[/bold]"
                     )
                 else:
                     routes.pop(mode, None)
-                    message = f"Restored default {UPSTREAM_ROUTE_LABELS[mode]} route."
+                    message = f"已恢复 {UPSTREAM_ROUTE_LABELS[mode]} 默认路径。"
         except (IndexError, ValueError) as exc:
             show_result_page(
-                "Upstream routes",
-                section_panel(f"[red]{exc}[/red]", "Config failed", "red"),
+                "上游路由",
+                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
             )
             continue
 
@@ -607,17 +607,17 @@ def manage_upstream_routes_interactively(path: Path) -> None:
             new_config = commit_config_data(path, data, old_config).new_config
         except (KeyError, TypeError, ValueError) as exc:
             show_result_page(
-                "Upstream routes",
-                section_panel(f"[red]{exc}[/red]", "Config failed", "red"),
+                "上游路由",
+                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
             )
             continue
         show_result_page(
-            "Upstream routes",
+            "上游路由",
             Group(
                 section_panel(
-                    f"Updated config file: [bold]{path}[/bold]\n"
-                    f"Base URL: [bold]{base_url}[/bold]\n{message}",
-                    "Config updated",
+                    f"已更新配置文件: [bold]{path}[/bold]\n"
+                    f"上游 URL: [bold]{base_url}[/bold]\n{message}",
+                    "配置完成",
                     "green",
                 ),
                 restart_service_after_config_change(path, old_config, new_config),
