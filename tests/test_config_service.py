@@ -105,3 +105,26 @@ def test_legacy_key_upstream_routes_are_lifted_to_base_url_config() -> None:
     assert config.upstream_routes_for_base_url("https://example.test/") == {
         "anthropic": "anthropic/v1/messages",
     }
+
+
+def test_invalid_upstream_route_base_url_error_includes_value() -> None:
+    with pytest.raises(ValueError, match="ftp://bad.example"):
+        RouterConfig.from_dict(
+            {
+                "upstream_routes": {
+                    "ftp://bad.example": {"anthropic": "anthropic/"}
+                },
+                "models": [
+                    {
+                        "id": "model-a",
+                        "keys": [
+                            {
+                                "name": "key-a",
+                                "api_key": "sk-a",
+                                "base_url": "https://example.test",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )

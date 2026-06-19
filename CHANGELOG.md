@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- 根据 `9b129a0`，将 `upstream_routes` 从单个 Key 级配置重构为按上游 `base_url` 分组的全局配置；旧版 Key 级配置仍会兼容读取并提升到对应上游 URL。
+
+### Fixed
+- 修复 `upstream_routes` 上游 URL 格式校验错误信息缺少具体无效 `base_url` 的问题，便于定位配置错误。
+
 ## [2.1.2] - 2026-06-19
 
 ### Added

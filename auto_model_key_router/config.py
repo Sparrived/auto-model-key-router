@@ -401,7 +401,9 @@ class RouterConfig:
 
         for base_url, routes in self.upstream_routes.items():
             if not base_url.startswith(("http://", "https://")):
-                raise ValueError("upstream_routes 的上游 URL 必须以 http:// 或 https:// 开头")
+                raise ValueError(
+                    f"upstream_routes 的上游URL {base_url} 必须以 http:// 或 https:// 开头"
+                )
             for route_mode, route_path in routes.items():
                 normalize_upstream_route_path(route_mode, route_path)
 
