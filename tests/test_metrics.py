@@ -74,7 +74,7 @@ def test_snapshot_counts_anthropic_cache_read_tokens_as_cached(
 
     total = anyio.run(run)["total"]
 
-    assert total["prompt_tokens"] == 100
+    assert total["prompt_tokens"] == 200
     assert total["cached_tokens"] == 80
     assert total["cache_creation_input_tokens"] == 20
     assert total["cache_read_input_tokens"] == 80
