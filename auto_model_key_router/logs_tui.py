@@ -355,7 +355,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
     offset = (page - 1) * page_size
     stats_range_index, range_label, range_parameters = stats_range_query(stats_range_index)
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
-    for name in ["时间", "来源", "模型", "Key", "状态", "成功", "重试", "输入", "输出", "总Tok", "缓存", "首字", "耗时"]:
+    for name in ["时间", "来源", "模型", "Key", "状态", "成功", "重试", "输入", "缓存", "输出", "总Tok", "首字", "耗时"]:
         table.add_column(name)
     with sqlite3.connect(path) as connection:
         connection.row_factory = sqlite3.Row
@@ -394,7 +394,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
         offset = (page - 1) * page_size
         rows = connection.execute(f"SELECT created_at, {caller_type_expr}, model_id, key_name, status_code, success, retried, prompt_tokens, completion_tokens, total_tokens, {cached_tokens_expr}, {first_token_ms_expr}, {duration_ms_expr} FROM request_metrics {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?", (*query_parameters, page_size, offset)).fetchall()
     for row in rows:
-        table.add_row(short_text(row["created_at"], 19), caller_type_text(row["caller_type"]), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", str(row["prompt_tokens"] - row["cached_tokens"]), str(row["completion_tokens"]), str(row["total_tokens"]), str(row["cached_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
+        table.add_row(short_text(row["created_at"], 19), caller_type_text(row["caller_type"]), short_text(row["model_id"], 22), short_text(row["key_name"], 18), "-" if row["status_code"] is None else str(row["status_code"]), "是" if row["success"] else "否", "是" if row["retried"] else "否", str(row["prompt_tokens"] - row["cached_tokens"]), str(row["cached_tokens"]), str(row["completion_tokens"]), str(row["total_tokens"]), str(row["first_token_ms"]), str(row["duration_ms"]))
     if not rows:
         table.add_row("暂无", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
     caller_label = caller_type_title(caller_type)
