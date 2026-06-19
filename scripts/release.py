@@ -253,6 +253,67 @@ def update_changelog(version: str, release_date: str, notes: str, path: Path = C
     path.write_text(render_updated_changelog(text, version, release_date, notes), encoding="utf-8")
 
 
+COMMIT_TYPE_MAP: dict[str, str] = {
+    "feat": "Added",
+    "fix": "Fixed",
+    "refactor": "Changed",
+    "perf": "Changed",
+    "docs": "Changed",
+    "style": "Changed",
+    "chore": "Changed",
+    "build": "Changed",
+    "ci": "Changed",
+    "test": "Changed",
+    "revert": "Changed",
+}
+COMMIT_PATTERN = re.compile(r"^(?P<type>[a-z]+)(?:\(.+?\))?!?:\s*(?P<desc>.+)$")
+
+
+def get_last_release_tag() -> str | None:
+    result = run_git(["describe", "--tags", "--abbrev=0"], capture=True, check=False)
+    tag = result.stdout.strip()
+    return tag if result.returncode == 0 and tag else None
+
+
+def get_commits_since(tag: str | None) -> list[str]:
+    args = ["log", "--no-merges", "--format=%s"]
+    if tag:
+        args.append(f"{tag}..HEAD")
+    result = run_git(args, capture=True, check=False)
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def classify_commits(commits: Sequence[str]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {"Added": [], "Changed": [], "Fixed": []}
+    for commit in commits:
+        match = COMMIT_PATTERN.match(commit)
+        if match:
+            commit_type = match.group("type")
+            desc = match.group("desc")
+            category = COMMIT_TYPE_MAP.get(commit_type, "Changed")
+            groups[category].append(f"- {desc}")
+        else:
+            groups["Changed"].append(f"- {commit}")
+    return {key: value for key, value in groups.items() if value}
+
+
+def generate_release_notes() -> str:
+    tag = get_last_release_tag()
+    commits = get_commits_since(tag)
+    if not commits:
+        return ""
+    groups = classify_commits(commits)
+    if not groups:
+        return ""
+    sections = []
+    for category in ("Added", "Changed", "Fixed"):
+        if category in groups:
+            sections.append(f"### {category}\n" + "\n".join(groups[category]))
+    return "\n\n".join(sections)
+
+
 def prompt_release_type(current_version: str) -> str:
     table = Table(title="发布类型", box=box.ROUNDED, header_style="bold cyan", border_style="cyan", show_lines=False)
     table.add_column("编号", justify="right", style="cyan", width=4)
@@ -284,8 +345,23 @@ def prompt_custom_version() -> str:
             warning(str(exc))
 
 
-def prompt_notes() -> str:
-    info("请输入发布说明，空行结束；如果 CHANGELOG 的 Unreleased 已有内容，可直接留空。")
+def prompt_edit_notes(draft: str) -> str:
+    if draft:
+        console.print(Panel(draft, title="[bold cyan]自动生成的发布说明[/bold cyan]", border_style="cyan", box=box.ROUNDED))
+        info("Enter 确认使用 · 输入内容替换 · 输入 e 编辑 · 输入 c 清空")
+        choice = input("> ").strip()
+        if choice == "e":
+            return prompt_manual_notes()
+        if choice == "c":
+            return ""
+        if choice:
+            return choice
+        return draft
+    info("未从 commit 中提取到发布说明，请手动输入；空行结束。")
+    return prompt_manual_notes()
+
+
+def prompt_manual_notes() -> str:
     lines: list[str] = []
     while True:
         line = input()
@@ -403,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="交互式版本发布脚本")
     parser.add_argument("--type", choices=RELEASE_TYPES, dest="release_type", help="发布类型")
     parser.add_argument("--version", dest="custom_version", help="自定义版本号，仅 --type custom 时使用")
-    parser.add_argument("--notes", help="发布说明；留空时优先使用 CHANGELOG.md 的 Unreleased 内容")
+    parser.add_argument("--notes", help="发布说明；留空时优先使用 CHANGELOG Unreleased 内容，其次自动从 commit 生成")
     parser.add_argument("--branch", default="master", help="允许发布的目标分支")
     parser.add_argument("--remote", default="origin", help="推送目标远端")
     parser.add_argument("--yes", "-y", action="store_true", help="跳过确认提示")
@@ -442,7 +518,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.skip_tests:
         step(STEP_TITLES["tests"])
         run_command([sys.executable, "-m", "pytest"])
-    notes = args.notes if args.notes is not None else prompt_notes()
+    if args.notes is not None:
+        notes = args.notes
+    else:
+        changelog_text = CHANGELOG_PATH.read_text(encoding="utf-8") if CHANGELOG_PATH.exists() else ""
+        has_unreleased = bool(re.search(r"(?m)^##\s+\[Unreleased\][ \t]*$", changelog_text))
+        if has_unreleased:
+            match = re.search(r"(?m)^##\s+\[Unreleased\][ \t]*$", changelog_text)
+            assert match is not None
+            body_start = match.end()
+            next_heading = find_next_version_heading(changelog_text, body_start)
+            unreleased_body = changelog_text[body_start:next_heading].strip()
+            if unreleased_body:
+                notes = ""
+                info("CHANGELOG Unreleased 已有内容，将直接使用。")
+            else:
+                notes = generate_release_notes()
+                if not args.yes:
+                    notes = prompt_edit_notes(notes)
+        else:
+            notes = generate_release_notes()
+            if not args.yes:
+                notes = prompt_edit_notes(notes)
     write_project_version(next_version)
     update_changelog(next_version, date.today().isoformat(), notes)
     success("已更新 pyproject.toml 和 CHANGELOG.md")
