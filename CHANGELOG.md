@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- 将上游路由管理页面的英文文本翻译为中文，统一界面语言。
+
+### Fixed
+- 修复 Anthropic 格式输入 token 统计为负数的问题，`prompt_tokens` 现正确包含缓存 token。
+
 ## [2.1.3] - 2026-06-19
 
 ### Changed
