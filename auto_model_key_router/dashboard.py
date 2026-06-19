@@ -785,7 +785,7 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     auth_status = (
         "[green]✓[/green]" if config.local_api_key else "[yellow]✗[/yellow]"
     )
-    items = [
+    config_items = [
         f"[dim]监听[/dim] [bold]{config.host}:{config.port}[/bold]",
         f"[dim]服务[/dim] {service_status}",
         f"[dim]鉴权[/dim] {auth_status}",
@@ -794,16 +794,22 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
         f"[dim]上游[/dim] [bold magenta]{upstream_count}[/bold magenta]",
     ]
     if visitor_installed:
-        items.append(f"[dim]访客Key[/dim] [bold]{VISITOR_API_KEY}[/bold]")
-        items.append(f"[dim]访客可用[/dim] [bold green]{configured_visitor_key_count}[/bold green]")
+        config_items.append(f"[dim]访客Key[/dim] [bold]{VISITOR_API_KEY}[/bold]")
+        config_items.append(f"[dim]访客可用[/dim] [bold green]{configured_visitor_key_count}[/bold green]")
     elif configured_visitor_key_count:
-        items.append(f"[dim]未生效授权[/dim] [yellow]{configured_visitor_key_count}[/yellow]")
-    items.extend(quick_metrics_items(config.metrics_db_path))
+        config_items.append(f"[dim]未生效授权[/dim] [yellow]{configured_visitor_key_count}[/yellow]")
+    metrics_items = quick_metrics_items(config.metrics_db_path)
     summary = Text(no_wrap=True, overflow="ellipsis")
-    for i, item in enumerate(items):
+    for i, item in enumerate(config_items):
         if i:
             summary.append("  ")
         summary.append_text(Text.from_markup(item))
+    if metrics_items:
+        summary.append("\n")
+        for i, item in enumerate(metrics_items):
+            if i:
+                summary.append("  ")
+            summary.append_text(Text.from_markup(item))
     warning = (
         section_panel(
             "[bold red]⚠ 当前监听地址为 0.0.0.0，服务会接受所有可达网络的连接。[/bold red]\n[red]如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。[/red]",
