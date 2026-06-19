@@ -246,34 +246,39 @@ def test_key_update_preserves_secret_and_last_key_cannot_be_deleted(
     assert saved_key["allow_visitor"] is True
 
 
-def test_key_update_persists_and_clears_upstream_routes(tmp_path: Path) -> None:
+def test_key_update_persists_and_clears_base_url_upstream_routes(tmp_path: Path) -> None:
     app, path = create_file_backed_app(tmp_path)
 
     async def requests(
         client: httpx.AsyncClient,
-    ) -> tuple[httpx.Response, httpx.Response]:
+    ) -> tuple[httpx.Response, dict[str, object], httpx.Response]:
         updated = await client.put(
             "/api/models/model-a/keys/key-a",
             headers=AUTH_HEADERS,
             json={"upstream_routes": {"anthropic": "anthropic/"}},
         )
+        after_update = json.loads(path.read_text(encoding="utf-8"))
         cleared = await client.put(
             "/api/models/model-a/keys/key-a",
             headers=AUTH_HEADERS,
             json={"upstream_routes": None},
         )
-        return updated, cleared
+        return updated, after_update, cleared
 
-    updated, cleared = run_client(app, requests)
+    updated, after_update, cleared = run_client(app, requests)
 
     assert updated.status_code == 200
-    assert updated.json()["upstream_routes"] == {
-        "anthropic": "anthropic/v1/messages"
+    assert "upstream_routes" not in updated.json()
+    assert after_update["upstream_routes"] == {
+        "https://a.example.test": {"anthropic": "anthropic/v1/messages"}
     }
+    assert "upstream_routes" not in after_update["models"][0]["keys"][0]
     assert cleared.status_code == 200
     assert "upstream_routes" not in cleared.json()
-    saved_key = json.loads(path.read_text(encoding="utf-8"))["models"][0]["keys"][0]
-    assert saved_key["upstream_routes"] == {}
+    saved_data = json.loads(path.read_text(encoding="utf-8"))
+    saved_key = saved_data["models"][0]["keys"][0]
+    assert "upstream_routes" not in saved_key
+    assert "upstream_routes" not in saved_data
 
 
 def test_management_writes_require_a_config_file_path(tmp_path: Path) -> None:

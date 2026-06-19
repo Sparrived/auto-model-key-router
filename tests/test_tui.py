@@ -1316,6 +1316,11 @@ def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
 
 def test_upstream_routes_panel_shows_three_mode_support() -> None:
     data = {
+        "upstream_routes": {
+            "https://upstream.example.com": {
+                "anthropic": "anthropic/v1/messages",
+            }
+        },
         "models": [
             {
                 "id": "test-model",
@@ -1324,7 +1329,6 @@ def test_upstream_routes_panel_shows_three_mode_support() -> None:
                         "name": "main",
                         "api_key": "sk-main",
                         "base_url": "https://upstream.example.com",
-                        "upstream_routes": {"anthropic": "anthropic/v1/messages"},
                     }
                 ],
             }

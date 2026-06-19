@@ -688,9 +688,11 @@ def render_config(config: RouterConfig, path: Path) -> None:
         console.print(renderable)
 
 
-def upstream_mode_summary(items: list[tuple[Any, Any]], mode: str) -> str:
+def upstream_mode_summary(
+    config: RouterConfig, base_url: str, items: list[tuple[Any, Any]], mode: str
+) -> str:
     custom_paths = sorted(
-        {key.upstream_routes[mode] for _, key in items if mode in key.upstream_routes}
+        {path for path in [config.upstream_routes_for_base_url(base_url).get(mode)] if path}
     )
     if custom_paths:
         paths = "\n".join(short_text(path, 34) for path in custom_paths[:3])
@@ -718,7 +720,10 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
     for base_url, items in sorted(upstreams.items()):
         table.add_row(
             compact_url(base_url, 42),
-            *(upstream_mode_summary(items, mode) for mode in UPSTREAM_ROUTE_MODES),
+            *(
+                upstream_mode_summary(config, base_url, items, mode)
+                for mode in UPSTREAM_ROUTE_MODES
+            ),
         )
     return table
 

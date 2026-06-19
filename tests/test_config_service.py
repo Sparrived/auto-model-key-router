@@ -53,7 +53,37 @@ def test_invalid_update_leaves_existing_file_unchanged(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
-def test_upstream_routes_are_normalized_from_config() -> None:
+def test_upstream_routes_are_normalized_by_base_url_from_config() -> None:
+    config = RouterConfig.from_dict(
+        {
+            "upstream_routes": {
+                "https://example.test/": {
+                    "anthropic_messages": "anthropic/",
+                    "codex": "responses-v2",
+                }
+            },
+            "models": [
+                {
+                    "id": "model-a",
+                    "keys": [
+                        {
+                            "name": "key-a",
+                            "api_key": "sk-a",
+                            "base_url": "https://example.test",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert config.upstream_routes_for_base_url("https://example.test") == {
+        "anthropic": "anthropic/v1/messages",
+        "responses": "responses-v2/v1/responses",
+    }
+
+
+def test_legacy_key_upstream_routes_are_lifted_to_base_url_config() -> None:
     config = RouterConfig.from_dict(
         {
             "models": [
@@ -64,10 +94,7 @@ def test_upstream_routes_are_normalized_from_config() -> None:
                             "name": "key-a",
                             "api_key": "sk-a",
                             "base_url": "https://example.test",
-                            "upstream_routes": {
-                                "anthropic_messages": "anthropic/",
-                                "codex": "responses-v2",
-                            },
+                            "upstream_routes": {"anthropic": "anthropic/"},
                         }
                     ],
                 }
@@ -75,7 +102,6 @@ def test_upstream_routes_are_normalized_from_config() -> None:
         }
     )
 
-    assert config.models[0].keys[0].upstream_routes == {
+    assert config.upstream_routes_for_base_url("https://example.test/") == {
         "anthropic": "anthropic/v1/messages",
-        "responses": "responses-v2/v1/responses",
     }

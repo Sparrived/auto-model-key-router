@@ -12,7 +12,13 @@ from pydantic import BaseModel, Field
 if hasattr(BaseModel, "model_fields"):
     from pydantic import ConfigDict
 
-from .config import KeyConfig, ModelConfig, RouterConfig, normalize_upstream_routes
+from .config import (
+    KeyConfig,
+    ModelConfig,
+    RouterConfig,
+    normalize_upstream_base_url,
+    normalize_upstream_routes,
+)
 from .config_service import ConfigService
 from .proxy_support import _authorization_mode
 
@@ -154,6 +160,7 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         request: Request, model_id: str, payload: KeyCreate
     ) -> dict[str, Any]:
         key_data = _key_create_data(payload)
+        upstream_routes = key_data.pop("upstream_routes", None)
 
         def mutation(data: dict[str, Any]) -> None:
             model = _require_raw_model(_raw_models(data), model_id)
@@ -162,6 +169,16 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             if _find_raw_key(keys, model_id, key_name) is not None:
                 raise ManagementAPIError(
                     409, f"模型 {model_id} 的 key 已存在: {key_name}"
+                )
+            if upstream_routes is not None:
+                _set_upstream_routes_for_base_url(
+                    data,
+                    str(
+                        key_data.get("base_url")
+                        or data.get("default_base_url")
+                        or "https://api.openai.com"
+                    ),
+                    upstream_routes,
                 )
             keys.append(key_data)
 
@@ -183,6 +200,7 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             raise HTTPException(status_code=400, detail="至少需要提供一个要更新的字段")
         _normalize_key_updates(updates)
         updated_key_name = str(updates.get("name") or key_name)
+        upstream_routes = updates.pop("upstream_routes", None)
 
         def mutation(data: dict[str, Any]) -> None:
             model = _require_raw_model(_raw_models(data), model_id)
@@ -194,6 +212,17 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             ):
                 raise ManagementAPIError(
                     409, f"模型 {model_id} 的 key 已存在: {updated_key_name}"
+                )
+            if upstream_routes is not None:
+                _set_upstream_routes_for_base_url(
+                    data,
+                    str(
+                        updates.get("base_url")
+                        or key.get("base_url")
+                        or data.get("default_base_url")
+                        or "https://api.openai.com"
+                    ),
+                    upstream_routes,
                 )
             key.update(updates)
 
@@ -315,6 +344,24 @@ def _normalize_key_updates(data: dict[str, Any]) -> None:
             data["upstream_routes"] = {}
 
 
+def _set_upstream_routes_for_base_url(
+    data: dict[str, Any], base_url: str, routes: dict[str, str]
+) -> None:
+    normalized_base_url = normalize_upstream_base_url(base_url)
+    routes_by_url = data.get("upstream_routes")
+    if not isinstance(routes_by_url, dict):
+        routes_by_url = {}
+    if routes:
+        routes_by_url[normalized_base_url] = routes
+        data["upstream_routes"] = routes_by_url
+    else:
+        routes_by_url.pop(normalized_base_url, None)
+        if routes_by_url:
+            data["upstream_routes"] = routes_by_url
+        else:
+            data.pop("upstream_routes", None)
+
+
 def _payload_dict(payload: BaseModel) -> dict[str, Any]:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(exclude_unset=True)
@@ -353,8 +400,6 @@ def _key_response(key: KeyConfig) -> dict[str, Any]:
             :12
         ],
     }
-    if key.upstream_routes:
-        response["upstream_routes"] = dict(key.upstream_routes)
     return response
 
 

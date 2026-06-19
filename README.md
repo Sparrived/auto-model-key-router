@@ -126,6 +126,11 @@ auto-model-key-router --config router-config.json --switch-key auto
   "host": "127.0.0.1",
   "port": 8000,
   "default_base_url": "https://api.openai.com",
+  "upstream_routes": {
+    "https://example.com/tokenplan": {
+      "anthropic": "anthropic/"
+    }
+  },
   "request_timeout": 60,
   "max_retries": 2,
   "key_failure_threshold": 2,
@@ -146,8 +151,7 @@ auto-model-key-router --config router-config.json --switch-key auto
         {
           "name": "mimo-tokenplan",
           "api_key": "sk-your-third-upstream-key",
-          "base_url": "https://example.com/tokenplan",
-          "upstream_routes": {"anthropic": "anthropic/"}
+          "base_url": "https://example.com/tokenplan"
         }
       ]
     }

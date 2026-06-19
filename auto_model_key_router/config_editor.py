@@ -18,6 +18,7 @@ from .config import (
     RouterConfig,
     generate_local_api_key,
     load_config_data,
+    normalize_upstream_base_url,
     normalize_upstream_route_path,
     upstream_route_path,
 )
@@ -69,15 +70,57 @@ def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -
     return "[dim]功能未安装[/dim]"
 
 
-def key_upstream_routes(key: dict[str, Any]) -> dict[str, str]:
-    routes = key.get("upstream_routes")
-    return dict(routes) if isinstance(routes, dict) else {}
+def raw_upstream_routes_by_url(data: dict[str, Any]) -> dict[str, Any]:
+    routes = data.get("upstream_routes")
+    return routes if isinstance(routes, dict) else {}
+
+
+def upstream_routes_for_base_url(data: dict[str, Any], base_url: str) -> dict[str, str]:
+    normalized_base_url = normalize_upstream_base_url(base_url)
+    routes: dict[str, str] = {}
+    for raw_base_url, raw_routes in raw_upstream_routes_by_url(data).items():
+        if (
+            normalize_upstream_base_url(raw_base_url) == normalized_base_url
+            and isinstance(raw_routes, dict)
+        ):
+            routes.update(raw_routes)
+    for model in data.get("models", []):
+        for key in model.get("keys", []):
+            key_base_url = normalize_upstream_base_url(
+                key.get("base_url") or data.get("default_base_url") or "https://api.openai.com"
+            )
+            legacy_routes = key.get("upstream_routes")
+            if key_base_url == normalized_base_url and isinstance(legacy_routes, dict):
+                routes.update(legacy_routes)
+    return routes
+
+
+def set_upstream_routes_for_base_url(
+    data: dict[str, Any], base_url: str, routes: dict[str, str]
+) -> None:
+    normalized_base_url = normalize_upstream_base_url(base_url)
+    routes_by_url = raw_upstream_routes_by_url(data)
+    if routes:
+        routes_by_url[normalized_base_url] = routes
+        data["upstream_routes"] = routes_by_url
+    else:
+        routes_by_url.pop(normalized_base_url, None)
+        if routes_by_url:
+            data["upstream_routes"] = routes_by_url
+        else:
+            data.pop("upstream_routes", None)
+    for model in data.get("models", []):
+        for key in model.get("keys", []):
+            key_base_url = normalize_upstream_base_url(
+                key.get("base_url") or data.get("default_base_url") or "https://api.openai.com"
+            )
+            if key_base_url == normalized_base_url:
+                key.pop("upstream_routes", None)
 
 
 def upstream_route_support_text(
-    key: dict[str, Any], mode: str, *, native_first: bool = True
+    routes: dict[str, str], mode: str, *, native_first: bool = True
 ) -> str:
-    routes = key_upstream_routes(key)
     path = upstream_route_path(routes, mode)
     if mode in routes:
         return f"[green]自定义原生[/green] {path}"
@@ -91,22 +134,48 @@ def upstream_route_support_text(
 
 
 def upstream_routes_panel(
-    data: dict[str, Any], model: dict[str, Any], key_index: int
+    data: dict[str, Any],
+    model_or_base_url: dict[str, Any] | str,
+    key_index: int | None = None,
 ) -> Any:
-    key = model["keys"][key_index]
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    native_first = bool(model.get("native_first", True))
+    if isinstance(model_or_base_url, dict):
+        model = model_or_base_url
+        if key_index is None:
+            key_index = 0
+        key = model["keys"][key_index]
+        base_url = str(
+            key.get("base_url")
+            or data.get("default_base_url")
+            or "https://api.openai.com"
+        )
+        key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
+    else:
+        base_url = model_or_base_url
+        model = {"id": "upstream"}
+        key = {"name": str(base_url)}
+        key_name = str(base_url)
+    normalized_base_url = normalize_upstream_base_url(base_url)
+    routes = upstream_routes_for_base_url(data, normalized_base_url)
+    native_first = any(
+        bool(model.get("native_first", True))
+        for model in data.get("models", [])
+        for key in model.get("keys", [])
+        if normalize_upstream_base_url(
+            key.get("base_url")
+            or data.get("default_base_url")
+            or "https://api.openai.com"
+        )
+        == normalized_base_url
+    )
     table = Table(show_header=True, box=None, expand=True)
     table.add_column("模式", style="cyan", ratio=1)
     table.add_column("原生支持/上游路径", ratio=3)
     for mode in UPSTREAM_ROUTE_MODES:
         table.add_row(
             UPSTREAM_ROUTE_LABELS[mode],
-            upstream_route_support_text(key, mode, native_first=native_first),
+            upstream_route_support_text(routes, mode, native_first=native_first),
         )
-    base_url = compact_url(
-        key.get("base_url") or data.get("default_base_url") or "-", 56
-    )
+    base_url = compact_url(normalized_base_url or "-", 56)
     return Group(
         section_panel(
             f"模型: [bold]{short_text(model['id'], 48)}[/bold]\n"
@@ -463,6 +532,101 @@ def manage_selected_key_interactively(path: Path) -> None:
 
 
 def manage_upstream_routes_interactively(path: Path) -> None:
+    data = load_config_data(path)
+    base_urls = configured_base_urls(data, {})
+    if not base_urls:
+        show_result_page(
+            "Upstream routes",
+            section_panel("[yellow]No upstream URL configured[/yellow]", "Upstream", "yellow"),
+        )
+        return
+    base_url_choice = select_option(
+        "Upstream routes",
+        [
+            (str(index + 1), compact_url(base_url, 56))
+            for index, base_url in enumerate(base_urls)
+        ]
+        + [("0", "Back")],
+    )
+    if base_url_choice == "0":
+        return
+    try:
+        base_url = base_urls[int(base_url_choice) - 1]
+    except (IndexError, ValueError):
+        return
+
+    while True:
+        routes = upstream_routes_for_base_url(data, base_url)
+        options = [
+            (
+                str(index + 1),
+                f"{UPSTREAM_ROUTE_LABELS[mode]} - {short_text(upstream_route_path(routes, mode), 36)}",
+            )
+            for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
+        ]
+        options.extend([("c", "Clear custom routes"), ("0", "Back")])
+        choice = select_option(
+            f"Upstream routes - {short_text(base_url, 32)}",
+            options,
+            content=upstream_routes_panel(data, base_url),
+        )
+        if choice == "0":
+            return
+
+        old_config = RouterConfig.from_dict(data)
+        try:
+            if choice == "c":
+                routes = {}
+                message = "Cleared custom upstream routes."
+            else:
+                mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
+                current_path = routes.get(mode, "")
+                raw_path = prompt_text(
+                    "Upstream routes",
+                    f"{UPSTREAM_ROUTE_LABELS[mode]} path/prefix (blank restores default)",
+                    default=current_path,
+                ).strip()
+                if raw_path:
+                    routes[mode] = normalize_upstream_route_path(mode, raw_path)
+                    message = (
+                        f"Set {UPSTREAM_ROUTE_LABELS[mode]}: "
+                        f"[bold]{routes[mode]}[/bold]"
+                    )
+                else:
+                    routes.pop(mode, None)
+                    message = f"Restored default {UPSTREAM_ROUTE_LABELS[mode]} route."
+        except (IndexError, ValueError) as exc:
+            show_result_page(
+                "Upstream routes",
+                section_panel(f"[red]{exc}[/red]", "Config failed", "red"),
+            )
+            continue
+
+        set_upstream_routes_for_base_url(data, base_url, routes)
+        try:
+            new_config = commit_config_data(path, data, old_config).new_config
+        except (KeyError, TypeError, ValueError) as exc:
+            show_result_page(
+                "Upstream routes",
+                section_panel(f"[red]{exc}[/red]", "Config failed", "red"),
+            )
+            continue
+        show_result_page(
+            "Upstream routes",
+            Group(
+                section_panel(
+                    f"Updated config file: [bold]{path}[/bold]\n"
+                    f"Base URL: [bold]{base_url}[/bold]\n{message}",
+                    "Config updated",
+                    "green",
+                ),
+                restart_service_after_config_change(path, old_config, new_config),
+            ),
+        )
+        data = load_config_data(path)
+
+    return
+
     selection = select_api_key(path, "选择要配置上游路由的 Key")
     if selection is None:
         return
@@ -473,7 +637,7 @@ def manage_upstream_routes_interactively(path: Path) -> None:
         options = [
             (
                 str(index + 1),
-                f"{UPSTREAM_ROUTE_LABELS[mode]} · {short_text(upstream_route_path(key_upstream_routes(key), mode), 36)}",
+                f"{UPSTREAM_ROUTE_LABELS[mode]} · {short_text(upstream_route_path(upstream_routes_for_base_url(data, key.get('base_url') or data.get('default_base_url') or 'https://api.openai.com'), mode), 36)}",
             )
             for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
         ]
@@ -487,7 +651,10 @@ def manage_upstream_routes_interactively(path: Path) -> None:
             return
 
         old_config = RouterConfig.from_dict(data)
-        routes = key_upstream_routes(key)
+        routes = upstream_routes_for_base_url(
+            data,
+            key.get("base_url") or data.get("default_base_url") or "https://api.openai.com",
+        )
         try:
             if choice == "c":
                 routes = {}
@@ -516,10 +683,11 @@ def manage_upstream_routes_interactively(path: Path) -> None:
             )
             continue
 
-        if routes:
-            key["upstream_routes"] = routes
-        else:
-            key.pop("upstream_routes", None)
+        set_upstream_routes_for_base_url(
+            data,
+            key.get("base_url") or data.get("default_base_url") or "https://api.openai.com",
+            routes,
+        )
         try:
             new_config = commit_config_data(path, data, old_config).new_config
         except (KeyError, TypeError, ValueError) as exc:
@@ -713,7 +881,11 @@ def transferable_key_config(
                 key["base_url"] = default_base_url
             if not include_visitor:
                 key.pop("allow_visitor", None)
-    return {"models": models}
+    result: dict[str, Any] = {"models": models}
+    routes_by_url = data.get("upstream_routes")
+    if isinstance(routes_by_url, dict) and routes_by_url:
+        result["upstream_routes"] = deepcopy(routes_by_url)
+    return result
 
 
 def merge_transferable_key_config(
@@ -727,6 +899,17 @@ def merge_transferable_key_config(
     added_models = 0
     added_keys = 0
     skipped_keys = 0
+    transferred_routes = transfer_data.get("upstream_routes")
+    if isinstance(transferred_routes, dict):
+        merged_routes = merged_data.setdefault("upstream_routes", {})
+        if isinstance(merged_routes, dict):
+            for base_url, routes in transferred_routes.items():
+                if not isinstance(routes, dict):
+                    continue
+                target = merged_routes.setdefault(base_url, {})
+                if isinstance(target, dict):
+                    for mode, route_path in routes.items():
+                        target.setdefault(mode, route_path)
 
     for transferred_model in transfer_data["models"]:
         model_id = str(transferred_model["id"])
@@ -746,7 +929,6 @@ def merge_transferable_key_config(
             (
                 str(key.get("api_key") or ""),
                 str(key.get("base_url") or default_base_url),
-                json.dumps(key.get("upstream_routes") or {}, sort_keys=True),
             )
             for key in current_keys
         }
@@ -755,9 +937,6 @@ def merge_transferable_key_config(
             key_target = (
                 str(transferred_key.get("api_key") or ""),
                 str(transferred_key.get("base_url") or default_base_url),
-                json.dumps(
-                    transferred_key.get("upstream_routes") or {}, sort_keys=True
-                ),
             )
             if key_target in existing_key_targets:
                 skipped_keys += 1

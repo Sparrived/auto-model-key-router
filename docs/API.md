@@ -130,7 +130,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - 支持原生端点时保留所有 Anthropic 原生字段，提高缓存命中率
 - 可通过配置 `native_first: false` 禁用
 
-如果上游的 Anthropic 入口需要额外路径前缀，可在 Key 上配置 `upstream_routes.anthropic`，例如 `"anthropic": "anthropic/"` 会转发到 `base_url/anthropic/v1/messages`。
+如果上游的 Anthropic 入口需要额外路径前缀，可按上游 URL 配置 `upstream_routes[base_url].anthropic`，例如 `"anthropic": "anthropic/"` 会转发到 `base_url/anthropic/v1/messages`。
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -165,7 +165,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `POST /v1/responses`
 
-请求默认会转换为上游 `/v1/chat/completions`，响应再转换为 Responses JSON 或 SSE。配置 `upstream_routes.responses` 后会改为原生 Responses 路径透传，不支持时仍会回退到 `/v1/chat/completions`。
+请求默认会探测上游 `/v1/responses`，不支持时回退到 `/v1/chat/completions` 并转换响应。配置 URL 级 `upstream_routes[base_url].responses` 后会改为对应原生 Responses 路径透传，不支持时仍会回退。
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -306,9 +306,9 @@ status_codes
 | `base_url` | string/null | 否 | 使用配置的 `default_base_url`，否则为 `https://api.openai.com` |
 | `enabled` | boolean | 否 | `true` |
 | `allow_visitor` | boolean | 否 | `false` |
-| `upstream_routes` | object/null | 否 | 按模式覆盖上游原生路径；模式为 `openai`、`anthropic`、`responses` |
+| `upstream_routes` | object/null | 否 | 兼容字段；会写入该 Key 的 `base_url` 对应的 URL 级路由，而不是保存到 Key 上 |
 
-`base_url` 最终必须以 `http://` 或 `https://` 开头。`upstream_routes` 的值只能是相对路径或路径前缀，例如 `{"anthropic": "anthropic/"}` 会规范化为 `anthropic/v1/messages`。
+`base_url` 最终必须以 `http://` 或 `https://` 开头。KeyCreate/KeyUpdate 中的 `upstream_routes` 仅用于兼容旧客户端；值只能是相对路径或路径前缀，例如 `{"anthropic": "anthropic/"}` 会规范化为 URL 级配置 `upstream_routes[base_url].anthropic = "anthropic/v1/messages"`。
 
 #### KeyUpdate
 
@@ -335,9 +335,6 @@ status_codes
   "base_url": "https://api.openai.com",
   "enabled": true,
   "allow_visitor": true,
-  "upstream_routes": {
-    "anthropic": "anthropic/v1/messages"
-  },
   "api_key_fingerprint": "0123456789ab"
 }
 ```

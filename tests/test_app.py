@@ -74,6 +74,7 @@ def make_config(
     routing_mode: str = "round_robin",
     max_retries: int = 1,
     unified_model: UnifiedModelConfig | None = None,
+    upstream_routes: dict[str, dict[str, str]] | None = None,
 ) -> RouterConfig:
     return RouterConfig(
         host="127.0.0.1",
@@ -97,6 +98,7 @@ def make_config(
                 keys=keys,
             ),
         ),
+        upstream_routes=upstream_routes or {},
         unified_model=unified_model,
     )
 
@@ -2314,13 +2316,14 @@ def test_custom_anthropic_upstream_route_uses_native_messages_path() -> None:
                 },
             )
 
-        key = KeyConfig(
-            "key-1",
-            "sk-1",
-            "https://upstream.test",
-            upstream_routes={"anthropic": "anthropic/"},
+        key = KeyConfig("key-1", "sk-1", "https://upstream.test")
+        config = make_config(
+            Path(directory),
+            (key,),
+            upstream_routes={
+                "https://upstream.test": {"anthropic": "anthropic/"}
+            },
         )
-        config = make_config(Path(directory), (key,))
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
@@ -2813,13 +2816,14 @@ def test_custom_responses_upstream_route_uses_native_responses_path() -> None:
                 },
             )
 
-        key = KeyConfig(
-            "key-1",
-            "sk-1",
-            "https://upstream.test",
-            upstream_routes={"responses": "responses/"},
+        key = KeyConfig("key-1", "sk-1", "https://upstream.test")
+        config = make_config(
+            Path(directory),
+            (key,),
+            upstream_routes={
+                "https://upstream.test": {"responses": "responses/"}
+            },
         )
-        config = make_config(Path(directory), (key,))
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
@@ -2884,13 +2888,14 @@ def test_custom_responses_upstream_route_falls_back_when_native_probe_fails() ->
                 },
             )
 
-        key = KeyConfig(
-            "key-1",
-            "sk-1",
-            "https://upstream.test",
-            upstream_routes={"responses": "responses/"},
+        key = KeyConfig("key-1", "sk-1", "https://upstream.test")
+        config = make_config(
+            Path(directory),
+            (key,),
+            upstream_routes={
+                "https://upstream.test": {"responses": "responses/"}
+            },
         )
-        config = make_config(Path(directory), (key,))
         app = create_app(config)
         app.state.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)

@@ -103,6 +103,44 @@ def normalize_upstream_routes(raw: Any) -> dict[str, str]:
     return routes
 
 
+def normalize_upstream_base_url(value: Any) -> str:
+    base_url = str(value or "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("upstream_routes 上游 URL 不能为空")
+    return base_url
+
+
+def merge_upstream_routes_for_url(
+    routes_by_url: dict[str, dict[str, str]],
+    base_url: str,
+    routes: dict[str, str],
+) -> None:
+    if not routes:
+        return
+    normalized_base_url = normalize_upstream_base_url(base_url)
+    target = routes_by_url.setdefault(normalized_base_url, {})
+    for mode, route_path in routes.items():
+        existing = target.get(mode)
+        if existing is not None and existing != route_path:
+            raise ValueError(
+                f"上游 URL {normalized_base_url} 的 {mode} 路由配置冲突"
+            )
+        target[mode] = route_path
+
+
+def normalize_upstream_url_routes(raw: Any) -> dict[str, dict[str, str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("upstream_routes 必须是按上游 URL 分组的对象")
+    routes_by_url: dict[str, dict[str, str]] = {}
+    for raw_base_url, raw_routes in raw.items():
+        routes = normalize_upstream_routes(raw_routes)
+        if routes:
+            routes_by_url[normalize_upstream_base_url(raw_base_url)] = routes
+    return routes_by_url
+
+
 def upstream_route_path(
     upstream_routes: dict[str, str] | None, mode: str
 ) -> str:
@@ -132,6 +170,7 @@ def empty_config_dict() -> dict[str, Any]:
         "host": "127.0.0.1",
         "port": 8000,
         "default_base_url": "https://api.openai.com",
+        "upstream_routes": {},
         "request_timeout": 60,
         "max_retries": 2,
         "key_failure_threshold": 2,
@@ -189,7 +228,7 @@ class KeyConfig:
     base_url: str
     enabled: bool = True
     allow_visitor: bool = False
-    upstream_routes: dict[str, str] = field(default_factory=dict)
+    upstream_routes: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -229,10 +268,22 @@ class RouterConfig:
     log_file_path: str
     local_api_key: str
     models: tuple[ModelConfig, ...]
+    upstream_routes: dict[str, dict[str, str]] = field(default_factory=dict)
     unified_model: UnifiedModelConfig | None = None
     reasoning_effort_by_model: dict[str, str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        upstream_routes = normalize_upstream_url_routes(self.upstream_routes)
+        for model in self.models:
+            for key in model.keys:
+                merge_upstream_routes_for_url(
+                    upstream_routes, key.base_url, key.upstream_routes
+                )
+        object.__setattr__(
+            self,
+            "upstream_routes",
+            upstream_routes,
+        )
         object.__setattr__(
             self,
             "reasoning_effort_by_model",
@@ -252,18 +303,30 @@ class RouterConfig:
     def from_dict(cls, raw: dict[str, Any]) -> "RouterConfig":
         models: list[ModelConfig] = []
         default_routing_mode = str(raw.get("routing_mode") or "round_robin")
+        upstream_routes = normalize_upstream_url_routes(raw.get("upstream_routes"))
         for model in raw.get("models", []):
-            keys = tuple(
-                KeyConfig(
-                    name=str(key.get("name") or f"{model['id']}-{index + 1}"),
-                    api_key=str(key["api_key"]),
-                    base_url=str(key.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
-                    enabled=bool(key.get("enabled", True)),
-                    allow_visitor=bool(key.get("allow_visitor", False)),
-                    upstream_routes=normalize_upstream_routes(key.get("upstream_routes")),
+            model_keys: list[KeyConfig] = []
+            for index, key in enumerate(model.get("keys", [])):
+                base_url = str(
+                    key.get("base_url")
+                    or raw.get("default_base_url")
+                    or "https://api.openai.com"
                 )
-                for index, key in enumerate(model.get("keys", []))
-            )
+                merge_upstream_routes_for_url(
+                    upstream_routes,
+                    base_url,
+                    normalize_upstream_routes(key.get("upstream_routes")),
+                )
+                model_keys.append(
+                    KeyConfig(
+                        name=str(key.get("name") or f"{model['id']}-{index + 1}"),
+                        api_key=str(key["api_key"]),
+                        base_url=base_url,
+                        enabled=bool(key.get("enabled", True)),
+                        allow_visitor=bool(key.get("allow_visitor", False)),
+                    )
+                )
+            keys = tuple(model_keys)
             aliases = tuple(str(alias) for alias in model.get("aliases", []) if str(alias))
             routing_mode = str(model.get("routing_mode") or default_routing_mode)
             reasoning_effort = str(model.get("reasoning_effort") or "").strip() or None
@@ -296,6 +359,7 @@ class RouterConfig:
             log_file_path=str(raw.get("log_file_path") or default_log_file_path()),
             local_api_key=str(raw.get("local_api_key", "")),
             models=tuple(models),
+            upstream_routes=upstream_routes,
             unified_model=unified_model,
         )
         config.validate()
@@ -334,8 +398,12 @@ class RouterConfig:
                     raise ValueError(f"模型 {model.id} 存在空 api_key")
                 if not key.base_url.startswith(("http://", "https://")):
                     raise ValueError(f"模型 {model.id} 的 base_url 必须以 http:// 或 https:// 开头")
-                for route_mode, route_path in key.upstream_routes.items():
-                    normalize_upstream_route_path(route_mode, route_path)
+
+        for base_url, routes in self.upstream_routes.items():
+            if not base_url.startswith(("http://", "https://")):
+                raise ValueError("upstream_routes 的上游 URL 必须以 http:// 或 https:// 开头")
+            for route_mode, route_path in routes.items():
+                normalize_upstream_route_path(route_mode, route_path)
 
         if self.unified_model is None:
             return
@@ -361,3 +429,6 @@ class RouterConfig:
             if model.id == model_id:
                 return model.native_first
         return True
+
+    def upstream_routes_for_base_url(self, base_url: str) -> dict[str, str]:
+        return dict(self.upstream_routes.get(normalize_upstream_base_url(base_url), {}))

@@ -323,17 +323,18 @@ async def _execute_attempt(
     context: ProxyRequestContext, key: KeyConfig, attempt: int
 ) -> AttemptOutcome:
     runtime = context.runtime
+    upstream_routes = runtime.config.upstream_routes_for_base_url(key.base_url)
 
     custom_native_route = (
-        (context.path == "messages" and "anthropic" in key.upstream_routes)
-        or (context.path == "responses" and "responses" in key.upstream_routes)
+        (context.path == "messages" and "anthropic" in upstream_routes)
+        or (context.path == "responses" and "responses" in upstream_routes)
     )
     use_native = context.use_native or custom_native_route
     native_route_path = _upstream_path(
         context.path,
         context.payload,
         native=True,
-        upstream_routes=key.upstream_routes,
+        upstream_routes=upstream_routes,
     )
     if context.path == "messages" and use_native:
         native_support = runtime.key_pool.supports_native_messages(
@@ -372,7 +373,7 @@ async def _execute_attempt(
         context.path,
         context.payload,
         native=use_native,
-        upstream_routes=key.upstream_routes,
+        upstream_routes=upstream_routes,
     )
     upstream = _join_url(
         key.base_url,
@@ -467,7 +468,7 @@ async def _execute_attempt(
             context.path,
             context.payload,
             native=False,
-            upstream_routes=key.upstream_routes,
+            upstream_routes=upstream_routes,
         )
         fallback_upstream = _join_url(key.base_url, fallback_path)
         fallback_body = context.upstream_body
