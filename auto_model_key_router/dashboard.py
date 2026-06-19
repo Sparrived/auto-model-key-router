@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,7 @@ from rich import box
 from rich.console import Group
 from rich.live import Live
 from rich.table import Table
+from rich.text import Text
 
 from .agent_config import (
     CLAUDE_CODE,
@@ -38,6 +41,7 @@ from .config_editor import (
 )
 from .formatting import compact_url, short_text
 from . import __version__
+from .metrics import BEIJING_TZ, RATE_WINDOW_SECONDS
 from .logs_tui import watch_logs
 from .service import (
     is_service_healthy,
@@ -728,6 +732,38 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
     return table
 
 
+def quick_metrics_items(db_path: str) -> list[str]:
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        total = connection.execute(
+            "SELECT COUNT(*) AS requests, COALESCE(SUM(success), 0) AS successes, "
+            "COALESCE(SUM(total_tokens), 0) AS total_tokens FROM request_metrics"
+        ).fetchone()
+        rate_since = (
+            datetime.now(BEIJING_TZ) - timedelta(seconds=RATE_WINDOW_SECONDS)
+        ).isoformat()
+        recent = connection.execute(
+            "SELECT COUNT(*) AS rpm, COALESCE(SUM(total_tokens), 0) AS tpm "
+            "FROM request_metrics WHERE created_at >= ?",
+            (rate_since,),
+        ).fetchone()
+    requests = total["requests"]
+    if requests == 0:
+        return []
+    successes = total["successes"]
+    success_rate = f"{successes / requests:.1%}"
+    return [
+        f"[dim]请求[/dim] [bold cyan]{requests:,}[/bold cyan]",
+        f"[dim]成功率[/dim] [bold green]{success_rate}[/bold green]",
+        f"[dim]Token[/dim] [bold magenta]{total['total_tokens']:,}[/bold magenta]",
+        f"[dim]RPM[/dim] [bold]{recent['rpm']}[/bold]",
+        f"[dim]TPM[/dim] [bold]{recent['tpm']:,}[/bold]",
+    ]
+
+
 def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     model_count = len(config.models)
     key_count = sum(len(model.keys) for model in config.models)
@@ -742,39 +778,32 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
         {key.base_url for model in config.models for key in model.keys}
     )
     service_status = (
-        "[green]● 运行中[/green]"
+        "[green]●[/green]"
         if is_service_healthy(config.host, config.port)
-        else "[yellow]● 未运行[/yellow]"
+        else "[yellow]○[/yellow]"
     )
     auth_status = (
-        "[green]已启用[/green]" if config.local_api_key else "[yellow]未设置[/yellow]"
+        "[green]✓[/green]" if config.local_api_key else "[yellow]✗[/yellow]"
     )
-    summary = Table.grid(expand=True)
-    summary.add_column(ratio=1)
-    summary.add_column(ratio=1)
-    summary.add_column(ratio=1)
-    summary.add_row(
-        f"[dim]监听地址[/dim]\n[bold]{config.host}:{config.port}[/bold]",
-        f"[dim]服务状态[/dim]\n[bold]{service_status}[/bold]",
-        f"[dim]本地鉴权[/dim]\n[bold]{auth_status}[/bold]",
-    )
-    summary.add_row(
-        f"[dim]模型数量[/dim]\n[bold cyan]{model_count}[/bold cyan]",
-        f"[dim]Key 数量[/dim]\n[bold green]{key_count}[/bold green]",
-        f"[dim]上游数量[/dim]\n[bold magenta]{upstream_count}[/bold magenta]",
-    )
+    items = [
+        f"[dim]监听[/dim] [bold]{config.host}:{config.port}[/bold]",
+        f"[dim]服务[/dim] {service_status}",
+        f"[dim]鉴权[/dim] {auth_status}",
+        f"[dim]模型[/dim] [bold cyan]{model_count}[/bold cyan]",
+        f"[dim]Key[/dim] [bold green]{key_count}[/bold green]",
+        f"[dim]上游[/dim] [bold magenta]{upstream_count}[/bold magenta]",
+    ]
     if visitor_installed:
-        summary.add_row(
-            f"[dim]访客 Key[/dim]\n[bold]{VISITOR_API_KEY}[/bold]",
-            f"[dim]访客可用 Key[/dim]\n[bold green]{configured_visitor_key_count}[/bold green]",
-            "",
-        )
+        items.append(f"[dim]访客Key[/dim] [bold]{VISITOR_API_KEY}[/bold]")
+        items.append(f"[dim]访客可用[/dim] [bold green]{configured_visitor_key_count}[/bold green]")
     elif configured_visitor_key_count:
-        summary.add_row(
-            "[dim]访客功能[/dim]\n[yellow]未安装[/yellow]",
-            f"[dim]未生效授权[/dim]\n[yellow]{configured_visitor_key_count}[/yellow]",
-            "[dim]安装[/dim]\n[bold]auto-model-key-router[visitor][/bold]",
-        )
+        items.append(f"[dim]未生效授权[/dim] [yellow]{configured_visitor_key_count}[/yellow]")
+    items.extend(quick_metrics_items(config.metrics_db_path))
+    summary = Text(no_wrap=True, overflow="ellipsis")
+    for i, item in enumerate(items):
+        if i:
+            summary.append("  ")
+        summary.append_text(Text.from_markup(item))
     warning = (
         section_panel(
             "[bold red]⚠ 当前监听地址为 0.0.0.0，服务会接受所有可达网络的连接。[/bold red]\n[red]如果机器暴露在公网或未受信任网络中，请务必启用本地鉴权、限制防火墙访问，并避免泄露上游 API Key。[/red]",
