@@ -6,6 +6,9 @@
 - 新增单个 Key 统计页面，TUI 管理 Key 菜单中可查看指定 Key 的请求量、成功率、Token 用量、延迟等指标，支持时间范围切换和请求明细翻页。
 - 新增 `GET /api/models/{model_id}/keys/{key_name}/stats` REST API 端点，返回指定 Key 的统计数据，支持 `hours` 参数过滤时间范围。
 
+### Changed
+- 移除缓存命中次数统计（`cache_hits`、`cache_misses`、`cache_hit_rate`），仅保留 token 维度的缓存统计（`cached_tokens`、`cached_token_rate`）；TUI 总览面板「缓存命中」改为「缓存 Tok 比例」。
+
 ## [2.1.6] - 2026-06-19
 
 ### Added
