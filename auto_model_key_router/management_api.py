@@ -100,8 +100,10 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     async def update_unified_model(
         request: Request, payload: UnifiedModelUpdate
     ) -> dict[str, Any]:
-        target_model = payload.model.strip()
-        target_key = payload.key.strip() if payload.key else None
+        fields = _payload_dict(payload)
+        target_model = str(fields["model"]).strip()
+        key_provided = "key" in fields
+        target_key = str(fields["key"]).strip() if fields.get("key") else None
 
         def mutation(data: dict[str, Any]) -> None:
             models = _raw_models(data)
@@ -118,8 +120,13 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                         404, f"模型 {resolved_id} 的 key 不存在: {target_key}"
                     )
             unified_data: dict[str, Any] = {"model": resolved_id}
-            if target_key:
-                unified_data["key"] = target_key
+            if key_provided:
+                if target_key:
+                    unified_data["key"] = target_key
+            else:
+                existing = data.get("unified_model")
+                if isinstance(existing, dict) and existing.get("key"):
+                    unified_data["key"] = existing["key"]
             data["unified_model"] = unified_data
 
         config = await _update_config(request, reload_config, mutation)

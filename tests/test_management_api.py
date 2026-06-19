@@ -434,10 +434,10 @@ def test_unified_model_crud_via_api(tmp_path: Path) -> None:
 
     async def requests(
         client: httpx.AsyncClient,
-    ) -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
+    ) -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
         # Initially no unified model
         get_empty = await client.get("/api/unified-model", headers=AUTH_HEADERS)
-        # Set unified model
+        # Set unified model (auto routing)
         set_ok = await client.put(
             "/api/unified-model",
             headers=AUTH_HEADERS,
@@ -451,11 +451,26 @@ def test_unified_model_crud_via_api(tmp_path: Path) -> None:
             headers=AUTH_HEADERS,
             json={"model": "model-a", "key": "key-a"},
         )
-        # Delete
-        delete_ok = await client.delete("/api/unified-model", headers=AUTH_HEADERS)
-        return get_empty, set_ok, get_after_set, update_with_key, delete_ok
+        # Change model without key → should clear key (different model)
+        change_model = await client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "model-a"},
+        )
+        # Set key then explicitly null → auto routing
+        set_key_again = await client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "model-a", "key": "key-a"},
+        )
+        clear_key = await client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "model-a", "key": None},
+        )
+        return get_empty, set_ok, get_after_set, update_with_key, change_model, set_key_again, clear_key
 
-    get_empty, set_ok, get_after_set, update_with_key, delete_ok = run_client(
+    get_empty, set_ok, get_after_set, update_with_key, change_model, set_key_again, clear_key = run_client(
         app, requests
     )
 
@@ -468,10 +483,14 @@ def test_unified_model_crud_via_api(tmp_path: Path) -> None:
     assert get_after_set.json()["unified_model"]["model"] == "model-a"
     assert update_with_key.status_code == 200
     assert update_with_key.json()["unified_model"]["key"] == "key-a"
-    assert delete_ok.status_code == 204
-    # Verify deleted
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert "unified_model" not in saved
+    # Same model without key → keeps existing key
+    assert change_model.status_code == 200
+    assert change_model.json()["unified_model"]["key"] == "key-a"
+    # Explicit key then null → auto routing
+    assert set_key_again.status_code == 200
+    assert set_key_again.json()["unified_model"]["key"] == "key-a"
+    assert clear_key.status_code == 200
+    assert clear_key.json()["unified_model"]["key"] is None
 
 
 def test_unified_model_rejects_unknown_model(tmp_path: Path) -> None:
