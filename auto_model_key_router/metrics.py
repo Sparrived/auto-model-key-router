@@ -70,11 +70,22 @@ class MetricsStore:
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._started_at = _now_beijing()
         self._lock = asyncio.Lock()
+        self._active_count = 0
         self._connection = sqlite3.connect(self.database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._closed = False
         self._configure_connection()
         self._init_schema()
+
+    def acquire_active(self) -> None:
+        self._active_count += 1
+
+    def release_active(self) -> None:
+        self._active_count = max(self._active_count - 1, 0)
+
+    @property
+    def active_count(self) -> int:
+        return self._active_count
 
     async def record(
         self,
@@ -319,6 +330,7 @@ class MetricsStore:
             "current_rpm": recent.requests,
             "current_tpm": recent.total_tokens,
             "router_status": _router_status(recent),
+            "active_requests": self._active_count,
             "total": total.to_dict(),
             "caller_types": {
                 key[0]: stats.to_dict() for key, stats in caller_types.items()

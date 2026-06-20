@@ -198,14 +198,19 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     async def proxy(path: str, request: Request) -> Response:
         await _reload_config_if_changed(app.state)
         lease = await _acquire_runtime(app.state)
+        lease.resources.metrics.acquire_active()
         try:
             response = await handle_proxy_request(path, request, lease.resources)
         except BaseException:
+            lease.resources.metrics.release_active()
             await lease.release()
             raise
         if isinstance(response, StreamingResponse):
-            response.body_iterator = lease.wrap_stream(response.body_iterator)
+            response.body_iterator = lease.wrap_stream(
+                _wrap_active_stream(response.body_iterator, lease.resources.metrics)
+            )
         else:
+            lease.resources.metrics.release_active()
             await lease.release()
         return response
 
@@ -283,6 +288,17 @@ async def _acquire_runtime(state: Any) -> RuntimeLease:
     async with state.config_reload_lock:
         await sync_runtime_from_state(state)
         return await state.runtime_manager.acquire()
+
+
+async def _wrap_active_stream(
+    iterator: AsyncIterator[bytes], metrics: MetricsStore
+) -> AsyncIterator[bytes]:
+    """包装流式响应迭代器，流结束时释放活跃计数。"""
+    try:
+        async for chunk in iterator:
+            yield chunk
+    finally:
+        metrics.release_active()
 
 
 def _key_fingerprint(api_key: str) -> str:

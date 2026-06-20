@@ -2177,8 +2177,20 @@ def test_unified_model_rejects_unknown_or_disabled_key() -> None:
 
 def test_acquired_key_is_released_when_proxy_raises() -> None:
     class FailingMetrics:
+        _active_count: int = 0
+
         async def record(self, *args: object, **kwargs: object) -> None:
             raise RuntimeError("metrics unavailable")
+
+        def acquire_active(self) -> None:
+            self._active_count += 1
+
+        def release_active(self) -> None:
+            self._active_count = max(self._active_count - 1, 0)
+
+        @property
+        def active_count(self) -> int:
+            return self._active_count
 
         async def close(self) -> None:
             pass
