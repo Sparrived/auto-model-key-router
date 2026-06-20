@@ -135,7 +135,7 @@ def format_command(args: Sequence[str]) -> str:
 
 def run_command(args: Sequence[str], *, capture: bool = False, check: bool = True, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
     console.print(Text(f"$ {format_command(args)}", style="bold blue"))
-    result = subprocess.run(args, cwd=cwd, text=True, capture_output=capture)
+    result = subprocess.run(args, cwd=cwd, text=True, capture_output=capture, encoding="utf-8", errors="replace")
     if capture:
         if result.stdout:
             console.print(result.stdout, end="")
