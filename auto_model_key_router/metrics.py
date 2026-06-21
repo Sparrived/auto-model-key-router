@@ -178,9 +178,9 @@ class MetricsStore:
         )
         self._connection.commit()
 
-    async def snapshot(self, hours: float | None = None) -> dict[str, Any]:
+    async def snapshot(self, hours: float | None = None, since: datetime | None = None) -> dict[str, Any]:
         async with self._lock:
-            return await asyncio.to_thread(self._snapshot_sync, hours)
+            return await asyncio.to_thread(self._snapshot_sync, hours, since)
 
     async def key_stats(
         self,
@@ -309,23 +309,25 @@ class MetricsStore:
             )
         return stats
 
-    def _snapshot_sync(self, hours: float | None = None) -> dict[str, Any]:
-        since: str | None = None
-        if hours is not None:
-            since = (_now_beijing() - timedelta(hours=hours)).isoformat()
+    def _snapshot_sync(self, hours: float | None = None, since: datetime | None = None) -> dict[str, Any]:
+        since_str: str | None = None
+        if since is not None:
+            since_str = since.isoformat()
+        elif hours is not None:
+            since_str = (_now_beijing() - timedelta(hours=hours)).isoformat()
 
-        total = self._query_stats((), since_created_at=since)[()]
+        total = self._query_stats((), since_created_at=since_str)[()]
         current_window_started_at = (
             _now_beijing() - timedelta(seconds=RATE_WINDOW_SECONDS)
         ).isoformat()
         recent = self._query_stats((), since_created_at=current_window_started_at)[()]
-        caller_types = self._query_stats(("caller_type",), since_created_at=since)
+        caller_types = self._query_stats(("caller_type",), since_created_at=since_str)
         caller_types.setdefault(("local",), UsageStats())
         caller_types.setdefault(("visitor",), UsageStats())
-        models = self._query_stats(("model_id",), since_created_at=since)
-        requested_models = self._query_stats(("requested_model_id",), since_created_at=since)
-        model_requested = self._query_stats(("model_id", "requested_model_id"), since_created_at=since)
-        keys = self._query_stats(("model_id", "key_name"), since_created_at=since)
+        models = self._query_stats(("model_id",), since_created_at=since_str)
+        requested_models = self._query_stats(("requested_model_id",), since_created_at=since_str)
+        model_requested = self._query_stats(("model_id", "requested_model_id"), since_created_at=since_str)
+        keys = self._query_stats(("model_id", "key_name"), since_created_at=since_str)
 
         return {
             "started_at": self._started_at.isoformat(),
