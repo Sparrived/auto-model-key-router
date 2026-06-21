@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import WebSocket
@@ -21,6 +22,7 @@ class EventBus:
     def __init__(self) -> None:
         self._clients: set[WebSocket] = set()
         self._lock = asyncio.Lock()
+        self.on_client_count_change: Callable[[int], Awaitable[None]] | None = None
 
     async def authenticate(
         self, websocket: WebSocket, token: str, expected_key: str
@@ -42,13 +44,19 @@ class EventBus:
 
         async with self._lock:
             self._clients.add(websocket)
-        LOGGER.debug("event bus client connected, total=%d", len(self._clients))
+        total = len(self._clients)
+        LOGGER.debug("event bus client connected, total=%d", total)
+        if self.on_client_count_change is not None:
+            await self.on_client_count_change(total)
         return True
 
     async def disconnect(self, websocket: WebSocket) -> None:
         async with self._lock:
             self._clients.discard(websocket)
-        LOGGER.debug("event bus client disconnected, total=%d", len(self._clients))
+        total = len(self._clients)
+        LOGGER.debug("event bus client disconnected, total=%d", total)
+        if self.on_client_count_change is not None:
+            await self.on_client_count_change(total)
 
     async def broadcast(self, event_type: str, data: Any) -> None:
         """向所有已认证客户端推送事件。"""

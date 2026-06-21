@@ -53,16 +53,20 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             lifespan_app.state.health_probe_task = asyncio.create_task(
                 _health_probe_loop(lifespan_app.state)
             )
+        lifespan_app.state._metrics_broadcast_task = asyncio.create_task(
+            _broadcast_metrics_loop()
+        )
         try:
             yield
         finally:
-            task = getattr(lifespan_app.state, "health_probe_task", None)
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            for attr in ("_metrics_broadcast_task", "health_probe_task"):
+                task = getattr(lifespan_app.state, attr, None)
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
             await lifespan_app.state.runtime_manager.close()
 
     app = FastAPI(title="Auto Model Key Router", version=__version__, lifespan=lifespan)
@@ -92,6 +96,45 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     app.state.key_pool.on_key_state_change = _on_key_state_change
     app.state._on_key_state_change = _on_key_state_change
+
+    # metrics_snapshot 节流广播
+    _metrics_dirty = asyncio.Event()
+    _IDLE_BROADCAST_INTERVAL = 30.0
+
+    async def _broadcast_metrics_snapshot() -> None:
+        try:
+            snapshot = await app.state.metrics.snapshot()
+            await app.state.event_bus.broadcast("metrics_snapshot", snapshot)
+        except Exception:
+            LOGGER.debug("metrics_snapshot broadcast failed", exc_info=True)
+
+    async def _broadcast_metrics_loop() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    _metrics_dirty.wait(), timeout=_IDLE_BROADCAST_INTERVAL
+                )
+                _metrics_dirty.clear()
+            except asyncio.TimeoutError:
+                pass  # 空闲心跳，刷新 RPM/TPM 衰减
+            if app.state.event_bus.client_count > 0:
+                await _broadcast_metrics_snapshot()
+            await asyncio.sleep(1.0)
+
+    async def _on_metrics_recorded() -> None:
+        _metrics_dirty.set()
+
+    async def _on_client_count_change(count: int) -> None:
+        app.state.event_bus.broadcast(
+            "client_count", {"count": count}
+        )
+        if count > 0:
+            await _broadcast_metrics_snapshot()
+
+    app.state.metrics.on_record = _on_metrics_recorded
+    app.state.event_bus.on_client_count_change = _on_client_count_change
+    app.state._metrics_broadcast_task: asyncio.Task | None = None
+
     register_management_api(app, _reload_config_if_changed)
 
     @app.head("/", include_in_schema=False)
@@ -181,6 +224,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     @app.websocket("/ws/events")
     async def ws_events(websocket: WebSocket) -> None:
+        await websocket.accept()
         token = websocket.query_params.get("token", "")
         event_bus: EventBus = app.state.event_bus
         if not await event_bus.authenticate(websocket, token, app.state.config.local_api_key):

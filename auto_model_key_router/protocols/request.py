@@ -49,7 +49,10 @@ def _adapt_anthropic_messages_payload(payload: dict[str, Any]) -> dict[str, Any]
     tools = adapted.get("tools")
     if isinstance(tools, list):
         adapted["tools"] = [
-            _adapt_anthropic_tool(tool) for tool in tools if isinstance(tool, dict)
+            adapted_tool
+            for tool in tools
+            if isinstance(tool, dict)
+            and (adapted_tool := _adapt_anthropic_tool(tool)) is not None
         ]
     tool_choice = adapted.get("tool_choice")
     if isinstance(tool_choice, dict):
@@ -74,7 +77,10 @@ def _adapt_responses_input_payload(payload: dict[str, Any]) -> dict[str, Any]:
     tools = adapted.get("tools")
     if isinstance(tools, list):
         adapted["tools"] = [
-            _adapt_anthropic_tool(tool) for tool in tools if isinstance(tool, dict)
+            adapted_tool
+            for tool in tools
+            if isinstance(tool, dict)
+            and (adapted_tool := _adapt_anthropic_tool(tool)) is not None
         ]
     tool_choice = adapted.get("tool_choice")
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
@@ -237,8 +243,16 @@ def _adapt_anthropic_message(message: dict[str, Any]) -> list[dict[str, Any]]:
     return [adapted]
 
 
-def _adapt_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
-    if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+def _adapt_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any] | None:
+    """将工具定义转换为 OpenAI function calling 格式。
+
+    返回 None 表示该工具不是 function 类型，应被过滤掉。
+    """
+    tool_type = tool.get("type")
+    # 非 function 类型的工具（如 code_interpreter, file_search 等）不支持
+    if tool_type is not None and tool_type != "function":
+        return None
+    if tool_type == "function" and isinstance(tool.get("function"), dict):
         func = tool["function"]
         if func.get("name"):
             return tool
@@ -247,7 +261,11 @@ def _adapt_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
         adapted_func = dict(func)
         adapted_func["name"] = name
         return {"type": "function", "function": adapted_func}
-    function: dict[str, Any] = {"name": str(tool.get("name") or "")}
+    # Anthropic 格式或顶层有 name 的工具
+    name = str(tool.get("name") or "")
+    if not name:
+        return None  # 没有 name 的工具无法使用
+    function: dict[str, Any] = {"name": name}
     if tool.get("description") is not None:
         function["description"] = str(tool["description"])
     parameters = tool.get("input_schema", tool.get("parameters"))

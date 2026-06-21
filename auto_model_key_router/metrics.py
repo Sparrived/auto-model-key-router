@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -74,6 +75,7 @@ class MetricsStore:
         self._connection = sqlite3.connect(self.database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._closed = False
+        self.on_record: Callable[[], Awaitable[None]] | None = None
         self._configure_connection()
         self._init_schema()
 
@@ -118,6 +120,8 @@ class MetricsStore:
                 request_model_id,
                 caller_type,
             )
+        if self.on_record is not None:
+            await self.on_record()
 
     def _record_sync(
         self,
