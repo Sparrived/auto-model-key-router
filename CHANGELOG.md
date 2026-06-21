@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [2.2.2.post2] - 2026-06-21
+
+### Fixed
+- 处理function字典缺失name的情况
+
 ## [2.2.2.post1] - 2026-06-21
 
 ### Added
