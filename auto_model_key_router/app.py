@@ -103,7 +103,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     async def _broadcast_metrics_snapshot() -> None:
         try:
-            snapshot = await app.state.metrics.snapshot()
+            snapshot = await app.state.metrics.snapshot(hours=24)
             await app.state.event_bus.broadcast("metrics_snapshot", snapshot)
         except Exception:
             LOGGER.debug("metrics_snapshot broadcast failed", exc_info=True)
