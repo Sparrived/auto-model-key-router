@@ -264,7 +264,7 @@ def resolved_update_command(command: list[str]) -> list[str]:
     return [executable, *command[1:]]
 
 
-def windows_update_helper_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, ready_path: Path, log_path: Path, stdout_path: Path, stderr_path: Path, post_update_commands: list[list[str]] | None = None, max_attempts: int = 6) -> str:
+def windows_update_helper_script(version_result: VersionCheckResult, command: list[str], parent_pid: int, ready_path: Path, log_path: Path, stdout_path: Path, stderr_path: Path, post_update_commands: list[list[str]] | None = None, max_attempts: int = 6, initial_wait_ms: int = 3000, retry_base_seconds: int = 10) -> str:
     source_line = f"来源: {version_result.source or '可用来源'}"
     target_line = f"目标: {update_target_label(version_result)}"
     command_line = f"命令: {shell_command_text(command)}"
@@ -315,6 +315,8 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         f"$stdoutPath = {powershell_string(str(stdout_path))}",
         f"$stderrPath = {powershell_string(str(stderr_path))}",
         f"$maxAttempts = {max_attempts}",
+        f"$initialWaitMs = {initial_wait_ms}",
+        f"$retryBaseSeconds = {retry_base_seconds}",
         "$exitCode = 1",
         "$stdoutText = ''",
         "$stderrText = ''",
@@ -339,7 +341,7 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "try {",
         f"    $parentProcess = Get-Process -Id {parent_pid} -ErrorAction SilentlyContinue",
         "    if ($null -ne $parentProcess) { $parentProcess.WaitForExit() }",
-        "    Start-Sleep -Milliseconds 500",
+        "    Start-Sleep -Milliseconds $initialWaitMs",
         "    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {",
         "        Write-Host \"正在更新（第 $attempt/$maxAttempts 次）...\"",
         "        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue",
@@ -350,7 +352,7 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "        $attemptLog += @('', \"[attempt $attempt stdout]\", $stdoutText, '', \"[attempt $attempt stderr]\", $stderrText)",
         "        Save-UpdateLog $(if ($exitCode -eq 0) { '更新成功' } else { \"第 $attempt 次更新失败\" })",
         "        if ($exitCode -eq 0) { break }",
-        "        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds ([Math]::Min(5, $attempt)) }",
+        "        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds ([Math]::Min($retryBaseSeconds, $attempt * 2)) }",
         "    }",
         "    if ($exitCode -ne 0) { throw \"更新命令在 $maxAttempts 次尝试后仍失败，退出码: $exitCode\" }",
         *post_update_lines,
