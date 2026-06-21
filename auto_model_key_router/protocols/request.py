@@ -239,7 +239,14 @@ def _adapt_anthropic_message(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _adapt_anthropic_tool(tool: dict[str, Any]) -> dict[str, Any]:
     if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
-        return tool
+        func = tool["function"]
+        if func.get("name"):
+            return tool
+        # function 字典存在但缺少 name，补充 name
+        name = str(tool.get("name") or "")
+        adapted_func = dict(func)
+        adapted_func["name"] = name
+        return {"type": "function", "function": adapted_func}
     function: dict[str, Any] = {"name": str(tool.get("name") or "")}
     if tool.get("description") is not None:
         function["description"] = str(tool["description"])
