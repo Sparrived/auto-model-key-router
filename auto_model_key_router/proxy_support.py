@@ -104,6 +104,64 @@ def _upstream_body(
     ).encode("utf-8")
 
 
+def _is_tool_error(content: bytes) -> bool:
+    """检查错误响应是否与工具有关。"""
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            error = data.get("error", {})
+            if isinstance(error, dict):
+                message = str(error.get("message", "")).lower()
+                param = str(error.get("param", "")).lower()
+                # 检查是否是工具相关的错误
+                if "tool" in message or "function" in message:
+                    return True
+                if "tool" in param or "function" in param:
+                    return True
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    return False
+
+
+def _filter_function_tools(payload: dict[str, Any]) -> dict[str, Any]:
+    """过滤工具，只保留 function 类型的工具。"""
+    adapted = dict(payload)
+    tools = adapted.get("tools")
+    if isinstance(tools, list):
+        adapted["tools"] = [
+            tool for tool in tools
+            if isinstance(tool, dict) and tool.get("type") == "function"
+            and isinstance(tool.get("function"), dict)
+            and tool["function"].get("name")
+        ]
+    return adapted
+
+
+def _upstream_body_with_filtered_tools(
+    body: bytes,
+    payload: dict[str, Any],
+    model_id: str,
+    config: RouterConfig | None = None,
+    stream: bool = False,
+) -> bytes:
+    """创建过滤掉非 function 工具的请求体。"""
+    if not payload or "model" not in payload:
+        return body
+    upstream_payload = _filter_function_tools(dict(payload))
+    upstream_payload["model"] = model_id
+    upstream_payload = _apply_reasoning_effort(upstream_payload, model_id, config)
+    upstream_payload = _adapt_message_payload(upstream_payload)
+    if stream:
+        stream_options = upstream_payload.get("stream_options")
+        if not isinstance(stream_options, dict):
+            stream_options = {}
+        stream_options["include_usage"] = True
+        upstream_payload["stream_options"] = stream_options
+    return json.dumps(
+        upstream_payload, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+
+
 def _apply_reasoning_effort(
     payload: dict[str, Any], model_id: str, config: RouterConfig | None
 ) -> dict[str, Any]:

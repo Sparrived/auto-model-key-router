@@ -243,6 +243,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         await _reload_config_if_changed(app.state)
         lease = await _acquire_runtime(app.state)
         lease.resources.metrics.acquire_active()
+        _metrics_dirty.set()
         try:
             response = await handle_proxy_request(path, request, lease.resources)
         except BaseException:

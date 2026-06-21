@@ -34,6 +34,7 @@ from .proxy_support import (
     _authorization_mode,
     _debug_report,
     _is_stream_request,
+    _is_tool_error,
     _join_url,
     _json_body,
     _json_bytes,
@@ -44,6 +45,7 @@ from .proxy_support import (
     _send_upstream,
     _split_requested_model_key,
     _upstream_body,
+    _upstream_body_with_filtered_tools,
     _upstream_headers,
     _upstream_path,
     _upstream_timeout,
@@ -565,6 +567,101 @@ async def _execute_attempt(
                 response, content, anthropic=context.path == "messages"
             )
         )
+
+    # 400 错误且与工具有关时，尝试过滤非 function 工具重试
+    if response.status_code == 400:
+        content = await response.aread()
+        if _is_tool_error(content):
+            _debug_report(
+                "upstream-tool-error-retry",
+                _response_debug_payload(context, key, response, duration_ms, content),
+            )
+            await response.aclose()
+            # 创建过滤后的请求体
+            filtered_body = _upstream_body_with_filtered_tools(
+                context.original_body,
+                context.payload,
+                context.model_id,
+                runtime.config,
+                stream=context.is_stream,
+            )
+            retry_started = perf_counter()
+            try:
+                retry_response = await _send_upstream(
+                    runtime.http_client,
+                    context.request,
+                    upstream,
+                    _upstream_headers(context.request, key.api_key),
+                    filtered_body,
+                    stream=context.is_stream,
+                    timeout=_upstream_timeout(runtime.config, context.is_stream),
+                )
+                retry_duration_ms = _elapsed_ms(retry_started)
+                # 如果重试成功，使用重试的响应
+                if retry_response.status_code < 400:
+                    _debug_report(
+                        "upstream-tool-filter-success",
+                        {
+                            "model_id": context.model_id,
+                            "key_name": key.name,
+                            "original_status": 400,
+                            "retry_status": retry_response.status_code,
+                        },
+                    )
+                    response = retry_response
+                    duration_ms = retry_duration_ms
+                else:
+                    # 重试也失败，返回原始错误
+                    await retry_response.aclose()
+                    await _record_upstream_response(
+                        runtime,
+                        context.model_id,
+                        key.name,
+                        context.requested_model_id,
+                        response,
+                        content,
+                        duration_ms,
+                        caller_type=context.caller_type,
+                    )
+                    return AttemptOutcome(
+                        response=_json_error_response_from_content(
+                            response, content, anthropic=context.path == "messages"
+                        )
+                    )
+            except httpx.RequestError:
+                # 重试请求失败，返回原始错误
+                await _record_upstream_response(
+                    runtime,
+                    context.model_id,
+                    key.name,
+                    context.requested_model_id,
+                    response,
+                    content,
+                    duration_ms,
+                    caller_type=context.caller_type,
+                )
+                return AttemptOutcome(
+                    response=_json_error_response_from_content(
+                        response, content, anthropic=context.path == "messages"
+                    )
+                )
+        else:
+            await response.aclose()
+            await _record_upstream_response(
+                runtime,
+                context.model_id,
+                key.name,
+                context.requested_model_id,
+                response,
+                content,
+                duration_ms,
+                caller_type=context.caller_type,
+            )
+            return AttemptOutcome(
+                response=_json_error_response_from_content(
+                    response, content, anthropic=context.path == "messages"
+                )
+            )
 
     if context.is_stream:
         return AttemptOutcome(
