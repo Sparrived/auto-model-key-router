@@ -33,16 +33,18 @@ def default_config_path() -> Path:
 LEGACY_CONFIG_PATH = Path("router-config.json")
 DEFAULT_CONFIG_PATH = default_config_path()
 UNIFIED_MODEL_ID = "unified-model"
-UPSTREAM_ROUTE_MODES = ("openai", "anthropic", "responses")
+UPSTREAM_ROUTE_MODES = ("openai", "anthropic", "responses", "images")
 UPSTREAM_ROUTE_LABELS = {
     "openai": "OpenAI Chat",
     "anthropic": "Anthropic Messages",
     "responses": "OpenAI Responses",
+    "images": "OpenAI Images",
 }
 UPSTREAM_ROUTE_DEFAULT_PATHS = {
     "openai": "v1/chat/completions",
     "anthropic": "v1/messages",
     "responses": "v1/responses",
+    "images": "v1/images/generations",
 }
 UPSTREAM_ROUTE_MODE_ALIASES = {
     "chat": "openai",
@@ -54,6 +56,13 @@ UPSTREAM_ROUTE_MODE_ALIASES = {
     "anthropic_messages": "anthropic",
     "anthropic-messages": "anthropic",
     "codex": "responses",
+    "image": "images",
+    "img": "images",
+    "dall-e": "images",
+    "dalle": "images",
+    "images/generations": "images",
+    "image_generation": "images",
+    "image-generation": "images",
 }
 
 
@@ -62,7 +71,7 @@ def normalize_upstream_route_mode(value: Any) -> str:
     mode = UPSTREAM_ROUTE_MODE_ALIASES.get(mode, mode)
     if mode not in UPSTREAM_ROUTE_MODES:
         raise ValueError(
-            "upstream_routes 模式必须是 openai、anthropic 或 responses"
+            "upstream_routes 模式必须是 openai、anthropic、responses 或 images"
         )
     return mode
 
@@ -252,6 +261,8 @@ class ModelConfig:
 class UnifiedModelConfig:
     model: str
     key: str | None = None
+    image_model: str | None = None
+    image_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,7 +355,14 @@ class RouterConfig:
             target_key = str(raw_unified_model.get("key") or "").strip() or None
             if not target_model:
                 raise ValueError("unified_model.model 不能为空")
-            unified_model = UnifiedModelConfig(model=target_model, key=target_key)
+            target_image_model = str(raw_unified_model.get("image_model") or "").strip() or None
+            target_image_key = str(raw_unified_model.get("image_key") or "").strip() or None
+            unified_model = UnifiedModelConfig(
+                model=target_model,
+                key=target_key,
+                image_model=target_image_model,
+                image_key=target_image_key,
+            )
 
         config = cls(
             host=str(raw.get("host", "127.0.0.1")),

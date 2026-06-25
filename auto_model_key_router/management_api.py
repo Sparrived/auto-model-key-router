@@ -74,6 +74,8 @@ class ModelUpdate(APIModel):
 class UnifiedModelUpdate(APIModel):
     model: str = Field(min_length=1)
     key: str | None = None
+    image_model: str | None = None
+    image_key: str | None = None
 
 
 class ManagementAPIError(Exception):
@@ -89,12 +91,14 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         config = await _authorized_config(request, reload_config)
         if config.unified_model is None:
             return {"unified_model": None}
-        return {
-            "unified_model": {
-                "model": config.unified_model.model,
-                "key": config.unified_model.key,
-            }
+        result: dict[str, Any] = {
+            "model": config.unified_model.model,
+            "key": config.unified_model.key,
         }
+        if config.unified_model.image_model:
+            result["image_model"] = config.unified_model.image_model
+            result["image_key"] = config.unified_model.image_key
+        return {"unified_model": result}
 
     @app.put("/api/unified-model", tags=["management"])
     async def update_unified_model(
@@ -104,6 +108,10 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         target_model = str(fields["model"]).strip()
         key_provided = "key" in fields
         target_key = str(fields["key"]).strip() if fields.get("key") else None
+        image_model_provided = "image_model" in fields
+        target_image_model = str(fields["image_model"]).strip() if fields.get("image_model") else None
+        image_key_provided = "image_key" in fields
+        target_image_key = str(fields["image_key"]).strip() if fields.get("image_key") else None
 
         def mutation(data: dict[str, Any]) -> None:
             models = _raw_models(data)
@@ -127,15 +135,36 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                 existing = data.get("unified_model")
                 if isinstance(existing, dict) and existing.get("key"):
                     unified_data["key"] = existing["key"]
+            # 图像模型映射
+            existing_image_model = None
+            existing = data.get("unified_model")
+            if isinstance(existing, dict):
+                existing_image_model = existing.get("image_model")
+            if image_model_provided:
+                if target_image_model:
+                    resolved_image_id = _resolve_model_id(models, target_image_model)
+                    if resolved_image_id is None:
+                        raise ManagementAPIError(404, f"未配置模型或别名: {target_image_model}")
+                    unified_data["image_model"] = resolved_image_id
+                    if image_key_provided and target_image_key:
+                        unified_data["image_key"] = target_image_key
+                    elif not image_key_provided and isinstance(existing, dict) and existing.get("image_key") and existing.get("image_model") == resolved_image_id:
+                        unified_data["image_key"] = existing["image_key"]
+            elif existing_image_model:
+                unified_data["image_model"] = existing_image_model
+                if isinstance(existing, dict) and existing.get("image_key"):
+                    unified_data["image_key"] = existing["image_key"]
             data["unified_model"] = unified_data
 
         config = await _update_config(request, reload_config, mutation)
-        return {
-            "unified_model": {
-                "model": config.unified_model.model,
-                "key": config.unified_model.key,
-            }
+        result: dict[str, Any] = {
+            "model": config.unified_model.model,
+            "key": config.unified_model.key,
         }
+        if config.unified_model.image_model:
+            result["image_model"] = config.unified_model.image_model
+            result["image_key"] = config.unified_model.image_key
+        return {"unified_model": result}
 
     @app.delete(
         "/api/unified-model",

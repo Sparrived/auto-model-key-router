@@ -11,6 +11,9 @@ def switch_unified_model(
     key_name: str | None = None,
     *,
     update_key: bool = False,
+    image_model_name: str | None = None,
+    image_key_name: str | None = None,
+    update_image_key: bool = False,
 ) -> RouterConfig:
     path = Path(config_path)
     current_config = RouterConfig.load(path)
@@ -36,9 +39,29 @@ def switch_unified_model(
     if update_key:
         selected_key = key_name.strip() if key_name else None
 
-    unified_data = {"model": target_model_id}
+    # 图像模型映射
+    selected_image_key = current.image_key if current is not None else None
+    if image_model_name is not None:
+        target_image_model_id = current_config.configured_model_id(image_model_name.strip())
+        if target_image_model_id is None:
+            raise ValueError(f"未配置模型或别名: {image_model_name}")
+        current_image_model_id = current_config.configured_model_id(current.image_model) if current is not None and current.image_model else None
+        if target_image_model_id != current_image_model_id and not update_image_key:
+            selected_image_key = None
+        if update_image_key:
+            selected_image_key = image_key_name.strip() if image_key_name else None
+    elif current is not None and current.image_model:
+        target_image_model_id = current_config.configured_model_id(current.image_model)
+    else:
+        target_image_model_id = None
+
+    unified_data: dict[str, object] = {"model": target_model_id}
     if selected_key:
         unified_data["key"] = selected_key
+    if target_image_model_id:
+        unified_data["image_model"] = target_image_model_id
+        if selected_image_key:
+            unified_data["image_key"] = selected_image_key
     data["unified_model"] = unified_data
 
     updated_config = RouterConfig.from_dict(data)

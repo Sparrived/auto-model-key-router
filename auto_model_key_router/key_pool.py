@@ -104,10 +104,15 @@ class KeyPool:
         )
         self._unified_model_id = None
         self._unified_key_name = None
+        self._unified_image_model_id = None
+        self._unified_image_key_name = None
         if config.unified_model is not None:
             self._unified_model_id = self._aliases[config.unified_model.model]
             self._unified_key_name = config.unified_model.key
             self._aliases[UNIFIED_MODEL_ID] = self._unified_model_id
+            if config.unified_model.image_model:
+                self._unified_image_model_id = self._aliases[config.unified_model.image_model]
+                self._unified_image_key_name = config.unified_model.image_key
 
     @property
     def model_ids(self) -> list[str]:
@@ -137,9 +142,11 @@ class KeyPool:
         return self._visitor_routes.get(public_model_id)
 
     def resolve_route(
-        self, model_id: str, key_name: str | None = None
+        self, model_id: str, key_name: str | None = None, *, path: str | None = None
     ) -> tuple[str, str | None]:
         if model_id == UNIFIED_MODEL_ID and key_name is None:
+            if path in ("images/generations", "images/edits") and self._unified_image_model_id is not None:
+                return self._unified_image_model_id, self._unified_image_key_name
             key_name = self._unified_key_name
         return self.resolve_model_id(model_id), key_name
 
@@ -147,7 +154,14 @@ class KeyPool:
     def unified_route(self) -> dict[str, str | None] | None:
         if self._unified_model_id is None:
             return None
-        return {"model": self._unified_model_id, "key": self._unified_key_name}
+        result: dict[str, str | None] = {
+            "model": self._unified_model_id,
+            "key": self._unified_key_name,
+        }
+        if self._unified_image_model_id is not None:
+            result["image_model"] = self._unified_image_model_id
+            result["image_key"] = self._unified_image_key_name
+        return result
 
     def key_count(self, model_id: str) -> int:
         return len(

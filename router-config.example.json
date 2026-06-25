@@ -13,7 +13,9 @@
   "local_api_key": "amkr-generated-local-api-key",
   "unified_model": {
     "model": "gpt-4o-mini",
-    "key": "gpt-4o-mini-key-1"
+    "key": "gpt-4o-mini-key-1",
+    "image_model": null,
+    "image_key": null
   },
   "models": [
     {

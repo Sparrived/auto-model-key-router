@@ -189,6 +189,8 @@ def _upstream_mode(path: str) -> str | None:
         return "anthropic"
     if path == "responses":
         return "responses"
+    if path in ("images/generations", "images/edits"):
+        return "images"
     return None
 
 
@@ -199,6 +201,8 @@ def _upstream_path(
     upstream_routes: dict[str, str] | None = None,
 ) -> str:
     mode = _upstream_mode(path)
+    if path == "images/generations":
+        return upstream_route_path(upstream_routes, "images")
     if native and mode is not None:
         return upstream_route_path(upstream_routes, mode)
     if (

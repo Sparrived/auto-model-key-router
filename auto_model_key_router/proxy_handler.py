@@ -179,7 +179,7 @@ async def _prepare_proxy_request(
             )
     else:
         model_id, requested_key_name = runtime.key_pool.resolve_route(
-            requested_model_name, requested_key_name
+            requested_model_name, requested_key_name, path=path
         )
     configured_key_count = runtime.key_pool.key_count(model_id)
     key_count = (

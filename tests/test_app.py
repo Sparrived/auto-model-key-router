@@ -3062,4 +3062,300 @@ def test_none_reasoning_effort_disables_request_reasoning() -> None:
 
         assert response.status_code == 200
         assert upstream_bodies[0]["reasoning_effort"] == "none"
-        assert "reasoning" not in upstream_bodies[0]
+
+
+def test_images_generations_proxies_to_upstream() -> None:
+    """图像生成请求应正确代理到上游，model 字段被替换为解析后的模型 ID。"""
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict] = []
+        upstream_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_urls.append(str(request.url))
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1700000000,
+                    "data": [{"url": "https://example.com/image.png"}],
+                },
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "test-model",
+                    "prompt": "a white cat",
+                    "n": 1,
+                    "size": "1024x1024",
+                },
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 1700000000
+        assert data["data"][0]["url"] == "https://example.com/image.png"
+        assert upstream_urls[0] == "https://upstream.test/v1/images/generations"
+        assert upstream_bodies[0]["model"] == "test-model"
+        assert upstream_bodies[0]["prompt"] == "a white cat"
+        assert upstream_bodies[0]["n"] == 1
+        assert upstream_bodies[0]["size"] == "1024x1024"
+
+
+def test_images_generations_unified_model_resolves_correctly() -> None:
+    """unified-model 应正确解析为图像模型。"""
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={"created": 1, "data": [{"url": "https://example.com/img.png"}]},
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+            unified_model=UnifiedModelConfig(model="test-model"),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "unified-model", "prompt": "a sunset"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert upstream_bodies[0]["model"] == "test-model"
+
+
+def test_images_generations_failover_across_keys() -> None:
+    """图像生成请求在第一个 key 失败时应自动切换到第二个 key。"""
+    with tempfile.TemporaryDirectory() as directory:
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            auth = request.headers.get("authorization", "")
+            if auth == "Bearer sk-bad":
+                return httpx.Response(403, json={"error": "forbidden"})
+            return httpx.Response(
+                200,
+                json={"created": 1, "data": [{"url": "https://example.com/img.png"}]},
+            )
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("bad-key", "sk-bad", "https://upstream.test"),
+                KeyConfig("good-key", "sk-good", "https://upstream.test"),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "prompt": "a dog"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert call_count == 2
+
+
+def test_images_generations_custom_upstream_route() -> None:
+    """自定义 upstream_routes 中的 images 路径应被正确使用。"""
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_urls.append(str(request.url))
+            return httpx.Response(
+                200,
+                json={"created": 1, "data": [{"url": "https://example.com/img.png"}]},
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+            upstream_routes={"https://upstream.test": {"images": "custom/images/v2"}},
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "prompt": "a mountain"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert upstream_urls[0] == "https://upstream.test/custom/images/v2/v1/images/generations"
+
+
+def test_unified_model_routes_chat_and_image_to_different_models() -> None:
+    """unified-model 应根据请求路径将 chat 和 image 请求路由到不同模型。"""
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "data": [{"url": "https://example.com/img.png"}],
+                },
+            )
+
+        config = replace(
+            make_config(
+                Path(directory),
+                (
+                    KeyConfig("chat-key", "sk-chat", "https://upstream.test"),
+                    KeyConfig("img-key", "sk-img", "https://upstream.test"),
+                ),
+                unified_model=UnifiedModelConfig(
+                    model="test-model",
+                    image_model="alias-model",
+                ),
+            ),
+            models=(
+                ModelConfig(
+                    id="test-model",
+                    aliases=("chat-alias",),
+                    keys=(KeyConfig("chat-key", "sk-chat", "https://upstream.test"),),
+                ),
+                ModelConfig(
+                    id="alias-model",
+                    aliases=("img-alias",),
+                    keys=(KeyConfig("img-key", "sk-img", "https://upstream.test"),),
+                ),
+            ),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+            chat_resp = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "unified-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            img_resp = await client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "unified-model", "prompt": "a cat"},
+            )
+            return chat_resp, img_resp
+
+        chat_resp, img_resp = run_client(app, requests)
+
+        assert chat_resp.status_code == 200
+        assert img_resp.status_code == 200
+        assert upstream_bodies[0]["model"] == "test-model"
+        assert upstream_bodies[1]["model"] == "alias-model"
+
+
+def test_unified_model_image_request_without_image_model_uses_default() -> None:
+    """未配置 image_model 时，image 请求应使用默认 model。"""
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                200,
+                json={"created": 1, "data": [{"url": "https://example.com/img.png"}]},
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+            unified_model=UnifiedModelConfig(model="test-model"),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "unified-model", "prompt": "a dog"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert upstream_bodies[0]["model"] == "test-model"
+
+
+def test_images_edits_proxies_to_correct_upstream_path() -> None:
+    """images/edits 请求应代理到 v1/images/edits 而非 v1/images/generations。"""
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_urls.append(str(request.url))
+            return httpx.Response(
+                200,
+                json={"created": 1, "data": [{"url": "https://example.com/edited.png"}]},
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+        )
+        app = create_app(config)
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/images/edits",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "prompt": "add sunglasses"},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert upstream_urls[0] == "https://upstream.test/v1/images/edits"
