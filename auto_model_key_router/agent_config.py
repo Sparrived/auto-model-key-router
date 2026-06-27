@@ -226,6 +226,13 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
 
     document["model"] = UNIFIED_MODEL_ID
     document["model_provider"] = CODEX_PROVIDER_ID
+    document["review_model"] = UNIFIED_MODEL_ID
+    effort = config.reasoning_effort_by_model.get(config.unified_model.model)
+    if effort:
+        document["model_reasoning_effort"] = effort
+    document["disable_response_storage"] = True
+    document["network_access"] = "enabled"
+    document["windows_wsl_setup_acknowledged"] = True
     providers = document.get("model_providers")
     if providers is None:
         providers = tomlkit.table()
@@ -239,6 +246,14 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
     provider["wire_api"] = "responses"
     provider["experimental_bearer_token"] = config.local_api_key
     providers[CODEX_PROVIDER_ID] = provider
+
+    features = document.get("features")
+    if features is None:
+        features = tomlkit.table(is_super_table=True)
+        document["features"] = features
+    if isinstance(features, MutableMapping):
+        features["goals"] = True
+
     return tomlkit.dumps(document).encode("utf-8")
 
 

@@ -74,8 +74,14 @@ def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: 
     provider = configured["model_providers"]["auto_model_key_router"]
     assert configured["sandbox_mode"] == "workspace-write"
     assert configured["features"]["web_search"] is True
+    assert configured["features"]["goals"] is True
     assert configured["model"] == UNIFIED_MODEL_ID
     assert configured["model_provider"] == "auto_model_key_router"
+    assert configured["review_model"] == UNIFIED_MODEL_ID
+    assert "model_reasoning_effort" not in configured
+    assert configured["disable_response_storage"] is True
+    assert configured["network_access"] == "enabled"
+    assert configured["windows_wsl_setup_acknowledged"] is True
     assert provider["base_url"] == "http://127.0.0.1:8000/v1"
     assert provider["wire_api"] == "responses"
     assert provider["experimental_bearer_token"] == "local-key"
@@ -134,6 +140,31 @@ def test_rollback_rejects_corrupted_backup(tmp_path: Path) -> None:
 
     with pytest.raises(AgentConfigError, match="备份内容已损坏"):
         rollback_agent(CODEX, target_path=target, backup_path=backup)
+
+
+def test_configure_codex_writes_model_reasoning_effort_from_config(tmp_path: Path) -> None:
+    target = tmp_path / ".codex" / "config.toml"
+    backup = tmp_path / "backups" / "codex.json"
+    config = RouterConfig.from_dict(
+        {
+            "host": "127.0.0.1",
+            "port": 8000,
+            "local_api_key": "local-key",
+            "unified_model": {"model": "test-model"},
+            "models": [
+                {
+                    "id": "test-model",
+                    "keys": [{"name": "main", "api_key": "upstream-key", "base_url": "https://upstream.test"}],
+                    "reasoning_effort": "high",
+                }
+            ],
+        }
+    )
+
+    configure_agent(CODEX, config, target_path=target, backup_path=backup)
+
+    configured = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert configured["model_reasoning_effort"] == "high"
 
 
 def test_router_origin_uses_loopback_for_wildcard_and_brackets_ipv6() -> None:
