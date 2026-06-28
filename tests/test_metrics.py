@@ -4,7 +4,19 @@ from pathlib import Path
 
 import anyio
 
-from auto_model_key_router.metrics import MetricsStore
+from auto_model_key_router.metrics import MetricsStore, extract_usage
+
+
+def test_extract_usage_supports_responses_completed_event() -> None:
+    usage = {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+
+    assert extract_usage(
+        {"type": "response.completed", "response": {"usage": usage}}
+    ) == usage
 
 
 def test_snapshot_aggregates_dimensions_in_sql(tmp_path: Path) -> None:

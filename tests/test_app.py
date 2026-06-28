@@ -265,15 +265,9 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
         visitor_internal_alias,
     ) = run_client(app, requests)
 
-    assert {model["id"] for model in local_models.json()["data"]} == {
-        "external-public-model",
-        "gpt-5.5",
-        "internal-external-alias",
-        "internal-gpt-latest",
-        "internal-private-alias",
-        "private-model",
+    assert [model["id"] for model in local_models.json()["data"]] == [
         UNIFIED_MODEL_ID,
-    }
+    ]
     assert [model["id"] for model in visitor_models.json()["data"]] == [
         "amkr-external-public-model",
         "amkr-gpt-5.5",
@@ -2952,7 +2946,7 @@ def test_responses_stream_is_converted_to_codex_sse() -> None:
             [
                 'data: {"choices":[{"delta":{"content":"hello "}}]}',
                 'data: {"choices":[{"delta":{"content":"world","tool_calls":[{"index":0,"id":"call-1","function":{"name":"shell","arguments":"{\\"command\\":\\"pwd\\"}"}}]},"finish_reason":"tool_calls"}]}',
-                'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+                'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}',
                 "data: [DONE]",
                 "",
             ]

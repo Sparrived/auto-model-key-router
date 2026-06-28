@@ -129,6 +129,8 @@ class KeyPool:
                 for public_model_id, model_id in self._visitor_routes.items()
                 if self.keys_for_model(model_id, visitor_only=True)
             )
+        if self._unified_model_id is not None:
+            return [UNIFIED_MODEL_ID]
         return sorted(
             name
             for name, model_id in self._aliases.items()

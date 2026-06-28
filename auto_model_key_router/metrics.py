@@ -495,6 +495,9 @@ def extract_usage(data: Any) -> dict[str, Any] | None:
     usage = data.get("usage")
     if isinstance(usage, dict):
         return usage
+    response = data.get("response")
+    if isinstance(response, dict) and isinstance(response.get("usage"), dict):
+        return response["usage"]
     message = data.get("message")
     if isinstance(message, dict) and isinstance(message.get("usage"), dict):
         return message["usage"]
