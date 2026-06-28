@@ -391,10 +391,14 @@ def configure_agent_interactively(config_path: Path, agent: str) -> Any:
         if is_service_healthy(config.host, config.port, use_cache=False)
         else "[yellow]路由服务当前未运行，请先在“一键配置 → 路由服务”完成服务配置。[/yellow]"
     )
+    extra_targets = "".join(
+        f"附加文件: [bold]{path}[/bold]\n" for path in result.extra_target_paths
+    )
     return Group(
         section_panel(
             f"已将 {name} 指向本项目路由。\n"
             f"配置文件: [bold]{result.target_path}[/bold]\n"
+            f"{extra_targets}"
             f"路由地址: [bold]{result.router_url}[/bold]\n"
             f"请求模型: [bold cyan]{UNIFIED_MODEL_ID}[/bold cyan]\n"
             f"原配置缓存: [bold]{result.backup_path}[/bold]\n\n"

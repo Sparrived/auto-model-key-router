@@ -63,33 +63,45 @@ def test_configure_claude_code_preserves_settings_and_rolls_back_exactly(tmp_pat
 
 def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: Path) -> None:
     target = tmp_path / ".codex" / "config.toml"
+    auth = tmp_path / ".codex" / "auth.json"
     backup = tmp_path / "backups" / "codex.json"
     original = b'# keep this comment\nsandbox_mode = "workspace-write"\n\n[features]\nweb_search = true\n'
+    original_auth = b'{\n  "OTHER_TOKEN": "keep",\n  "OPENAI_API_KEY": "old-key"\n}\n'
     target.parent.mkdir()
     target.write_bytes(original)
+    auth.write_bytes(original_auth)
 
     result = configure_agent(CODEX, make_config(), target_path=target, backup_path=backup)
 
     configured = tomllib.loads(target.read_text(encoding="utf-8"))
-    provider = configured["model_providers"]["auto_model_key_router"]
+    auth_configured = json.loads(auth.read_text(encoding="utf-8"))
+    provider = configured["model_providers"]["OpenAI"]
     assert configured["sandbox_mode"] == "workspace-write"
     assert configured["features"]["web_search"] is True
     assert configured["features"]["goals"] is True
+    assert configured["model_provider"] == "OpenAI"
     assert configured["model"] == UNIFIED_MODEL_ID
-    assert configured["model_provider"] == "auto_model_key_router"
     assert configured["review_model"] == UNIFIED_MODEL_ID
-    assert "model_reasoning_effort" not in configured
+    assert configured["model_reasoning_effort"] == "xhigh"
     assert configured["disable_response_storage"] is True
     assert configured["network_access"] == "enabled"
     assert configured["windows_wsl_setup_acknowledged"] is True
+    assert provider["name"] == "OpenAI"
     assert provider["base_url"] == "http://127.0.0.1:8000/v1"
     assert provider["wire_api"] == "responses"
-    assert provider["experimental_bearer_token"] == "local-key"
+    assert provider["requires_openai_auth"] is True
+    assert "experimental_bearer_token" not in provider
+    assert auth_configured["OTHER_TOKEN"] == "keep"
+    assert auth_configured["OPENAI_API_KEY"] == "local-key"
     assert result.router_url == "http://127.0.0.1:8000/v1"
+    assert result.extra_target_paths == (auth.resolve(),)
+    assert get_agent_config_status(CODEX, target_path=target, backup_path=backup).current_is_applied
 
+    configure_agent(CODEX, make_config(port=9000, local_api_key="new-key"), target_path=target, backup_path=backup)
     rollback_agent(CODEX, target_path=target, backup_path=backup)
 
     assert target.read_bytes() == original
+    assert auth.read_bytes() == original_auth
 
 
 def test_rollback_removes_agent_config_that_did_not_exist_before_apply(tmp_path: Path) -> None:

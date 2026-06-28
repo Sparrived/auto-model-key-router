@@ -19,7 +19,7 @@ from .config import UNIFIED_MODEL_ID, RouterConfig, default_cache_dir
 CLAUDE_CODE = "claude-code"
 CODEX = "codex"
 SUPPORTED_AGENTS = (CLAUDE_CODE, CODEX)
-CODEX_PROVIDER_ID = "auto_model_key_router"
+CODEX_PROVIDER_ID = "OpenAI"
 
 
 class AgentConfigError(ValueError):
@@ -41,6 +41,7 @@ class AgentConfigResult:
     target_path: Path
     backup_path: Path
     router_url: str
+    extra_target_paths: tuple[Path, ...] = ()
     restored: bool = False
 
 
@@ -85,7 +86,10 @@ def get_agent_config_status(
     backup_available = bool(state and state.get("agent") == agent and state.get("target_path") == str(target))
     current_is_applied = False
     if backup_available and target.exists():
-        current_is_applied = _sha256(target.read_bytes()) == state.get("applied_sha256")
+        current_is_applied = (
+            _sha256(target.read_bytes()) == state.get("applied_sha256")
+            and _extra_targets_are_applied(state)
+        )
     return AgentConfigStatus(agent, target, backup, backup_available, current_is_applied)
 
 
@@ -112,6 +116,7 @@ def configure_agent(
         and state.get("agent") == agent
         and state.get("target_path") == str(target)
         and state.get("applied_sha256") == _sha256(current)
+        and _extra_targets_are_applied(state)
     )
     if preserve_existing_backup:
         original_exists = bool(state["original_exists"])
@@ -120,11 +125,14 @@ def configure_agent(
         original_exists = target.exists()
         original_content = base64.b64encode(current).decode("ascii")
 
+    extra_targets: tuple[tuple[Path, bytes], ...] = ()
     if agent == CLAUDE_CODE:
         updated = _configure_claude_code(current, config)
         route_url = router_origin(config)
     else:
         updated = _configure_codex(current, config)
+        auth_target = _codex_auth_path(target)
+        extra_targets = ((auth_target, _configure_codex_auth(auth_target, config)),)
         route_url = f"{router_origin(config)}/v1"
 
     new_state = {
@@ -135,17 +143,34 @@ def configure_agent(
         "original_content": original_content,
         "applied_sha256": _sha256(updated),
     }
+    if extra_targets:
+        new_state["extra_targets"] = _extra_backup_entries(
+            extra_targets, preserve_existing_backup=preserve_existing_backup, state=state
+        )
     previous_backup = backup.read_bytes() if backup.exists() else None
-    _write_atomic(backup, json.dumps(new_state, indent=2, ensure_ascii=True).encode("utf-8") + b"\n")
+    snapshots = _file_snapshots((target, *(path for path, _ in extra_targets)))
+    _write_atomic(
+        backup,
+        json.dumps(new_state, indent=2, ensure_ascii=True).encode("utf-8") + b"\n",
+    )
     try:
         _write_atomic(target, updated)
+        for extra_target, extra_content in extra_targets:
+            _write_atomic(extra_target, extra_content)
     except Exception:
+        _restore_file_snapshots(snapshots)
         if previous_backup is None:
             backup.unlink(missing_ok=True)
         else:
             _write_atomic(backup, previous_backup)
         raise
-    return AgentConfigResult(agent, target, backup, route_url)
+    return AgentConfigResult(
+        agent,
+        target,
+        backup,
+        route_url,
+        tuple(path for path, _ in extra_targets),
+    )
 
 
 def rollback_agent(
@@ -168,17 +193,34 @@ def rollback_agent(
     if target != stored_target:
         raise AgentConfigError("备份对应的配置路径与当前目标路径不一致")
 
-    try:
-        original = base64.b64decode(str(state.get("original_content") or ""), validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise AgentConfigError("Agent 配置备份内容已损坏") from exc
-    if state.get("original_exists"):
-        _write_atomic(target, original)
-    else:
-        target.unlink(missing_ok=True)
+    restores = [(target, bool(state.get("original_exists")), _decode_backup_content(state))]
+    for extra_state in _extra_backup_states(state):
+        extra_target_text = str(extra_state.get("target_path") or "")
+        if not extra_target_text:
+            raise AgentConfigError("Agent 配置备份缺少附加目标路径")
+        restores.append(
+            (
+                _resolved_path(Path(extra_target_text)),
+                bool(extra_state.get("original_exists")),
+                _decode_backup_content(extra_state),
+            )
+        )
+
+    for restore_target, restore_exists, restore_content in restores:
+        if restore_exists:
+            _write_atomic(restore_target, restore_content)
+        else:
+            restore_target.unlink(missing_ok=True)
     backup.unlink(missing_ok=True)
     route_url = ""
-    return AgentConfigResult(agent, target, backup, route_url, restored=True)
+    return AgentConfigResult(
+        agent,
+        target,
+        backup,
+        route_url,
+        tuple(path for path, _, _ in restores[1:]),
+        restored=True,
+    )
 
 
 def _configure_claude_code(current: bytes, config: RouterConfig) -> bytes:
@@ -224,12 +266,12 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
     else:
         document = tomlkit.document()
 
-    document["model"] = UNIFIED_MODEL_ID
     document["model_provider"] = CODEX_PROVIDER_ID
+    document["model"] = UNIFIED_MODEL_ID
     document["review_model"] = UNIFIED_MODEL_ID
-    effort = config.reasoning_effort_by_model.get(config.unified_model.model)
-    if effort:
-        document["model_reasoning_effort"] = effort
+    document["model_reasoning_effort"] = (
+        config.reasoning_effort_by_model.get(config.unified_model.model) or "xhigh"
+    )
     document["disable_response_storage"] = True
     document["network_access"] = "enabled"
     document["windows_wsl_setup_acknowledged"] = True
@@ -241,10 +283,10 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
         raise AgentConfigError("Codex 配置中的 model_providers 必须是 TOML 表")
 
     provider = tomlkit.table()
-    provider["name"] = "Auto Model Key Router"
+    provider["name"] = CODEX_PROVIDER_ID
     provider["base_url"] = f"{router_origin(config)}/v1"
     provider["wire_api"] = "responses"
-    provider["experimental_bearer_token"] = config.local_api_key
+    provider["requires_openai_auth"] = True
     providers[CODEX_PROVIDER_ID] = provider
 
     features = document.get("features")
@@ -255,6 +297,108 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
         features["goals"] = True
 
     return tomlkit.dumps(document).encode("utf-8")
+
+
+
+def _codex_auth_path(config_path: Path) -> Path:
+    return config_path.parent / "auth.json"
+
+
+
+def _configure_codex_auth(target: Path, config: RouterConfig) -> bytes:
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentConfigError(f"Codex 鉴权配置不是有效的 UTF-8 JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise AgentConfigError("Codex 鉴权配置根节点必须是 JSON 对象")
+    else:
+        data = {}
+    data["OPENAI_API_KEY"] = config.local_api_key
+    return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
+
+
+
+def _extra_backup_states(state: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    extra_targets = state.get("extra_targets")
+    if not isinstance(extra_targets, list):
+        return ()
+    return tuple(item for item in extra_targets if isinstance(item, dict))
+
+
+
+def _extra_targets_are_applied(state: dict[str, Any] | None) -> bool:
+    if not state:
+        return True
+    for extra_state in _extra_backup_states(state):
+        target_text = str(extra_state.get("target_path") or "")
+        applied_sha256 = extra_state.get("applied_sha256")
+        if not target_text or not isinstance(applied_sha256, str):
+            return False
+        target = _resolved_path(Path(target_text))
+        if not target.exists() or _sha256(target.read_bytes()) != applied_sha256:
+            return False
+    return True
+
+
+
+def _extra_backup_entries(
+    extra_targets: tuple[tuple[Path, bytes], ...],
+    *,
+    preserve_existing_backup: bool,
+    state: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    existing_states = {
+        str(_resolved_path(Path(str(item.get("target_path") or "")))): item
+        for item in _extra_backup_states(state or {})
+        if item.get("target_path")
+    }
+    entries: list[dict[str, Any]] = []
+    for target, content in extra_targets:
+        current = target.read_bytes() if target.exists() else b""
+        stored_state = existing_states.get(str(target)) if preserve_existing_backup else None
+        if stored_state and stored_state.get("applied_sha256") == _sha256(current):
+            original_exists = bool(stored_state.get("original_exists"))
+            original_content = str(stored_state.get("original_content") or "")
+        else:
+            original_exists = target.exists()
+            original_content = base64.b64encode(current).decode("ascii")
+        entries.append(
+            {
+                "target_path": str(target),
+                "original_exists": original_exists,
+                "original_content": original_content,
+                "applied_sha256": _sha256(content),
+            }
+        )
+    return entries
+
+
+
+def _decode_backup_content(state: dict[str, Any]) -> bytes:
+    try:
+        return base64.b64decode(str(state.get("original_content") or ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AgentConfigError("Agent 配置备份内容已损坏") from exc
+
+
+
+def _file_snapshots(paths: tuple[Path, ...]) -> tuple[tuple[Path, bool, bytes], ...]:
+    return tuple(
+        (path, path.exists(), path.read_bytes() if path.exists() else b"")
+        for path in paths
+    )
+
+
+
+def _restore_file_snapshots(snapshots: tuple[tuple[Path, bool, bytes], ...]) -> None:
+    for path, existed, content in snapshots:
+        if existed:
+            _write_atomic(path, content)
+        else:
+            path.unlink(missing_ok=True)
+
 
 
 def _load_backup_state(path: Path) -> dict[str, Any] | None:

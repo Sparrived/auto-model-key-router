@@ -561,20 +561,37 @@ AMKR 会更新：
 
 ```text
 ~/.codex/config.toml
-# 或 CODEX_HOME/config.toml
+~/.codex/auth.json
+# 或 CODEX_HOME/config.toml 与 CODEX_HOME/auth.json
 ```
 
 写入的核心配置类似：
 
 ```toml
+model_provider = "OpenAI"
 model = "unified-model"
-model_provider = "auto_model_key_router"
+review_model = "unified-model"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+network_access = "enabled"
+windows_wsl_setup_acknowledged = true
 
-[model_providers.auto_model_key_router]
-name = "Auto Model Key Router"
+[model_providers.OpenAI]
+name = "OpenAI"
 base_url = "http://127.0.0.1:8000/v1"
 wire_api = "responses"
-experimental_bearer_token = "amkr_your-local-api-key"
+requires_openai_auth = true
+
+[features]
+goals = true
+```
+
+`auth.json` 会写入本地鉴权 key：
+
+```json
+{
+  "OPENAI_API_KEY": "amkr_your-local-api-key"
+}
 ```
 
 应用前的原始配置同样会备份，可在 TUI 中回退。
