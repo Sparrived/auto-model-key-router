@@ -132,7 +132,7 @@ def configure_agent(
     else:
         updated = _configure_codex(current, config)
         auth_target = _codex_auth_path(target)
-        extra_targets = ((auth_target, _configure_codex_auth(auth_target, config)),)
+        extra_targets = ((auth_target, _configure_codex_auth(config)),)
         route_url = f"{router_origin(config)}/v1"
 
     new_state = {
@@ -305,17 +305,8 @@ def _codex_auth_path(config_path: Path) -> Path:
 
 
 
-def _configure_codex_auth(target: Path, config: RouterConfig) -> bytes:
-    if target.exists():
-        try:
-            data = json.loads(target.read_text(encoding="utf-8-sig"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise AgentConfigError(f"Codex 鉴权配置不是有效的 UTF-8 JSON: {exc}") from exc
-        if not isinstance(data, dict):
-            raise AgentConfigError("Codex 鉴权配置根节点必须是 JSON 对象")
-    else:
-        data = {}
-    data["OPENAI_API_KEY"] = config.local_api_key
+def _configure_codex_auth(config: RouterConfig) -> bytes:
+    data = {"OPENAI_API_KEY": config.local_api_key}
     return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
 
 

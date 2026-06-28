@@ -91,8 +91,7 @@ def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: 
     assert provider["wire_api"] == "responses"
     assert provider["requires_openai_auth"] is True
     assert "experimental_bearer_token" not in provider
-    assert auth_configured["OTHER_TOKEN"] == "keep"
-    assert auth_configured["OPENAI_API_KEY"] == "local-key"
+    assert auth_configured == {"OPENAI_API_KEY": "local-key"}
     assert result.router_url == "http://127.0.0.1:8000/v1"
     assert result.extra_target_paths == (auth.resolve(),)
     assert get_agent_config_status(CODEX, target_path=target, backup_path=backup).current_is_applied
