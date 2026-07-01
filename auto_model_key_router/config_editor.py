@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 import sys
+from time import monotonic
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,21 @@ from .visitor import visitor_feature_available
 
 
 VISITOR_KEY_STYLE = "bold bright_magenta"
+PROBE_ROUTE_MODES = ("openai", "anthropic", "responses")
+
+
+@dataclass(frozen=True)
+class KeyProbeResult:
+    model_id: str
+    key_name: str
+    mode: str
+    label: str
+    path: str
+    url: str
+    available: bool
+    status_code: int | None
+    duration_ms: int
+    error: str
 
 
 def key_display_name(key: dict[str, Any], fallback: str, width: int = 28) -> str:
@@ -472,6 +489,17 @@ def manage_selected_key_interactively(path: Path) -> None:
                 options.append(
                     ("6", "禁止访客访问" if visitor_allowed else "允许访客访问")
                 )
+                probe_choice = "7"
+                probe_all_choice = "8"
+            else:
+                probe_choice = "6"
+                probe_all_choice = "7"
+            options.extend(
+                [
+                    (probe_choice, "可用性探测"),
+                    (probe_all_choice, "探测所有 Key"),
+                ]
+            )
             options.append(("0", "返回"))
             choice = select_option(
                 f"管理 Key · {short_text(key_name, 24)}",
@@ -508,10 +536,14 @@ def manage_selected_key_interactively(path: Path) -> None:
                 result = copy_selected_key_interactively(data, model, key_index)
             elif choice == "4":
                 result = toggle_selected_key_interactively(path, data, model, key_index)
-            elif choice == "6":
+            elif visitor_installed and choice == "6":
                 result = toggle_visitor_access_interactively(
                     path, data, model, key_index
                 )
+            elif choice == probe_choice:
+                result = probe_selected_key_interactively(path, data, model, key_index)
+            elif choice == probe_all_choice:
+                result = probe_all_keys_interactively(path)
             else:
                 continue
             if result is not None:
@@ -520,6 +552,8 @@ def manage_selected_key_interactively(path: Path) -> None:
                     "3": "复制 API key",
                     "4": "Key 开关",
                     "6": "访客访问",
+                    probe_choice: "可用性探测",
+                    probe_all_choice: "探测所有 Key",
                 }.get(choice, "Key 管理")
                 show_result_page(result_title, result)
             if choice in ("1", "4", "6"):
@@ -1114,6 +1148,138 @@ def discover_upstream_models(
         return sorted(model_ids)
     except (httpx.RequestError, httpx.HTTPStatusError, KeyError, TypeError, ValueError):
         return []
+
+
+def probe_payload_for_mode(mode: str, model_id: str) -> dict[str, Any]:
+    if mode == "responses":
+        return {"model": model_id, "input": ".", "max_output_tokens": 1}
+    return {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "."}],
+        "max_tokens": 1,
+    }
+
+
+def _probe_error_text(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text[:160]
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("type") or error)[:160]
+        if error:
+            return str(error)[:160]
+        message = data.get("message")
+        if message:
+            return str(message)[:160]
+    return response.text[:160]
+
+
+def probe_key_availability(
+    data: dict[str, Any],
+    model_id: str,
+    key: dict[str, Any],
+    timeout: float = 15.0,
+) -> list[KeyProbeResult]:
+    key_name = str(key.get("name") or f"{model_id}-key")
+    api_key = str(key.get("api_key") or "")
+    base_url = str(
+        key.get("base_url") or data.get("default_base_url") or "https://api.openai.com"
+    )
+    routes = upstream_routes_for_base_url(data, base_url)
+    results: list[KeyProbeResult] = []
+    with httpx.Client(timeout=timeout) as client:
+        for mode in PROBE_ROUTE_MODES:
+            path = upstream_route_path(routes, mode)
+            url = _join_url(base_url, path)
+            started = monotonic()
+            status_code: int | None = None
+            error = ""
+            try:
+                response = client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json=probe_payload_for_mode(mode, model_id),
+                )
+                status_code = response.status_code
+                available = 200 <= response.status_code < 300
+                if not available:
+                    error = _probe_error_text(response)
+            except httpx.RequestError as exc:
+                available = False
+                error = str(exc)[:160]
+            duration_ms = int((monotonic() - started) * 1000)
+            results.append(
+                KeyProbeResult(
+                    model_id=model_id,
+                    key_name=key_name,
+                    mode=mode,
+                    label=UPSTREAM_ROUTE_LABELS[mode],
+                    path=path,
+                    url=url,
+                    available=available,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                    error=error,
+                )
+            )
+    return results
+
+
+def probe_all_key_availability(
+    data: dict[str, Any], timeout: float = 15.0
+) -> list[KeyProbeResult]:
+    results: list[KeyProbeResult] = []
+    for model in data.get("models", []):
+        model_id = str(model.get("id") or "")
+        for key in model.get("keys", []):
+            results.extend(probe_key_availability(data, model_id, key, timeout=timeout))
+    return results
+
+
+def key_probe_results_panel(results: list[KeyProbeResult], title: str = "Key 可用性探测") -> Any:
+    if not results:
+        return section_panel("[yellow]没有可探测的 Key。[/yellow]", title, "yellow")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("模型", overflow="fold")
+    table.add_column("Key", overflow="fold")
+    table.add_column("路径", overflow="fold")
+    table.add_column("状态")
+    table.add_column("HTTP")
+    table.add_column("耗时")
+    table.add_column("错误", overflow="fold")
+    for result in results:
+        status = "[green]可用[/green]" if result.available else "[red]不可用[/red]"
+        table.add_row(
+            short_text(result.model_id, 24),
+            short_text(result.key_name, 24),
+            result.path,
+            status,
+            str(result.status_code) if result.status_code is not None else "-",
+            f"{result.duration_ms}ms",
+            result.error or "-",
+        )
+    available_count = sum(1 for result in results if result.available)
+    summary = f"可用路径: [bold]{available_count}/{len(results)}[/bold]"
+    return Group(section_panel(summary, title, "cyan"), section_panel(table, "探测结果", "cyan"))
+
+
+def probe_selected_key_interactively(
+    path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
+) -> Any:
+    key = model["keys"][key_index]
+    with console.status("[cyan]正在探测当前 Key...[/cyan]", spinner="dots"):
+        results = probe_key_availability(data, str(model["id"]), key)
+    return key_probe_results_panel(results, "当前 Key 可用性")
+
+
+def probe_all_keys_interactively(path: Path) -> Any:
+    data = load_config_data(path)
+    with console.status("[cyan]正在探测所有 Key...[/cyan]", spinner="dots"):
+        results = probe_all_key_availability(data)
+    return key_probe_results_panel(results, "所有 Key 可用性")
 
 
 def _select_model_with_discovery(

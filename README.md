@@ -63,7 +63,7 @@ amkr --config router-config.json
 
 在 TUI 中进入：
 
-1. **模型 Key**：添加真实模型和上游 API Key。
+1. **模型 Key**：添加真实模型和上游 API Key，并可在管理 Key 中对当前 Key 或所有 Key 探测 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 可用性。
 2. **统一模型**：把 `unified-model` 指向一个真实模型，必要时固定到某个 Key。
 3. **一键配置 → 路由服务**：启动或注册本地代理服务。
 4. **一键配置 → Claude Code / Codex**：按需自动写入客户端配置。

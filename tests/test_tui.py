@@ -1688,6 +1688,136 @@ def test_discover_upstream_models_failure(monkeypatch) -> None:
     assert result == []
 
 
+def test_probe_key_availability_posts_all_text_routes(monkeypatch) -> None:
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+
+        @property
+        def text(self):
+            return "{}"
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def post(self, url, headers=None, json=None):
+            requests.append((url, headers, json))
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
+
+    results = config_editor.probe_key_availability(
+        {
+            "upstream_routes": {
+                "https://api.example.com": {"responses": "custom/responses"}
+            }
+        },
+        "model-a",
+        {"name": "main", "api_key": "sk-main", "base_url": "https://api.example.com"},
+    )
+
+    assert [result.mode for result in results] == ["openai", "anthropic", "responses"]
+    assert [url for url, _, _ in requests] == [
+        "https://api.example.com/v1/chat/completions",
+        "https://api.example.com/v1/messages",
+        "https://api.example.com/custom/responses",
+    ]
+    assert all(headers == {"Authorization": "Bearer sk-main"} for _, headers, _ in requests)
+    assert requests[0][2]["messages"] == [{"role": "user", "content": "."}]
+    assert requests[0][2]["max_tokens"] == 1
+    assert requests[1][2]["max_tokens"] == 1
+    assert requests[2][2]["input"] == "."
+    assert requests[2][2]["max_output_tokens"] == 1
+    assert all(result.available for result in results)
+
+
+def test_probe_all_key_availability_checks_every_configured_key(monkeypatch) -> None:
+    calls = []
+
+    def fake_probe(data, model_id, key, timeout=15.0):
+        calls.append((model_id, key["name"]))
+        return [
+            config_editor.KeyProbeResult(
+                model_id=model_id,
+                key_name=key["name"],
+                mode="openai",
+                label="OpenAI Chat",
+                path="v1/chat/completions",
+                url="https://api.example.com/v1/chat/completions",
+                available=True,
+                status_code=200,
+                duration_ms=1,
+                error="",
+            )
+        ]
+
+    monkeypatch.setattr(config_editor, "probe_key_availability", fake_probe)
+
+    results = config_editor.probe_all_key_availability(
+        {
+            "models": [
+                {"id": "model-a", "keys": [{"name": "a1"}, {"name": "a2"}]},
+                {"id": "model-b", "keys": [{"name": "b1", "enabled": False}]},
+            ]
+        }
+    )
+
+    assert calls == [("model-a", "a1"), ("model-a", "a2"), ("model-b", "b1")]
+    assert [result.key_name for result in results] == ["a1", "a2", "b1"]
+
+
+def test_manage_selected_key_menu_includes_single_and_all_probe(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "model-a",
+                        "keys": [
+                            {"name": "main", "api_key": "sk-main", "base_url": "https://api.example.com"}
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["7", "0"])
+    menus = []
+    shown = []
+    selections = iter([
+        (config_editor.load_config_data(config_path), config_editor.load_config_data(config_path)["models"][0], 0),
+        None,
+    ])
+
+    def choose(title, options, selected=0, content=None, *, on_key=None):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(config_editor, "select_api_key", lambda path, title: next(selections))
+    monkeypatch.setattr(config_editor, "select_option", choose)
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+    monkeypatch.setattr(config_editor, "clear_terminal_history", lambda: None)
+    monkeypatch.setattr(config_editor, "probe_all_keys_interactively", lambda path: Text("all probe"))
+    monkeypatch.setattr(config_editor, "show_result_page", lambda title, content: shown.append((title, render_plain(content))))
+
+    config_editor.manage_selected_key_interactively(config_path)
+
+    assert ("6", "可用性探测") in menus[0]
+    assert ("7", "探测所有 Key") in menus[0]
+    assert shown == [("探测所有 Key", "all probe\n")]
+
+
 def test_add_config_with_discovery_adds_selected_models(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
