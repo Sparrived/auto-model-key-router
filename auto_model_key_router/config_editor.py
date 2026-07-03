@@ -23,8 +23,11 @@ from .config import (
     default_metrics_db_path,
     generate_local_api_key,
     load_config_data,
+    migrate_config_data,
+    migrate_config_file,
     normalize_upstream_base_url,
     normalize_upstream_route_path,
+    save_config_data,
     upstream_route_path,
 )
 from .config_service import commit_config_data
@@ -180,6 +183,38 @@ def fetch_key_runtime_state(
     return fetch_key_runtime_states(data).get(key_runtime_state_key(model_id, key_name))
 
 
+def key_status_overview_panel(data: dict[str, Any]) -> Any:
+    runtime_states = fetch_key_runtime_states(data)
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("模型", overflow="fold")
+    table.add_column("Key", overflow="fold")
+    table.add_column("配置")
+    table.add_column("运行")
+    table.add_column("失败")
+    table.add_column("最近状态")
+    for model in data.get("models", []):
+        model_id = str(model.get("id") or "-")
+        for index, key in enumerate(model.get("keys", [])):
+            key_name = str(key.get("name") or f"{model_id}-{index + 1}")
+            state = runtime_states.get(key_runtime_state_key(model_id, key_name))
+            table.add_row(
+                short_text(model_id, 24),
+                key_display_name(key, key_name, 24),
+                "[green]启用[/green]" if key.get("enabled", True) else "[red]禁用[/red]",
+                format_key_runtime_status(state),
+                str(int(state.get("failures") or 0)) if state else "0",
+                str(state.get("last_status_code")) if state and state.get("last_status_code") is not None else "-",
+            )
+    if not table.rows:
+        return section_panel("[yellow]暂无 Key。[/yellow]", "Key 状态", "yellow")
+    return section_panel(
+        table,
+        "Key 状态",
+        "cyan",
+        "[dim]运行状态来自服务 / key_state_path；冷却或暂停会影响实际路由使用。[/dim]",
+    )
+
+
 def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -> str:
     if visitor_installed:
         return (
@@ -319,51 +354,561 @@ def _open_config_on_key(path: Path, key: str) -> str | None:
     return None
 
 
+def load_v2_config_data(path: Path) -> dict[str, Any]:
+    data = load_config_data(path)
+    migrated = migrate_config_data(data)
+    if migrated != data:
+        save_config_data(path, migrated)
+    return migrated
+
+
+def raw_providers(data: dict[str, Any]) -> dict[str, Any]:
+    providers = data.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        raise ValueError("providers 必须是对象")
+    return providers
+
+
+def raw_v2_models(data: dict[str, Any]) -> dict[str, Any]:
+    models = data.setdefault("models", {})
+    if not isinstance(models, dict):
+        raise ValueError("models 必须是对象")
+    return models
+
+
+def provider_keys(provider: dict[str, Any]) -> dict[str, Any]:
+    keys = provider.setdefault("keys", {})
+    if not isinstance(keys, dict):
+        raise ValueError("provider.keys 必须是对象")
+    return keys
+
+
+def model_targets(model: dict[str, Any]) -> list[dict[str, Any]]:
+    targets = model.setdefault("targets", [])
+    if not isinstance(targets, list):
+        raise ValueError("model.targets 必须是数组")
+    return targets
+
+
+def v2_summary_panel(data: dict[str, Any]) -> Any:
+    providers = raw_providers(data)
+    models = raw_v2_models(data)
+    visitor_installed = visitor_feature_available()
+
+    provider_table = Table(show_header=True, header_style="bold cyan", expand=True)
+    provider_table.add_column("供应商", ratio=1)
+    provider_table.add_column("Base URL", ratio=2)
+    provider_table.add_column("Keys", justify="right")
+    provider_table.add_column("访客", justify="right")
+    provider_table.add_column("路由", ratio=2)
+    for provider_id, provider in sorted(providers.items()):
+        keys = provider_keys(provider)
+        visitor_keys = sum(1 for key in keys.values() if key.get("allow_visitor"))
+        routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
+        route_text = ", ".join(sorted(routes)) if routes else "默认"
+        provider_table.add_row(
+            short_text(str(provider_id), 18),
+            compact_url(str(provider.get("base_url") or "-"), 42),
+            str(len(keys)),
+            format_visitor_status_text(visitor_keys > 0, visitor_installed),
+            short_text(route_text, 28),
+        )
+    if not provider_table.rows:
+        provider_table.add_row("-", "[yellow]暂无供应商[/yellow]", "0", "-", "-")
+
+    model_table = Table(show_header=True, header_style="bold cyan", expand=True)
+    model_table.add_column("本地模型", ratio=2)
+    model_table.add_column("Targets", justify="right")
+    model_table.add_column("模式", ratio=1)
+    model_table.add_column("上游", ratio=3)
+    for model_id, model in sorted(models.items()):
+        targets = model_targets(model)
+        upstreams = []
+        for target in targets[:3]:
+            upstreams.append(
+                f"{target.get('provider')}/{target.get('key')}→{target.get('upstream_model') or model_id}"
+            )
+        if len(targets) > 3:
+            upstreams.append(f"+{len(targets) - 3}")
+        model_table.add_row(
+            short_text(str(model_id), 28),
+            str(len(targets)),
+            str(model.get("routing_mode") or "round_robin"),
+            short_text(", ".join(upstreams) if upstreams else "未绑定", 56),
+        )
+    if not model_table.rows:
+        model_table.add_row("-", "0", "-", "[yellow]暂无模型路由[/yellow]")
+    return Group(
+        section_panel(provider_table, "供应商 Key", "cyan"),
+        section_panel(model_table, "模型路由", "magenta"),
+    )
+
+
+def commit_v2_config(path: Path, data: dict[str, Any], old_config: RouterConfig) -> Any:
+    new_config = commit_config_data(path, data, old_config).new_config
+    return restart_service_after_config_change(path, old_config, new_config)
+
+
+def select_provider(data: dict[str, Any], title: str) -> str | None:
+    providers = raw_providers(data)
+    if not providers:
+        return None
+    options = [
+        (
+            str(index + 1),
+            f"{short_text(provider_id, 22)} · {compact_url(str(provider.get('base_url') or '-'), 42)} · {len(provider_keys(provider))} Key",
+        )
+        for index, (provider_id, provider) in enumerate(sorted(providers.items()))
+    ] + [("0", "返回")]
+    choice = select_option(title, options)
+    if choice == "0":
+        return None
+    return sorted(providers)[int(choice) - 1]
+
+
+def select_provider_key(data: dict[str, Any], title: str) -> tuple[str, str] | None:
+    provider_id = select_provider(data, "选择供应商")
+    if provider_id is None:
+        return None
+    keys = provider_keys(raw_providers(data)[provider_id])
+    if not keys:
+        return None
+    options = [
+        (
+            str(index + 1),
+            f"{short_text(key_name, 26)} · {'启用' if key.get('enabled', True) else '禁用'} · {key_fingerprint(str(key.get('api_key') or ''))}",
+        )
+        for index, (key_name, key) in enumerate(sorted(keys.items()))
+    ] + [("0", "返回")]
+    choice = select_option(title, options)
+    if choice == "0":
+        return None
+    return provider_id, sorted(keys)[int(choice) - 1]
+
+
+def select_v2_model(data: dict[str, Any], title: str) -> str | None:
+    models = raw_v2_models(data)
+    if not models:
+        return None
+    options = [
+        (
+            str(index + 1),
+            f"{short_text(model_id, 30)} · {len(model_targets(model))} Target · {model.get('routing_mode') or 'round_robin'}",
+        )
+        for index, (model_id, model) in enumerate(sorted(models.items()))
+    ] + [("0", "返回")]
+    choice = select_option(title, options)
+    if choice == "0":
+        return None
+    return sorted(models)[int(choice) - 1]
+
+
+def add_provider_key_interactively(path: Path) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    providers = raw_providers(data)
+    existing = sorted(providers)
+    provider_choice = select_option(
+        "供应商",
+        [("n", "新供应商")]
+        + [(str(index + 1), provider_id) for index, provider_id in enumerate(existing)]
+        + [("0", "返回")],
+        content=v2_summary_panel(data),
+    )
+    if provider_choice == "0":
+        return None
+    if provider_choice == "n":
+        provider_id = prompt_text("添加供应商", "供应商 ID", default="openai").strip()
+        if not provider_id:
+            return section_panel("[red]供应商 ID 不能为空[/red]", "添加失败", "red")
+        if provider_id in providers:
+            return section_panel(f"[red]供应商已存在: {provider_id}[/red]", "添加失败", "red")
+        base_url = prompt_text(
+            "添加供应商", "Base URL", default="https://api.openai.com"
+        ).strip()
+        providers[provider_id] = {"base_url": base_url, "keys": {}}
+    else:
+        provider_id = existing[int(provider_choice) - 1]
+    provider = providers[provider_id]
+    keys = provider_keys(provider)
+    key_name = prompt_text(
+        "添加供应商 Key", "Key 名称", default=f"key-{len(keys) + 1}"
+    ).strip()
+    if not key_name:
+        return section_panel("[red]Key 名称不能为空[/red]", "添加失败", "red")
+    if key_name in keys:
+        return section_panel(f"[red]Key 已存在: {key_name}[/red]", "添加失败", "red")
+    api_key = prompt_text("添加供应商 Key", "API key", password=True).strip()
+    if not api_key:
+        return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
+    keys[key_name] = {"api_key": api_key, "enabled": True}
+    restart = commit_v2_config(path, data, old_config)
+    return Group(
+        section_panel(
+            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]",
+            "添加完成",
+            "green",
+        ),
+        restart,
+    )
+
+
+def manage_provider_keys_interactively(path: Path) -> None:
+    while True:
+        data = load_v2_config_data(path)
+        selected = select_provider_key(data, "选择供应商 Key")
+        if selected is None:
+            return
+        provider_id, key_name = selected
+        provider = raw_providers(data)[provider_id]
+        key = provider_keys(provider)[key_name]
+        choice = select_option(
+            f"{provider_id}/{key_name}",
+            [
+                ("1", "开关"),
+                ("2", "重命名"),
+                ("3", "替换 API key"),
+                ("4", "访客访问"),
+                ("5", "删除"),
+                ("0", "返回"),
+            ],
+            content=section_panel(
+                f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n状态: [bold]{'启用' if key.get('enabled', True) else '禁用'}[/bold]\n访客: {format_visitor_status_text(bool(key.get('allow_visitor')), visitor_feature_available())}\n指纹: [bold]{key_fingerprint(str(key.get('api_key') or ''))}[/bold]",
+                "Key 信息",
+                "cyan",
+            ),
+        )
+        if choice == "0":
+            continue
+        clear_terminal_history()
+        result = update_provider_key_interactively(path, provider_id, key_name, choice)
+        if result is not None:
+            show_result_page("供应商 Key", result)
+
+
+def update_provider_key_interactively(
+    path: Path, provider_id: str, key_name: str, choice: str
+) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    provider = raw_providers(data)[provider_id]
+    keys = provider_keys(provider)
+    key = keys[key_name]
+    if choice == "1":
+        key["enabled"] = not bool(key.get("enabled", True))
+        message = f"已{'启用' if key['enabled'] else '禁用'} {provider_id}/{key_name}。"
+    elif choice == "2":
+        new_name = prompt_text("重命名 Key", "新名称", default=key_name).strip()
+        if not new_name or new_name == key_name:
+            return section_panel("[yellow]配置未变化。[/yellow]", "重命名 Key", "yellow")
+        if new_name in keys:
+            return section_panel(f"[red]Key 已存在: {new_name}[/red]", "重命名 Key", "red")
+        keys[new_name] = keys.pop(key_name)
+        for model in raw_v2_models(data).values():
+            for target in model_targets(model):
+                if target.get("provider") == provider_id and target.get("key") == key_name:
+                    target["key"] = new_name
+        message = f"已重命名 {provider_id}/{key_name} → {new_name}。"
+    elif choice == "3":
+        api_key = prompt_text("替换 API key", "API key", password=True).strip()
+        if not api_key:
+            return section_panel("[red]API key 不能为空[/red]", "替换 API key", "red")
+        key["api_key"] = api_key
+        message = f"已替换 {provider_id}/{key_name} 的 API key。"
+    elif choice == "4":
+        key["allow_visitor"] = not bool(key.get("allow_visitor", False))
+        message = f"已{'允许' if key['allow_visitor'] else '禁止'}访客访问 {provider_id}/{key_name}。"
+    elif choice == "5":
+        used_by = [
+            model_id
+            for model_id, model in raw_v2_models(data).items()
+            for target in model_targets(model)
+            if target.get("provider") == provider_id and target.get("key") == key_name
+        ]
+        if used_by and not confirm_choice(
+            f"该 Key 被 {len(used_by)} 个模型路由使用，删除会一并移除这些 target。继续？",
+            default=False,
+        ):
+            return section_panel("[yellow]配置未变化。[/yellow]", "删除 Key", "yellow")
+        keys.pop(key_name)
+        for model in raw_v2_models(data).values():
+            targets = model_targets(model)
+            targets[:] = [
+                target
+                for target in targets
+                if not (target.get("provider") == provider_id and target.get("key") == key_name)
+            ]
+        message = f"已删除 {provider_id}/{key_name}。"
+    else:
+        return None
+    restart = commit_v2_config(path, data, old_config)
+    return Group(section_panel(message, "供应商 Key", "green"), restart)
+
+
+def add_model_route_interactively(path: Path) -> Any:
+    data = load_v2_config_data(path)
+    if not raw_providers(data):
+        return section_panel("[yellow]请先添加供应商 Key。[/yellow]", "添加模型路由", "yellow")
+    old_config = RouterConfig.from_dict(data)
+    models = raw_v2_models(data)
+    model_id = prompt_text("添加模型路由", "本地模型 ID", default="gpt-4o-mini").strip()
+    if not model_id:
+        return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
+    selected = select_provider_key(data, "选择供应商 Key")
+    if selected is None:
+        return None
+    provider_id, key_name = selected
+    upstream_model = prompt_text(
+        "添加模型路由", "上游模型 ID", default=model_id
+    ).strip() or model_id
+    model = models.setdefault(
+        model_id,
+        {"aliases": [], "routing_mode": "round_robin", "targets": []},
+    )
+    targets = model_targets(model)
+    if any(
+        target.get("provider") == provider_id
+        and target.get("key") == key_name
+        and str(target.get("upstream_model") or model_id) == upstream_model
+        for target in targets
+    ):
+        return section_panel("[yellow]该路由已存在。[/yellow]", "添加模型路由", "yellow")
+    targets.append(
+        {"provider": provider_id, "key": key_name, "upstream_model": upstream_model}
+    )
+    restart = commit_v2_config(path, data, old_config)
+    return Group(
+        section_panel(
+            f"本地模型: [bold]{model_id}[/bold]\nTarget: [bold]{provider_id}/{key_name}[/bold]\n上游模型: [bold]{upstream_model}[/bold]",
+            "添加完成",
+            "green",
+        ),
+        restart,
+    )
+
+
+def manage_model_routes_interactively(path: Path) -> None:
+    while True:
+        data = load_v2_config_data(path)
+        model_id = select_v2_model(data, "选择模型路由")
+        if model_id is None:
+            return
+        model = raw_v2_models(data)[model_id]
+        targets = model_targets(model)
+        if not targets:
+            show_result_page(
+                "模型路由",
+                section_panel("[yellow]该模型暂无 target。[/yellow]", "模型路由", "yellow"),
+            )
+            continue
+        options = [
+            (
+                str(index + 1),
+                f"{target.get('provider')}/{target.get('key')} → {target.get('upstream_model') or model_id}",
+            )
+            for index, target in enumerate(targets)
+        ] + [("0", "返回")]
+        target_choice = select_option(f"Target · {short_text(model_id, 28)}", options)
+        if target_choice == "0":
+            continue
+        target_index = int(target_choice) - 1
+        action = select_option(
+            "管理 Target",
+            [("1", "改上游模型"), ("2", "删除 Target"), ("0", "返回")],
+        )
+        if action == "0":
+            continue
+        clear_terminal_history()
+        result = update_model_target_interactively(path, model_id, target_index, action)
+        if result is not None:
+            show_result_page("模型路由", result)
+
+
+def update_model_target_interactively(
+    path: Path, model_id: str, target_index: int, action: str
+) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    model = raw_v2_models(data)[model_id]
+    targets = model_targets(model)
+    target = targets[target_index]
+    if action == "1":
+        current = str(target.get("upstream_model") or model_id)
+        upstream_model = prompt_text(
+            "改上游模型", "上游模型 ID", default=current
+        ).strip()
+        if not upstream_model or upstream_model == current:
+            return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
+        target["upstream_model"] = upstream_model
+        message = f"已更新 {model_id} 的上游模型: {current} → {upstream_model}。"
+    elif action == "2":
+        if len(targets) == 1 and not confirm_choice(
+            "这是该模型最后一个 target，删除后模型将不可用。继续？", default=False
+        ):
+            return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
+        removed = targets.pop(target_index)
+        message = f"已删除 target: {removed.get('provider')}/{removed.get('key')}。"
+    else:
+        return None
+    restart = commit_v2_config(path, data, old_config)
+    return Group(section_panel(message, "模型路由", "green"), restart)
+
+
+def manage_v2_model_settings_interactively(path: Path) -> None:
+    while True:
+        data = load_v2_config_data(path)
+        model_id = select_v2_model(data, "选择模型")
+        if model_id is None:
+            return
+        model = raw_v2_models(data)[model_id]
+        choice = select_option(
+            f"模型参数 · {short_text(model_id, 28)}",
+            [("1", "别名"), ("2", "路由模式"), ("3", "推理强度"), ("0", "返回")],
+            content=section_panel(
+                f"别名: [bold]{', '.join(model.get('aliases') or []) or '无'}[/bold]\n路由模式: [bold]{model.get('routing_mode') or 'round_robin'}[/bold]\n推理强度: [bold]{reasoning_effort_text(model.get('reasoning_effort'))}[/bold]",
+                "模型参数",
+                "cyan",
+            ),
+        )
+        if choice == "0":
+            continue
+        clear_terminal_history()
+        result = update_v2_model_settings_interactively(path, model_id, choice)
+        if result is not None:
+            show_result_page("模型参数", result)
+
+
+def update_v2_model_settings_interactively(path: Path, model_id: str, choice: str) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    model = raw_v2_models(data)[model_id]
+    if choice == "1":
+        aliases_text = prompt_text(
+            "模型别名", "别名，多个用逗号分隔", default=", ".join(model.get("aliases") or [])
+        ).strip()
+        model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()]
+        message = f"已更新 {model_id} 的别名。"
+    elif choice == "2":
+        current = str(model.get("routing_mode") or "round_robin")
+        routing_mode = prompt_text(
+            "路由模式",
+            "路由模式",
+            choices=["priority", "round_robin", "only_first"],
+            default=current,
+        ).strip()
+        model["routing_mode"] = routing_mode
+        message = f"已更新 {model_id} 的路由模式: {routing_mode}。"
+    elif choice == "3":
+        effort = prompt_text(
+            "推理强度",
+            "推理强度",
+            choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"],
+            default=normalize_reasoning_effort_choice(model.get("reasoning_effort")),
+        ).strip()
+        if effort == "downstream":
+            model.pop("reasoning_effort", None)
+        else:
+            model["reasoning_effort"] = effort
+        message = f"已更新 {model_id} 的推理强度: {reasoning_effort_text(effort)}。"
+    else:
+        return None
+    restart = commit_v2_config(path, data, old_config)
+    return Group(section_panel(message, "模型参数", "green"), restart)
+
+
+def manage_provider_routes_interactively(path: Path) -> None:
+    while True:
+        data = load_v2_config_data(path)
+        provider_id = select_provider(data, "选择供应商路径")
+        if provider_id is None:
+            return
+        provider = raw_providers(data)[provider_id]
+        routes = provider.setdefault("routes", {})
+        route_rows = "\n".join(
+            f"{UPSTREAM_ROUTE_LABELS[mode]}: [bold]{upstream_route_path(routes, mode)}[/bold]"
+            for mode in UPSTREAM_ROUTE_MODES
+        )
+        mode_options = [
+            (str(index + 1), UPSTREAM_ROUTE_LABELS[mode])
+            for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
+        ] + [("c", "清空自定义路径"), ("0", "返回")]
+        choice = select_option(
+            f"供应商路径 · {provider_id}",
+            mode_options,
+            content=section_panel(route_rows, "当前路径", "cyan"),
+        )
+        if choice == "0":
+            continue
+        clear_terminal_history()
+        result = update_provider_routes_interactively(path, provider_id, choice)
+        if result is not None:
+            show_result_page("供应商路径", result)
+
+
+def update_provider_routes_interactively(path: Path, provider_id: str, choice: str) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    provider = raw_providers(data)[provider_id]
+    routes = provider.setdefault("routes", {})
+    if choice == "c":
+        provider.pop("routes", None)
+        message = f"已清空 {provider_id} 的自定义路径。"
+    else:
+        mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
+        current = routes.get(mode) or UPSTREAM_ROUTE_DEFAULT_PATHS[mode]
+        route = prompt_text(
+            "供应商路径",
+            f"{UPSTREAM_ROUTE_LABELS[mode]} 路径或前缀",
+            default=current,
+        ).strip()
+        if not route:
+            routes.pop(mode, None)
+            message = f"已恢复 {UPSTREAM_ROUTE_LABELS[mode]} 默认路径。"
+        else:
+            routes[mode] = normalize_upstream_route_path(mode, route)
+            message = f"已更新 {provider_id} 的 {UPSTREAM_ROUTE_LABELS[mode]} 路径。"
+    restart = commit_v2_config(path, data, old_config)
+    return Group(section_panel(message, "供应商路径", "green"), restart)
+
+
 def manage_model_keys_interactively(path: Path) -> None:
     on_key = lambda key: _open_config_on_key(path, key)
     while True:
+        data = load_v2_config_data(path)
         choice = select_option(
-            "模型 Key",
+            "供应商与模型",
             [
-                ("1", "添加 Key"),
-                ("2", "管理 Key"),
-                ("3", "Key 排序"),
-                ("4", "路由模式"),
-                ("5", "推理强度"),
-                ("6", "模型别称"),
-                ("7", "上游路由"),
+                ("1", "添加供应商 Key"),
+                ("2", "管理供应商 Key"),
+                ("3", "添加模型路由"),
+                ("4", "管理模型路由"),
+                ("5", "模型参数"),
+                ("6", "供应商路径"),
                 ("0", "返回"),
             ],
+            content=v2_summary_panel(data),
             on_key=on_key,
         )
         if choice == "0":
             return
         if choice == "1":
             clear_terminal_history()
-            result = add_config_interactively(path, ask_continue=False)
+            result = add_provider_key_interactively(path)
             if result is not None:
-                show_result_page("添加 Key", result)
+                show_result_page("添加供应商 Key", result)
         elif choice == "2":
-            run_submodule(lambda: manage_selected_key_interactively(path))
+            run_submodule(lambda: manage_provider_keys_interactively(path))
         elif choice == "3":
             clear_terminal_history()
-            result = reorder_api_keys_interactively(path)
+            result = add_model_route_interactively(path)
             if result is not None:
-                show_result_page("Key 排序", result)
+                show_result_page("添加模型路由", result)
         elif choice == "4":
-            clear_terminal_history()
-            result = set_model_routing_mode_interactively(path)
-            if result is not None:
-                show_result_page("路由模式", result)
+            run_submodule(lambda: manage_model_routes_interactively(path))
         elif choice == "5":
-            clear_terminal_history()
-            result = set_model_reasoning_effort_interactively(path)
-            if result is not None:
-                show_result_page("推理强度", result)
+            run_submodule(lambda: manage_v2_model_settings_interactively(path))
         elif choice == "6":
-            run_submodule(lambda: manage_model_aliases_interactively(path))
-        elif choice == "7":
-            run_submodule(lambda: manage_upstream_routes_interactively(path))
+            run_submodule(lambda: manage_provider_routes_interactively(path))
 
 
 def manage_model_aliases_interactively(path: Path) -> None:
@@ -565,9 +1110,30 @@ def save_model_alias_change(
 def manage_selected_key_interactively(path: Path) -> None:
     on_key = lambda key: _open_config_on_key(path, key)
     while True:
+        data = load_config_data(path)
+        manage_choice = select_option(
+            "管理 Key",
+            [
+                ("1", "管理单个 Key"),
+                ("2", "探测所有 Key"),
+                ("0", "返回"),
+            ],
+            content=key_status_overview_panel(data),
+            on_key=on_key,
+        )
+        if manage_choice == "0":
+            return
+        if manage_choice == "2":
+            clear_terminal_history()
+            result = probe_all_keys_interactively(path)
+            show_result_page("探测所有 Key", result)
+            continue
+        if manage_choice != "1":
+            continue
+
         selection = select_api_key(path, "选择要管理的 Key")
         if selection is None:
-            return
+            continue
         data, model, key_index = selection
         key = model["keys"][key_index]
         key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
@@ -594,16 +1160,9 @@ def manage_selected_key_interactively(path: Path) -> None:
                     ("6", "禁止访客访问" if visitor_allowed else "允许访客访问")
                 )
                 probe_choice = "7"
-                probe_all_choice = "8"
             else:
                 probe_choice = "6"
-                probe_all_choice = "7"
-            options.extend(
-                [
-                    (probe_choice, "可用性探测"),
-                    (probe_all_choice, "探测所有 Key"),
-                ]
-            )
+            options.append((probe_choice, "可用性探测"))
             usage_choice = "r" if runtime_state and (
                 runtime_state.get("disabled")
                 or int(runtime_state.get("cooldown_remaining_seconds") or 0) > 0
@@ -658,8 +1217,6 @@ def manage_selected_key_interactively(path: Path) -> None:
                 )
             elif choice == probe_choice:
                 result = probe_selected_key_interactively(path, data, model, key_index)
-            elif choice == probe_all_choice:
-                result = probe_all_keys_interactively(path)
             elif choice == "r":
                 result = update_key_runtime_state_interactively(
                     path, data, str(model["id"]), key_name, clear_cooldown=True
@@ -681,7 +1238,6 @@ def manage_selected_key_interactively(path: Path) -> None:
                     "4": "Key 开关",
                     "6": "访客访问",
                     probe_choice: "可用性探测",
-                    probe_all_choice: "探测所有 Key",
                     "r": "运行状态",
                     "p": "运行状态",
                 }.get(choice, "Key 管理")

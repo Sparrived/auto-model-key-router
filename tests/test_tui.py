@@ -722,7 +722,7 @@ def test_request_stats_pages_support_legacy_database_without_caller_type(tmp_pat
 
 
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
-    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "模型 Key"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
+    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "供应商模型"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
     assert dashboard.ONE_CLICK_OPTIONS == [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("0", "返回")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
@@ -1294,8 +1294,8 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
     assert model["keys"] == [{"name": "primary", "api_key": "sk-primary", "base_url": "https://primary.example.com"}]
 
 
-def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
-    choices = iter(["6", "0"])
+def test_provider_model_menu_opens_model_settings(tmp_path, monkeypatch) -> None:
+    choices = iter(["5", "0"])
     menus: list[list[tuple[str, str]]] = []
     opened: list[Path] = []
 
@@ -1305,12 +1305,52 @@ def test_model_key_menu_opens_alias_manager(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(config_editor, "select_option", choose)
     monkeypatch.setattr(config_editor, "run_submodule", lambda action: action())
-    monkeypatch.setattr(config_editor, "manage_model_aliases_interactively", lambda path: opened.append(path))
+    monkeypatch.setattr(config_editor, "manage_v2_model_settings_interactively", lambda path: opened.append(path))
 
     config_editor.manage_model_keys_interactively(tmp_path / "router-config.json")
 
-    assert ("6", "模型别称") in menus[0]
+    assert menus[0] == [
+        ("1", "添加供应商 Key"),
+        ("2", "管理供应商 Key"),
+        ("3", "添加模型路由"),
+        ("4", "管理模型路由"),
+        ("5", "模型参数"),
+        ("6", "供应商路径"),
+        ("0", "返回"),
+    ]
     assert opened == [tmp_path / "router-config.json"]
+
+
+def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"local_api_key": "local-key", "models": []}),
+        encoding="utf-8",
+    )
+    prompts = iter(["openai", "https://api.openai.com", "main", "sk-main"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "n")
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    result = config_editor.add_provider_key_interactively(config_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "添加完成" in render_plain(result)
+    assert data["config_version"] == 2
+    assert data["providers"]["openai"]["keys"]["main"]["api_key"] == "sk-main"
+
+    prompts = iter(["local-model", "upstream-model"])
+    choices = iter(["1", "1"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
+
+    result = config_editor.add_model_route_interactively(config_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "添加完成" in render_plain(result)
+    assert data["models"]["local-model"]["targets"] == [
+        {"provider": "openai", "key": "main", "upstream_model": "upstream-model"}
+    ]
 
 
 def test_upstream_routes_panel_shows_three_mode_support() -> None:
@@ -1775,11 +1815,31 @@ def test_probe_all_key_availability_checks_every_configured_key(monkeypatch) -> 
     assert [result.key_name for result in results] == ["a1", "a2", "b1"]
 
 
-def test_manage_selected_key_menu_includes_single_and_all_probe(tmp_path, monkeypatch) -> None:
+def test_manage_key_menu_includes_all_probe(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
+    state_path = tmp_path / "key-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "keys": [
+                    {
+                        "model_id": "model-a",
+                        "key_name": "main",
+                        "failures": 1,
+                        "cooldown_until": 4100.0,
+                        "last_status_code": 503,
+                        "disabled": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     config_path.write_text(
         json.dumps(
             {
+                "key_state_path": str(state_path),
                 "models": [
                     {
                         "id": "model-a",
@@ -1793,29 +1853,34 @@ def test_manage_selected_key_menu_includes_single_and_all_probe(tmp_path, monkey
         ),
         encoding="utf-8",
     )
-    choices = iter(["7", "0"])
+    choices = iter(["2", "0"])
     menus = []
+    contents = []
     shown = []
-    selections = iter([
-        (config_editor.load_config_data(config_path), config_editor.load_config_data(config_path)["models"][0], 0),
-        None,
-    ])
 
     def choose(title, options, selected=0, content=None, *, on_key=None):
-        menus.append(options)
+        menus.append((title, options))
+        contents.append(render_plain(content))
         return next(choices)
 
-    monkeypatch.setattr(config_editor, "select_api_key", lambda path, title: next(selections))
     monkeypatch.setattr(config_editor, "select_option", choose)
     monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+    monkeypatch.setattr(config_editor, "time", lambda: 4000.0)
+    monkeypatch.setattr(config_editor.httpx, "get", lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("down")))
     monkeypatch.setattr(config_editor, "clear_terminal_history", lambda: None)
     monkeypatch.setattr(config_editor, "probe_all_keys_interactively", lambda path: Text("all probe"))
     monkeypatch.setattr(config_editor, "show_result_page", lambda title, content: shown.append((title, render_plain(content))))
 
     config_editor.manage_selected_key_interactively(config_path)
 
-    assert ("6", "可用性探测") in menus[0]
-    assert ("7", "探测所有 Key") in menus[0]
+    assert menus[0] == (
+        "管理 Key",
+        [("1", "管理单个 Key"), ("2", "探测所有 Key"), ("0", "返回")],
+    )
+    assert "Key 状态" in contents[0]
+    assert "main" in contents[0]
+    assert "冷却中 100s" in contents[0]
+    assert "503" in contents[0]
     assert shown == [("探测所有 Key", "all probe\n")]
 
 

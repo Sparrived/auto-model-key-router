@@ -85,7 +85,7 @@ from .visitor import VISITOR_API_KEY, visitor_feature_available
 
 MENU_OPTIONS = [
     ("1", "一键配置"),
-    ("2", "模型 Key"),
+    ("2", "供应商模型"),
     ("3", "统一模型"),
     ("4", "调用日志"),
     ("5", "CLI 设置"),
