@@ -397,6 +397,18 @@ def test_show_result_page_can_copy_text(monkeypatch) -> None:
     assert copied == ["secret-key"]
 
 
+def test_run_submodule_catches_unhandled_exception(monkeypatch) -> None:
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(tui, "clear_terminal_history", lambda: None)
+    monkeypatch.setattr(tui, "show_result_page", lambda title, content: shown.append((title, render_plain(content))))
+
+    result = tui.run_submodule(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    assert shown and shown[0][0] == "操作出错"
+    assert "RuntimeError: boom" in shown[0][1]
+    assert "RuntimeError: boom" in render_plain(result)
+
+
 def test_fit_terminal_lines_preserves_bottom_and_pads() -> None:
     lines = [[tui.Segment(str(index))] for index in range(5)]
 
@@ -1332,7 +1344,7 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "n")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: {"models": ["upstream-model"], "all_models": ["upstream-model"], "routes": {}})
+    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: provider["pools"][pool_name].update({"available_models": ["upstream-model"], "all_available_models": ["upstream-model"], "models": []}) or {"models": ["upstream-model"], "all_models": ["upstream-model"], "routes": {}})
 
     result = config_editor.add_provider_key_interactively(config_path)
     data = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1340,10 +1352,12 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     assert "添加完成" in render_plain(result)
     assert data["config_version"] == 3
     assert data["providers"]["openai"]["keys"]["main"]["api_key"] == "sk-main"
-    assert data["providers"]["openai"]["pools"] == {"default": {"keys": ["main"]}}
+    assert data["providers"]["openai"]["pools"]["default"]["keys"] == ["main"]
+    data["providers"]["openai"]["pools"]["default"]["models"] = ["upstream-model"]
+    config_path.write_text(json.dumps(data), encoding="utf-8")
 
-    prompts = iter(["local-model", "upstream-model"])
-    choices = iter(["1", "1"])
+    prompts = iter(["local-model"])
+    choices = iter(["1", "1", "1"])
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
 
@@ -1354,6 +1368,91 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     assert data["models"]["local-model"]["targets"] == [
         {"provider": "openai", "pool": "default", "upstream_model": "upstream-model"}
     ]
+
+
+def test_deleting_last_provider_key_removes_empty_pool_and_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "local_api_key": "local-key",
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"], "models": ["gpt-a"]}},
+                    }
+                },
+                "models": {
+                    "local-model": {
+                        "targets": [
+                            {"provider": "gateway", "pool": "default", "upstream_model": "gpt-a"}
+                        ]
+                    }
+                },
+                "unified_model": {"model": "local-model"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    result = config_editor.update_provider_key_interactively(config_path, "gateway", "main", "5")
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "已删除 gateway/main" in render_plain(result)
+    assert data["providers"] == {}
+    assert data["models"] == {}
+    assert "unified_model" not in data
+
+
+def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "local_api_key": "local-key",
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {
+                            "main": {"api_key": "sk-main"},
+                            "backup": {"api_key": "sk-backup"},
+                        },
+                        "pools": {
+                            "main-pool": {"keys": ["main"]},
+                            "backup-pool": {"keys": ["backup"]},
+                        },
+                    }
+                },
+                "models": {
+                    "local-model": {
+                        "targets": [
+                            {"provider": "gateway", "pool": "main-pool", "upstream_model": "gpt-a"}
+                        ]
+                    },
+                    "backup-model": {
+                        "targets": [
+                            {"provider": "gateway", "pool": "backup-pool", "upstream_model": "gpt-b"}
+                        ]
+                    },
+                },
+                "unified_model": {"model": "local-model", "key": "main"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    config_editor.update_provider_key_interactively(config_path, "gateway", "main", "5")
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "local-model" not in data["models"]
+    assert data["unified_model"] == {"model": "backup-model"}
 
 
 def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
@@ -1436,6 +1535,31 @@ def test_pool_probe_models_records_common_models_and_routes(monkeypatch) -> None
     assert result["key_models"] == {"k1": ["gpt-a", "gpt-b"], "k2": ["gpt-a", "gpt-c"]}
     assert result["routes"] == {"k1": {"openai": True}, "k2": {"openai": True}}
     assert result["checked_at"]
+
+
+def test_apply_pool_probe_keeps_discovered_models_disabled_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        config_editor,
+        "pool_probe_models",
+        lambda *args, **kwargs: {
+            "models": ["gpt-a", "gpt-b"],
+            "all_models": ["gpt-a", "gpt-b"],
+            "key_models": {"k1": ["gpt-a", "gpt-b"]},
+            "routes": {},
+            "manual_models": False,
+            "checked_at": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    provider = {
+        "base_url": "https://gateway.example.test",
+        "keys": {"k1": {"api_key": "sk-1"}},
+        "pools": {"default": {"keys": ["k1"]}},
+    }
+
+    config_editor.apply_pool_probe(provider, "default")
+
+    assert provider["pools"]["default"]["available_models"] == ["gpt-a", "gpt-b"]
+    assert provider["pools"]["default"]["models"] == []
 
 
 def test_pool_probe_models_accepts_manual_models_when_discovery_empty(monkeypatch) -> None:

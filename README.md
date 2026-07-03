@@ -145,6 +145,7 @@ auto-model-key-router --config router-config.json --switch-key auto
       "pools": {
         "default": {
           "keys": ["main", "backup"],
+          "available_models": ["gpt-4o-mini"],
           "models": ["gpt-4o-mini"]
         }
       }
@@ -177,7 +178,7 @@ auto-model-key-router --config router-config.json --switch-key auto
 }
 ```
 
-> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`providers.*.pools` 表示同一模型能力池，TUI 创建或刷新模型池时会探测可用模型与路由并写入 `models` / `routes` 元信息；如果上游不支持 `/v1/models`，TUI 会允许手动填写可用模型并继续探测路由；`models.*.targets` 默认绑定到模型池。旧版 `models[].keys[]` 和 v2 的 `target.key` 会自动迁移为新版语义。
+> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`providers.*.pools` 表示同一模型能力池，TUI 创建或刷新模型池时会探测可用模型与路由并写入 `available_models` / `routes` 元信息，探测到的模型默认不启用；如果上游不支持 `/v1/models`，TUI 会允许手动填写可用模型并继续探测路由；`providers.*.pools.*.models` 是手动启用后可用于添加本地模型路由的模型清单。旧版 `models[].keys[]` 和 v2 的 `target.key` 会自动迁移为新版语义。
 
 ## 文档
 

@@ -31,6 +31,7 @@
       "pools": {
         "default": {
           "keys": ["main", "backup"],
+          "available_models": ["gpt-4o-mini"],
           "models": ["gpt-4o-mini"]
         }
       }
