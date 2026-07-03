@@ -4,9 +4,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 import json
 import sys
-from time import monotonic
+from time import monotonic, time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from rich.console import Group
@@ -18,6 +19,7 @@ from .config import (
     UPSTREAM_ROUTE_LABELS,
     UPSTREAM_ROUTE_MODES,
     RouterConfig,
+    default_key_state_path,
     default_metrics_db_path,
     generate_local_api_key,
     load_config_data,
@@ -76,6 +78,106 @@ def key_display_name(key: dict[str, Any], fallback: str, width: int = 28) -> str
     if key.get("allow_visitor", False):
         return f"[{VISITOR_KEY_STYLE}]{short_text(name, width)}[/]"
     return short_text(name, width)
+
+
+def key_runtime_state_key(model_id: str, key_name: str) -> str:
+    return f"{model_id}:{key_name}"
+
+
+def format_key_runtime_status(state: dict[str, Any] | None) -> str:
+    if not state:
+        return "[green]可用[/green]"
+    if state.get("disabled"):
+        return "[red]运行态暂停[/red]"
+    cooldown = int(state.get("cooldown_remaining_seconds") or 0)
+    if cooldown > 0:
+        return f"[yellow]冷却中 {cooldown}s[/yellow]"
+    failures = int(state.get("failures") or 0)
+    status_code = state.get("last_status_code")
+    if failures or status_code is not None:
+        suffix = f" · HTTP {status_code}" if status_code is not None else ""
+        return f"[yellow]最近失败 {failures} 次{suffix}[/yellow]"
+    return "[green]可用[/green]"
+
+
+def service_management_base_url(data: dict[str, Any]) -> str:
+    host = str(data.get("host") or "127.0.0.1")
+    port = int(data.get("port") or 8000)
+    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    if ":" in connect_host and not connect_host.startswith("["):
+        connect_host = f"[{connect_host}]"
+    return f"http://{connect_host}:{port}"
+
+
+def management_headers(data: dict[str, Any]) -> dict[str, str] | None:
+    local_api_key = str(data.get("local_api_key") or "").strip()
+    if not local_api_key:
+        return None
+    return {"Authorization": f"Bearer {local_api_key}"}
+
+
+def load_key_runtime_states_from_file(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    path = Path(str(data.get("key_state_path") or default_key_state_path()))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    now = time()
+    states: dict[str, dict[str, Any]] = {}
+    for item in raw.get("keys", []):
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("model_id") or "")
+        key_name = str(item.get("key_name") or "")
+        if not model_id or not key_name:
+            continue
+        cooldown_until = max(0.0, float(item.get("cooldown_until") or 0.0))
+        states[key_runtime_state_key(model_id, key_name)] = {
+            "failures": max(0, int(item.get("failures") or 0)),
+            "cooldown_remaining_seconds": max(0, round(cooldown_until - now)),
+            "last_status_code": item.get("last_status_code"),
+            "disabled": bool(item.get("disabled", False)),
+        }
+    return states
+
+
+def fetch_key_runtime_states(data: dict[str, Any], timeout: float = 0.5) -> dict[str, dict[str, Any]]:
+    states = load_key_runtime_states_from_file(data)
+    try:
+        response = httpx.get(f"{service_management_base_url(data)}/health", timeout=timeout)
+        response.raise_for_status()
+        service_states = response.json().get("key_states", {})
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError):
+        return states
+    if isinstance(service_states, dict):
+        states.update(
+            {
+                str(key): value
+                for key, value in service_states.items()
+                if isinstance(value, dict)
+            }
+        )
+    return states
+
+
+def fetch_key_runtime_state(
+    data: dict[str, Any], model_id: str, key_name: str, timeout: float = 1.0
+) -> dict[str, Any] | None:
+    headers = management_headers(data)
+    if headers is not None:
+        try:
+            response = httpx.get(
+                f"{service_management_base_url(data)}/api/models/{quote(model_id, safe='')}/keys/{quote(key_name, safe='')}/state",
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            state = response.json()
+            if isinstance(state, dict):
+                return state
+        except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError):
+            pass
+    return fetch_key_runtime_states(data).get(key_runtime_state_key(model_id, key_name))
 
 
 def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -> str:
@@ -471,6 +573,8 @@ def manage_selected_key_interactively(path: Path) -> None:
         key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
         enabled = key.get("enabled", True)
         status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+        runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
+        runtime_status_text = format_key_runtime_status(runtime_state)
         visitor_allowed = bool(key.get("allow_visitor", False))
         visitor_installed = visitor_feature_available()
         visitor_status_text = format_visitor_status_text(
@@ -500,6 +604,17 @@ def manage_selected_key_interactively(path: Path) -> None:
                     (probe_all_choice, "探测所有 Key"),
                 ]
             )
+            usage_choice = "r" if runtime_state and (
+                runtime_state.get("disabled")
+                or int(runtime_state.get("cooldown_remaining_seconds") or 0) > 0
+                or int(runtime_state.get("failures") or 0) > 0
+            ) else "p"
+            options.append(
+                (
+                    usage_choice,
+                    "恢复运行使用 / 清除冷却" if usage_choice == "r" else "暂停运行使用",
+                )
+            )
             options.append(("0", "返回"))
             choice = select_option(
                 f"管理 Key · {short_text(key_name, 24)}",
@@ -508,7 +623,8 @@ def manage_selected_key_interactively(path: Path) -> None:
                     f"模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
                     f"Key: {key_display_name(key, key_name, 32)}\n"
                     f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]\n"
-                    f"状态: {status_text}\n"
+                    f"配置状态: {status_text}\n"
+                    f"运行状态: {runtime_status_text}\n"
                     f"访客访问: {visitor_status_text}",
                     "Key 信息",
                     "cyan",
@@ -544,6 +660,18 @@ def manage_selected_key_interactively(path: Path) -> None:
                 result = probe_selected_key_interactively(path, data, model, key_index)
             elif choice == probe_all_choice:
                 result = probe_all_keys_interactively(path)
+            elif choice == "r":
+                result = update_key_runtime_state_interactively(
+                    path, data, str(model["id"]), key_name, clear_cooldown=True
+                )
+                runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
+                runtime_status_text = format_key_runtime_status(runtime_state)
+            elif choice == "p":
+                result = update_key_runtime_state_interactively(
+                    path, data, str(model["id"]), key_name, disabled=True
+                )
+                runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
+                runtime_status_text = format_key_runtime_status(runtime_state)
             else:
                 continue
             if result is not None:
@@ -554,6 +682,8 @@ def manage_selected_key_interactively(path: Path) -> None:
                     "6": "访客访问",
                     probe_choice: "可用性探测",
                     probe_all_choice: "探测所有 Key",
+                    "r": "运行状态",
+                    "p": "运行状态",
                 }.get(choice, "Key 管理")
                 show_result_page(result_title, result)
             if choice in ("1", "4", "6"):
@@ -566,6 +696,8 @@ def manage_selected_key_interactively(path: Path) -> None:
                 key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
                 enabled = key.get("enabled", True)
                 status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
+                runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
+                runtime_status_text = format_key_runtime_status(runtime_state)
                 visitor_allowed = bool(key.get("allow_visitor", False))
                 visitor_installed = visitor_feature_available()
                 visitor_status_text = format_visitor_status_text(
@@ -851,6 +983,53 @@ def toggle_selected_key_interactively(
             "green",
         ),
         restart_service_after_config_change(path, old_config, new_config),
+    )
+
+
+def update_key_runtime_state_interactively(
+    path: Path,
+    data: dict[str, Any],
+    model_id: str,
+    key_name: str,
+    *,
+    disabled: bool | None = None,
+    clear_cooldown: bool = False,
+) -> Any:
+    headers = management_headers(data)
+    if headers is None:
+        return section_panel(
+            "未配置本地鉴权密钥，无法通过管理 API 调控运行状态。",
+            "运行状态",
+            "yellow",
+        )
+    payload: dict[str, Any] = {"clear_cooldown": clear_cooldown}
+    if disabled is not None:
+        payload["disabled"] = disabled
+    try:
+        response = httpx.put(
+            f"{service_management_base_url(data)}/api/models/{quote(model_id, safe='')}/keys/{quote(key_name, safe='')}/state",
+            headers=headers,
+            json=payload,
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        state = response.json()
+    except httpx.ConnectError:
+        return section_panel(
+            "路由服务未运行，无法调控实际使用状态；请先启动服务后重试。",
+            "运行状态",
+            "yellow",
+        )
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError) as exc:
+        return section_panel(
+            f"更新运行状态失败: {exc}",
+            "运行状态",
+            "red",
+        )
+    return section_panel(
+        f"已更新运行状态。\n配置文件: [bold]{path.resolve()}[/bold]\n模型: [bold]{short_text(model_id, 32)}[/bold]\nKey: [bold]{short_text(key_name, 32)}[/bold]\n运行状态: {format_key_runtime_status(state)}",
+        "运行状态",
+        "green",
     )
 
 
@@ -1878,6 +2057,7 @@ def select_api_key(
     path: Path, title: str
 ) -> tuple[dict[str, Any], dict[str, Any], int] | None:
     data = load_config_data(path)
+    runtime_states = fetch_key_runtime_states(data)
     selectable_models = [model for model in data.get("models", []) if model.get("keys")]
     if not selectable_models:
         return None
@@ -1900,7 +2080,13 @@ def select_api_key(
         )
         enabled = key.get("enabled", True)
         status = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-        key_options.append((str(index + 1), f"{name} · {base_url} · {status}"))
+        key_name = str(key.get("name") or f"{model['id']}-{index + 1}")
+        runtime_status = format_key_runtime_status(
+            runtime_states.get(key_runtime_state_key(str(model["id"]), key_name))
+        )
+        key_options.append(
+            (str(index + 1), f"{name} · {base_url} · {status} · {runtime_status}")
+        )
     key_options.append(("0", "返回"))
     key_choice = select_option(title, key_options)
     if key_choice == "0":

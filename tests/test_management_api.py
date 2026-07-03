@@ -429,6 +429,48 @@ def test_get_key_stats_returns_key_specific_metrics(
     assert with_hours.status_code == 200
 
 
+def test_key_state_endpoint_controls_runtime_usage(tmp_path: Path) -> None:
+    app, _ = create_file_backed_app(tmp_path)
+
+    async def requests(
+        client: httpx.AsyncClient,
+    ) -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
+        await app.state.runtime_manager.current.key_pool.mark_failure(
+            "model-a", "key-a", status_code=503
+        )
+        cooling = await client.get(
+            "/api/models/model-a/keys/key-a/state", headers=AUTH_HEADERS
+        )
+        paused = await client.put(
+            "/api/models/model-a/keys/key-a/state",
+            headers=AUTH_HEADERS,
+            json={"disabled": True},
+        )
+        restored = await client.put(
+            "/api/models/model-a/keys/key-a/state",
+            headers=AUTH_HEADERS,
+            json={"clear_cooldown": True},
+        )
+        unauthorized = await client.get("/api/models/model-a/keys/key-a/state")
+        return cooling, paused, restored, unauthorized
+
+    cooling, paused, restored, unauthorized = run_client(app, requests)
+
+    assert cooling.status_code == 200
+    assert cooling.json()["cooldown_remaining_seconds"] > 0
+    assert cooling.json()["last_status_code"] == 503
+    assert paused.status_code == 200
+    assert paused.json()["disabled"] is True
+    assert restored.status_code == 200
+    assert restored.json() == {
+        "failures": 0,
+        "cooldown_remaining_seconds": 0,
+        "last_status_code": None,
+        "disabled": False,
+    }
+    assert unauthorized.status_code == 401
+
+
 def test_unified_model_crud_via_api(tmp_path: Path) -> None:
     app, path = create_file_backed_app(tmp_path)
 

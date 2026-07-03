@@ -379,6 +379,43 @@ class KeyPool:
             for (model_id, key_name), state in self._states.items()
         }
 
+    def key_state(self, model_id: str, key_name: str) -> dict[str, Any]:
+        model_id = self.resolve_model_id(model_id)
+        state = self._states.get((model_id, key_name))
+        now = time()
+        return {
+            "failures": state.failures if state else 0,
+            "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)) if state else 0,
+            "last_status_code": state.last_status_code if state else None,
+            "disabled": state.disabled if state else False,
+        }
+
+    async def set_key_usage_state(
+        self,
+        model_id: str,
+        key_name: str,
+        *,
+        disabled: bool | None = None,
+        clear_cooldown: bool = False,
+    ) -> dict[str, Any]:
+        model_id = self.resolve_model_id(model_id)
+        async with self._lock:
+            state_key = (model_id, key_name)
+            state = self._states[state_key]
+            if disabled is not None:
+                state.disabled = disabled
+                if disabled:
+                    state.cooldown_until = 0.0
+            if clear_cooldown:
+                state.failures = 0
+                state.cooldown_until = 0.0
+                state.last_status_code = None
+                if disabled is None:
+                    state.disabled = False
+        await self._persist_states()
+        await self._notify_state_change(model_id, key_name)
+        return self.key_state(model_id, key_name)
+
     def url_native_support_states(self) -> dict[str, bool]:
         """返回所有 URL 的原生端点支持状态"""
         return dict(self._url_native_support)

@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import sqlite3
 import subprocess
 
+import httpx
 from rich.console import Console, ConsoleDimensions
 from rich.text import Text
 
@@ -1816,6 +1817,60 @@ def test_manage_selected_key_menu_includes_single_and_all_probe(tmp_path, monkey
     assert ("6", "可用性探测") in menus[0]
     assert ("7", "探测所有 Key") in menus[0]
     assert shown == [("探测所有 Key", "all probe\n")]
+
+
+def test_select_api_key_shows_runtime_cooldown_from_state_file(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "key-state.json"
+    config_path = tmp_path / "router-config.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "keys": [
+                    {
+                        "model_id": "model-a",
+                        "key_name": "main",
+                        "failures": 2,
+                        "cooldown_until": 4100.0,
+                        "last_status_code": None,
+                        "disabled": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path.write_text(
+        json.dumps(
+            {
+                "key_state_path": str(state_path),
+                "models": [
+                    {
+                        "id": "model-a",
+                        "keys": [
+                            {"name": "main", "api_key": "sk-main", "base_url": "https://api.example.com"}
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "0"])
+    menus = []
+
+    def choose(title, options, selected=0, content=None, *, on_key=None):
+        menus.append((title, options))
+        return next(choices)
+
+    monkeypatch.setattr(config_editor, "select_option", choose)
+    monkeypatch.setattr(config_editor, "time", lambda: 4000.0)
+    monkeypatch.setattr(config_editor.httpx, "get", lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("down")))
+
+    assert config_editor.select_api_key(config_path, "选择 Key") is None
+
+    assert any("冷却中 100s" in option for _, options in menus for _, option in options)
 
 
 def test_add_config_with_discovery_adds_selected_models(tmp_path, monkeypatch) -> None:
