@@ -511,6 +511,63 @@ def test_prompt_text_edits_inside_live_window(monkeypatch) -> None:
     assert "******" in render_plain(live_instances[0].renderable)
 
 
+def test_prompt_text_q_on_empty_value_cancels(monkeypatch) -> None:
+    @contextmanager
+    def input_mode():
+        yield
+
+    class FakeLive:
+        def __init__(self, renderable, **kwargs):
+            self.renderable = renderable
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def update(self, renderable, refresh=False):
+            self.renderable = renderable
+
+    monkeypatch.setattr(tui, "posix_input_mode", input_mode)
+    monkeypatch.setattr(tui, "Live", FakeLive)
+    monkeypatch.setattr(tui, "read_key_responsive", lambda on_resize=None: "q")
+
+    cancelled = False
+    try:
+        tui.prompt_text("edit", "API key")
+    except KeyboardInterrupt:
+        cancelled = True
+
+    assert cancelled
+
+
+def test_select_option_q_returns_back_option(monkeypatch) -> None:
+    @contextmanager
+    def input_mode():
+        yield
+
+    class FakeLive:
+        def __init__(self, renderable, **kwargs):
+            self.renderable = renderable
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def update(self, renderable, refresh=False):
+            self.renderable = renderable
+
+    monkeypatch.setattr(tui, "posix_input_mode", input_mode)
+    monkeypatch.setattr(tui, "mouse_wheel_mode", input_mode)
+    monkeypatch.setattr(tui, "Live", FakeLive)
+    monkeypatch.setattr(tui, "read_key_responsive", lambda on_resize=None: "q")
+
+    assert tui.select_option("menu", [("1", "one"), ("0", "返回")]) == "0"
+
+
 def test_watch_logs_reads_keys_inside_posix_input_mode(monkeypatch) -> None:
     events: list[str] = []
 
@@ -1368,6 +1425,35 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     assert data["models"]["local-model"]["targets"] == [
         {"provider": "openai", "pool": "default", "upstream_model": "upstream-model"}
     ]
+
+
+def test_add_provider_key_keeps_in_memory_draft_on_cancel(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"local_api_key": "local-key", "models": []}),
+        encoding="utf-8",
+    )
+    config_editor.FORM_DRAFTS.clear()
+    prompts = iter(["openai", "https://api.openai.com"])
+
+    def ask(*args, **kwargs):
+        try:
+            return next(prompts)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(config_editor, "prompt_text", ask)
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "n")
+
+    cancelled = False
+    try:
+        config_editor.add_provider_key_interactively(config_path)
+    except KeyboardInterrupt:
+        cancelled = True
+
+    assert cancelled
+    assert config_editor.FORM_DRAFTS["add_provider_key"]["provider_id"] == "openai"
+    assert config_editor.FORM_DRAFTS["add_provider_key"]["base_url"] == "https://api.openai.com"
 
 
 def test_deleting_last_provider_key_removes_empty_pool_and_model(tmp_path, monkeypatch) -> None:

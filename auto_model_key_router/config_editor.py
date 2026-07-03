@@ -61,6 +61,11 @@ from .visitor import visitor_feature_available
 
 VISITOR_KEY_STYLE = "bold bright_magenta"
 PROBE_ROUTE_MODES = ("openai", "anthropic", "responses")
+FORM_DRAFTS: dict[str, dict[str, str]] = {}
+
+
+def form_draft(name: str) -> dict[str, str]:
+    return FORM_DRAFTS.setdefault(name, {})
 
 
 @dataclass(frozen=True)
@@ -683,6 +688,7 @@ def select_v2_model(data: dict[str, Any], title: str) -> str | None:
 
 
 def add_provider_key_interactively(path: Path) -> Any:
+    draft = form_draft("add_provider_key")
     data = load_v2_config_data(path)
     old_config = RouterConfig.from_dict(data)
     providers = raw_providers(data)
@@ -697,27 +703,31 @@ def add_provider_key_interactively(path: Path) -> Any:
     if provider_choice == "0":
         return None
     if provider_choice == "n":
-        provider_id = prompt_text("添加供应商", "供应商 ID", default="openai").strip()
+        provider_id = prompt_text("添加供应商", "供应商 ID", default=draft.get("provider_id", "openai")).strip()
+        draft["provider_id"] = provider_id
         if not provider_id:
             return section_panel("[red]供应商 ID 不能为空[/red]", "添加失败", "red")
         if provider_id in providers:
             return section_panel(f"[red]供应商已存在: {provider_id}[/red]", "添加失败", "red")
         base_url = prompt_text(
-            "添加供应商", "Base URL", default="https://api.openai.com"
+            "添加供应商", "Base URL", default=draft.get("base_url", "https://api.openai.com")
         ).strip()
+        draft["base_url"] = base_url
         providers[provider_id] = {"base_url": base_url, "keys": {}, "pools": {}}
     else:
         provider_id = existing[int(provider_choice) - 1]
     provider = providers[provider_id]
     keys = provider_keys(provider)
     key_name = prompt_text(
-        "添加供应商 Key", "Key 名称", default=f"key-{len(keys) + 1}"
+        "添加供应商 Key", "Key 名称", default=draft.get("key_name", f"key-{len(keys) + 1}")
     ).strip()
+    draft["key_name"] = key_name
     if not key_name:
         return section_panel("[red]Key 名称不能为空[/red]", "添加失败", "red")
     if key_name in keys:
         return section_panel(f"[red]Key 已存在: {key_name}[/red]", "添加失败", "red")
     api_key = prompt_text("添加供应商 Key", "API key", password=True).strip()
+    draft["api_key"] = api_key
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
     keys[key_name] = {"api_key": api_key, "enabled": True}
@@ -728,6 +738,7 @@ def add_provider_key_interactively(path: Path) -> Any:
     with console.status("[cyan]正在探测 default 模型池可用模型和路由...[/cyan]", spinner="dots"):
         probe = apply_pool_probe(provider, "default")
     restart = commit_v2_config(path, data, old_config)
+    FORM_DRAFTS.pop("add_provider_key", None)
     return Group(
         section_panel(
             f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池 default 共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]",
@@ -902,13 +913,15 @@ def manage_provider_pools_interactively(path: Path) -> None:
 
 
 def update_provider_pool_interactively(path: Path, provider_id: str, choice: str) -> Any:
+    draft = form_draft(f"provider_pool:{provider_id}")
     data = load_v2_config_data(path)
     old_config = RouterConfig.from_dict(data)
     provider = raw_providers(data)[provider_id]
     keys = provider_keys(provider)
     pools = provider_pools(provider)
     if choice == "1":
-        pool_name = prompt_text("模型池", "Pool 名称", default="default").strip()
+        pool_name = prompt_text("模型池", "Pool 名称", default=draft.get("pool_name", "default")).strip()
+        draft["pool_name"] = pool_name
         if not pool_name:
             return section_panel("[red]Pool 名称不能为空[/red]", "模型池", "red")
         if not keys:
@@ -1062,10 +1075,13 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
     else:
         return None
     restart = commit_v2_config(path, data, old_config)
+    if choice in {"1", "3", "4", "5"}:
+        FORM_DRAFTS.pop(f"provider_pool:{provider_id}", None)
     return Group(section_panel(message, "模型池", "green"), restart)
 
 
 def add_model_route_interactively(path: Path) -> Any:
+    draft = form_draft("add_model_route")
     data = load_v2_config_data(path)
     if not raw_providers(data):
         return section_panel("[yellow]请先添加供应商 Key。[/yellow]", "添加模型路由", "yellow")
@@ -1091,7 +1107,8 @@ def add_model_route_interactively(path: Path) -> Any:
     if upstream_choice == "0":
         return None
     upstream_model = enabled_models[int(upstream_choice) - 1]
-    model_id = prompt_text("添加模型路由", "本地模型 ID", default=upstream_model).strip()
+    model_id = prompt_text("添加模型路由", "本地模型 ID", default=draft.get("model_id", upstream_model)).strip()
+    draft["model_id"] = model_id
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
     model = models.setdefault(
@@ -1110,6 +1127,7 @@ def add_model_route_interactively(path: Path) -> Any:
         {"provider": provider_id, "pool": pool_name, "upstream_model": upstream_model}
     )
     restart = commit_v2_config(path, data, old_config)
+    FORM_DRAFTS.pop("add_model_route", None)
     return Group(
         section_panel(
             f"本地模型: [bold]{model_id}[/bold]\n模型池: [bold]{provider_id}/{pool_name}[/bold]\n上游模型: [bold]{upstream_model}[/bold]",
@@ -1326,8 +1344,7 @@ def manage_model_keys_interactively(path: Path) -> None:
         if choice == "0":
             return
         if choice == "1":
-            clear_terminal_history()
-            result = add_provider_key_interactively(path)
+            result = run_submodule(lambda: add_provider_key_interactively(path))
             if result is not None:
                 show_result_page("添加供应商 Key", result)
         elif choice == "2":
@@ -1335,8 +1352,7 @@ def manage_model_keys_interactively(path: Path) -> None:
         elif choice == "3":
             run_submodule(lambda: manage_provider_pools_interactively(path))
         elif choice == "4":
-            clear_terminal_history()
-            result = add_model_route_interactively(path)
+            result = run_submodule(lambda: add_model_route_interactively(path))
             if result is not None:
                 show_result_page("添加模型路由", result)
         elif choice == "5":

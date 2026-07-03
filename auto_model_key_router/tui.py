@@ -257,9 +257,9 @@ def render_option_menu_state(
     if content is not None:
         renderables.append(content)
     renderables.append(section_panel(menu_table(options, selected), "操作菜单", "cyan", "[dim]选择下一步操作[/dim]"))
-    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 翻阅窗体  ·  数字快捷键  ·  Ctrl+C 返回"
+    shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn 翻阅窗体  ·  数字快捷键  ·  q/Ctrl+C 返回"
     if sys.platform == "win32" and content is not None:
-        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅窗体  ·  数字快捷键  ·  Ctrl+C 返回"
+        shortcuts = "↑/↓ 选择  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅窗体  ·  数字快捷键  ·  q/Ctrl+C 返回"
     return terminal_frame_state(
         renderables,
         shortcut_text(shortcuts),
@@ -610,7 +610,7 @@ def prompt_text(
             renderables.append(section_panel(status, "提示", "yellow"))
         return terminal_frame(
             renderables,
-            shortcut_text("输入内容  ·  Backspace 删除  ·  Ctrl+U 清空  ·  Enter 确认  ·  Esc/Ctrl+C 取消"),
+            shortcut_text("输入内容  ·  Backspace 删除  ·  Ctrl+U 清空  ·  Enter 确认  ·  q/Esc/Ctrl+C 返回"),
             preserve_bottom=True,
         )
 
@@ -621,6 +621,8 @@ def prompt_text(
         while True:
             key = read_key_responsive(refresh)
             if key == "cancel":
+                raise KeyboardInterrupt
+            if key in {"q", "Q"} and not value:
                 raise KeyboardInterrupt
             if key == "enter":
                 result = "".join(value) if value else (default or "")
@@ -689,6 +691,9 @@ def select_option(
                     return result
             if key == "cancel":
                 return options[-1][0]
+            if key in {"q", "Q"}:
+                option_values = {option[0] for option in options}
+                return "0" if "0" in option_values else options[-1][0]
             if key in WHEEL_KEYS:
                 handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
                 if not handle_wheel:
@@ -751,9 +756,9 @@ def render_multi_select_state(
     if content is not None:
         renderables.append(content)
     renderables.append(section_panel(checkbox_menu_table(options, selected, checked), "操作菜单", "cyan", "[dim]Space 切换 · A 全选/取消[/dim]"))
-    shortcuts = "↑/↓ 选择  ·  Space 切换  ·  A 全选/取消  ·  Enter 确认  ·  PgUp/PgDn 翻阅  ·  Ctrl+C 跳过"
+    shortcuts = "↑/↓ 选择  ·  Space 切换  ·  A 全选/取消  ·  Enter 确认  ·  PgUp/PgDn 翻阅  ·  q/Ctrl+C 返回"
     if sys.platform == "win32" and content is not None:
-        shortcuts = "↑/↓ 选择  ·  Space 切换  ·  A 全选/取消  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅  ·  Ctrl+C 跳过"
+        shortcuts = "↑/↓ 选择  ·  Space 切换  ·  A 全选/取消  ·  Enter 确认  ·  PgUp/PgDn/滚轮 翻阅  ·  q/Ctrl+C 返回"
     return terminal_frame_state(
         renderables,
         shortcut_text(shortcuts),
@@ -792,6 +797,8 @@ def select_multiple(
         while True:
             key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
             if key == "cancel":
+                return []
+            if key in {"q", "Q"}:
                 return []
             if key in WHEEL_KEYS:
                 handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(key, last_wheel_key, last_wheel_at)
