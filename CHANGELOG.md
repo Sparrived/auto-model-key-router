@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [2.2.6] - 2026-07-03
+
+### Changed
+- Add key availability probes to TUI
+
+### Fixed
+- fix some problems
+
 ## [2.2.5.post1] - 2026-06-28
 
 ### Changed
