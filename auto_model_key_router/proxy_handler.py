@@ -73,7 +73,6 @@ class ProxyRequestContext:
     requested_model_name: str
     requested_key_name: str | None
     model_id: str
-    upstream_body: bytes
     original_body: bytes  # 原始请求体，用于原生模式
     key_count: int
     only_first: bool
@@ -225,9 +224,6 @@ async def _prepare_proxy_request(
         requested_model_name=requested_model_name,
         requested_key_name=requested_key_name,
         model_id=model_id,
-        upstream_body=_upstream_body(
-            body, payload, model_id, runtime.config, stream=is_stream
-        ),
         original_body=body,
         key_count=key_count,
         only_first=only_first,
@@ -326,6 +322,7 @@ async def _execute_attempt(
 ) -> AttemptOutcome:
     runtime = context.runtime
     upstream_routes = runtime.config.upstream_routes_for_base_url(key.base_url)
+    upstream_model_id = key.upstream_model or context.model_id
 
     custom_native_route = (
         (context.path == "messages" and "anthropic" in upstream_routes)
@@ -347,7 +344,7 @@ async def _execute_attempt(
                 runtime.http_client,
                 key.base_url,
                 key.api_key,
-                context.model_id,
+                upstream_model_id,
                 native_route_path,
             )
             await runtime.key_pool.update_native_support(
@@ -363,7 +360,7 @@ async def _execute_attempt(
                 runtime.http_client,
                 key.base_url,
                 key.api_key,
-                context.model_id,
+                upstream_model_id,
                 native_route_path,
             )
             await runtime.key_pool.update_native_endpoint(
@@ -383,10 +380,17 @@ async def _execute_attempt(
     )
     if use_native:
         upstream_body = _upstream_body(
-            context.original_body, context.payload, context.model_id, native=True
+            context.original_body, context.payload, upstream_model_id, native=True
         )
     else:
-        upstream_body = context.upstream_body
+        upstream_body = _upstream_body(
+            context.original_body,
+            context.payload,
+            upstream_model_id,
+            runtime.config,
+            stream=context.is_stream,
+            reasoning_model_id=context.model_id,
+        )
 
     headers = _upstream_headers(context.request, key.api_key)
     if use_native and context.path == "messages":
@@ -401,6 +405,7 @@ async def _execute_attempt(
         {
             "upstream": upstream,
             "model_id": context.model_id,
+            "upstream_model_id": upstream_model_id,
             "requested_model_id": context.requested_model_id,
             "key_name": key.name,
             "stream": context.is_stream,
@@ -474,7 +479,14 @@ async def _execute_attempt(
             upstream_routes=upstream_routes,
         )
         fallback_upstream = _join_url(key.base_url, fallback_path)
-        fallback_body = context.upstream_body
+        fallback_body = _upstream_body(
+            context.original_body,
+            context.payload,
+            upstream_model_id,
+            runtime.config,
+            stream=context.is_stream,
+            reasoning_model_id=context.model_id,
+        )
         fallback_headers = _upstream_headers(context.request, key.api_key)
         _debug_report(
             "upstream-fallback",
@@ -581,9 +593,10 @@ async def _execute_attempt(
             filtered_body = _upstream_body_with_filtered_tools(
                 context.original_body,
                 context.payload,
-                context.model_id,
+                upstream_model_id,
                 runtime.config,
                 stream=context.is_stream,
+                reasoning_model_id=context.model_id,
             )
             retry_started = perf_counter()
             try:

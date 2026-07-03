@@ -149,6 +149,55 @@ def test_models_requires_valid_api_key(tmp_path: Path) -> None:
     }
 
 
+def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> None:
+    config = RouterConfig.from_dict(
+        {
+            "config_version": 2,
+            "local_api_key": "local-key",
+            "providers": {
+                "vendor": {
+                    "base_url": "https://upstream.test",
+                    "keys": {"main": {"api_key": "sk-main"}},
+                }
+            },
+            "models": {
+                "local-model": {
+                    "targets": [
+                        {
+                            "provider": "vendor",
+                            "key": "main",
+                            "upstream_model": "vendor-model",
+                        }
+                    ]
+                }
+            },
+            "metrics_db_path": str(tmp_path / "metrics.sqlite3"),
+            "key_state_path": str(tmp_path / "key-state.json"),
+            "log_file_path": str(tmp_path / "server.log"),
+        }
+    )
+    app = create_app(config)
+    upstream_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        upstream_payloads.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"id": "ok"})
+
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def request(client: httpx.AsyncClient) -> httpx.Response:
+        return await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer local-key"},
+            json={"model": "local-model", "messages": []},
+        )
+
+    response = run_client(app, request)
+
+    assert response.status_code == 200
+    assert upstream_payloads == [{"model": "vendor-model", "messages": []}]
+
+
 def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
     tmp_path: Path, visitor_feature
 ) -> None:

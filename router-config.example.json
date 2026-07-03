@@ -1,7 +1,7 @@
 {
+  "config_version": 2,
   "host": "127.0.0.1",
   "port": 8000,
-  "default_base_url": "https://api.openai.com",
   "request_timeout": 60,
   "max_retries": 2,
   "key_failure_threshold": 2,
@@ -11,29 +11,48 @@
   "metrics_db_path": "",
   "log_file_path": "",
   "local_api_key": "amkr-generated-local-api-key",
-  "unified_model": {
-    "model": "gpt-4o-mini",
-    "key": "gpt-4o-mini-key-1",
-    "image_model": null,
-    "image_key": null
-  },
-  "models": [
-    {
-      "id": "gpt-4o-mini",
-      "aliases": ["gpt-4o-mini-display", "fast-mini"],
-      "routing_mode": "round_robin",
-      "reasoning_effort": "medium",
-      "keys": [
-        {
-          "name": "gpt-4o-mini-key-1",
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com",
+      "routes": {
+        "openai": "v1/chat/completions",
+        "responses": "v1/responses",
+        "images": "v1/images/generations"
+      },
+      "keys": {
+        "main": {
           "api_key": "sk-your-first-key"
         },
-        {
-          "name": "gpt-4o-mini-key-2",
+        "backup": {
           "api_key": "sk-your-second-key",
           "allow_visitor": true
         }
+      }
+    }
+  },
+  "unified_model": {
+    "model": "gpt-4o-mini",
+    "key": "main",
+    "image_model": null,
+    "image_key": null
+  },
+  "models": {
+    "gpt-4o-mini": {
+      "aliases": ["gpt-4o-mini-display", "fast-mini"],
+      "routing_mode": "round_robin",
+      "reasoning_effort": "medium",
+      "targets": [
+        {
+          "provider": "openai",
+          "key": "main",
+          "upstream_model": "gpt-4o-mini"
+        },
+        {
+          "provider": "openai",
+          "key": "backup",
+          "upstream_model": "gpt-4o-mini"
+        }
       ]
     }
-  ]
+  }
 }

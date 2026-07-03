@@ -82,6 +82,7 @@ def _upstream_body(
     config: RouterConfig | None = None,
     stream: bool = False,
     native: bool = False,
+    reasoning_model_id: str | None = None,
 ) -> bytes:
     if not payload or "model" not in payload:
         return body
@@ -91,7 +92,9 @@ def _upstream_body(
         return json.dumps(
             upstream_payload, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
-    upstream_payload = _apply_reasoning_effort(upstream_payload, model_id, config)
+    upstream_payload = _apply_reasoning_effort(
+        upstream_payload, reasoning_model_id or model_id, config
+    )
     upstream_payload = _adapt_message_payload(upstream_payload)
     if stream:
         stream_options = upstream_payload.get("stream_options")
@@ -143,13 +146,16 @@ def _upstream_body_with_filtered_tools(
     model_id: str,
     config: RouterConfig | None = None,
     stream: bool = False,
+    reasoning_model_id: str | None = None,
 ) -> bytes:
     """创建过滤掉非 function 工具的请求体。"""
     if not payload or "model" not in payload:
         return body
     upstream_payload = _filter_function_tools(dict(payload))
     upstream_payload["model"] = model_id
-    upstream_payload = _apply_reasoning_effort(upstream_payload, model_id, config)
+    upstream_payload = _apply_reasoning_effort(
+        upstream_payload, reasoning_model_id or model_id, config
+    )
     upstream_payload = _adapt_message_payload(upstream_payload)
     if stream:
         stream_options = upstream_payload.get("stream_options")

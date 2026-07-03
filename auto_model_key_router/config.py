@@ -11,6 +11,9 @@ from typing import Any
 from .visitor import VISITOR_API_KEY
 
 
+CONFIG_VERSION = 2
+
+
 def default_cache_dir() -> Path:
     system = platform.system().lower()
     if system == "windows":
@@ -176,6 +179,7 @@ def generate_local_api_key() -> str:
 
 def empty_config_dict() -> dict[str, Any]:
     return {
+        "config_version": CONFIG_VERSION,
         "host": "127.0.0.1",
         "port": 8000,
         "default_base_url": "https://api.openai.com",
@@ -189,8 +193,141 @@ def empty_config_dict() -> dict[str, Any]:
         "metrics_db_path": default_metrics_db_path(),
         "log_file_path": default_log_file_path(),
         "local_api_key": generate_local_api_key(),
+        "providers": {},
         "models": [],
     }
+
+
+def is_legacy_config_data(data: dict[str, Any]) -> bool:
+    if int(data.get("config_version") or 1) < CONFIG_VERSION:
+        return True
+    models = data.get("models")
+    return isinstance(models, list)
+
+
+def migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
+    if not is_legacy_config_data(data):
+        return data
+    migrated = dict(data)
+    providers: dict[str, Any] = {}
+    models: dict[str, Any] = {}
+    default_base_url = str(data.get("default_base_url") or "https://api.openai.com")
+    top_routes = normalize_upstream_url_routes(data.get("upstream_routes"))
+    for base_url in top_routes:
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                f"upstream_routes 的上游URL {base_url} 必须以 http:// 或 https:// 开头"
+            )
+    provider_names_by_base_url: dict[str, str] = {}
+
+    def provider_name_for(base_url: str) -> str:
+        normalized_base_url = normalize_upstream_base_url(base_url)
+        existing = provider_names_by_base_url.get(normalized_base_url)
+        if existing:
+            return existing
+        if normalized_base_url == normalize_upstream_base_url(default_base_url):
+            base_name = "default"
+        else:
+            host = normalized_base_url.split("://", 1)[-1].split("/", 1)[0]
+            base_name = "".join(
+                ch.lower() if ch.isalnum() else "-" for ch in host
+            ).strip("-") or "provider"
+        name = base_name
+        suffix = 2
+        while name in providers:
+            name = f"{base_name}-{suffix}"
+            suffix += 1
+        providers[name] = {
+            "base_url": normalized_base_url,
+            "routes": dict(top_routes.get(normalized_base_url, {})),
+            "keys": {},
+        }
+        provider_names_by_base_url[normalized_base_url] = name
+        return name
+
+    def migrated_key_name(
+        provider: dict[str, Any], desired_name: str, key_data: dict[str, Any], model_id: str
+    ) -> str:
+        keys = provider["keys"]
+        existing = keys.get(desired_name)
+        if existing is None or existing == key_data:
+            return desired_name
+        base_name = f"{model_id}-{desired_name}".strip("-")
+        name = base_name
+        suffix = 2
+        while name in keys and keys[name] != key_data:
+            name = f"{base_name}-{suffix}"
+            suffix += 1
+        return name
+
+    def merge_provider_routes(provider: dict[str, Any], routes: dict[str, str]) -> None:
+        provider_routes = provider["routes"]
+        for mode, route_path in routes.items():
+            existing = provider_routes.get(mode)
+            if existing is not None and existing != route_path:
+                raise ValueError(
+                    f"供应商 {provider['base_url']} 的 {mode} 路由配置冲突"
+                )
+            provider_routes[mode] = route_path
+
+    raw_models = data.get("models")
+    if isinstance(raw_models, dict):
+        migrated["config_version"] = CONFIG_VERSION
+        return migrated
+    if not isinstance(raw_models, list):
+        raw_models = []
+
+    for raw_model in raw_models:
+        if not isinstance(raw_model, dict):
+            continue
+        model_id = str(raw_model.get("id") or "").strip()
+        if not model_id:
+            continue
+        model_data: dict[str, Any] = {
+            "targets": [],
+        }
+        for field_name in ("aliases", "routing_mode", "reasoning_effort", "native_first"):
+            if field_name in raw_model:
+                model_data[field_name] = raw_model[field_name]
+        raw_keys = raw_model.get("keys")
+        if not isinstance(raw_keys, list):
+            raw_keys = []
+        model_key_names: set[str] = set()
+        for index, raw_key in enumerate(raw_keys):
+            if not isinstance(raw_key, dict):
+                continue
+            base_url = str(raw_key.get("base_url") or default_base_url)
+            provider_name = provider_name_for(base_url)
+            provider = providers[provider_name]
+            key_name = str(raw_key.get("name") or f"{model_id}-{index + 1}").strip()
+            if key_name in model_key_names:
+                raise ValueError(f"模型 {model_id} 的 key name 重复: {key_name}")
+            model_key_names.add(key_name)
+            key_data = {
+                "api_key": raw_key.get("api_key"),
+                "enabled": bool(raw_key.get("enabled", True)),
+                "allow_visitor": bool(raw_key.get("allow_visitor", False)),
+            }
+            key_name = migrated_key_name(provider, key_name, key_data, model_id)
+            provider["keys"][key_name] = key_data
+            key_routes = normalize_upstream_routes(raw_key.get("upstream_routes"))
+            if key_routes:
+                merge_provider_routes(provider, key_routes)
+            model_data["targets"].append(
+                {
+                    "provider": provider_name,
+                    "key": key_name,
+                    "upstream_model": str(raw_key.get("upstream_model") or model_id),
+                }
+            )
+        models[model_id] = model_data
+
+    migrated["config_version"] = CONFIG_VERSION
+    migrated["providers"] = providers
+    migrated["models"] = models
+    migrated.pop("default_base_url", None)
+    migrated.pop("upstream_routes", None)
+    return migrated
 
 
 def load_config_data(path: Path) -> dict[str, Any]:
@@ -212,6 +349,14 @@ def save_config_data(path: Path, data: dict[str, Any]) -> None:
             temporary_path.unlink()
         except OSError:
             pass
+
+
+def migrate_config_file(path: Path) -> dict[str, Any]:
+    data = load_config_data(path)
+    migrated = migrate_config_data(data)
+    if migrated != data:
+        save_config_data(path, migrated)
+    return migrated
 
 
 def _resolve_config_path(path: str | Path | None = None) -> Path:
@@ -238,6 +383,8 @@ class KeyConfig:
     enabled: bool = True
     allow_visitor: bool = False
     upstream_routes: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    provider: str | None = None
+    upstream_model: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -255,6 +402,26 @@ class ModelConfig:
     routing_mode: str = "round_robin"
     reasoning_effort: str | None = None
     native_first: bool = True
+
+
+@dataclass(frozen=True)
+class ProviderKeyConfig:
+    name: str
+    api_key: str
+    enabled: bool = True
+    allow_visitor: bool = False
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    id: str
+    base_url: str
+    keys: tuple[ProviderKeyConfig, ...]
+    routes: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "base_url", normalize_upstream_base_url(self.base_url))
+        object.__setattr__(self, "routes", normalize_upstream_routes(self.routes))
 
 
 @dataclass(frozen=True)
@@ -279,12 +446,17 @@ class RouterConfig:
     log_file_path: str
     local_api_key: str
     models: tuple[ModelConfig, ...]
+    providers: tuple[ProviderConfig, ...] = ()
     upstream_routes: dict[str, dict[str, str]] = field(default_factory=dict)
     unified_model: UnifiedModelConfig | None = None
     reasoning_effort_by_model: dict[str, str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         upstream_routes = normalize_upstream_url_routes(self.upstream_routes)
+        for provider in self.providers:
+            merge_upstream_routes_for_url(
+                upstream_routes, provider.base_url, provider.routes
+            )
         for model in self.models:
             for key in model.keys:
                 merge_upstream_routes_for_url(
@@ -312,11 +484,86 @@ class RouterConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "RouterConfig":
+        raw = migrate_config_data(raw)
         models: list[ModelConfig] = []
+        providers: list[ProviderConfig] = []
         default_routing_mode = str(raw.get("routing_mode") or "round_robin")
-        upstream_routes = normalize_upstream_url_routes(raw.get("upstream_routes"))
-        for model in raw.get("models", []):
+        upstream_routes: dict[str, dict[str, str]] = {}
+        provider_keys: dict[tuple[str, str], tuple[ProviderConfig, ProviderKeyConfig]] = {}
+        raw_providers = raw.get("providers")
+        if isinstance(raw_providers, dict):
+            for provider_id, provider in raw_providers.items():
+                if not isinstance(provider, dict):
+                    continue
+                keys: list[ProviderKeyConfig] = []
+                raw_keys = provider.get("keys")
+                if isinstance(raw_keys, dict):
+                    raw_key_items = raw_keys.items()
+                elif isinstance(raw_keys, list):
+                    raw_key_items = (
+                        (str(item.get("name") or index + 1), item)
+                        for index, item in enumerate(raw_keys)
+                        if isinstance(item, dict)
+                    )
+                else:
+                    raw_key_items = ()
+                for key_name, key in raw_key_items:
+                    key_config = ProviderKeyConfig(
+                        name=str(key_name),
+                        api_key=str(key["api_key"]),
+                        enabled=bool(key.get("enabled", True)),
+                        allow_visitor=bool(key.get("allow_visitor", False)),
+                    )
+                    keys.append(key_config)
+                provider_config = ProviderConfig(
+                    id=str(provider_id),
+                    base_url=str(provider.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
+                    keys=tuple(keys),
+                    routes=normalize_upstream_routes(provider.get("routes")),
+                )
+                providers.append(provider_config)
+                for key_config in provider_config.keys:
+                    provider_keys[(provider_config.id, key_config.name)] = (
+                        provider_config,
+                        key_config,
+                    )
+
+        raw_models = raw.get("models", [])
+        if isinstance(raw_models, dict):
+            raw_model_items = raw_models.items()
+        else:
+            raw_model_items = (
+                (str(model.get("id") or ""), model)
+                for model in raw_models
+                if isinstance(model, dict)
+            )
+            upstream_routes = normalize_upstream_url_routes(raw.get("upstream_routes"))
+        for raw_model_id, model in raw_model_items:
             model_keys: list[KeyConfig] = []
+            raw_targets = model.get("targets")
+            if isinstance(raw_targets, list):
+                for target in raw_targets:
+                    if not isinstance(target, dict):
+                        continue
+                    provider_id = str(target.get("provider") or "").strip()
+                    key_name = str(target.get("key") or "").strip()
+                    provider_key = provider_keys.get((provider_id, key_name))
+                    if provider_key is None:
+                        raise ValueError(
+                            f"模型 {raw_model_id} 引用了未配置的供应商 key: {provider_id}/{key_name}"
+                        )
+                    provider_config, key_config = provider_key
+                    model_keys.append(
+                        KeyConfig(
+                            name=str(target.get("name") or key_name),
+                            api_key=key_config.api_key,
+                            base_url=provider_config.base_url,
+                            provider=provider_id,
+                            upstream_model=str(target.get("upstream_model") or raw_model_id),
+                            enabled=key_config.enabled and bool(target.get("enabled", True)),
+                            allow_visitor=key_config.allow_visitor,
+                        )
+                    )
             for index, key in enumerate(model.get("keys", [])):
                 base_url = str(
                     key.get("base_url")
@@ -330,9 +577,10 @@ class RouterConfig:
                 )
                 model_keys.append(
                     KeyConfig(
-                        name=str(key.get("name") or f"{model['id']}-{index + 1}"),
+                        name=str(key.get("name") or f"{raw_model_id}-{index + 1}"),
                         api_key=str(key["api_key"]),
                         base_url=base_url,
+                        upstream_model=str(key.get("upstream_model") or raw_model_id),
                         enabled=bool(key.get("enabled", True)),
                         allow_visitor=bool(key.get("allow_visitor", False)),
                     )
@@ -344,7 +592,8 @@ class RouterConfig:
             if reasoning_effort in {"default", "downstream"}:
                 reasoning_effort = None
             native_first = bool(model.get("native_first", True))
-            models.append(ModelConfig(id=str(model["id"]), keys=keys, aliases=aliases, routing_mode=routing_mode, reasoning_effort=reasoning_effort, native_first=native_first))
+            model_id = str(model.get("id") or raw_model_id)
+            models.append(ModelConfig(id=model_id, keys=keys, aliases=aliases, routing_mode=routing_mode, reasoning_effort=reasoning_effort, native_first=native_first))
 
         unified_model = None
         raw_unified_model = raw.get("unified_model")
@@ -377,6 +626,7 @@ class RouterConfig:
             log_file_path=str(raw.get("log_file_path") or default_log_file_path()),
             local_api_key=str(raw.get("local_api_key", "")),
             models=tuple(models),
+            providers=tuple(providers),
             upstream_routes=upstream_routes,
             unified_model=unified_model,
         )

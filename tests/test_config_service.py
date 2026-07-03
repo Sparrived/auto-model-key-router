@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from auto_model_key_router.config import RouterConfig
+from auto_model_key_router.config import RouterConfig, migrate_config_data, migrate_config_file
 from auto_model_key_router.config_service import ConfigService
 
 
@@ -128,3 +128,112 @@ def test_invalid_upstream_route_base_url_error_includes_value() -> None:
                 ],
             }
         )
+
+
+def test_legacy_config_migrates_keys_under_providers() -> None:
+    migrated = migrate_config_data(
+        {
+            "local_api_key": "local-key",
+            "default_base_url": "https://api.example.test",
+            "upstream_routes": {
+                "https://api.example.test": {"anthropic": "anthropic/"}
+            },
+            "models": [
+                {
+                    "id": "model-a",
+                    "aliases": ["alias-a"],
+                    "keys": [
+                        {
+                            "name": "main",
+                            "api_key": "sk-a",
+                            "base_url": "https://api.example.test",
+                            "allow_visitor": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert migrated["config_version"] == 2
+    assert migrated["providers"] == {
+        "default": {
+            "base_url": "https://api.example.test",
+            "routes": {"anthropic": "anthropic/v1/messages"},
+            "keys": {
+                "main": {
+                    "api_key": "sk-a",
+                    "enabled": True,
+                    "allow_visitor": True,
+                }
+            },
+        }
+    }
+    assert migrated["models"] == {
+        "model-a": {
+            "aliases": ["alias-a"],
+            "targets": [
+                {
+                    "provider": "default",
+                    "key": "main",
+                    "upstream_model": "model-a",
+                }
+            ],
+        }
+    }
+
+
+def test_migrate_config_file_persists_v2_data(tmp_path: Path) -> None:
+    path = tmp_path / "router-config.json"
+    path.write_text(json.dumps(config_data()), encoding="utf-8")
+
+    migrated = migrate_config_file(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    assert migrated == saved
+    assert saved["config_version"] == 2
+    assert saved["providers"]["example-test"]["keys"]["key-a"]["api_key"] == "sk-a"
+    assert saved["models"]["model-a"]["targets"] == [
+        {"provider": "example-test", "key": "key-a", "upstream_model": "model-a"}
+    ]
+
+
+def test_v2_provider_targets_parse_to_runtime_models() -> None:
+    config = RouterConfig.from_dict(
+        {
+            "config_version": 2,
+            "providers": {
+                "vendor": {
+                    "base_url": "https://vendor.example.test",
+                    "routes": {"responses": "responses-v2"},
+                    "keys": {
+                        "main": {"api_key": "sk-main", "allow_visitor": True}
+                    },
+                }
+            },
+            "models": {
+                "local-model": {
+                    "aliases": ["local-alias"],
+                    "targets": [
+                        {
+                            "provider": "vendor",
+                            "key": "main",
+                            "upstream_model": "vendor-model",
+                        }
+                    ],
+                }
+            },
+        }
+    )
+
+    model = config.models[0]
+    key = model.keys[0]
+    assert model.id == "local-model"
+    assert model.aliases == ("local-alias",)
+    assert key.name == "main"
+    assert key.provider == "vendor"
+    assert key.upstream_model == "vendor-model"
+    assert key.base_url == "https://vendor.example.test"
+    assert config.upstream_routes_for_base_url("https://vendor.example.test") == {
+        "responses": "responses-v2/v1/responses"
+    }

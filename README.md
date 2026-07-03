@@ -123,43 +123,53 @@ auto-model-key-router --config router-config.json --switch-key auto
 
 ```json
 {
+  "config_version": 2,
   "host": "127.0.0.1",
   "port": 8000,
-  "default_base_url": "https://api.openai.com",
-  "upstream_routes": {
-    "https://example.com/tokenplan": {
-      "anthropic": "anthropic/"
-    }
-  },
   "request_timeout": 60,
   "max_retries": 2,
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
   "local_api_key": "amkr_your-local-api-key",
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com",
+      "routes": {
+        "openai": "v1/chat/completions",
+        "responses": "v1/responses"
+      },
+      "keys": {
+        "main": {"api_key": "sk-your-first-upstream-key"},
+        "backup": {"api_key": "sk-your-second-upstream-key"}
+      }
+    },
+    "tokenplan": {
+      "base_url": "https://example.com/tokenplan",
+      "routes": {"anthropic": "anthropic/"},
+      "keys": {
+        "mimo": {"api_key": "sk-your-third-upstream-key"}
+      }
+    }
+  },
   "unified_model": {
     "model": "gpt-4o-mini",
     "key": null
   },
-  "models": [
-    {
-      "id": "gpt-4o-mini",
+  "models": {
+    "gpt-4o-mini": {
       "aliases": ["fast-mini"],
       "routing_mode": "round_robin",
-      "keys": [
-        {"name": "openai-main", "api_key": "sk-your-first-upstream-key"},
-        {"name": "openai-backup", "api_key": "sk-your-second-upstream-key"},
-        {
-          "name": "mimo-tokenplan",
-          "api_key": "sk-your-third-upstream-key",
-          "base_url": "https://example.com/tokenplan"
-        }
+      "targets": [
+        {"provider": "openai", "key": "main", "upstream_model": "gpt-4o-mini"},
+        {"provider": "openai", "key": "backup", "upstream_model": "gpt-4o-mini"},
+        {"provider": "tokenplan", "key": "mimo", "upstream_model": "gpt-4o-mini"}
       ]
     }
-  ]
+  }
 }
 ```
 
-> `local_api_key` 是客户端访问本地 AMKR 的 Key；`keys[].api_key` 是 AMKR 转发到上游模型服务时使用的真实供应商 Key。
+> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`models.*.targets` 决定本地模型可路由到哪些供应商 Key。旧版 `models[].keys[]` 配置会在加载时自动按供应商迁移为新版语义。
 
 ## 文档
 
