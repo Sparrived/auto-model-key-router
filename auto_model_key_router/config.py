@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import secrets
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 from .visitor import VISITOR_API_KEY
 
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 
 def default_cache_dir() -> Path:
@@ -241,6 +242,7 @@ def migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
             "base_url": normalized_base_url,
             "routes": dict(top_routes.get(normalized_base_url, {})),
             "keys": {},
+            "pools": {},
         }
         provider_names_by_base_url[normalized_base_url] = name
         return name
@@ -272,6 +274,47 @@ def migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
 
     raw_models = data.get("models")
     if isinstance(raw_models, dict):
+        providers = deepcopy(data.get("providers")) if isinstance(data.get("providers"), dict) else {}
+        models = deepcopy(raw_models)
+        for provider_id, provider in providers.items():
+            if not isinstance(provider, dict):
+                continue
+            keys = provider.get("keys") if isinstance(provider.get("keys"), dict) else {}
+            pools = provider.setdefault("pools", {})
+            if not isinstance(pools, dict):
+                pools = {}
+                provider["pools"] = pools
+            if keys and not pools:
+                pools["default"] = {"keys": list(keys)}
+        for model in models.values():
+            if not isinstance(model, dict):
+                continue
+            targets = model.get("targets")
+            if not isinstance(targets, list):
+                continue
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                provider_id = str(target.get("provider") or "")
+                key_name = str(target.get("key") or "")
+                if target.get("pool") or not provider_id or not key_name:
+                    continue
+                provider = providers.get(provider_id)
+                if not isinstance(provider, dict):
+                    continue
+                pools = provider.setdefault("pools", {})
+                pool_name = key_name
+                existing = pools.get(pool_name)
+                if isinstance(existing, dict):
+                    pool_keys = existing.setdefault("keys", [])
+                    if key_name not in pool_keys:
+                        pool_keys.append(key_name)
+                else:
+                    pools[pool_name] = {"keys": [key_name]}
+                target["pool"] = pool_name
+                target.pop("key", None)
+        migrated["providers"] = providers
+        migrated["models"] = models
         migrated["config_version"] = CONFIG_VERSION
         return migrated
     if not isinstance(raw_models, list):
@@ -310,13 +353,18 @@ def migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
             }
             key_name = migrated_key_name(provider, key_name, key_data, model_id)
             provider["keys"][key_name] = key_data
+            pools = provider.setdefault("pools", {})
+            pool_name = str(raw_key.get("pool") or "default")
+            pool = pools.setdefault(pool_name, {"keys": []})
+            if key_name not in pool["keys"]:
+                pool["keys"].append(key_name)
             key_routes = normalize_upstream_routes(raw_key.get("upstream_routes"))
             if key_routes:
                 merge_provider_routes(provider, key_routes)
             model_data["targets"].append(
                 {
                     "provider": provider_name,
-                    "key": key_name,
+                    "pool": str(raw_key.get("pool") or "default"),
                     "upstream_model": str(raw_key.get("upstream_model") or model_id),
                 }
             )
@@ -413,10 +461,17 @@ class ProviderKeyConfig:
 
 
 @dataclass(frozen=True)
+class ProviderPoolConfig:
+    name: str
+    keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     id: str
     base_url: str
     keys: tuple[ProviderKeyConfig, ...]
+    pools: tuple[ProviderPoolConfig, ...] = ()
     routes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -490,6 +545,7 @@ class RouterConfig:
         default_routing_mode = str(raw.get("routing_mode") or "round_robin")
         upstream_routes: dict[str, dict[str, str]] = {}
         provider_keys: dict[tuple[str, str], tuple[ProviderConfig, ProviderKeyConfig]] = {}
+        provider_pools: dict[tuple[str, str], tuple[ProviderConfig, tuple[ProviderKeyConfig, ...]]] = {}
         raw_providers = raw.get("providers")
         if isinstance(raw_providers, dict):
             for provider_id, provider in raw_providers.items():
@@ -515,10 +571,32 @@ class RouterConfig:
                         allow_visitor=bool(key.get("allow_visitor", False)),
                     )
                     keys.append(key_config)
+                key_configs_by_name = {key_config.name: key_config for key_config in keys}
+                pools: list[ProviderPoolConfig] = []
+                raw_pools = provider.get("pools")
+                if isinstance(raw_pools, dict):
+                    raw_pool_items = raw_pools.items()
+                else:
+                    raw_pool_items = (("default", {"keys": list(key_configs_by_name)}),)
+                for pool_name, pool in raw_pool_items:
+                    if isinstance(pool, dict):
+                        pool_keys = pool.get("keys")
+                    else:
+                        pool_keys = pool
+                    if not isinstance(pool_keys, list):
+                        raise ValueError(f"供应商 {provider_id} 的 pool {pool_name} keys 必须是数组")
+                    pool_key_names = tuple(str(key_name) for key_name in pool_keys)
+                    missing_keys = [key_name for key_name in pool_key_names if key_name not in key_configs_by_name]
+                    if missing_keys:
+                        raise ValueError(
+                            f"供应商 {provider_id} 的 pool {pool_name} 引用了未配置的 key: {', '.join(missing_keys)}"
+                        )
+                    pools.append(ProviderPoolConfig(str(pool_name), pool_key_names))
                 provider_config = ProviderConfig(
                     id=str(provider_id),
                     base_url=str(provider.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
                     keys=tuple(keys),
+                    pools=tuple(pools),
                     routes=normalize_upstream_routes(provider.get("routes")),
                 )
                 providers.append(provider_config)
@@ -526,6 +604,11 @@ class RouterConfig:
                     provider_keys[(provider_config.id, key_config.name)] = (
                         provider_config,
                         key_config,
+                    )
+                for pool_config in provider_config.pools:
+                    provider_pools[(provider_config.id, pool_config.name)] = (
+                        provider_config,
+                        tuple(key_configs_by_name[key_name] for key_name in pool_config.keys),
                     )
 
         raw_models = raw.get("models", [])
@@ -540,13 +623,55 @@ class RouterConfig:
             upstream_routes = normalize_upstream_url_routes(raw.get("upstream_routes"))
         for raw_model_id, model in raw_model_items:
             model_keys: list[KeyConfig] = []
+            used_model_key_names: set[str] = set()
+
+            def model_key_name(base_name: str, qualifier: str | None = None) -> str:
+                name = base_name
+                if name not in used_model_key_names:
+                    used_model_key_names.add(name)
+                    return name
+                qualified = f"{qualifier}-{base_name}" if qualifier else base_name
+                name = qualified
+                suffix = 2
+                while name in used_model_key_names:
+                    name = f"{qualified}-{suffix}"
+                    suffix += 1
+                used_model_key_names.add(name)
+                return name
+
             raw_targets = model.get("targets")
             if isinstance(raw_targets, list):
                 for target in raw_targets:
                     if not isinstance(target, dict):
                         continue
                     provider_id = str(target.get("provider") or "").strip()
+                    pool_name = str(target.get("pool") or "").strip()
                     key_name = str(target.get("key") or "").strip()
+                    upstream_model = str(target.get("upstream_model") or raw_model_id)
+                    target_enabled = bool(target.get("enabled", True))
+                    if pool_name:
+                        provider_pool = provider_pools.get((provider_id, pool_name))
+                        if provider_pool is None:
+                            raise ValueError(
+                                f"模型 {raw_model_id} 引用了未配置的供应商 pool: {provider_id}/{pool_name}"
+                            )
+                        provider_config, pool_keys = provider_pool
+                        for key_config in pool_keys:
+                            model_keys.append(
+                                KeyConfig(
+                                    name=model_key_name(
+                                        str(target.get("name") or key_config.name),
+                                        pool_name,
+                                    ),
+                                    api_key=key_config.api_key,
+                                    base_url=provider_config.base_url,
+                                    provider=provider_id,
+                                    upstream_model=upstream_model,
+                                    enabled=key_config.enabled and target_enabled,
+                                    allow_visitor=key_config.allow_visitor,
+                                )
+                            )
+                        continue
                     provider_key = provider_keys.get((provider_id, key_name))
                     if provider_key is None:
                         raise ValueError(
@@ -555,12 +680,12 @@ class RouterConfig:
                     provider_config, key_config = provider_key
                     model_keys.append(
                         KeyConfig(
-                            name=str(target.get("name") or key_name),
+                            name=model_key_name(str(target.get("name") or key_name)),
                             api_key=key_config.api_key,
                             base_url=provider_config.base_url,
                             provider=provider_id,
-                            upstream_model=str(target.get("upstream_model") or raw_model_id),
-                            enabled=key_config.enabled and bool(target.get("enabled", True)),
+                            upstream_model=upstream_model,
+                            enabled=key_config.enabled and target_enabled,
                             allow_visitor=key_config.allow_visitor,
                         )
                     )
@@ -577,7 +702,7 @@ class RouterConfig:
                 )
                 model_keys.append(
                     KeyConfig(
-                        name=str(key.get("name") or f"{raw_model_id}-{index + 1}"),
+                        name=model_key_name(str(key.get("name") or f"{raw_model_id}-{index + 1}")),
                         api_key=str(key["api_key"]),
                         base_url=base_url,
                         upstream_model=str(key.get("upstream_model") or raw_model_id),

@@ -155,7 +155,7 @@ def test_legacy_config_migrates_keys_under_providers() -> None:
         }
     )
 
-    assert migrated["config_version"] == 2
+    assert migrated["config_version"] == 3
     assert migrated["providers"] == {
         "default": {
             "base_url": "https://api.example.test",
@@ -167,6 +167,7 @@ def test_legacy_config_migrates_keys_under_providers() -> None:
                     "allow_visitor": True,
                 }
             },
+            "pools": {"default": {"keys": ["main"]}},
         }
     }
     assert migrated["models"] == {
@@ -175,7 +176,7 @@ def test_legacy_config_migrates_keys_under_providers() -> None:
             "targets": [
                 {
                     "provider": "default",
-                    "key": "main",
+                    "pool": "default",
                     "upstream_model": "model-a",
                 }
             ],
@@ -191,17 +192,18 @@ def test_migrate_config_file_persists_v2_data(tmp_path: Path) -> None:
     saved = json.loads(path.read_text(encoding="utf-8"))
 
     assert migrated == saved
-    assert saved["config_version"] == 2
+    assert saved["config_version"] == 3
     assert saved["providers"]["example-test"]["keys"]["key-a"]["api_key"] == "sk-a"
+    assert saved["providers"]["example-test"]["pools"] == {"default": {"keys": ["key-a"]}}
     assert saved["models"]["model-a"]["targets"] == [
-        {"provider": "example-test", "key": "key-a", "upstream_model": "model-a"}
+        {"provider": "example-test", "pool": "default", "upstream_model": "model-a"}
     ]
 
 
-def test_v2_provider_targets_parse_to_runtime_models() -> None:
+def test_provider_pool_targets_parse_to_runtime_models() -> None:
     config = RouterConfig.from_dict(
         {
-            "config_version": 2,
+            "config_version": 3,
             "providers": {
                 "vendor": {
                     "base_url": "https://vendor.example.test",
@@ -209,6 +211,7 @@ def test_v2_provider_targets_parse_to_runtime_models() -> None:
                     "keys": {
                         "main": {"api_key": "sk-main", "allow_visitor": True}
                     },
+                    "pools": {"premium": {"keys": ["main"]}},
                 }
             },
             "models": {
@@ -217,7 +220,7 @@ def test_v2_provider_targets_parse_to_runtime_models() -> None:
                     "targets": [
                         {
                             "provider": "vendor",
-                            "key": "main",
+                            "pool": "premium",
                             "upstream_model": "vendor-model",
                         }
                     ],
@@ -237,3 +240,36 @@ def test_v2_provider_targets_parse_to_runtime_models() -> None:
     assert config.upstream_routes_for_base_url("https://vendor.example.test") == {
         "responses": "responses-v2/v1/responses"
     }
+
+
+def test_v2_key_targets_migrate_to_single_key_pools() -> None:
+    migrated = migrate_config_data(
+        {
+            "config_version": 2,
+            "providers": {
+                "vendor": {
+                    "base_url": "https://vendor.example.test",
+                    "keys": {
+                        "main": {"api_key": "sk-main"},
+                        "backup": {"api_key": "sk-backup"},
+                    },
+                }
+            },
+            "models": {
+                "local-model": {
+                    "targets": [
+                        {"provider": "vendor", "key": "main", "upstream_model": "vendor-model"}
+                    ]
+                }
+            },
+        }
+    )
+
+    assert migrated["config_version"] == 3
+    assert migrated["providers"]["vendor"]["pools"] == {
+        "default": {"keys": ["main", "backup"]},
+        "main": {"keys": ["main"]},
+    }
+    assert migrated["models"]["local-model"]["targets"] == [
+        {"provider": "vendor", "upstream_model": "vendor-model", "pool": "main"}
+    ]

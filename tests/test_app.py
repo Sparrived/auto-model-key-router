@@ -152,12 +152,13 @@ def test_models_requires_valid_api_key(tmp_path: Path) -> None:
 def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> None:
     config = RouterConfig.from_dict(
         {
-            "config_version": 2,
+            "config_version": 3,
             "local_api_key": "local-key",
             "providers": {
                 "vendor": {
                     "base_url": "https://upstream.test",
                     "keys": {"main": {"api_key": "sk-main"}},
+                    "pools": {"premium": {"keys": ["main"]}},
                 }
             },
             "models": {
@@ -165,7 +166,7 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
                     "targets": [
                         {
                             "provider": "vendor",
-                            "key": "main",
+                            "pool": "premium",
                             "upstream_model": "vendor-model",
                         }
                     ]

@@ -1,5 +1,5 @@
 {
-  "config_version": 2,
+  "config_version": 3,
   "host": "127.0.0.1",
   "port": 8000,
   "request_timeout": 60,
@@ -27,12 +27,18 @@
           "api_key": "sk-your-second-key",
           "allow_visitor": true
         }
+      },
+      "pools": {
+        "default": {
+          "keys": ["main", "backup"],
+          "models": ["gpt-4o-mini"]
+        }
       }
     }
   },
   "unified_model": {
     "model": "gpt-4o-mini",
-    "key": "main",
+    "key": null,
     "image_model": null,
     "image_key": null
   },
@@ -44,12 +50,7 @@
       "targets": [
         {
           "provider": "openai",
-          "key": "main",
-          "upstream_model": "gpt-4o-mini"
-        },
-        {
-          "provider": "openai",
-          "key": "backup",
+          "pool": "default",
           "upstream_model": "gpt-4o-mini"
         }
       ]
