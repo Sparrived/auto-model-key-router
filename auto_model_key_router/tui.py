@@ -847,6 +847,14 @@ def run_submodule(action: Any) -> Any:
         return action()
     except KeyboardInterrupt:
         return section_panel("已取消，返回上一级。", "取消", "yellow")
+    except Exception as exc:
+        content = section_panel(
+            f"[red]{exc.__class__.__name__}: {exc}[/red]\n\n[dim]已捕获错误，按返回键回到主页。[/dim]",
+            "操作出错",
+            "red",
+        )
+        show_result_page("操作出错", content)
+        return content
 
 
 def show_result_page(title: str, content: Any) -> None:
