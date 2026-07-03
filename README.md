@@ -123,7 +123,7 @@ auto-model-key-router --config router-config.json --switch-key auto
 
 ```json
 {
-  "config_version": 2,
+  "config_version": 3,
   "host": "127.0.0.1",
   "port": 8000,
   "request_timeout": 60,
@@ -141,6 +141,12 @@ auto-model-key-router --config router-config.json --switch-key auto
       "keys": {
         "main": {"api_key": "sk-your-first-upstream-key"},
         "backup": {"api_key": "sk-your-second-upstream-key"}
+      },
+      "pools": {
+        "default": {
+          "keys": ["main", "backup"],
+          "models": ["gpt-4o-mini"]
+        }
       }
     },
     "tokenplan": {
@@ -148,6 +154,9 @@ auto-model-key-router --config router-config.json --switch-key auto
       "routes": {"anthropic": "anthropic/"},
       "keys": {
         "mimo": {"api_key": "sk-your-third-upstream-key"}
+      },
+      "pools": {
+        "default": {"keys": ["mimo"]}
       }
     }
   },
@@ -160,16 +169,15 @@ auto-model-key-router --config router-config.json --switch-key auto
       "aliases": ["fast-mini"],
       "routing_mode": "round_robin",
       "targets": [
-        {"provider": "openai", "key": "main", "upstream_model": "gpt-4o-mini"},
-        {"provider": "openai", "key": "backup", "upstream_model": "gpt-4o-mini"},
-        {"provider": "tokenplan", "key": "mimo", "upstream_model": "gpt-4o-mini"}
+        {"provider": "openai", "pool": "default", "upstream_model": "gpt-4o-mini"},
+        {"provider": "tokenplan", "pool": "default", "upstream_model": "gpt-4o-mini"}
       ]
     }
   }
 }
 ```
 
-> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`models.*.targets` 决定本地模型可路由到哪些供应商 Key。旧版 `models[].keys[]` 配置会在加载时自动按供应商迁移为新版语义。
+> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`providers.*.pools` 表示同一模型能力池，TUI 创建或刷新模型池时会探测可用模型与路由并写入 `models` / `routes` 元信息；如果上游不支持 `/v1/models`，TUI 会允许手动填写可用模型并继续探测路由；`models.*.targets` 默认绑定到模型池。旧版 `models[].keys[]` 和 v2 的 `target.key` 会自动迁移为新版语义。
 
 ## 文档
 

@@ -1295,7 +1295,7 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
 
 
 def test_provider_model_menu_opens_model_settings(tmp_path, monkeypatch) -> None:
-    choices = iter(["5", "0"])
+    choices = iter(["6", "0"])
     menus: list[list[tuple[str, str]]] = []
     opened: list[Path] = []
 
@@ -1312,10 +1312,11 @@ def test_provider_model_menu_opens_model_settings(tmp_path, monkeypatch) -> None
     assert menus[0] == [
         ("1", "添加供应商 Key"),
         ("2", "管理供应商 Key"),
-        ("3", "添加模型路由"),
-        ("4", "管理模型路由"),
-        ("5", "模型参数"),
-        ("6", "供应商路径"),
+        ("3", "模型池"),
+        ("4", "添加模型路由"),
+        ("5", "管理模型路由"),
+        ("6", "模型参数"),
+        ("7", "供应商路径"),
         ("0", "返回"),
     ]
     assert opened == [tmp_path / "router-config.json"]
@@ -1331,13 +1332,15 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "n")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: {"models": ["upstream-model"], "all_models": ["upstream-model"], "routes": {}})
 
     result = config_editor.add_provider_key_interactively(config_path)
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert "添加完成" in render_plain(result)
-    assert data["config_version"] == 2
+    assert data["config_version"] == 3
     assert data["providers"]["openai"]["keys"]["main"]["api_key"] == "sk-main"
+    assert data["providers"]["openai"]["pools"] == {"default": {"keys": ["main"]}}
 
     prompts = iter(["local-model", "upstream-model"])
     choices = iter(["1", "1"])
@@ -1349,7 +1352,142 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
 
     assert "添加完成" in render_plain(result)
     assert data["models"]["local-model"]["targets"] == [
-        {"provider": "openai", "key": "main", "upstream_model": "upstream-model"}
+        {"provider": "openai", "pool": "default", "upstream_model": "upstream-model"}
+    ]
+
+
+def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {
+                            "cheap-1": {"api_key": "sk-1"},
+                            "cheap-2": {"api_key": "sk-2"},
+                            "pro-1": {"api_key": "sk-3"},
+                        },
+                        "pools": {},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1"])
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "cheap")
+    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["cheap-1", "cheap-2"])
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: provider["pools"][pool_name].update({"models": ["gpt-a"], "all_models": ["gpt-a", "gpt-b"], "routes": {}}) or {"models": ["gpt-a"], "all_models": ["gpt-a", "gpt-b"], "routes": {}})
+
+    result = config_editor.update_provider_pool_interactively(config_path, "gateway", "1")
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "模型池" in render_plain(result)
+    assert data["providers"]["gateway"]["pools"]["cheap"] == {
+        "keys": ["cheap-1", "cheap-2"],
+        "models": ["gpt-a"],
+        "all_models": ["gpt-a", "gpt-b"],
+        "routes": {},
+    }
+
+
+def test_pool_probe_models_records_common_models_and_routes(monkeypatch) -> None:
+    def fake_discover(base_url, api_key, existing_model_ids, timeout=15.0):
+        return {
+            "sk-1": ["gpt-a", "gpt-b"],
+            "sk-2": ["gpt-a", "gpt-c"],
+        }[api_key]
+
+    def fake_probe(data, model_id, key, timeout=15.0):
+        return [
+            config_editor.KeyProbeResult(
+                model_id=model_id,
+                key_name=str(key["name"]),
+                mode="openai",
+                label="OpenAI Chat",
+                path="v1/chat/completions",
+                url="https://gateway.example.test/v1/chat/completions",
+                available=True,
+                status_code=200,
+                duration_ms=1,
+                error="",
+            )
+        ]
+
+    monkeypatch.setattr(config_editor, "discover_upstream_models", fake_discover)
+    monkeypatch.setattr(config_editor, "probe_key_availability", fake_probe)
+
+    result = config_editor.pool_probe_models(
+        {
+            "base_url": "https://gateway.example.test",
+            "keys": {"k1": {"api_key": "sk-1"}, "k2": {"api_key": "sk-2"}},
+        },
+        ["k1", "k2"],
+    )
+
+    assert result["models"] == ["gpt-a"]
+    assert result["all_models"] == ["gpt-a", "gpt-b", "gpt-c"]
+    assert result["key_models"] == {"k1": ["gpt-a", "gpt-b"], "k2": ["gpt-a", "gpt-c"]}
+    assert result["routes"] == {"k1": {"openai": True}, "k2": {"openai": True}}
+    assert result["checked_at"]
+
+
+def test_pool_probe_models_accepts_manual_models_when_discovery_empty(monkeypatch) -> None:
+    monkeypatch.setattr(config_editor, "discover_upstream_models", lambda *args, **kwargs: [])
+    monkeypatch.setattr(config_editor, "probe_key_availability", lambda *args, **kwargs: [])
+
+    result = config_editor.pool_probe_models(
+        {
+            "base_url": "https://gateway.example.test",
+            "keys": {"k1": {"api_key": "sk-1"}, "k2": {"api_key": "sk-2"}},
+        },
+        ["k1", "k2"],
+        manual_models=["gpt-manual"],
+    )
+
+    assert result["models"] == ["gpt-manual"]
+    assert result["all_models"] == ["gpt-manual"]
+    assert result["key_models"] == {"k1": ["gpt-manual"], "k2": ["gpt-manual"]}
+    assert result["manual_models"] is True
+
+
+def test_pool_update_prompts_manual_models_when_discovery_empty(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {"k1": {"api_key": "sk-1"}},
+                        "pools": {},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompts = iter(["manual-pool", "gpt-manual,gpt-extra"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["k1"])
+    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: {"models": [], "all_models": [], "routes": {}} if "manual_models" not in kwargs else provider["pools"][pool_name].update({"models": kwargs["manual_models"], "all_models": kwargs["manual_models"], "key_models": {"k1": kwargs["manual_models"]}, "routes": {}, "manual_models": True}) or {"models": kwargs["manual_models"], "all_models": kwargs["manual_models"], "routes": {}})
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    result = config_editor.update_provider_pool_interactively(config_path, "gateway", "1")
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "共同可用模型" in render_plain(result)
+    assert data["providers"]["gateway"]["pools"]["manual-pool"]["models"] == [
+        "gpt-manual",
+        "gpt-extra",
     ]
 
 

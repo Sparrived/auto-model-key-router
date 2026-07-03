@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import sys
 from time import monotonic, time
@@ -383,6 +384,124 @@ def provider_keys(provider: dict[str, Any]) -> dict[str, Any]:
     return keys
 
 
+def provider_pools(provider: dict[str, Any]) -> dict[str, Any]:
+    pools = provider.setdefault("pools", {})
+    if not isinstance(pools, dict):
+        raise ValueError("provider.pools 必须是对象")
+    return pools
+
+
+def pool_key_names(pool: Any) -> list[str]:
+    if isinstance(pool, dict):
+        keys = pool.get("keys", [])
+    else:
+        keys = pool
+    if not isinstance(keys, list):
+        return []
+    return [str(key_name) for key_name in keys]
+
+
+def ensure_default_pool(provider: dict[str, Any]) -> None:
+    keys = provider_keys(provider)
+    pools = provider_pools(provider)
+    if keys and "default" not in pools:
+        pools["default"] = {"keys": list(keys)}
+
+
+def pool_probe_models(
+    provider: dict[str, Any],
+    key_names: list[str],
+    timeout: float = 15.0,
+    manual_models: list[str] | None = None,
+) -> dict[str, Any]:
+    base_url = str(provider.get("base_url") or "").strip()
+    keys = provider_keys(provider)
+    routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
+    key_models: dict[str, list[str]] = {}
+    model_counts: dict[str, int] = {}
+    route_results: dict[str, dict[str, bool]] = {}
+    for key_name in key_names:
+        key = keys.get(key_name)
+        if not isinstance(key, dict):
+            continue
+        api_key = str(key.get("api_key") or "")
+        if not base_url or not api_key:
+            key_models[key_name] = []
+            continue
+        discovered = discover_upstream_models(base_url, api_key, set(), timeout=timeout)
+        key_models[key_name] = discovered
+        for model_id in discovered:
+            model_counts[model_id] = model_counts.get(model_id, 0) + 1
+    common_models = sorted(
+        model_id for model_id, count in model_counts.items() if count == len(key_names)
+    )
+    manual_models = sorted(dict.fromkeys(manual_models or []))
+    if not model_counts and manual_models:
+        common_models = manual_models
+        model_counts = {model_id: len(key_names) for model_id in manual_models}
+        for key_name in key_names:
+            key_models[key_name] = manual_models
+    candidate_models = common_models or sorted(model_counts)
+    probe_model = candidate_models[0] if candidate_models else None
+    if probe_model:
+        probe_data = {"upstream_routes": {base_url: routes} if routes else {}}
+        for key_name in key_names:
+            key = keys.get(key_name)
+            if not isinstance(key, dict):
+                continue
+            probe_key = dict(key)
+            probe_key["name"] = key_name
+            probe_key["base_url"] = base_url
+            route_results[key_name] = {
+                result.mode: result.available
+                for result in probe_key_availability(
+                    probe_data, probe_model, probe_key, timeout=timeout
+                )
+            }
+    return {
+        "models": common_models,
+        "all_models": sorted(model_counts),
+        "key_models": key_models,
+        "routes": route_results,
+        "manual_models": bool(manual_models and common_models == manual_models),
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def apply_pool_probe(
+    provider: dict[str, Any],
+    pool_name: str,
+    timeout: float = 15.0,
+    manual_models: list[str] | None = None,
+) -> dict[str, Any]:
+    pool = provider_pools(provider).setdefault(pool_name, {"keys": []})
+    key_names = pool_key_names(pool)
+    probe = pool_probe_models(
+        provider, key_names, timeout=timeout, manual_models=manual_models
+    )
+    if isinstance(pool, dict):
+        pool["models"] = probe["models"]
+        pool["all_models"] = probe["all_models"]
+        pool["key_models"] = probe["key_models"]
+        pool["routes"] = probe["routes"]
+        pool["manual_models"] = probe["manual_models"]
+        pool["checked_at"] = probe["checked_at"]
+    return probe
+
+
+def parse_model_id_list(value: str) -> list[str]:
+    return [model_id.strip() for model_id in value.split(",") if model_id.strip()]
+
+
+def prompt_manual_pool_models(default_models: list[str] | None = None) -> list[str]:
+    text = prompt_text(
+        "模型池",
+        "手动可用模型，多个用逗号分隔",
+        default=", ".join(default_models or []),
+    ).strip()
+    return parse_model_id_list(text)
+
+
 def model_targets(model: dict[str, Any]) -> list[dict[str, Any]]:
     targets = model.setdefault("targets", [])
     if not isinstance(targets, list):
@@ -399,10 +518,12 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
     provider_table.add_column("供应商", ratio=1)
     provider_table.add_column("Base URL", ratio=2)
     provider_table.add_column("Keys", justify="right")
+    provider_table.add_column("Pools", justify="right")
     provider_table.add_column("访客", justify="right")
     provider_table.add_column("路由", ratio=2)
     for provider_id, provider in sorted(providers.items()):
         keys = provider_keys(provider)
+        pools = provider_pools(provider)
         visitor_keys = sum(1 for key in keys.values() if key.get("allow_visitor"))
         routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
         route_text = ", ".join(sorted(routes)) if routes else "默认"
@@ -410,11 +531,12 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
             short_text(str(provider_id), 18),
             compact_url(str(provider.get("base_url") or "-"), 42),
             str(len(keys)),
+            str(len(pools)),
             format_visitor_status_text(visitor_keys > 0, visitor_installed),
             short_text(route_text, 28),
         )
     if not provider_table.rows:
-        provider_table.add_row("-", "[yellow]暂无供应商[/yellow]", "0", "-", "-")
+        provider_table.add_row("-", "[yellow]暂无供应商[/yellow]", "0", "0", "-", "-")
 
     model_table = Table(show_header=True, header_style="bold cyan", expand=True)
     model_table.add_column("本地模型", ratio=2)
@@ -425,8 +547,9 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
         targets = model_targets(model)
         upstreams = []
         for target in targets[:3]:
+            target_name = target.get("pool") or target.get("key") or "-"
             upstreams.append(
-                f"{target.get('provider')}/{target.get('key')}→{target.get('upstream_model') or model_id}"
+                f"{target.get('provider')}/{target_name}→{target.get('upstream_model') or model_id}"
             )
         if len(targets) > 3:
             upstreams.append(f"+{len(targets) - 3}")
@@ -486,6 +609,28 @@ def select_provider_key(data: dict[str, Any], title: str) -> tuple[str, str] | N
     return provider_id, sorted(keys)[int(choice) - 1]
 
 
+def select_provider_pool(data: dict[str, Any], title: str) -> tuple[str, str] | None:
+    provider_id = select_provider(data, "选择供应商")
+    if provider_id is None:
+        return None
+    provider = raw_providers(data)[provider_id]
+    ensure_default_pool(provider)
+    pools = provider_pools(provider)
+    if not pools:
+        return None
+    options = [
+        (
+            str(index + 1),
+            f"{short_text(pool_name, 26)} · {len(pool_key_names(pool))} Key",
+        )
+        for index, (pool_name, pool) in enumerate(sorted(pools.items()))
+    ] + [("0", "返回")]
+    choice = select_option(title, options)
+    if choice == "0":
+        return None
+    return provider_id, sorted(pools)[int(choice) - 1]
+
+
 def select_v2_model(data: dict[str, Any], title: str) -> str | None:
     models = raw_v2_models(data)
     if not models:
@@ -526,7 +671,7 @@ def add_provider_key_interactively(path: Path) -> Any:
         base_url = prompt_text(
             "添加供应商", "Base URL", default="https://api.openai.com"
         ).strip()
-        providers[provider_id] = {"base_url": base_url, "keys": {}}
+        providers[provider_id] = {"base_url": base_url, "keys": {}, "pools": {}}
     else:
         provider_id = existing[int(provider_choice) - 1]
     provider = providers[provider_id]
@@ -542,10 +687,16 @@ def add_provider_key_interactively(path: Path) -> Any:
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
     keys[key_name] = {"api_key": api_key, "enabled": True}
+    default_pool = provider_pools(provider).setdefault("default", {"keys": []})
+    default_keys = default_pool.setdefault("keys", [])
+    if key_name not in default_keys:
+        default_keys.append(key_name)
+    with console.status("[cyan]正在探测 default 模型池可用模型和路由...[/cyan]", spinner="dots"):
+        probe = apply_pool_probe(provider, "default")
     restart = commit_v2_config(path, data, old_config)
     return Group(
         section_panel(
-            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]",
+            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池 default 共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]",
             "添加完成",
             "green",
         ),
@@ -604,6 +755,10 @@ def update_provider_key_interactively(
         if new_name in keys:
             return section_panel(f"[red]Key 已存在: {new_name}[/red]", "重命名 Key", "red")
         keys[new_name] = keys.pop(key_name)
+        for pool in provider_pools(provider).values():
+            pool_keys = pool_key_names(pool)
+            if key_name in pool_keys and isinstance(pool, dict):
+                pool["keys"] = [new_name if item == key_name else item for item in pool_keys]
         for model in raw_v2_models(data).values():
             for target in model_targets(model):
                 if target.get("provider") == provider_id and target.get("key") == key_name:
@@ -631,6 +786,9 @@ def update_provider_key_interactively(
         ):
             return section_panel("[yellow]配置未变化。[/yellow]", "删除 Key", "yellow")
         keys.pop(key_name)
+        for pool in provider_pools(provider).values():
+            if isinstance(pool, dict):
+                pool["keys"] = [item for item in pool_key_names(pool) if item != key_name]
         for model in raw_v2_models(data).values():
             targets = model_targets(model)
             targets[:] = [
@@ -645,6 +803,173 @@ def update_provider_key_interactively(
     return Group(section_panel(message, "供应商 Key", "green"), restart)
 
 
+def manage_provider_pools_interactively(path: Path) -> None:
+    while True:
+        data = load_v2_config_data(path)
+        provider_id = select_provider(data, "选择供应商模型池")
+        if provider_id is None:
+            return
+        provider = raw_providers(data)[provider_id]
+        ensure_default_pool(provider)
+        pools = provider_pools(provider)
+        rows = "\n".join(
+            f"[bold]{pool_name}[/bold]: {', '.join(pool_key_names(pool)) or '空'}"
+            f" · 模型 {len(pool.get('models') or []) if isinstance(pool, dict) else 0}"
+            f" · {pool.get('checked_at') or '未探测' if isinstance(pool, dict) else '未探测'}"
+            for pool_name, pool in sorted(pools.items())
+        ) or "[yellow]暂无模型池[/yellow]"
+        choice = select_option(
+            f"模型池 · {provider_id}",
+            [
+                ("1", "新增/编辑模型池"),
+                ("2", "刷新可用性"),
+                ("3", "手动设置模型"),
+                ("4", "删除模型池"),
+                ("0", "返回"),
+            ],
+            content=section_panel(rows, "模型池", "cyan"),
+        )
+        if choice == "0":
+            continue
+        clear_terminal_history()
+        result = update_provider_pool_interactively(path, provider_id, choice)
+        if result is not None:
+            show_result_page("模型池", result)
+
+
+def update_provider_pool_interactively(path: Path, provider_id: str, choice: str) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    provider = raw_providers(data)[provider_id]
+    keys = provider_keys(provider)
+    pools = provider_pools(provider)
+    if choice == "1":
+        pool_name = prompt_text("模型池", "Pool 名称", default="default").strip()
+        if not pool_name:
+            return section_panel("[red]Pool 名称不能为空[/red]", "模型池", "red")
+        if not keys:
+            return section_panel("[yellow]该供应商暂无 Key。[/yellow]", "模型池", "yellow")
+        selected_keys = select_multiple(
+            "选择 Pool Keys",
+            [(key_name, key_name) for key_name in sorted(keys)],
+            content=section_panel(
+                "选择这个模型池可用的 Key。池代表同一批模型能力，而不是单个凭证。",
+                "模型池",
+                "cyan",
+            ),
+        )
+        if not selected_keys:
+            return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
+        pools[pool_name] = {"keys": selected_keys}
+        with console.status("[cyan]正在探测模型池可用模型和路由...[/cyan]", spinner="dots"):
+            probe = apply_pool_probe(provider, pool_name)
+        if not probe.get("models") and not probe.get("all_models"):
+            manual_models = prompt_manual_pool_models()
+            if manual_models:
+                with console.status("[cyan]正在使用手动模型探测路由...[/cyan]", spinner="dots"):
+                    probe = apply_pool_probe(
+                        provider, pool_name, manual_models=manual_models
+                    )
+        model_count = len(probe.get("models") or [])
+        all_model_count = len(probe.get("all_models") or [])
+        route_count = sum(
+            1
+            for route_map in (probe.get("routes") or {}).values()
+            for available in route_map.values()
+            if available
+        )
+        message = (
+            f"已保存模型池 {provider_id}/{pool_name}，包含 {len(selected_keys)} 个 Key。\n"
+            f"共同可用模型: [bold]{model_count}[/bold]\n"
+            f"任一 Key 可用模型: [bold]{all_model_count}[/bold]\n"
+            f"可用路由探测: [bold]{route_count}[/bold]"
+        )
+    elif choice == "2":
+        if not pools:
+            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
+        pool_choice = select_option(
+            "刷新模型池",
+            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
+            + [("0", "返回")],
+        )
+        if pool_choice == "0":
+            return None
+        pool_name = sorted(pools)[int(pool_choice) - 1]
+        with console.status("[cyan]正在刷新模型池可用性...[/cyan]", spinner="dots"):
+            probe = apply_pool_probe(provider, pool_name)
+        if not probe.get("models") and not probe.get("all_models"):
+            pool = pools.get(pool_name)
+            defaults = pool.get("models") if isinstance(pool, dict) else []
+            manual_models = prompt_manual_pool_models(defaults)
+            if manual_models:
+                with console.status("[cyan]正在使用手动模型探测路由...[/cyan]", spinner="dots"):
+                    probe = apply_pool_probe(
+                        provider, pool_name, manual_models=manual_models
+                    )
+        message = (
+            f"已刷新模型池 {provider_id}/{pool_name}。\n"
+            f"共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]\n"
+            f"任一 Key 可用模型: [bold]{len(probe.get('all_models') or [])}[/bold]"
+        )
+    elif choice == "3":
+        if not pools:
+            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
+        pool_choice = select_option(
+            "手动设置模型",
+            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
+            + [("0", "返回")],
+        )
+        if pool_choice == "0":
+            return None
+        pool_name = sorted(pools)[int(pool_choice) - 1]
+        pool = pools[pool_name]
+        current_models = pool.get("models") if isinstance(pool, dict) else []
+        manual_models = prompt_manual_pool_models(current_models)
+        if not manual_models:
+            return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
+        with console.status("[cyan]正在使用手动模型探测路由...[/cyan]", spinner="dots"):
+            probe = apply_pool_probe(provider, pool_name, manual_models=manual_models)
+        message = (
+            f"已手动设置模型池 {provider_id}/{pool_name}。\n"
+            f"模型数: [bold]{len(probe.get('models') or [])}[/bold]"
+        )
+    elif choice == "4":
+        if not pools:
+            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
+        pool_choice = select_option(
+            "删除模型池",
+            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
+            + [("0", "返回")],
+        )
+        if pool_choice == "0":
+            return None
+        pool_name = sorted(pools)[int(pool_choice) - 1]
+        used_by = [
+            model_id
+            for model_id, model in raw_v2_models(data).items()
+            for target in model_targets(model)
+            if target.get("provider") == provider_id and target.get("pool") == pool_name
+        ]
+        if used_by and not confirm_choice(
+            f"该模型池被 {len(used_by)} 个模型路由使用，删除会一并移除这些 target。继续？",
+            default=False,
+        ):
+            return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
+        pools.pop(pool_name)
+        for model in raw_v2_models(data).values():
+            targets = model_targets(model)
+            targets[:] = [
+                target
+                for target in targets
+                if not (target.get("provider") == provider_id and target.get("pool") == pool_name)
+            ]
+        message = f"已删除模型池 {provider_id}/{pool_name}。"
+    else:
+        return None
+    restart = commit_v2_config(path, data, old_config)
+    return Group(section_panel(message, "模型池", "green"), restart)
+
+
 def add_model_route_interactively(path: Path) -> Any:
     data = load_v2_config_data(path)
     if not raw_providers(data):
@@ -654,10 +979,10 @@ def add_model_route_interactively(path: Path) -> Any:
     model_id = prompt_text("添加模型路由", "本地模型 ID", default="gpt-4o-mini").strip()
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
-    selected = select_provider_key(data, "选择供应商 Key")
+    selected = select_provider_pool(data, "选择模型池")
     if selected is None:
         return None
-    provider_id, key_name = selected
+    provider_id, pool_name = selected
     upstream_model = prompt_text(
         "添加模型路由", "上游模型 ID", default=model_id
     ).strip() or model_id
@@ -668,18 +993,18 @@ def add_model_route_interactively(path: Path) -> Any:
     targets = model_targets(model)
     if any(
         target.get("provider") == provider_id
-        and target.get("key") == key_name
+        and target.get("pool") == pool_name
         and str(target.get("upstream_model") or model_id) == upstream_model
         for target in targets
     ):
         return section_panel("[yellow]该路由已存在。[/yellow]", "添加模型路由", "yellow")
     targets.append(
-        {"provider": provider_id, "key": key_name, "upstream_model": upstream_model}
+        {"provider": provider_id, "pool": pool_name, "upstream_model": upstream_model}
     )
     restart = commit_v2_config(path, data, old_config)
     return Group(
         section_panel(
-            f"本地模型: [bold]{model_id}[/bold]\nTarget: [bold]{provider_id}/{key_name}[/bold]\n上游模型: [bold]{upstream_model}[/bold]",
+            f"本地模型: [bold]{model_id}[/bold]\n模型池: [bold]{provider_id}/{pool_name}[/bold]\n上游模型: [bold]{upstream_model}[/bold]",
             "添加完成",
             "green",
         ),
@@ -704,7 +1029,7 @@ def manage_model_routes_interactively(path: Path) -> None:
         options = [
             (
                 str(index + 1),
-                f"{target.get('provider')}/{target.get('key')} → {target.get('upstream_model') or model_id}",
+                f"{target.get('provider')}/{target.get('pool') or target.get('key')} → {target.get('upstream_model') or model_id}",
             )
             for index, target in enumerate(targets)
         ] + [("0", "返回")]
@@ -747,7 +1072,7 @@ def update_model_target_interactively(
         ):
             return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
         removed = targets.pop(target_index)
-        message = f"已删除 target: {removed.get('provider')}/{removed.get('key')}。"
+        message = f"已删除 target: {removed.get('provider')}/{removed.get('pool') or removed.get('key')}。"
     else:
         return None
     restart = commit_v2_config(path, data, old_config)
@@ -880,10 +1205,11 @@ def manage_model_keys_interactively(path: Path) -> None:
             [
                 ("1", "添加供应商 Key"),
                 ("2", "管理供应商 Key"),
-                ("3", "添加模型路由"),
-                ("4", "管理模型路由"),
-                ("5", "模型参数"),
-                ("6", "供应商路径"),
+                ("3", "模型池"),
+                ("4", "添加模型路由"),
+                ("5", "管理模型路由"),
+                ("6", "模型参数"),
+                ("7", "供应商路径"),
                 ("0", "返回"),
             ],
             content=v2_summary_panel(data),
@@ -899,15 +1225,17 @@ def manage_model_keys_interactively(path: Path) -> None:
         elif choice == "2":
             run_submodule(lambda: manage_provider_keys_interactively(path))
         elif choice == "3":
+            run_submodule(lambda: manage_provider_pools_interactively(path))
+        elif choice == "4":
             clear_terminal_history()
             result = add_model_route_interactively(path)
             if result is not None:
                 show_result_page("添加模型路由", result)
-        elif choice == "4":
-            run_submodule(lambda: manage_model_routes_interactively(path))
         elif choice == "5":
-            run_submodule(lambda: manage_v2_model_settings_interactively(path))
+            run_submodule(lambda: manage_model_routes_interactively(path))
         elif choice == "6":
+            run_submodule(lambda: manage_v2_model_settings_interactively(path))
+        elif choice == "7":
             run_submodule(lambda: manage_provider_routes_interactively(path))
 
 
