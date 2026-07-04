@@ -238,6 +238,18 @@ def fetch_key_runtime_state(
     return fetch_key_runtime_states(data).get(key_runtime_state_key(model_id, key_name))
 
 
+def configured_runtime_keys(data: dict[str, Any]) -> list[tuple[str, str, bool]]:
+    try:
+        config = RouterConfig.from_dict(data)
+    except (KeyError, TypeError, ValueError):
+        return []
+    return [
+        (model.id, key.name, key.enabled)
+        for model in config.models
+        for key in model.keys
+    ]
+
+
 def key_status_overview_panel(data: dict[str, Any]) -> Any:
     runtime_states = fetch_key_runtime_states(data)
     table = Table(show_header=True, header_style="bold cyan")
@@ -247,19 +259,17 @@ def key_status_overview_panel(data: dict[str, Any]) -> Any:
     table.add_column("运行")
     table.add_column("失败")
     table.add_column("最近状态")
-    for model in data.get("models", []):
-        model_id = str(model.get("id") or "-")
-        for index, key in enumerate(model.get("keys", [])):
-            key_name = str(key.get("name") or f"{model_id}-{index + 1}")
-            state = runtime_states.get(key_runtime_state_key(model_id, key_name))
-            table.add_row(
-                short_text(model_id, 24),
-                key_display_name(key, key_name, 24),
-                "[green]启用[/green]" if key.get("enabled", True) else "[red]禁用[/red]",
-                format_key_runtime_status(state),
-                str(int(state.get("failures") or 0)) if state else "0",
-                str(state.get("last_status_code")) if state and state.get("last_status_code") is not None else "-",
-            )
+    for model_id, key_name, enabled in configured_runtime_keys(data):
+        state = runtime_states.get(key_runtime_state_key(model_id, key_name))
+        last_status = state.get("last_status_code") if state else None
+        table.add_row(
+            short_text(model_id, 24),
+            short_text(key_name, 24),
+            "[green]启用[/green]" if enabled else "[red]禁用[/red]",
+            format_key_runtime_status(state),
+            str(int(state.get("failures") or 0)) if state else "0",
+            str(last_status) if last_status is not None else "-",
+        )
     if not table.rows:
         return section_panel("[yellow]暂无 Key。[/yellow]", "Key 状态", "yellow")
     return section_panel(
@@ -632,6 +642,46 @@ def model_targets(model: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(targets, list):
         raise ValueError("model.targets 必须是数组")
     return targets
+
+
+def enable_pool_models(
+    data: dict[str, Any], provider_id: str, pool_name: str, enabled_models: list[str]
+) -> None:
+    pool = provider_pools(raw_providers(data)[provider_id])[pool_name]
+    if isinstance(pool, dict):
+        pool["models"] = enabled_models
+    models = raw_v2_models(data)
+    enabled = set(enabled_models)
+    for model_id in enabled_models:
+        model = models.setdefault(model_id, {"targets": []})
+        targets = model_targets(model)
+        if not any(
+            target.get("provider") == provider_id
+            and target.get("pool") == pool_name
+            and str(target.get("upstream_model") or model_id) == model_id
+            for target in targets
+        ):
+            targets.append(
+                {
+                    "provider": provider_id,
+                    "pool": pool_name,
+                    "upstream_model": model_id,
+                }
+            )
+    for model_id, model in list(models.items()):
+        targets = model_targets(model)
+        targets[:] = [
+            target
+            for target in targets
+            if not (
+                target.get("provider") == provider_id
+                and target.get("pool") == pool_name
+                and str(target.get("upstream_model") or model_id) == model_id
+                and model_id not in enabled
+            )
+        ]
+        if not targets and not model.get("aliases"):
+            models.pop(model_id, None)
 
 
 def v2_summary_panel(data: dict[str, Any]) -> Any:
@@ -1208,9 +1258,11 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
                 "cyan",
             ),
         )
-        if isinstance(pool, dict):
-            pool["models"] = enabled_models
-        message = f"已启用模型池 {provider_id}/{pool_name} 的 [bold]{len(enabled_models)}[/bold] 个模型。"
+        enable_pool_models(data, provider_id, pool_name, enabled_models)
+        message = (
+            f"已启用模型池 {provider_id}/{pool_name} 的 [bold]{len(enabled_models)}[/bold] 个模型，"
+            "并同步本地模型路由。"
+        )
     elif choice == "5":
         if not pools:
             return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
@@ -1504,9 +1556,10 @@ def manage_model_keys_interactively(path: Path) -> None:
                 ("3", "模型池"),
                 ("4", "添加模型路由"),
                 ("5", "模型映射"),
+                ("6", "Key 运行态"),
                 ("0", "返回"),
             ],
-            content=v2_summary_panel(data),
+            content=Group(v2_summary_panel(data), key_status_overview_panel(data)),
             on_key=on_key,
         )
         if choice == "0":
@@ -1525,6 +1578,79 @@ def manage_model_keys_interactively(path: Path) -> None:
                 show_result_page("添加模型路由", result)
         elif choice == "5":
             run_submodule(lambda: manage_v2_model_settings_interactively(path))
+        elif choice == "6":
+            run_submodule(lambda: manage_key_runtime_states_interactively(path))
+
+
+def manage_key_runtime_states_interactively(path: Path) -> None:
+    def on_key(key: str) -> str | None:
+        return _open_config_on_key(path, key)
+
+    while True:
+        data = load_v2_config_data(path)
+        runtime_states = fetch_key_runtime_states(data)
+        keys = configured_runtime_keys(data)
+        if not keys:
+            show_result_page(
+                "Key 运行态",
+                section_panel(
+                    "[yellow]暂无可管理的运行态 Key。[/yellow]",
+                    "运行状态",
+                    "yellow",
+                ),
+            )
+            return
+        options = []
+        for index, (model_id, key_name, enabled) in enumerate(keys):
+            state = runtime_states.get(key_runtime_state_key(model_id, key_name))
+            config_status = "启用" if enabled else "配置禁用"
+            options.append(
+                (
+                    str(index + 1),
+                    f"{short_text(model_id, 24)} / {short_text(key_name, 24)}"
+                    f" · {config_status} · {format_key_runtime_status(state)}",
+                )
+            )
+        options.append(("0", "返回"))
+        choice = select_option(
+            "Key 运行态",
+            options,
+            content=key_status_overview_panel(data),
+            on_key=on_key,
+        )
+        if choice == "0":
+            return
+        model_id, key_name, _ = keys[int(choice) - 1]
+        state = runtime_states.get(key_runtime_state_key(model_id, key_name))
+        disabled = bool(state and state.get("disabled"))
+        action = select_option(
+            f"运行态 · {short_text(key_name, 24)}",
+            [
+                ("1", "恢复运行" if disabled else "暂停运行"),
+                ("2", "清除失败/冷却"),
+                ("0", "返回"),
+            ],
+            content=section_panel(
+                f"模型: [bold]{model_id}[/bold]\n"
+                f"Key: [bold]{key_name}[/bold]\n"
+                f"运行: {format_key_runtime_status(state)}",
+                "运行状态",
+                "cyan",
+            ),
+            on_key=on_key,
+        )
+        if action == "0":
+            continue
+        clear_terminal_history()
+        result = update_key_runtime_state_interactively(
+            path,
+            data,
+            model_id,
+            key_name,
+            disabled=not disabled if action == "1" else None,
+            clear_cooldown=action == "2",
+        )
+        show_result_page("Key 运行态", result)
 
 
 def manage_model_aliases_interactively(path: Path) -> None:

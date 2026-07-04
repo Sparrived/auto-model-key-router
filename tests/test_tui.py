@@ -160,6 +160,58 @@ def test_mouse_wheel_mode_is_enabled_by_default(monkeypatch) -> None:
     assert output.getvalue() == f"{tui.MOUSE_MODE_ENABLE}{tui.MOUSE_MODE_DISABLE}"
 
 
+def test_enable_pool_models_adds_matching_model_routes() -> None:
+    data = {
+        "config_version": 3,
+        "providers": {
+            "vendor": {
+                "base_url": "https://example.test",
+                "keys": {"main": {"api_key": "sk-main"}},
+                "pools": {
+                    "default": {
+                        "keys": ["main"],
+                        "available_models": ["model-a", "model-b"],
+                    }
+                },
+            }
+        },
+        "models": {},
+    }
+
+    config_editor.enable_pool_models(data, "vendor", "default", ["model-a", "model-b"])
+
+    assert data["providers"]["vendor"]["pools"]["default"]["models"] == [
+        "model-a",
+        "model-b",
+    ]
+    assert data["models"] == {
+        "model-a": {"targets": [{"provider": "vendor", "pool": "default", "upstream_model": "model-a"}]},
+        "model-b": {"targets": [{"provider": "vendor", "pool": "default", "upstream_model": "model-b"}]},
+    }
+
+
+def test_key_status_overview_panel_shows_v3_runtime_state(monkeypatch) -> None:
+    data = v3_config({"model-a": [{"name": "main", "api_key": "sk-main"}]})
+    monkeypatch.setattr(
+        config_editor,
+        "fetch_key_runtime_states",
+        lambda data: {
+            "model-a:main": {
+                "failures": 2,
+                "cooldown_remaining_seconds": 0,
+                "last_status_code": 429,
+                "disabled": True,
+            }
+        },
+    )
+
+    output = render_plain(config_editor.key_status_overview_panel(data))
+
+    assert "model-a" in output
+    assert "main" in output
+    assert "运行态暂停" in output
+
+
 def test_mouse_wheel_mode_is_disabled_on_linux(monkeypatch) -> None:
     output = StringIO()
     monkeypatch.setattr(tui.sys, "stdout", output)
@@ -1593,6 +1645,7 @@ def test_provider_model_menu_opens_model_mapping(tmp_path, monkeypatch) -> None:
         ("3", "模型池"),
         ("4", "添加模型路由"),
         ("5", "模型映射"),
+        ("6", "Key 运行态"),
         ("0", "返回"),
     ]
     assert opened == [tmp_path / "router-config.json"]
