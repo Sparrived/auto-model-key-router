@@ -167,6 +167,57 @@ def fetch_key_runtime_states(data: dict[str, Any], timeout: float = 0.5) -> dict
     return states
 
 
+def load_native_endpoint_states_from_file(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    path = Path(str(data.get("key_state_path") or default_key_state_path()))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    states = raw.get("url_native_support", {})
+    if not isinstance(states, dict):
+        return {}
+    return {
+        str(key): _native_endpoint_state_payload(value)
+        for key, value in states.items()
+        if _native_endpoint_state_payload(value) is not None
+    }
+
+
+def fetch_native_endpoint_states(data: dict[str, Any], timeout: float = 0.5) -> dict[str, dict[str, Any]]:
+    states = load_native_endpoint_states_from_file(data)
+    try:
+        response = httpx.get(f"{service_management_base_url(data)}/health", timeout=timeout)
+        response.raise_for_status()
+        service_states = response.json().get("native_endpoint_states", {})
+    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError):
+        return states
+    if isinstance(service_states, dict):
+        states.update(
+            {
+                str(key): value
+                for key, value in service_states.items()
+                if isinstance(value, dict)
+            }
+        )
+    return states
+
+
+def _native_endpoint_state_payload(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, bool):
+        return {"supported": value, "reason": "legacy", "expires_in_seconds": None}
+    if isinstance(value, dict) and isinstance(value.get("supported"), bool):
+        payload = dict(value)
+        expires_at = payload.get("expires_at")
+        if expires_at is None and payload.get("ttl_seconds"):
+            expires_at = float(payload.get("checked_at") or 0) + float(
+                payload.get("ttl_seconds") or 0
+            )
+        if expires_at is not None:
+            payload["expires_in_seconds"] = max(0, int(float(expires_at) - time()))
+        return payload
+    return None
+
+
 def fetch_key_runtime_state(
     data: dict[str, Any], model_id: str, key_name: str, timeout: float = 1.0
 ) -> dict[str, Any] | None:
@@ -278,18 +329,36 @@ def set_upstream_routes_for_base_url(
 
 
 def upstream_route_support_text(
-    routes: dict[str, str], mode: str, *, native_first: bool = True
+    routes: dict[str, str],
+    mode: str,
+    *,
+    native_first: bool = True,
+    native_state: dict[str, Any] | None = None,
 ) -> str:
     path = upstream_route_path(routes, mode)
+    status = native_endpoint_support_text(native_state)
     if mode in routes:
-        return f"[green]自定义原生[/green] {path}"
+        return f"[green]自定义原生[/green] {path}{status}"
     if mode == "openai":
         return f"[green]原生[/green] {path}"
     if mode == "anthropic" and native_first:
-        return f"[cyan]自动探测[/cyan] {path}"
+        return f"[cyan]自动探测[/cyan] {path}{status}"
+    if mode == "responses":
+        return f"[cyan]自动探测[/cyan] {path}{status}"
     return (
         f"[yellow]转换[/yellow] {UPSTREAM_ROUTE_DEFAULT_PATHS['openai']}"
     )
+
+
+def native_endpoint_support_text(state: dict[str, Any] | None) -> str:
+    if not state:
+        return "\n[dim]探测: 未测试[/dim]"
+    reason = str(state.get("reason") or "-")
+    if state.get("supported") is True:
+        return f"\n[green]探测: 支持[/green] [dim]{reason}[/dim]"
+    expires = state.get("expires_in_seconds")
+    retry = f"，{int(expires)}s 后重试" if isinstance(expires, int) else ""
+    return f"\n[yellow]探测: 回退缓存[/yellow] [dim]{reason}{retry}[/dim]"
 
 
 def upstream_routes_panel(
@@ -315,6 +384,7 @@ def upstream_routes_panel(
         key_name = str(base_url)
     normalized_base_url = normalize_upstream_base_url(base_url)
     routes = upstream_routes_for_base_url(data, normalized_base_url)
+    native_states = fetch_native_endpoint_states(data)
     native_first = any(
         bool(model.get("native_first", True))
         for model in data.get("models", [])
@@ -332,7 +402,14 @@ def upstream_routes_panel(
     for mode in UPSTREAM_ROUTE_MODES:
         table.add_row(
             UPSTREAM_ROUTE_LABELS[mode],
-            upstream_route_support_text(routes, mode, native_first=native_first),
+            upstream_route_support_text(
+                routes,
+                mode,
+                native_first=native_first,
+                native_state=native_states.get(
+                    f"{normalized_base_url}|{upstream_route_path(routes, mode).strip('/')}"
+                ),
+            ),
         )
     base_url = compact_url(normalized_base_url or "-", 56)
     return Group(

@@ -447,7 +447,13 @@ async def _update_config(
         if not path.is_file():
             raise HTTPException(status_code=409, detail=f"配置文件不存在: {path}")
         try:
-            change = await asyncio.to_thread(ConfigService(path).update, mutation)
+            def edit(data: dict[str, Any]) -> None:
+                editable = _management_editable_config_data(data)
+                mutation(editable)
+                data.clear()
+                data.update(editable)
+
+            change = await asyncio.to_thread(ConfigService(path).update, edit)
         except ManagementAPIError as exc:
             raise HTTPException(
                 status_code=exc.status_code, detail=exc.message
@@ -530,6 +536,35 @@ def _payload_dict(payload: BaseModel) -> dict[str, Any]:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(exclude_unset=True)
     return payload.dict(exclude_unset=True)
+
+
+def _management_editable_config_data(data: dict[str, Any]) -> dict[str, Any]:
+    config = RouterConfig.from_dict(data)
+    editable = dict(data)
+    editable["models"] = [
+        {
+            "id": model.id,
+            "aliases": list(model.aliases),
+            "routing_mode": model.routing_mode,
+            "reasoning_effort": model.reasoning_effort,
+            "native_first": model.native_first,
+            "keys": [
+                {
+                    "name": key.name,
+                    "api_key": key.api_key,
+                    "base_url": key.base_url,
+                    "enabled": key.enabled,
+                    "allow_visitor": key.allow_visitor,
+                    "upstream_model": key.upstream_model or model.id,
+                }
+                for key in model.keys
+            ],
+        }
+        for model in config.models
+    ]
+    editable["upstream_routes"] = dict(config.upstream_routes)
+    editable.pop("providers", None)
+    return editable
 
 
 def _reject_null_fields(data: dict[str, Any], *fields: str) -> None:

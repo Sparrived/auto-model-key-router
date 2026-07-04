@@ -33,8 +33,10 @@ from .config import (
 )
 from .config_service import commit_config_data
 from .config_editor import (
+    fetch_native_endpoint_states,
     manage_config_transfer_interactively,
     manage_model_keys_interactively,
+    native_endpoint_support_text,
     set_listen_interactively,
     set_local_api_key_interactively,
 )
@@ -706,8 +708,18 @@ def render_config(config: RouterConfig, path: Path) -> None:
 
 
 def upstream_mode_summary(
-    config: RouterConfig, base_url: str, items: list[tuple[Any, Any]], mode: str
+    config: RouterConfig,
+    base_url: str,
+    items: list[tuple[Any, Any]],
+    mode: str,
+    native_states: dict[str, dict[str, Any]] | None = None,
 ) -> str:
+    route_path = config.upstream_routes_for_base_url(base_url).get(
+        mode, UPSTREAM_ROUTE_DEFAULT_PATHS[mode]
+    )
+    status = native_endpoint_support_text(
+        (native_states or {}).get(f"{base_url.rstrip('/')}|{route_path.strip('/')}")
+    )
     custom_paths = sorted(
         {path for path in [config.upstream_routes_for_base_url(base_url).get(mode)] if path}
     )
@@ -715,11 +727,13 @@ def upstream_mode_summary(
         paths = "\n".join(short_text(path, 34) for path in custom_paths[:3])
         if len(custom_paths) > 3:
             paths = f"{paths}\n[dim]+{len(custom_paths) - 3} 更多[/dim]"
-        return f"[green]自定义原生[/green]\n{paths}"
+        return f"[green]自定义原生[/green]\n{paths}{status}"
     if mode == "openai":
         return f"[green]原生[/green]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"
     if mode == "anthropic" and any(model.native_first for model, _ in items):
-        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"
+        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}{status}"
+    if mode == "responses":
+        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}{status}"
     return f"[yellow]转换[/yellow]\n{UPSTREAM_ROUTE_DEFAULT_PATHS['openai']}"
 
 
@@ -730,6 +744,12 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
             upstreams.setdefault(key.base_url, []).append((model, key))
     if not upstreams:
         return None
+    native_states = fetch_native_endpoint_states({
+        "host": config.host,
+        "port": config.port,
+        "local_api_key": config.local_api_key,
+        "key_state_path": config.key_state_path,
+    })
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("上游 URL", ratio=2)
     for mode in UPSTREAM_ROUTE_MODES:
@@ -738,7 +758,7 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
         table.add_row(
             compact_url(base_url, 42),
             *(
-                upstream_mode_summary(config, base_url, items, mode)
+                upstream_mode_summary(config, base_url, items, mode, native_states)
                 for mode in UPSTREAM_ROUTE_MODES
             ),
         )

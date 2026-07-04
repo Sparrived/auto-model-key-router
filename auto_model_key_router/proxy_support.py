@@ -422,7 +422,7 @@ async def test_native_messages_support(
     api_key: str,
     model_id: str,
     route_path: str | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     """测试上游是否支持原生 /v1/messages 端点
     
     发送一个最小化的测试请求，根据响应判断是否支持。
@@ -455,21 +455,21 @@ async def test_native_messages_support(
                 test_url,
                 response.status_code,
             )
-            return False
+            return False, "unsupported"
         # 其他状态码（包括认证错误、参数错误等）说明端点存在
         LOGGER.info(
             "endpoint %s returned %d, native messages supported",
             test_url,
             response.status_code,
         )
-        return True
+        return True, "ok"
     except httpx.RequestError as exc:
         LOGGER.warning(
             "endpoint %s test failed: %s, assuming native messages not supported",
             test_url,
             exc,
         )
-        return False
+        return False, "error"
 
 
 async def test_native_responses_support(
@@ -478,7 +478,7 @@ async def test_native_responses_support(
     api_key: str,
     model_id: str,
     route_path: str | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     """Test whether the upstream supports a native Responses endpoint."""
     test_url = _join_url(
         base_url, route_path or UPSTREAM_ROUTE_DEFAULT_PATHS["responses"]
@@ -505,17 +505,17 @@ async def test_native_responses_support(
                 test_url,
                 response.status_code,
             )
-            return False
+            return False, "unsupported"
         LOGGER.info(
             "endpoint %s returned %d, native responses supported",
             test_url,
             response.status_code,
         )
-        return True
+        return True, "ok"
     except httpx.RequestError as exc:
         LOGGER.warning(
             "endpoint %s test failed: %s, assuming native responses not supported",
             test_url,
             exc,
         )
-        return False
+        return False, "error"

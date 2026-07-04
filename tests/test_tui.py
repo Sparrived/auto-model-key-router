@@ -2029,7 +2029,7 @@ def test_pool_update_prompts_manual_models_when_discovery_empty(tmp_path, monkey
     ]
 
 
-def test_upstream_routes_panel_shows_three_mode_support() -> None:
+def test_upstream_routes_panel_shows_three_mode_support(monkeypatch) -> None:
     data = {
         "upstream_routes": {
             "https://upstream.example.com": {
@@ -2050,6 +2050,17 @@ def test_upstream_routes_panel_shows_three_mode_support() -> None:
         ]
     }
     model = data["models"][0]
+    monkeypatch.setattr(
+        config_editor,
+        "fetch_native_endpoint_states",
+        lambda data: {
+            "https://upstream.example.com|v1/responses": {
+                "supported": False,
+                "reason": "unsupported",
+                "expires_in_seconds": 42,
+            }
+        },
+    )
 
     output = render_plain(config_editor.upstream_routes_panel(data, model, 0))
 
@@ -2057,6 +2068,8 @@ def test_upstream_routes_panel_shows_three_mode_support() -> None:
     assert "Anthropic Messages" in output
     assert "OpenAI Responses" in output
     assert "anthropic/v1/messages" in output
+    assert "探测: 回退缓存" in output
+    assert "42s 后重试" in output
 
 
 def test_model_aliases_panel_lists_current_aliases() -> None:

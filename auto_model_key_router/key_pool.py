@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from time import time
 from typing import Any
 
@@ -13,6 +13,8 @@ from .visitor import VISITOR_MODEL_PREFIX
 
 
 MAX_CONSECUTIVE_KEY_FAILURES = 5
+NATIVE_NEGATIVE_TTL_SECONDS = 600
+NATIVE_ERROR_TTL_SECONDS = 60
 
 
 @dataclass
@@ -23,6 +25,14 @@ class KeyState:
     disabled: bool = False
 
 
+@dataclass
+class NativeSupportState:
+    supported: bool
+    checked_at: float
+    reason: str = "ok"
+    ttl_seconds: int = 0
+
+
 class KeyPool:
     def __init__(self, config: RouterConfig):
         self._apply_config(config)
@@ -30,7 +40,7 @@ class KeyPool:
         self._active_requests = defaultdict(int)
         self._states = defaultdict(KeyState)
         self._sticky_keys: dict[tuple[str, bool, str], str] = {}
-        self._url_native_support: dict[str, bool] = {}
+        self._url_native_support: dict[str, NativeSupportState] = {}
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
         self._load_states()
@@ -416,20 +426,23 @@ class KeyPool:
         await self._notify_state_change(model_id, key_name)
         return self.key_state(model_id, key_name)
 
-    def url_native_support_states(self) -> dict[str, bool]:
+    def url_native_support_states(self) -> dict[str, dict[str, Any]]:
         """返回所有 URL 的原生端点支持状态"""
-        return dict(self._url_native_support)
+        now = time()
+        return {
+            key: self._native_support_state_payload(state, now)
+            for key, state in self._url_native_support.items()
+        }
 
     def supports_native_messages(
         self, base_url: str, route_path: str = "v1/messages"
     ) -> bool | None:
         """返回 None=未测试, True/False=已测试结果"""
         key = self._native_support_key(base_url, route_path)
-        if route_path.strip("/") == "v1/messages":
-            return self._url_native_support.get(
-                key, self._url_native_support.get(base_url.rstrip("/"))
-            )
-        return self._url_native_support.get(key)
+        state = self._url_native_support.get(key)
+        if state is None and route_path.strip("/") == "v1/messages":
+            state = self._url_native_support.get(base_url.rstrip("/"))
+        return self._fresh_native_support(state)
 
     def supports_native_endpoint(
         self, base_url: str, route_path: str
@@ -438,21 +451,55 @@ class KeyPool:
         return self.supports_native_messages(base_url, route_path)
 
     async def update_native_support(
-        self, base_url: str, supported: bool, route_path: str = "v1/messages"
+        self,
+        base_url: str,
+        supported: bool,
+        route_path: str = "v1/messages",
+        reason: str = "ok",
     ) -> None:
         key = self._native_support_key(base_url, route_path)
+        ttl_seconds = 0 if supported else _native_negative_ttl(reason)
         async with self._lock:
-            self._url_native_support[key] = supported
+            self._url_native_support[key] = NativeSupportState(
+                supported=supported,
+                checked_at=time(),
+                reason=reason,
+                ttl_seconds=ttl_seconds,
+            )
         await self._persist_states()
 
     async def update_native_endpoint(
-        self, base_url: str, supported: bool, route_path: str
+        self, base_url: str, supported: bool, route_path: str, reason: str = "ok"
     ) -> None:
-        await self.update_native_support(base_url, supported, route_path)
+        await self.update_native_support(base_url, supported, route_path, reason)
 
     def _native_support_key(self, base_url: str, route_path: str) -> str:
         route = route_path.strip("/") or "v1/messages"
         return f"{base_url.rstrip('/')}|{route}"
+
+    def _fresh_native_support(self, state: NativeSupportState | None) -> bool | None:
+        if state is None:
+            return None
+        if state.ttl_seconds > 0 and time() - state.checked_at >= state.ttl_seconds:
+            return None
+        return state.supported
+
+    def _native_support_state_payload(
+        self, state: NativeSupportState, now: float
+    ) -> dict[str, Any]:
+        expires_at = (
+            state.checked_at + state.ttl_seconds if state.ttl_seconds > 0 else None
+        )
+        return {
+            "supported": state.supported,
+            "checked_at": state.checked_at,
+            "reason": state.reason,
+            "ttl_seconds": state.ttl_seconds,
+            "expires_at": expires_at,
+            "expires_in_seconds": (
+                max(0, int(expires_at - now)) if expires_at is not None else None
+            ),
+        }
 
     def _failure_cooldown_seconds(
         self, state: KeyState, retry_after: float | None
@@ -495,9 +542,10 @@ class KeyPool:
                 disabled=bool(item.get("disabled", False)),
             )
         # 加载 URL 级别的原生支持数据
-        for url, supported in url_native_support.items():
-            if isinstance(supported, bool):
-                self._url_native_support[url] = supported
+        for url, item in url_native_support.items():
+            state = _native_support_state_from_raw(item)
+            if state is not None:
+                self._url_native_support[url] = state
 
     async def _persist_states(self) -> None:
         async with self._persist_lock:
@@ -511,5 +559,36 @@ class KeyPool:
                     )
                     for key, state in self._states.items()
                 }
-                url_native_support = dict(self._url_native_support)
+                url_native_support = {
+                    key: asdict(state)
+                    for key, state in self._url_native_support.items()
+                }
             await self._state_store.save(states, url_native_support)
+
+
+def _native_negative_ttl(reason: str) -> int:
+    if reason == "error":
+        return NATIVE_ERROR_TTL_SECONDS
+    return NATIVE_NEGATIVE_TTL_SECONDS
+
+
+def _native_support_state_from_raw(item: Any) -> NativeSupportState | None:
+    if isinstance(item, bool):
+        return NativeSupportState(
+            supported=item,
+            checked_at=time() if item else 0.0,
+            reason="legacy",
+            ttl_seconds=0 if item else NATIVE_NEGATIVE_TTL_SECONDS,
+        )
+    if not isinstance(item, dict) or not isinstance(item.get("supported"), bool):
+        return None
+    reason = str(item.get("reason") or "ok")
+    ttl_seconds = int(item.get("ttl_seconds") or 0)
+    if not item["supported"] and ttl_seconds <= 0:
+        ttl_seconds = _native_negative_ttl(reason)
+    return NativeSupportState(
+        supported=item["supported"],
+        checked_at=float(item.get("checked_at") or time()),
+        reason=reason,
+        ttl_seconds=ttl_seconds,
+    )

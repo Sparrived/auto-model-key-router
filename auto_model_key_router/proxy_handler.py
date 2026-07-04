@@ -340,7 +340,7 @@ async def _execute_attempt(
             key.base_url, native_route_path
         )
         if native_support is None:
-            native_support = await test_native_messages_support(
+            native_support, native_reason = await test_native_messages_support(
                 runtime.http_client,
                 key.base_url,
                 key.api_key,
@@ -348,7 +348,7 @@ async def _execute_attempt(
                 native_route_path,
             )
             await runtime.key_pool.update_native_support(
-                key.base_url, native_support, native_route_path
+                key.base_url, native_support, native_route_path, native_reason
             )
         use_native = native_support
     elif context.path == "responses":
@@ -356,7 +356,7 @@ async def _execute_attempt(
             key.base_url, native_route_path
         )
         if native_support is None:
-            native_support = await test_native_responses_support(
+            native_support, native_reason = await test_native_responses_support(
                 runtime.http_client,
                 key.base_url,
                 key.api_key,
@@ -364,7 +364,7 @@ async def _execute_attempt(
                 native_route_path,
             )
             await runtime.key_pool.update_native_endpoint(
-                key.base_url, native_support, native_route_path
+                key.base_url, native_support, native_route_path, native_reason
             )
         use_native = native_support
 
@@ -470,7 +470,7 @@ async def _execute_attempt(
         )
         if context.path in {"messages", "responses"}:
             await runtime.key_pool.update_native_endpoint(
-                key.base_url, False, native_route_path
+                key.base_url, False, native_route_path, "unsupported"
             )
         fallback_path = _upstream_path(
             context.path,

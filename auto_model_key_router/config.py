@@ -219,6 +219,97 @@ def save_config_data(path: Path, data: dict[str, Any]) -> None:
             pass
 
 
+def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
+    if int(raw.get("config_version") or 0) == CONFIG_VERSION and isinstance(
+        raw.get("models"), dict
+    ):
+        return raw
+    models = raw.get("models")
+    if not isinstance(models, list):
+        return raw
+
+    migrated = dict(raw)
+    migrated["config_version"] = CONFIG_VERSION
+    providers: dict[str, Any] = {}
+    migrated_models: dict[str, Any] = {}
+    upstream_routes = normalize_upstream_url_routes(raw.get("upstream_routes"))
+
+    for raw_model in models:
+        if not isinstance(raw_model, dict):
+            continue
+        model_id = str(raw_model.get("id") or "").strip()
+        if not model_id:
+            continue
+        raw_keys = raw_model.get("keys") if isinstance(raw_model.get("keys"), list) else []
+        targets: list[dict[str, Any]] = []
+        used_key_names: set[str] = set()
+        for index, raw_key in enumerate(raw_keys, start=1):
+            if not isinstance(raw_key, dict):
+                continue
+            key_name = str(raw_key.get("name") or f"{model_id}-{index}").strip()
+            api_key = str(raw_key.get("api_key") or "").strip()
+            if not key_name or not api_key:
+                continue
+            if key_name in used_key_names:
+                raise ValueError(f"模型 {model_id} 的 key name 重复: {key_name}")
+            used_key_names.add(key_name)
+            base_url = normalize_upstream_base_url(
+                raw_key.get("base_url")
+                or raw.get("default_base_url")
+                or "https://api.openai.com"
+            )
+            provider_id = _legacy_provider_id(base_url)
+            provider = providers.setdefault(
+                provider_id,
+                {"base_url": base_url, "keys": {}, "pools": {}},
+            )
+            provider.setdefault("base_url", base_url)
+            provider_keys = provider.setdefault("keys", {})
+            provider_keys[key_name] = {
+                "api_key": api_key,
+                "enabled": bool(raw_key.get("enabled", True)),
+                "allow_visitor": bool(raw_key.get("allow_visitor", False)),
+            }
+            provider_pools = provider.setdefault("pools", {})
+            pool_name = model_id
+            pool = provider_pools.setdefault(pool_name, {"keys": []})
+            pool_keys = pool.setdefault("keys", [])
+            if key_name not in pool_keys:
+                pool_keys.append(key_name)
+            merge_upstream_routes_for_url(
+                upstream_routes,
+                base_url,
+                normalize_upstream_routes(raw_key.get("upstream_routes")),
+            )
+            targets.append(
+                {
+                    "provider": provider_id,
+                    "pool": pool_name,
+                    "upstream_model": str(raw_key.get("upstream_model") or model_id),
+                }
+            )
+
+        migrated_model: dict[str, Any] = {"targets": targets}
+        for field_name in ("aliases", "routing_mode", "reasoning_effort", "native_first"):
+            if field_name in raw_model:
+                migrated_model[field_name] = raw_model[field_name]
+        migrated_models[model_id] = migrated_model
+
+    migrated["providers"] = providers
+    migrated["models"] = migrated_models
+    if upstream_routes:
+        migrated["upstream_routes"] = upstream_routes
+    else:
+        migrated.pop("upstream_routes", None)
+    return migrated
+
+
+def _legacy_provider_id(base_url: str) -> str:
+    provider_id = base_url.replace("https://", "").replace("http://", "")
+    provider_id = provider_id.strip("/").replace("/", "-").replace(":", "-")
+    return provider_id or "default"
+
+
 def _resolve_config_path(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path)
@@ -344,6 +435,10 @@ class RouterConfig:
     def load(cls, path: str | Path | None = None) -> "RouterConfig":
         config_path = _resolve_config_path(path)
         raw = load_config_data(config_path)
+        migrated = migrate_config_data(raw)
+        if migrated != raw:
+            raw = migrated
+            save_config_data(config_path, raw)
         if not raw.get("local_api_key"):
             raw["local_api_key"] = generate_local_api_key()
             save_config_data(config_path, raw)
@@ -351,6 +446,7 @@ class RouterConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "RouterConfig":
+        raw = migrate_config_data(raw)
         if int(raw.get("config_version") or 0) != CONFIG_VERSION:
             raise ValueError(f"配置文件必须是 config_version {CONFIG_VERSION}")
         models: list[ModelConfig] = []

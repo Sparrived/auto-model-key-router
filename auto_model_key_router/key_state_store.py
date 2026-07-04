@@ -13,7 +13,7 @@ class KeyStateStore:
         self.path = Path(path)
         self._write_lock = asyncio.Lock()
 
-    def load(self) -> tuple[list[dict[str, Any]], dict[str, bool]]:
+    def load(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -28,7 +28,7 @@ class KeyStateStore:
     async def save(
         self,
         states: dict[tuple[str, str], Any],
-        url_native_support: dict[str, bool] | None = None,
+        url_native_support: dict[str, Any] | None = None,
     ) -> None:
         payload = {
             "version": 2,

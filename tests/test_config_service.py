@@ -60,24 +60,40 @@ def test_invalid_update_leaves_existing_file_unchanged(tmp_path: Path) -> None:
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
-def test_runtime_rejects_legacy_list_model_config() -> None:
+def test_runtime_migrates_legacy_list_model_config(tmp_path: Path) -> None:
     legacy = config_data()
     legacy.pop("config_version")
     legacy["models"] = [
         {
             "id": "model-a",
+            "aliases": ["alias-a"],
             "keys": [
                 {
                     "name": "key-a",
                     "api_key": "sk-a",
                     "base_url": "https://example.test",
+                    "allow_visitor": True,
                 }
             ],
         }
     ]
 
-    with pytest.raises(ValueError, match="config_version 3"):
-        RouterConfig.from_dict(legacy)
+    path = tmp_path / "router-config.json"
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    config = RouterConfig.load(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    assert config.models[0].id == "model-a"
+    assert config.models[0].aliases == ("alias-a",)
+    assert config.models[0].keys[0].name == "key-a"
+    assert config.models[0].keys[0].api_key == "sk-a"
+    assert config.models[0].keys[0].allow_visitor is True
+    assert saved["config_version"] == 3
+    assert saved["providers"]["example.test"]["keys"]["key-a"]["api_key"] == "sk-a"
+    assert saved["models"]["model-a"]["targets"] == [
+        {"provider": "example.test", "pool": "model-a", "upstream_model": "model-a"}
+    ]
 
 
 def test_upstream_routes_are_normalized_by_base_url_from_config() -> None:
