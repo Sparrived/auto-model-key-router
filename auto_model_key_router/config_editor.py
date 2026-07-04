@@ -84,7 +84,7 @@ class KeyProbeResult:
 
 def key_display_name(key: dict[str, Any], fallback: str, width: int = 28) -> str:
     name = str(key.get("name") or fallback)
-    if key.get("allow_visitor", False):
+    if visitor_feature_available() and key.get("allow_visitor", False):
         return f"[{VISITOR_KEY_STYLE}]{short_text(name, width)}[/]"
     return short_text(name, width)
 
@@ -573,7 +573,8 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
     provider_table.add_column("Base URL", ratio=2)
     provider_table.add_column("Keys", justify="right")
     provider_table.add_column("Pools", justify="right")
-    provider_table.add_column("访客", justify="right")
+    if visitor_installed:
+        provider_table.add_column("访客", justify="right")
     provider_table.add_column("路由", ratio=2)
     for provider_id, provider in sorted(providers.items()):
         keys = provider_keys(provider)
@@ -581,16 +582,21 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
         visitor_keys = sum(1 for key in keys.values() if key.get("allow_visitor"))
         routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
         route_text = ", ".join(sorted(routes)) if routes else "默认"
-        provider_table.add_row(
+        row = [
             short_text(str(provider_id), 18),
             compact_url(str(provider.get("base_url") or "-"), 42),
             str(len(keys)),
             str(len(pools)),
-            format_visitor_status_text(visitor_keys > 0, visitor_installed),
             short_text(route_text, 28),
-        )
+        ]
+        if visitor_installed:
+            row.insert(4, format_visitor_status_text(visitor_keys > 0, visitor_installed))
+        provider_table.add_row(*row)
     if not provider_table.rows:
-        provider_table.add_row("-", "[yellow]暂无供应商[/yellow]", "0", "0", "-", "-")
+        empty_row = ["-", "[yellow]暂无供应商[/yellow]", "0", "0", "-"]
+        if visitor_installed:
+            empty_row.insert(4, "-")
+        provider_table.add_row(*empty_row)
 
     model_table = Table(show_header=True, header_style="bold cyan", expand=True)
     model_table.add_column("本地模型", ratio=2)
@@ -836,18 +842,30 @@ def manage_provider_keys_interactively(path: Path) -> None:
         provider_id, key_name = selected
         provider = raw_providers(data)[provider_id]
         key = provider_keys(provider)[key_name]
+        visitor_installed = visitor_feature_available()
+        options = [
+            ("1", "开关"),
+            ("2", "重命名"),
+            ("3", "替换 API key"),
+        ]
+        if visitor_installed:
+            options.append(("4", "访客访问"))
+        options.extend([("5", "删除"), ("0", "返回")])
+        lines = [
+            f"供应商: [bold]{provider_id}[/bold]",
+            f"Key: [bold]{key_name}[/bold]",
+            f"状态: [bold]{'启用' if key.get('enabled', True) else '禁用'}[/bold]",
+        ]
+        if visitor_installed:
+            lines.append(
+                f"访客: {format_visitor_status_text(bool(key.get('allow_visitor')), True)}"
+            )
+        lines.append(f"指纹: [bold]{key_fingerprint(str(key.get('api_key') or ''))}[/bold]")
         choice = select_option(
             f"{provider_id}/{key_name}",
-            [
-                ("1", "开关"),
-                ("2", "重命名"),
-                ("3", "替换 API key"),
-                ("4", "访客访问"),
-                ("5", "删除"),
-                ("0", "返回"),
-            ],
+            options,
             content=section_panel(
-                f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n状态: [bold]{'启用' if key.get('enabled', True) else '禁用'}[/bold]\n访客: {format_visitor_status_text(bool(key.get('allow_visitor')), visitor_feature_available())}\n指纹: [bold]{key_fingerprint(str(key.get('api_key') or ''))}[/bold]",
+                "\n".join(lines),
                 "Key 信息",
                 "cyan",
             ),
@@ -893,7 +911,7 @@ def update_provider_key_interactively(
             return section_panel("[red]API key 不能为空[/red]", "替换 API key", "red")
         key["api_key"] = api_key
         message = f"已替换 {provider_id}/{key_name} 的 API key。"
-    elif choice == "4":
+    elif choice == "4" and visitor_feature_available():
         key["allow_visitor"] = not bool(key.get("allow_visitor", False))
         message = f"已{'允许' if key['allow_visitor'] else '禁止'}访客访问 {provider_id}/{key_name}。"
     elif choice == "5":
@@ -1719,19 +1737,19 @@ def manage_selected_key_interactively(path: Path) -> None:
                 )
             )
             options.append(("0", "返回"))
+            key_info_lines = [
+                f"模型: [bold]{short_text(model['id'], 32)}[/bold]",
+                f"Key: {key_display_name(key, key_name, 32)}",
+                f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]",
+                f"配置状态: {status_text}",
+                f"运行状态: {runtime_status_text}",
+            ]
+            if visitor_installed:
+                key_info_lines.append(f"访客访问: {visitor_status_text}")
             choice = select_option(
                 f"管理 Key · {short_text(key_name, 24)}",
                 options,
-                content=section_panel(
-                    f"模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
-                    f"Key: {key_display_name(key, key_name, 32)}\n"
-                    f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]\n"
-                    f"配置状态: {status_text}\n"
-                    f"运行状态: {runtime_status_text}\n"
-                    f"访客访问: {visitor_status_text}",
-                    "Key 信息",
-                    "cyan",
-                ),
+                content=section_panel("\n".join(key_info_lines), "Key 信息", "cyan"),
                 on_key=on_key,
             )
             if choice == "0":
@@ -2286,11 +2304,7 @@ def export_config_interactively(path: Path) -> ResultPage:
     config_text = json.dumps(transfer_data, ensure_ascii=False, separators=(",", ":"))
     model_count = len(transfer_data["models"])
     key_count = sum(len(model.get("keys", [])) for model in transfer_data["models"])
-    visitor_message = (
-        "包含访客访问权限。"
-        if visitor_installed
-        else "visitor 扩展未安装，不包含访客访问权限。"
-    )
+    visitor_message = "包含访客访问权限。" if visitor_installed else ""
     content = section_panel(
         f"配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\n"
         f"Key 数量: [bold]{key_count}[/bold]\n\n"

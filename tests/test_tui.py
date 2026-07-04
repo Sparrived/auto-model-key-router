@@ -790,6 +790,16 @@ def test_request_stats_pages_filter_local_and_visitor_calls(tmp_path) -> None:
     assert "local-model" not in visitor_output
 
 
+def test_logs_hide_visitor_navigation_when_feature_missing(monkeypatch) -> None:
+    monkeypatch.setattr(logs_tui, "visitor_feature_available", lambda: False)
+
+    header = render_plain(logs_tui.log_header_renderable("stats"))
+    help_text = render_plain(logs_tui.log_help_text("logs"))
+
+    assert "访客" not in header
+    assert "访客" not in help_text
+
+
 def test_request_stats_pages_support_legacy_database_without_caller_type(tmp_path) -> None:
     database_path = tmp_path / "legacy-metrics.sqlite3"
     with sqlite3.connect(database_path) as connection:
@@ -1058,6 +1068,7 @@ def test_select_api_key_highlights_visitor_enabled_key(tmp_path, monkeypatch) ->
         menus.append(options)
         return next(choices)
 
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: True)
     monkeypatch.setattr(config_editor, "select_option", choose)
 
     _, _, key_index = config_editor.select_api_key(config_path, "选择 Key")
@@ -1065,6 +1076,64 @@ def test_select_api_key_highlights_visitor_enabled_key(tmp_path, monkeypatch) ->
     assert key_index == 1
     assert "[bold bright_magenta]guest[/]" in menus[1][1][1]
     assert "[bold bright_magenta]local[/]" not in menus[1][0][1]
+
+
+def test_v2_summary_hides_visitor_column_when_feature_missing(monkeypatch) -> None:
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+
+    output = render_plain(
+        config_editor.v2_summary_panel(
+            {
+                "config_version": 3,
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {"main": {"api_key": "sk-main", "allow_visitor": True}},
+                        "pools": {},
+                    }
+                },
+                "models": {},
+            }
+        )
+    )
+
+    assert "访客" not in output
+
+
+def test_provider_key_menu_hides_visitor_when_feature_missing(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {"main": {"api_key": "sk-main", "allow_visitor": True}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "1", "0", "0"])
+    menus = []
+    contents = []
+
+    def choose(title, options, selected=0, content=None, **kwargs):
+        menus.append(options)
+        contents.append(render_plain(content))
+        return next(choices)
+
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+    monkeypatch.setattr(config_editor, "select_option", choose)
+
+    config_editor.manage_provider_keys_interactively(config_path)
+
+    assert all("访客" not in label for _, label in menus[-1])
+    assert "访客" not in contents[-1]
 
 
 def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_path, monkeypatch) -> None:
@@ -1114,7 +1183,8 @@ def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_
     assert "sk-secret" not in output
     assert "local-secret" not in output
     assert "本地鉴权、监听地址、端口及其他 CLI 设置不会复制" in output
-    assert "visitor 扩展未安装，不包含访客访问权限" in output
+    assert "visitor" not in output
+    assert "访客" not in output
 
 
 def test_export_config_interactively_includes_visitor_access_when_installed(tmp_path, monkeypatch) -> None:

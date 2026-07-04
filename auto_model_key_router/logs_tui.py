@@ -22,6 +22,7 @@ from .formatting import abbreviate_number, percent, short_text
 from .log_files import archived_log_paths
 from .metrics import BEIJING_TZ, RATE_WINDOW_SECONDS
 from .tui import console, content_scroll_offset, key_pressed, mouse_wheel_mode, posix_input_mode, section_panel, shortcut_text, should_handle_wheel, terminal_frame_state
+from .visitor import visitor_feature_available
 
 
 REQUEST_STATS_PAGE_SIZE = 10
@@ -48,6 +49,12 @@ STATS_CALLER_PAGES: tuple[tuple[str, str, str | None], ...] = (
     ("stats_local", "本地调用", "local"),
     ("stats_visitor", "访客调用", "visitor"),
 )
+
+
+def stats_caller_pages() -> tuple[tuple[str, str, str | None], ...]:
+    if visitor_feature_available():
+        return STATS_CALLER_PAGES
+    return tuple(page for page in STATS_CALLER_PAGES if page[2] != "visitor")
 
 
 def render_logs(database_path: str, log_file_path: str, limit: int) -> None:
@@ -112,7 +119,7 @@ def watch_logs(database_path: str, log_file_path: str, limit: int) -> None:
                     frame_offset = 0
                     refresh()
                     continue
-                if key == "4":
+                if key == "4" and visitor_feature_available():
                     page = "stats_visitor"
                     stats_page = 1
                     frame_offset = 0
@@ -213,7 +220,7 @@ def log_page_size(limit: int) -> int:
 def log_header_renderable(page: str) -> Panel:
     logs_label = "[bold black on cyan] 1 运行日志 [/bold black on cyan]" if page == "logs" else "[dim]1[/dim] 运行日志"
     caller_labels = []
-    for index, (page_id, label, _) in enumerate(STATS_CALLER_PAGES, start=2):
+    for index, (page_id, label, _) in enumerate(stats_caller_pages(), start=2):
         caller_labels.append(
             f"[bold black on cyan] {index} {label} [/bold black on cyan]"
             if page == page_id
@@ -223,9 +230,10 @@ def log_header_renderable(page: str) -> Panel:
 
 
 def log_help_text(page: str) -> Align:
+    visitor_shortcut = "  ·  4 访客" if visitor_feature_available() else ""
     if page == "logs":
-        return shortcut_text("1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  ←/→ 切换日志  ·  O 打开  ·  ↑/↓/Pg 滚动  ·  q 返回" if sys.platform != "win32" else "1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  ←/→ 切换日志  ·  O 打开  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
-    return shortcut_text("1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  Tab 时间范围  ·  ↑/↓/Pg 滚动  ·  ←/→ 翻页  ·  q 返回" if sys.platform != "win32" else "1 日志  ·  2 全部  ·  3 本地  ·  4 访客  ·  Tab 时间范围  ·  ↑/↓/滚轮/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
+        return shortcut_text(f"1 日志  ·  2 全部  ·  3 本地{visitor_shortcut}  ·  ←/→ 切换日志  ·  O 打开  ·  ↑/↓/Pg 滚动  ·  q 返回" if sys.platform != "win32" else f"1 日志  ·  2 全部  ·  3 本地{visitor_shortcut}  ·  ←/→ 切换日志  ·  O 打开  ·  ↑/↓/滚轮/Pg 滚动  ·  q 返回")
+    return shortcut_text(f"1 日志  ·  2 全部  ·  3 本地{visitor_shortcut}  ·  Tab 时间范围  ·  ↑/↓/Pg 滚动  ·  ←/→ 翻页  ·  q 返回" if sys.platform != "win32" else f"1 日志  ·  2 全部  ·  3 本地{visitor_shortcut}  ·  Tab 时间范围  ·  ↑/↓/滚轮/Pg 滚动  ·  ←/→ 翻页  ·  q 返回")
 
 
 def open_log_file(log_file_path: str) -> str:
@@ -402,7 +410,7 @@ def request_stats_renderable(database_path: str, page: int, page_size: int, stat
 
 
 def stats_caller_type(page: str) -> str | None:
-    return next((caller_type for page_id, _, caller_type in STATS_CALLER_PAGES if page_id == page), None)
+    return next((caller_type for page_id, _, caller_type in stats_caller_pages() if page_id == page), None)
 
 
 def key_stats_renderable(database_path: str, model_id: str, key_name: str, page: int, page_size: int, stats_range_index: int = 0) -> Group | Panel:
