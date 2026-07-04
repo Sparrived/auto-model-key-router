@@ -256,6 +256,26 @@ def test_windows_update_helper_script_handshakes_retries_and_writes_log(tmp_path
     assert "Read-Host '按 Enter 关闭更新器'" in script
 
 
+def test_windows_update_helper_script_verifies_installed_version_before_success(tmp_path) -> None:
+    command = ["uv", "tool", "upgrade", "auto-model-key-router"]
+
+    script = windows_update_helper_script(
+        VersionCheckResult(current_version="1.0.0", latest_version="1.2.3", source="PyPI"),
+        command,
+        123,
+        tmp_path / "update.ready",
+        tmp_path / "update.log",
+        tmp_path / "stdout.log",
+        tmp_path / "stderr.log",
+    )
+
+    assert "$expectedVersion = '1.2.3'" in script
+    assert "auto_model_key_router.main" in script
+    assert "--version" in script
+    assert "更新命令退出码为 0，但版本仍不是目标版本" in script
+    assert "if ($exitCode -eq 0 -and $versionVerified) { break }" in script
+
+
 def test_windows_update_helper_script_runs_post_update_commands_on_success(tmp_path) -> None:
     command = ["uv", "tool", "upgrade", "auto-model-key-router"]
     post_commands = [[sys.executable, "-m", "auto_model_key_router.main", "--config", str(tmp_path / "config.json"), "--restart-service-after-update"], [sys.executable, "-m", "auto_model_key_router.main", "--config", str(tmp_path / "config.json")]]

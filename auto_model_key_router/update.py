@@ -269,6 +269,9 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
     target_line = f"目标: {update_target_label(version_result)}"
     command_line = f"命令: {shell_command_text(command)}"
     argument_line = subprocess.list2cmdline(command[1:])
+    version_probe_command = resolved_update_command(
+        [sys.executable, "-m", "auto_model_key_router.main", "--version"]
+    )
     post_update_lines: list[str] = []
     for index, post_update_command in enumerate(post_update_commands or []):
         post_command = resolved_update_command(post_update_command)
@@ -310,6 +313,9 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "$ProgressPreference = 'SilentlyContinue'",
         f"$tool = {powershell_string(command[0])}",
         f"$argumentLine = {powershell_string(argument_line)}",
+        f"$expectedVersion = {powershell_string(version_result.latest_version or '')}",
+        f"$versionTool = {powershell_string(version_probe_command[0])}",
+        f"$versionArgs = {powershell_array(version_probe_command[1:])}",
         f"$readyPath = {powershell_string(str(ready_path))}",
         f"$logPath = {powershell_string(str(log_path))}",
         f"$stdoutPath = {powershell_string(str(stdout_path))}",
@@ -343,6 +349,7 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "    if ($null -ne $parentProcess) { $parentProcess.WaitForExit() }",
         "    Start-Sleep -Milliseconds $initialWaitMs",
         "    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {",
+        "        $versionVerified = $false",
         "        Write-Host \"正在更新（第 $attempt/$maxAttempts 次）...\"",
         "        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue",
         "        $updateProcess = Start-Process -FilePath $tool -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath",
@@ -350,8 +357,25 @@ def windows_update_helper_script(version_result: VersionCheckResult, command: li
         "        $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { '' }",
         "        $stderrText = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { '' }",
         "        $attemptLog += @('', \"[attempt $attempt stdout]\", $stdoutText, '', \"[attempt $attempt stderr]\", $stderrText)",
+        "        if ($exitCode -eq 0 -and $expectedVersion) {",
+        "            try {",
+        "                $versionOutput = & $versionTool @versionArgs 2>&1 | Out-String",
+        "                $attemptLog += @('', \"[attempt $attempt version]\", $versionOutput)",
+        "                if ($versionOutput -match [regex]::Escape($expectedVersion)) {",
+        "                    $versionVerified = $true",
+        "                } else {",
+        "                    $exitCode = 1",
+        "                    $attemptLog += @('', \"[attempt $attempt version mismatch]\", \"更新命令退出码为 0，但版本仍不是目标版本 $expectedVersion；实际输出: $versionOutput\")",
+        "                }",
+        "            } catch {",
+        "                $exitCode = 1",
+        "                $attemptLog += @('', \"[attempt $attempt version check error]\", ($_ | Out-String))",
+        "            }",
+        "        } elseif ($exitCode -eq 0) {",
+        "            $versionVerified = $true",
+        "        }",
         "        Save-UpdateLog $(if ($exitCode -eq 0) { '更新成功' } else { \"第 $attempt 次更新失败\" })",
-        "        if ($exitCode -eq 0) { break }",
+        "        if ($exitCode -eq 0 -and $versionVerified) { break }",
         "        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds ([Math]::Min($retryBaseSeconds, $attempt * 2)) }",
         "    }",
         "    if ($exitCode -ne 0) { throw \"更新命令在 $maxAttempts 次尝试后仍失败，退出码: $exitCode\" }",
