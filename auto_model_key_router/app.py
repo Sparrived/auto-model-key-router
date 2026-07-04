@@ -164,6 +164,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 "visitor_key_count": visitor_key_count if visitor_installed else 0,
                 "unified_model": runtime.key_pool.unified_route,
                 "key_states": runtime.key_pool.key_states(),
+                "native_endpoint_states": runtime.key_pool.url_native_support_states(),
             }
         finally:
             await lease.release()

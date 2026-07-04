@@ -1,59 +1,62 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import anyio
 import pytest
 
-from auto_model_key_router.config import RouterConfig
+from auto_model_key_router.config import KeyConfig, ModelConfig, RouterConfig
 from auto_model_key_router.key_pool import KeyPool
 
 
 def make_pool(tmp_path: Path) -> KeyPool:
     return KeyPool(
-        RouterConfig.from_dict(
-            {
-                "key_state_path": str(tmp_path / "key-state.json"),
-                "models": [
-                    {
-                        "id": "model-a",
-                        "keys": [
-                            {
-                                "name": "key-a",
-                                "api_key": "sk-a",
-                                "base_url": "https://example.test",
-                            }
-                        ],
-                    }
-                ],
-            }
+        RouterConfig(
+            host="127.0.0.1",
+            port=8000,
+            request_timeout=10,
+            max_retries=1,
+            key_failure_threshold=5,
+            key_cooldown_seconds=10,
+            key_state_path=str(tmp_path / "key-state.json"),
+            upstream_health_check_interval=0,
+            metrics_db_path=str(tmp_path / "metrics.sqlite3"),
+            log_file_path=str(tmp_path / "server.log"),
+            local_api_key="local-key",
+            models=(
+                ModelConfig(
+                    id="model-a",
+                    keys=(KeyConfig("key-a", "sk-a", "https://example.test"),),
+                ),
+            ),
         )
     )
 
 
 def make_multi_key_pool(tmp_path: Path) -> KeyPool:
     return KeyPool(
-        RouterConfig.from_dict(
-            {
-                "key_state_path": str(tmp_path / "key-state.json"),
-                "models": [
-                    {
-                        "id": "model-a",
-                        "keys": [
-                            {
-                                "name": "key-a",
-                                "api_key": "sk-a",
-                                "base_url": "https://a.example.test",
-                            },
-                            {
-                                "name": "key-b",
-                                "api_key": "sk-b",
-                                "base_url": "https://b.example.test",
-                            },
-                        ],
-                    }
-                ],
-            }
+        RouterConfig(
+            host="127.0.0.1",
+            port=8000,
+            request_timeout=10,
+            max_retries=1,
+            key_failure_threshold=5,
+            key_cooldown_seconds=10,
+            key_state_path=str(tmp_path / "key-state.json"),
+            upstream_health_check_interval=0,
+            metrics_db_path=str(tmp_path / "metrics.sqlite3"),
+            log_file_path=str(tmp_path / "server.log"),
+            local_api_key="local-key",
+            models=(
+                ModelConfig(
+                    id="model-a",
+                    keys=(
+                        KeyConfig("key-a", "sk-a", "https://a.example.test"),
+                        KeyConfig("key-b", "sk-b", "https://b.example.test"),
+                    ),
+                ),
+            ),
         )
     )
 
@@ -163,3 +166,24 @@ def test_key_is_disabled_after_five_consecutive_failures(tmp_path: Path) -> None
     assert state["cooldown_remaining_seconds"] == 0
     assert state["disabled"] is True
     assert reloaded.key_states()["model-a:key-a"]["disabled"] is True
+
+
+def test_native_negative_support_expires_and_is_visible(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("auto_model_key_router.key_pool.time", lambda: 1000.0)
+    pool = make_pool(tmp_path)
+
+    async def run() -> None:
+        await pool.update_native_endpoint("https://example.test", False, "v1/responses")
+
+    anyio.run(run)
+
+    assert pool.supports_native_endpoint("https://example.test", "v1/responses") is False
+    state = pool.url_native_support_states()["https://example.test|v1/responses"]
+    assert state["supported"] is False
+    assert state["expires_in_seconds"] == 600
+
+    monkeypatch.setattr("auto_model_key_router.key_pool.time", lambda: 1601.0)
+
+    assert pool.supports_native_endpoint("https://example.test", "v1/responses") is None
+    persisted = json.loads((tmp_path / "key-state.json").read_text(encoding="utf-8"))
+    assert persisted["url_native_support"]["https://example.test|v1/responses"]["supported"] is False

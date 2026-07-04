@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import RouterConfig, load_config_data, save_config_data
+from .config import RouterConfig, load_config_data, migrate_config_data, save_config_data
 
 
 @dataclass(frozen=True)
@@ -27,9 +27,10 @@ class ConfigService:
         old_config: RouterConfig | None = None,
     ) -> ConfigChange:
         previous = old_config or RouterConfig.load(self.path)
-        new_config = RouterConfig.from_dict(data)
-        save_config_data(self.path, data)
-        return ConfigChange(self.path, previous, new_config, deepcopy(data))
+        migrated = migrate_config_data(data)
+        new_config = RouterConfig.from_dict(migrated)
+        save_config_data(self.path, migrated)
+        return ConfigChange(self.path, previous, new_config, deepcopy(migrated))
 
     def update(
         self,
@@ -48,3 +49,4 @@ def commit_config_data(
     old_config: RouterConfig,
 ) -> ConfigChange:
     return ConfigService(path).commit(data, old_config=old_config)
+

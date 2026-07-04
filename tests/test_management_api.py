@@ -212,7 +212,7 @@ def test_model_and_key_crud_persist_and_hot_reload_visitor_access(
     assert missing_model.status_code == 404
 
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert [model["id"] for model in saved["models"]] == ["model-a"]
+    assert list(saved["models"]) == ["model-a"]
     assert "sk-secret-b" not in created.text
     assert "sk-secret-b" not in updated_key.text
 
@@ -240,10 +240,11 @@ def test_key_update_preserves_secret_and_last_key_cannot_be_deleted(
     assert updated.status_code == 200
     assert updated.json()["allow_visitor"] is True
     assert deleted.status_code == 409
-    saved_key = json.loads(path.read_text(encoding="utf-8"))["models"][0]["keys"][0]
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    saved_key = saved["providers"]["new.example.test"]["keys"]["key-a"]
     assert saved_key["api_key"] == "sk-secret-a"
-    assert saved_key["base_url"] == "https://new.example.test"
     assert saved_key["allow_visitor"] is True
+    assert saved["providers"]["new.example.test"]["base_url"] == "https://new.example.test"
 
 
 def test_key_update_persists_and_clears_base_url_upstream_routes(tmp_path: Path) -> None:
@@ -272,11 +273,11 @@ def test_key_update_persists_and_clears_base_url_upstream_routes(tmp_path: Path)
     assert after_update["upstream_routes"] == {
         "https://a.example.test": {"anthropic": "anthropic/v1/messages"}
     }
-    assert "upstream_routes" not in after_update["models"][0]["keys"][0]
+    assert "upstream_routes" not in after_update["models"]["model-a"]
     assert cleared.status_code == 200
     assert "upstream_routes" not in cleared.json()
     saved_data = json.loads(path.read_text(encoding="utf-8"))
-    saved_key = saved_data["models"][0]["keys"][0]
+    saved_key = saved_data["providers"]["a.example.test"]["keys"]["key-a"]
     assert "upstream_routes" not in saved_key
     assert "upstream_routes" not in saved_data
 
@@ -342,8 +343,7 @@ def test_management_can_update_an_implicitly_named_key(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json()["name"] == "model-a-1"
     assert response.json()["allow_visitor"] is True
-    saved_key = json.loads(path.read_text(encoding="utf-8"))["models"][0]["keys"][0]
-    assert "name" not in saved_key
+    saved_key = json.loads(path.read_text(encoding="utf-8"))["providers"]["a.example.test"]["keys"]["model-a-1"]
     assert saved_key["allow_visitor"] is True
 
 

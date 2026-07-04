@@ -33,9 +33,10 @@ from .config import (
 )
 from .config_service import commit_config_data
 from .config_editor import (
+    fetch_native_endpoint_states,
     manage_config_transfer_interactively,
     manage_model_keys_interactively,
-    reasoning_effort_text,
+    native_endpoint_support_text,
     set_listen_interactively,
     set_local_api_key_interactively,
 )
@@ -707,8 +708,18 @@ def render_config(config: RouterConfig, path: Path) -> None:
 
 
 def upstream_mode_summary(
-    config: RouterConfig, base_url: str, items: list[tuple[Any, Any]], mode: str
+    config: RouterConfig,
+    base_url: str,
+    items: list[tuple[Any, Any]],
+    mode: str,
+    native_states: dict[str, dict[str, Any]] | None = None,
 ) -> str:
+    route_path = config.upstream_routes_for_base_url(base_url).get(
+        mode, UPSTREAM_ROUTE_DEFAULT_PATHS[mode]
+    )
+    status = native_endpoint_support_text(
+        (native_states or {}).get(f"{base_url.rstrip('/')}|{route_path.strip('/')}")
+    )
     custom_paths = sorted(
         {path for path in [config.upstream_routes_for_base_url(base_url).get(mode)] if path}
     )
@@ -716,11 +727,13 @@ def upstream_mode_summary(
         paths = "\n".join(short_text(path, 34) for path in custom_paths[:3])
         if len(custom_paths) > 3:
             paths = f"{paths}\n[dim]+{len(custom_paths) - 3} 更多[/dim]"
-        return f"[green]自定义原生[/green]\n{paths}"
+        return f"[green]自定义原生[/green]\n{paths}{status}"
     if mode == "openai":
         return f"[green]原生[/green]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"
     if mode == "anthropic" and any(model.native_first for model, _ in items):
-        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}"
+        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}{status}"
+    if mode == "responses":
+        return f"[cyan]自动探测[/cyan]\n{UPSTREAM_ROUTE_DEFAULT_PATHS[mode]}{status}"
     return f"[yellow]转换[/yellow]\n{UPSTREAM_ROUTE_DEFAULT_PATHS['openai']}"
 
 
@@ -731,6 +744,12 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
             upstreams.setdefault(key.base_url, []).append((model, key))
     if not upstreams:
         return None
+    native_states = fetch_native_endpoint_states({
+        "host": config.host,
+        "port": config.port,
+        "local_api_key": config.local_api_key,
+        "key_state_path": config.key_state_path,
+    })
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("上游 URL", ratio=2)
     for mode in UPSTREAM_ROUTE_MODES:
@@ -739,7 +758,7 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
         table.add_row(
             compact_url(base_url, 42),
             *(
-                upstream_mode_summary(config, base_url, items, mode)
+                upstream_mode_summary(config, base_url, items, mode, native_states)
                 for mode in UPSTREAM_ROUTE_MODES
             ),
         )
@@ -828,45 +847,26 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     )
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("模型 ID", style="cyan", ratio=2)
-    table.add_column("名称")
+    table.add_column("别名")
     table.add_column("路由模式")
-    table.add_column("推理强度")
     table.add_column("Keys", justify="right", style="green")
-    table.add_column("上游", ratio=2)
-    table.add_column("原生支持")
     for model in config.models:
-        upstreams = sorted({compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
         routing_mode = {
             "round_robin": "分流",
             "priority": "优先级",
             "only_first": "仅首个",
         }.get(model.routing_mode, "分流")
-        native_items = []
-        for base_url in sorted({key.base_url for key in model.keys}):
-            routes = config.upstream_routes_for_base_url(base_url)
-            if routes.get("anthropic"):
-                native_items.append("[cyan]Anth[/cyan]")
-            elif model.native_first:
-                native_items.append("[cyan]Anth[/cyan]")
-            if routes.get("openai"):
-                native_items.append("[green]OAI[/green]")
-            if routes.get("responses"):
-                native_items.append("[magenta]Resp[/magenta]")
-        native_summary = " ".join(native_items) if native_items else "[dim]-[/dim]"
         table.add_row(
             short_text(model.id, 28),
             short_text(display_names, 24),
             routing_mode,
-            reasoning_effort_text(model.reasoning_effort),
             str(len(model.keys)),
-            "\n".join(upstreams),
-            native_summary,
         )
     if not config.models:
-        table.add_row("未配置", "-", "-", "-", "0", "-", "-")
+        table.add_row("未配置", "-", "-", "0")
     renderables = [section_panel(summary, "运行概览", "cyan")]
     if warning is not None:
         renderables.append(warning)
-    renderables.append(section_panel(table, "模型路由", "blue"))
+    renderables.append(section_panel(table, "模型配置", "blue"))
     return tuple(renderables)
