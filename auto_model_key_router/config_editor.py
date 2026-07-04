@@ -19,16 +19,14 @@ from .config import (
     UPSTREAM_ROUTE_DEFAULT_PATHS,
     UPSTREAM_ROUTE_LABELS,
     UPSTREAM_ROUTE_MODES,
+    CONFIG_VERSION,
     RouterConfig,
     default_key_state_path,
     default_metrics_db_path,
     generate_local_api_key,
     load_config_data,
-    migrate_config_data,
-    migrate_config_file,
     normalize_upstream_base_url,
     normalize_upstream_route_path,
-    save_config_data,
     upstream_route_path,
 )
 from .config_service import commit_config_data
@@ -361,11 +359,7 @@ def _open_config_on_key(path: Path, key: str) -> str | None:
 
 
 def load_v2_config_data(path: Path) -> dict[str, Any]:
-    data = load_config_data(path)
-    migrated = migrate_config_data(data)
-    if migrated != data:
-        save_config_data(path, migrated)
-    return migrated
+    return load_config_data(path)
 
 
 def raw_providers(data: dict[str, Any]) -> dict[str, Any]:
@@ -1421,7 +1415,8 @@ def update_provider_routes_interactively(path: Path, provider_id: str, choice: s
 
 
 def manage_model_keys_interactively(path: Path) -> None:
-    on_key = lambda key: _open_config_on_key(path, key)
+    def on_key(key: str) -> str | None:
+        return _open_config_on_key(path, key)
     while True:
         data = load_v2_config_data(path)
         choice = select_option(
@@ -1456,7 +1451,8 @@ def manage_model_keys_interactively(path: Path) -> None:
 
 
 def manage_model_aliases_interactively(path: Path) -> None:
-    on_key = lambda key: _open_config_on_key(path, key)
+    def on_key(key: str) -> str | None:
+        return _open_config_on_key(path, key)
     while True:
         data = load_config_data(path)
         models = data.get("models", [])
@@ -1494,7 +1490,8 @@ def manage_model_aliases_interactively(path: Path) -> None:
 
 
 def manage_selected_model_aliases_interactively(path: Path, model_id: str) -> None:
-    on_key = lambda key: _open_config_on_key(path, key)
+    def on_key(key: str) -> str | None:
+        return _open_config_on_key(path, key)
     while True:
         data = load_config_data(path)
         model = find_model(data.get("models", []), model_id)
@@ -1652,7 +1649,8 @@ def save_model_alias_change(
 
 
 def manage_selected_key_interactively(path: Path) -> None:
-    on_key = lambda key: _open_config_on_key(path, key)
+    def on_key(key: str) -> str | None:
+        return _open_config_on_key(path, key)
     while True:
         data = load_config_data(path)
         manage_choice = select_option(
@@ -2160,7 +2158,8 @@ def toggle_visitor_access_interactively(
 
 
 def manage_config_transfer_interactively(path: Path) -> None:
-    on_key = lambda key: _open_config_on_key(path, key)
+    def on_key(key: str) -> str | None:
+        return _open_config_on_key(path, key)
     while True:
         choice = select_option(
             "配置迁移", [("1", "复制 Key 配置"), ("2", "粘贴并应用"), ("0", "返回")],
@@ -2181,100 +2180,132 @@ def manage_config_transfer_interactively(path: Path) -> None:
 def transferable_key_config(
     data: dict[str, Any], *, include_visitor: bool
 ) -> dict[str, Any]:
-    default_base_url = str(data.get("default_base_url") or "https://api.openai.com")
-    default_routing_mode = str(data.get("routing_mode") or "round_robin")
-    raw_models = data.get("models", [])
-    if not isinstance(raw_models, list):
-        raise ValueError("models 必须是数组")
-    models = deepcopy(raw_models)
-    for model in models:
-        if not isinstance(model, dict):
-            raise ValueError("models 中的每一项必须是对象")
-        if not model.get("routing_mode"):
-            model["routing_mode"] = default_routing_mode
-        keys = model.get("keys", [])
-        if not isinstance(keys, list):
-            raise ValueError("模型 keys 必须是数组")
-        for key in keys:
-            if not isinstance(key, dict):
-                raise ValueError("模型 keys 中的每一项必须是对象")
-            if not key.get("base_url"):
-                key["base_url"] = default_base_url
-            if not include_visitor:
-                key.pop("allow_visitor", None)
-    result: dict[str, Any] = {"models": models}
-    routes_by_url = data.get("upstream_routes")
-    if isinstance(routes_by_url, dict) and routes_by_url:
-        result["upstream_routes"] = deepcopy(routes_by_url)
-    return result
+    providers = deepcopy(raw_providers(data))
+    models = deepcopy(raw_v2_models(data))
+    if not include_visitor:
+        for provider in providers.values():
+            if isinstance(provider, dict):
+                for key in provider_keys(provider).values():
+                    if isinstance(key, dict):
+                        key.pop("allow_visitor", None)
+    return {
+        "config_version": CONFIG_VERSION,
+        "providers": providers,
+        "models": models,
+    }
 
 
 def merge_transferable_key_config(
     current_data: dict[str, Any], transfer_data: dict[str, Any]
 ) -> tuple[dict[str, Any], int, int, int]:
     merged_data = deepcopy(current_data)
-    models = merged_data.setdefault("models", [])
-    default_base_url = str(
-        current_data.get("default_base_url") or "https://api.openai.com"
-    )
+    merged_data["config_version"] = CONFIG_VERSION
+    current_providers = raw_providers(merged_data)
+    current_models = raw_v2_models(merged_data)
+    transfer_providers = raw_providers(transfer_data)
+    transfer_models = raw_v2_models(transfer_data)
     added_models = 0
     added_keys = 0
     skipped_keys = 0
-    transferred_routes = transfer_data.get("upstream_routes")
-    if isinstance(transferred_routes, dict):
-        merged_routes = merged_data.setdefault("upstream_routes", {})
-        if isinstance(merged_routes, dict):
-            for base_url, routes in transferred_routes.items():
-                if not isinstance(routes, dict):
-                    continue
-                target = merged_routes.setdefault(base_url, {})
-                if isinstance(target, dict):
-                    for mode, route_path in routes.items():
-                        target.setdefault(mode, route_path)
+    provider_name_map: dict[str, str] = {}
+    pool_name_map: dict[tuple[str, str], tuple[str, str]] = {}
 
-    for transferred_model in transfer_data["models"]:
-        model_id = str(transferred_model["id"])
-        current_model = find_model(models, model_id)
-        if current_model is None:
-            models.append(deepcopy(transferred_model))
-            added_models += 1
-            added_keys += len(transferred_model.get("keys", []))
+    for provider_id, provider in transfer_providers.items():
+        if not isinstance(provider, dict):
             continue
-
-        current_keys = current_model.setdefault("keys", [])
-        used_names = {
-            str(key.get("name") or f"{model_id}-{index + 1}")
-            for index, key in enumerate(current_keys)
-        }
+        target_provider_id = str(provider_id)
+        if target_provider_id in current_providers:
+            current_provider = current_providers[target_provider_id]
+            if normalize_upstream_base_url(current_provider.get("base_url")) != normalize_upstream_base_url(provider.get("base_url")):
+                base_name = target_provider_id
+                suffix = 2
+                while f"{base_name}-{suffix}" in current_providers:
+                    suffix += 1
+                target_provider_id = f"{base_name}-{suffix}"
+                current_provider = deepcopy(provider)
+                current_provider["keys"] = {}
+                current_provider["pools"] = {}
+                current_providers[target_provider_id] = current_provider
+        else:
+            current_provider = deepcopy(provider)
+            current_provider["keys"] = {}
+            current_provider["pools"] = {}
+            current_providers[target_provider_id] = current_provider
+        provider_name_map[str(provider_id)] = target_provider_id
+        current_keys = provider_keys(current_provider)
+        current_pools = provider_pools(current_provider)
         existing_key_targets = {
-            (
-                str(key.get("api_key") or ""),
-                str(key.get("base_url") or default_base_url),
-            )
-            for key in current_keys
+            str(key.get("api_key") or "")
+            for key in current_keys.values()
+            if isinstance(key, dict)
         }
-
-        for index, transferred_key in enumerate(transferred_model.get("keys", [])):
-            key_target = (
-                str(transferred_key.get("api_key") or ""),
-                str(transferred_key.get("base_url") or default_base_url),
-            )
-            if key_target in existing_key_targets:
+        key_name_map: dict[str, str | None] = {}
+        for key_name, key in provider_keys(provider).items():
+            api_key = str(key.get("api_key") or "") if isinstance(key, dict) else ""
+            if api_key in existing_key_targets:
                 skipped_keys += 1
+                key_name_map[str(key_name)] = None
                 continue
-
-            key = deepcopy(transferred_key)
-            base_name = str(key.get("name") or f"{model_id}-{index + 1}")
-            key_name = base_name
+            target_key_name = str(key_name)
+            base_name = target_key_name
             suffix = 2
-            while key_name in used_names:
-                key_name = f"{base_name}-{suffix}"
+            while target_key_name in current_keys:
+                target_key_name = f"{base_name}-{suffix}"
                 suffix += 1
-            key["name"] = key_name
-            current_keys.append(key)
-            used_names.add(key_name)
-            existing_key_targets.add(key_target)
+            current_keys[target_key_name] = deepcopy(key)
+            key_name_map[str(key_name)] = target_key_name
+            existing_key_targets.add(api_key)
             added_keys += 1
+        for pool_name, pool in provider_pools(provider).items():
+            mapped_keys = [
+                key_name_map[key_name]
+                for key_name in pool_key_names(pool)
+                if key_name_map.get(key_name)
+            ]
+            if not mapped_keys:
+                pool_name_map[(str(provider_id), str(pool_name))] = (target_provider_id, "")
+                continue
+            target_pool_name = str(pool_name)
+            base_name = target_pool_name
+            suffix = 2
+            while target_pool_name in current_pools:
+                target_pool_name = f"{base_name}-{suffix}"
+                suffix += 1
+            current_pools[target_pool_name] = {"keys": mapped_keys}
+            pool_name_map[(str(provider_id), str(pool_name))] = (target_provider_id, target_pool_name)
+
+    for model_id, transferred_model in transfer_models.items():
+        target_model = current_models.get(str(model_id))
+        if not isinstance(target_model, dict):
+            current_models[str(model_id)] = deepcopy(transferred_model)
+            target_model = current_models[str(model_id)]
+            target_model["targets"] = []
+            added_models += 1
+        targets = model_targets(target_model)
+        existing_targets = {
+            (
+                str(target.get("provider") or ""),
+                str(target.get("pool") or ""),
+                str(target.get("upstream_model") or model_id),
+            )
+            for target in targets
+        }
+        for target in model_targets(transferred_model):
+            mapped = pool_name_map.get((str(target.get("provider") or ""), str(target.get("pool") or "")))
+            if not mapped:
+                continue
+            provider_id, pool_name = mapped
+            if not pool_name:
+                continue
+            new_target = {
+                "provider": provider_id,
+                "pool": pool_name,
+                "upstream_model": str(target.get("upstream_model") or model_id),
+            }
+            target_key = (new_target["provider"], new_target["pool"], new_target["upstream_model"])
+            if target_key not in existing_targets:
+                targets.append(new_target)
+                existing_targets.add(target_key)
 
     return merged_data, added_models, added_keys, skipped_keys
 
@@ -2285,7 +2316,7 @@ def export_config_interactively(path: Path) -> ResultPage:
     transfer_data = transferable_key_config(data, include_visitor=visitor_installed)
     config_text = json.dumps(transfer_data, ensure_ascii=False, separators=(",", ":"))
     model_count = len(transfer_data["models"])
-    key_count = sum(len(model.get("keys", [])) for model in transfer_data["models"])
+    key_count = sum(len(provider_keys(provider)) for provider in transfer_data["providers"].values())
     visitor_message = "包含访客访问权限。" if visitor_installed else ""
     content = section_panel(
         f"配置文件: [bold]{path.resolve()}[/bold]\n模型数量: [bold]{model_count}[/bold]\n"
@@ -2346,16 +2377,17 @@ def paste_config_interactively(path: Path) -> Any:
     )
 
 
-def select_model_id_for_new_key(models: list[dict[str, Any]]) -> str | None:
+def select_model_id_for_new_key(models: dict[str, Any]) -> str | None:
     if not models:
         return prompt_text("添加 Key", "新模型 ID").strip()
 
+    model_ids = sorted(models)
     options = [
         (
             str(index + 1),
-            f"{short_text(model.get('id') or '-', 32)} · {len(model.get('keys', []))} Key",
+            f"{short_text(model_id, 32)} · {len(model_targets(models[model_id]))} Target",
         )
-        for index, model in enumerate(models)
+        for index, model_id in enumerate(model_ids)
     ]
     options.extend([("n", "自定义添加新的模型 ID"), ("0", "返回")])
     choice = select_option("选择模型", options)
@@ -2363,12 +2395,10 @@ def select_model_id_for_new_key(models: list[dict[str, Any]]) -> str | None:
         return None
     if choice == "n":
         return prompt_text("添加 Key", "新模型 ID").strip()
-    return str(models[int(choice) - 1].get("id") or "").strip()
+    return model_ids[int(choice) - 1]
 
 
-def configured_base_urls(
-    data: dict[str, Any], selected_model: dict[str, Any]
-) -> list[str]:
+def configured_base_urls(data: dict[str, Any], selected_model: dict[str, Any]) -> list[str]:
     base_urls: list[str] = []
 
     def append(value: Any) -> None:
@@ -2376,12 +2406,11 @@ def configured_base_urls(
         if base_url and base_url not in base_urls:
             base_urls.append(base_url)
 
-    for key in selected_model.get("keys", []):
-        append(key.get("base_url"))
-    for model in data.get("models", []):
-        for key in model.get("keys", []):
-            append(key.get("base_url"))
-    append(data.get("default_base_url") or "https://api.openai.com")
+    append(selected_model.get("base_url"))
+    for provider in raw_providers(data).values():
+        if isinstance(provider, dict):
+            append(provider.get("base_url"))
+    append("https://api.openai.com")
     return base_urls
 
 
@@ -2585,14 +2614,14 @@ def probe_all_keys_interactively(path: Path) -> Any:
 
 
 def _select_model_with_discovery(
-    models: list[dict[str, Any]],
+    models: dict[str, Any],
     base_url: str,
     api_key: str,
 ) -> tuple[str | None, list[str]]:
-    existing_ids = {str(model.get("id") or "") for model in models}
+    existing_ids = {str(model_id) for model_id in models}
     with console.status("[cyan]正在探测上游可用模型...[/cyan]", spinner="dots"):
         discovered = discover_upstream_models(base_url, api_key, existing_ids)
-    available = [mid for mid in discovered if find_model(models, mid) is not None]
+    available = [mid for mid in discovered if mid in models]
     new_models = [mid for mid in discovered if mid not in existing_ids]
     manual_entry = ("n", "自定义添加新的模型 ID")
     return_entry = ("0", "返回")
@@ -2600,13 +2629,12 @@ def _select_model_with_discovery(
     if available or new_models:
         options: list[tuple[str, str]] = []
         for mid in available:
-            model = find_model(models, mid)
-            options.append((mid, f"{short_text(mid, 32)} · 已有 · {len(model.get('keys', []))} Key"))
+            options.append((mid, f"{short_text(mid, 32)} · 已有 · {len(model_targets(models[mid]))} Target"))
         for mid in new_models:
             options.append((mid, f"{short_text(mid, 32)} · 新模型"))
         options.extend([manual_entry, return_entry])
         content = section_panel(
-            f"已探测到 [bold]{len(discovered)}[/bold] 个上游模型，直接选择即可为已有模型添加 Key，或选择新模型。",
+            f"已探测到 [bold]{len(discovered)}[/bold] 个上游模型，直接选择即可为已有模型添加路由，或选择新模型。",
             "发现上游模型",
             "cyan",
         )
@@ -2624,9 +2652,10 @@ def _select_model_with_discovery(
 def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     data = load_config_data(path)
     old_config = RouterConfig.from_dict(data)
-    models = data.setdefault("models", [])
+    providers = raw_providers(data)
+    models = raw_v2_models(data)
 
-    base_url = select_base_url_for_new_key(data, {"keys": []})
+    base_url = select_base_url_for_new_key(data, {})
     if base_url is None:
         return None
     if not base_url:
@@ -2641,16 +2670,11 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加失败", "red")
 
-    model = find_model(models, model_id)
+    model = models.get(model_id)
     is_new_model = model is None
     if model is None:
-        model = {
-            "id": model_id,
-            "aliases": [],
-            "routing_mode": "round_robin",
-            "keys": [],
-        }
-        models.append(model)
+        model = {"aliases": [], "routing_mode": "round_robin", "targets": []}
+        models[model_id] = model
 
     if is_new_model:
         aliases_text = prompt_text(
@@ -2679,14 +2703,22 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
             model.pop("reasoning_effort", None)
         else:
             model["reasoning_effort"] = reasoning_effort
-    keys = model.setdefault("keys", [])
+
+    provider_id = "default"
+    provider = providers.setdefault(provider_id, {"base_url": base_url, "keys": {}, "pools": {}})
+    provider["base_url"] = base_url
+    keys = provider_keys(provider)
     default_key_name = f"{model_id}-key-{len(keys) + 1}"
     key_name = (
         prompt_text("添加 Key", "Key 名称", default=default_key_name).strip()
         or default_key_name
     )
-
-    keys.append({"name": key_name, "api_key": api_key, "base_url": base_url})
+    keys[key_name] = {"api_key": api_key, "enabled": True}
+    pool_name = key_name
+    provider_pools(provider)[pool_name] = {"keys": [key_name]}
+    model_targets(model).append(
+        {"provider": provider_id, "pool": pool_name, "upstream_model": model_id}
+    )
     new_config = commit_config_data(path, data, old_config).new_config
 
     added_by_discovery = 0
@@ -2730,16 +2762,19 @@ def _add_discovered_models(path: Path, model_ids: list[str], api_key: str, base_
     for mid in model_ids:
         data = load_config_data(path)
         old_config = RouterConfig.from_dict(data)
-        models = data.setdefault("models", [])
-        if find_model(models, mid) is not None:
+        models = raw_v2_models(data)
+        if mid in models:
             continue
-        new_model = {
-            "id": mid,
+        provider = raw_providers(data).setdefault("default", {"base_url": base_url, "keys": {}, "pools": {}})
+        provider["base_url"] = base_url
+        key_name = f"{mid}-key-1"
+        provider_keys(provider)[key_name] = {"api_key": api_key, "enabled": True}
+        provider_pools(provider)[key_name] = {"keys": [key_name]}
+        models[mid] = {
             "aliases": [],
             "routing_mode": "round_robin",
-            "keys": [{"name": f"{mid}-key-1", "api_key": api_key, "base_url": base_url}],
+            "targets": [{"provider": "default", "pool": key_name, "upstream_model": mid}],
         }
-        models.append(new_model)
         try:
             commit_config_data(path, data, old_config)
             added += 1
@@ -3294,3 +3329,7 @@ def find_model(models: list[dict[str, Any]], model_id: str) -> dict[str, Any] | 
         if model.get("id") == model_id:
             return model
     return None
+
+
+
+
