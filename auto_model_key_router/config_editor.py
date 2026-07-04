@@ -600,30 +600,30 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
 
     model_table = Table(show_header=True, header_style="bold cyan", expand=True)
     model_table.add_column("本地模型", ratio=2)
-    model_table.add_column("Targets", justify="right")
-    model_table.add_column("模式", ratio=1)
-    model_table.add_column("上游", ratio=3)
+    model_table.add_column("别名", ratio=2)
+    model_table.add_column("路由模式", ratio=1)
+    model_table.add_column("Keys", justify="right")
     for model_id, model in sorted(models.items()):
-        targets = model_targets(model)
-        upstreams = []
-        for target in targets[:3]:
-            target_name = target.get("pool") or target.get("key") or "-"
-            upstreams.append(
-                f"{target.get('provider')}/{target_name}→{target.get('upstream_model') or model_id}"
-            )
-        if len(targets) > 3:
-            upstreams.append(f"+{len(targets) - 3}")
+        aliases = ", ".join(str(alias) for alias in model.get("aliases", []) if str(alias))
+        key_count = 0
+        for target in model_targets(model):
+            provider = providers.get(str(target.get("provider") or ""), {})
+            if target.get("pool"):
+                pool = provider_pools(provider).get(str(target.get("pool") or ""), {})
+                key_count += len(pool_key_names(pool))
+            elif target.get("key"):
+                key_count += 1
         model_table.add_row(
             short_text(str(model_id), 28),
-            str(len(targets)),
+            short_text(aliases or "-", 36),
             str(model.get("routing_mode") or "round_robin"),
-            short_text(", ".join(upstreams) if upstreams else "未绑定", 56),
+            str(key_count),
         )
     if not model_table.rows:
-        model_table.add_row("-", "0", "-", "[yellow]暂无模型路由[/yellow]")
+        model_table.add_row("-", "-", "-", "0")
     return Group(
         section_panel(provider_table, "供应商 Key", "cyan"),
-        section_panel(model_table, "模型路由", "magenta"),
+        section_panel(model_table, "模型映射", "magenta"),
     )
 
 
@@ -1323,11 +1323,11 @@ def manage_v2_model_settings_interactively(path: Path) -> None:
             return
         model = raw_v2_models(data)[model_id]
         choice = select_option(
-            f"模型参数 · {short_text(model_id, 28)}",
-            [("1", "别名"), ("2", "路由模式"), ("3", "推理强度"), ("0", "返回")],
+            f"模型映射 · {short_text(model_id, 28)}",
+            [("1", "别名"), ("2", "路由模式"), ("0", "返回")],
             content=section_panel(
-                f"别名: [bold]{', '.join(model.get('aliases') or []) or '无'}[/bold]\n路由模式: [bold]{model.get('routing_mode') or 'round_robin'}[/bold]\n推理强度: [bold]{reasoning_effort_text(model.get('reasoning_effort'))}[/bold]",
-                "模型参数",
+                f"别名: [bold]{', '.join(model.get('aliases') or []) or '无'}[/bold]\n路由模式: [bold]{model.get('routing_mode') or 'round_robin'}[/bold]",
+                "模型映射",
                 "cyan",
             ),
         )
@@ -1336,7 +1336,7 @@ def manage_v2_model_settings_interactively(path: Path) -> None:
         clear_terminal_history()
         result = update_v2_model_settings_interactively(path, model_id, choice)
         if result is not None:
-            show_result_page("模型参数", result)
+            show_result_page("模型映射", result)
 
 
 def update_v2_model_settings_interactively(path: Path, model_id: str, choice: str) -> Any:
@@ -1359,22 +1359,10 @@ def update_v2_model_settings_interactively(path: Path, model_id: str, choice: st
         ).strip()
         model["routing_mode"] = routing_mode
         message = f"已更新 {model_id} 的路由模式: {routing_mode}。"
-    elif choice == "3":
-        effort = prompt_text(
-            "推理强度",
-            "推理强度",
-            choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"],
-            default=normalize_reasoning_effort_choice(model.get("reasoning_effort")),
-        ).strip()
-        if effort == "downstream":
-            model.pop("reasoning_effort", None)
-        else:
-            model["reasoning_effort"] = effort
-        message = f"已更新 {model_id} 的推理强度: {reasoning_effort_text(effort)}。"
     else:
         return None
     restart = commit_v2_config(path, data, old_config)
-    return Group(section_panel(message, "模型参数", "green"), restart)
+    return Group(section_panel(message, "模型映射", "green"), restart)
 
 
 def manage_provider_routes_interactively(path: Path) -> None:
@@ -1443,9 +1431,7 @@ def manage_model_keys_interactively(path: Path) -> None:
                 ("2", "管理供应商 Key"),
                 ("3", "模型池"),
                 ("4", "添加模型路由"),
-                ("5", "管理模型路由"),
-                ("6", "模型参数"),
-                ("7", "供应商路径"),
+                ("5", "模型映射"),
                 ("0", "返回"),
             ],
             content=v2_summary_panel(data),
@@ -1466,11 +1452,7 @@ def manage_model_keys_interactively(path: Path) -> None:
             if result is not None:
                 show_result_page("添加模型路由", result)
         elif choice == "5":
-            run_submodule(lambda: manage_model_routes_interactively(path))
-        elif choice == "6":
             run_submodule(lambda: manage_v2_model_settings_interactively(path))
-        elif choice == "7":
-            run_submodule(lambda: manage_provider_routes_interactively(path))
 
 
 def manage_model_aliases_interactively(path: Path) -> None:

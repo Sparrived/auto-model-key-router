@@ -35,7 +35,6 @@ from .config_service import commit_config_data
 from .config_editor import (
     manage_config_transfer_interactively,
     manage_model_keys_interactively,
-    reasoning_effort_text,
     set_listen_interactively,
     set_local_api_key_interactively,
 )
@@ -828,45 +827,26 @@ def config_renderables(config: RouterConfig, path: Path) -> tuple[Any, ...]:
     )
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("模型 ID", style="cyan", ratio=2)
-    table.add_column("名称")
+    table.add_column("别名")
     table.add_column("路由模式")
-    table.add_column("推理强度")
     table.add_column("Keys", justify="right", style="green")
-    table.add_column("上游", ratio=2)
-    table.add_column("原生支持")
     for model in config.models:
-        upstreams = sorted({compact_url(key.base_url) for key in model.keys})
         display_names = "\n".join(model.aliases) if model.aliases else "-"
         routing_mode = {
             "round_robin": "分流",
             "priority": "优先级",
             "only_first": "仅首个",
         }.get(model.routing_mode, "分流")
-        native_items = []
-        for base_url in sorted({key.base_url for key in model.keys}):
-            routes = config.upstream_routes_for_base_url(base_url)
-            if routes.get("anthropic"):
-                native_items.append("[cyan]Anth[/cyan]")
-            elif model.native_first:
-                native_items.append("[cyan]Anth[/cyan]")
-            if routes.get("openai"):
-                native_items.append("[green]OAI[/green]")
-            if routes.get("responses"):
-                native_items.append("[magenta]Resp[/magenta]")
-        native_summary = " ".join(native_items) if native_items else "[dim]-[/dim]"
         table.add_row(
             short_text(model.id, 28),
             short_text(display_names, 24),
             routing_mode,
-            reasoning_effort_text(model.reasoning_effort),
             str(len(model.keys)),
-            "\n".join(upstreams),
-            native_summary,
         )
     if not config.models:
-        table.add_row("未配置", "-", "-", "-", "0", "-", "-")
+        table.add_row("未配置", "-", "-", "0")
     renderables = [section_panel(summary, "运行概览", "cyan")]
     if warning is not None:
         renderables.append(warning)
-    renderables.append(section_panel(table, "模型路由", "blue"))
+    renderables.append(section_panel(table, "模型配置", "blue"))
     return tuple(renderables)

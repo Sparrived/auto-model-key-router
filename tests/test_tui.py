@@ -847,6 +847,47 @@ def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert all(label != "调用日志" for _, label in dashboard.SETTINGS_OPTIONS)
 
 
+def test_dashboard_model_table_focuses_on_model_mapping() -> None:
+    config = dashboard.RouterConfig.from_dict(
+        {
+            "models": {
+                "local-model": {
+                    "aliases": ["alias-model"],
+                    "routing_mode": "priority",
+                    "reasoning_effort": "high",
+                    "targets": [
+                        {
+                            "provider": "gateway",
+                            "pool": "default",
+                            "upstream_model": "upstream-model",
+                        }
+                    ],
+                }
+            },
+            "providers": {
+                "gateway": {
+                    "base_url": "https://gateway.example.test",
+                    "keys": {"main": {"api_key": "sk-main"}},
+                    "pools": {"default": {"keys": ["main"]}},
+                }
+            },
+        }
+    )
+
+    output = render_plain(dashboard.config_renderables(config, Path("router-config.json"))[-1])
+
+    assert "模型配置" in output
+    assert "模型路由" not in output
+    assert "别名" in output
+    assert "路由模式" in output
+    assert "Keys" in output
+    assert "推理强度" not in output
+    assert "上游" not in output
+    assert "原生支持" not in output
+    assert "gateway.example.test" not in output
+    assert "high" not in output
+
+
 def test_tui_switches_unified_model_and_key(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
@@ -1469,8 +1510,8 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
     assert model["keys"] == [{"name": "primary", "api_key": "sk-primary", "base_url": "https://primary.example.com"}]
 
 
-def test_provider_model_menu_opens_model_settings(tmp_path, monkeypatch) -> None:
-    choices = iter(["6", "0"])
+def test_provider_model_menu_opens_model_mapping(tmp_path, monkeypatch) -> None:
+    choices = iter(["5", "0"])
     menus: list[list[tuple[str, str]]] = []
     opened: list[Path] = []
 
@@ -1489,12 +1530,48 @@ def test_provider_model_menu_opens_model_settings(tmp_path, monkeypatch) -> None
         ("2", "管理供应商 Key"),
         ("3", "模型池"),
         ("4", "添加模型路由"),
-        ("5", "管理模型路由"),
-        ("6", "模型参数"),
-        ("7", "供应商路径"),
+        ("5", "模型映射"),
         ("0", "返回"),
     ]
     assert opened == [tmp_path / "router-config.json"]
+
+
+def test_v2_summary_model_section_focuses_on_mapping() -> None:
+    output = render_plain(
+        config_editor.v2_summary_panel(
+            {
+                "config_version": 3,
+                "providers": {
+                    "gateway": {
+                        "base_url": "https://gateway.example.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    }
+                },
+                "models": {
+                    "local-model": {
+                        "aliases": ["alias-model"],
+                        "routing_mode": "priority",
+                        "targets": [
+                            {
+                                "provider": "gateway",
+                                "pool": "default",
+                                "upstream_model": "upstream-model",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+    )
+
+    assert "模型映射" in output
+    assert "模型路由" not in output
+    assert "别名" in output
+    assert "路由模式" in output
+    assert "上游" not in output
+    assert "gateway/default" not in output
+    assert "upstream-model" not in output
 
 
 def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None:
