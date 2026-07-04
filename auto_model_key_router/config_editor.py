@@ -518,10 +518,25 @@ def parse_model_id_list(value: str) -> list[str]:
 
 
 def prompt_manual_pool_models(default_models: list[str] | None = None) -> list[str]:
+    default_models = sorted(dict.fromkeys(default_models or []))
+    if default_models:
+        custom = "__custom__"
+        selected = select_multiple(
+            "模型池",
+            [(model_id, model_id) for model_id in default_models]
+            + [(custom, "自定义输入")],
+            content=section_panel(
+                "选择要保留/设置的可用模型；需要新增未列出的模型时选择自定义输入。",
+                "手动可用模型",
+                "cyan",
+            ),
+        )
+        if custom not in selected:
+            return selected
     text = prompt_text(
         "模型池",
         "手动可用模型，多个用逗号分隔",
-        default=", ".join(default_models or []),
+        default=", ".join(default_models),
     ).strip()
     return parse_model_id_list(text)
 
@@ -685,6 +700,69 @@ def select_v2_model(data: dict[str, Any], title: str) -> str | None:
     if choice == "0":
         return None
     return sorted(models)[int(choice) - 1]
+
+
+def select_or_enter_model_id(
+    title: str,
+    prompt: str,
+    models: dict[str, Any],
+    *,
+    default: str,
+) -> str:
+    model_ids = sorted(models)
+    if not model_ids:
+        return prompt_text(title, prompt, default=default).strip()
+    options = [(model_id, short_text(model_id, 48)) for model_id in model_ids]
+    options.extend([("__custom__", "自定义输入"), ("0", "返回")])
+    selected = model_ids.index(default) if default in model_ids else 0
+    choice = select_option(title, options, selected=selected)
+    if choice == "0":
+        return ""
+    if choice == "__custom__":
+        return prompt_text(title, prompt, default=default).strip()
+    return choice
+
+
+def select_pool_model_id(
+    title: str,
+    prompt: str,
+    provider: dict[str, Any],
+    pool_name: str,
+    *,
+    default: str,
+) -> str:
+    pool = provider_pools(provider).get(pool_name, {})
+    model_ids = sorted(dict.fromkeys(pool_enabled_models(pool) or pool_available_models(pool)))
+    if not model_ids:
+        return prompt_text(title, prompt, default=default).strip()
+    options = [(model_id, short_text(model_id, 48)) for model_id in model_ids]
+    options.extend([("__custom__", "自定义输入"), ("0", "返回")])
+    selected = model_ids.index(default) if default in model_ids else 0
+    choice = select_option(title, options, selected=selected)
+    if choice == "0":
+        return ""
+    if choice == "__custom__":
+        return prompt_text(title, prompt, default=default).strip()
+    return choice
+
+
+def select_or_enter_pool_name(
+    pools: dict[str, Any],
+    *,
+    default: str,
+) -> str:
+    pool_names = sorted(pools)
+    if not pool_names:
+        return prompt_text("模型池", "Pool 名称", default=default).strip()
+    options = [(pool_name, pool_name) for pool_name in pool_names]
+    options.extend([("__custom__", "新建/自定义 Pool 名称"), ("0", "返回")])
+    selected = pool_names.index(default) if default in pool_names else 0
+    choice = select_option("模型池", options, selected=selected)
+    if choice == "0":
+        return ""
+    if choice == "__custom__":
+        return prompt_text("模型池", "Pool 名称", default=default).strip()
+    return choice
 
 
 def add_provider_key_interactively(path: Path) -> Any:
@@ -920,7 +998,10 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
     keys = provider_keys(provider)
     pools = provider_pools(provider)
     if choice == "1":
-        pool_name = prompt_text("模型池", "Pool 名称", default=draft.get("pool_name", "default")).strip()
+        pool_name = select_or_enter_pool_name(
+            pools,
+            default=draft.get("pool_name", "default"),
+        )
         draft["pool_name"] = pool_name
         if not pool_name:
             return section_panel("[red]Pool 名称不能为空[/red]", "模型池", "red")
@@ -1107,7 +1188,12 @@ def add_model_route_interactively(path: Path) -> Any:
     if upstream_choice == "0":
         return None
     upstream_model = enabled_models[int(upstream_choice) - 1]
-    model_id = prompt_text("添加模型路由", "本地模型 ID", default=draft.get("model_id", upstream_model)).strip()
+    model_id = select_or_enter_model_id(
+        "添加模型路由",
+        "本地模型 ID",
+        models,
+        default=draft.get("model_id", upstream_model),
+    )
     draft["model_id"] = model_id
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
@@ -1185,9 +1271,15 @@ def update_model_target_interactively(
     target = targets[target_index]
     if action == "1":
         current = str(target.get("upstream_model") or model_id)
-        upstream_model = prompt_text(
-            "改上游模型", "上游模型 ID", default=current
-        ).strip()
+        provider_id = str(target.get("provider") or "")
+        pool_name = str(target.get("pool") or "")
+        upstream_model = select_pool_model_id(
+            "改上游模型",
+            "上游模型 ID",
+            raw_providers(data).get(provider_id, {}),
+            pool_name,
+            default=current,
+        )
         if not upstream_model or upstream_model == current:
             return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
         target["upstream_model"] = upstream_model

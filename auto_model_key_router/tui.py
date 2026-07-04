@@ -589,6 +589,17 @@ def prompt_text(
     password: bool = False,
     choices: list[str] | None = None,
 ) -> str:
+    if choices:
+        selected = choices.index(default) if default in choices else 0
+        choice = select_option(
+            title,
+            [(choice, choice) for choice in choices] + [("0", "返回")],
+            selected=selected,
+        )
+        if choice == "0":
+            raise KeyboardInterrupt
+        return choice
+
     value: list[str] = []
     status: str | None = None
 

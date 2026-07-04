@@ -542,6 +542,42 @@ def test_prompt_text_q_on_empty_value_cancels(monkeypatch) -> None:
     assert cancelled
 
 
+def test_prompt_text_choices_use_select_option(monkeypatch) -> None:
+    calls = []
+
+    def choose(title, options, selected=0, content=None, **kwargs):
+        calls.append((title, options, selected))
+        return "round_robin"
+
+    monkeypatch.setattr(tui, "select_option", choose)
+    monkeypatch.setattr(
+        tui,
+        "read_key_responsive",
+        lambda on_resize=None: (_ for _ in ()).throw(AssertionError("manual input should not be used")),
+    )
+
+    result = tui.prompt_text(
+        "路由模式",
+        "路由模式",
+        choices=["priority", "round_robin", "only_first"],
+        default="round_robin",
+    )
+
+    assert result == "round_robin"
+    assert calls == [
+        (
+            "路由模式",
+            [
+                ("priority", "priority"),
+                ("round_robin", "round_robin"),
+                ("only_first", "only_first"),
+                ("0", "返回"),
+            ],
+            1,
+        )
+    ]
+
+
 def test_select_option_q_returns_back_option(monkeypatch) -> None:
     @contextmanager
     def input_mode():
@@ -1425,6 +1461,89 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     assert data["models"]["local-model"]["targets"] == [
         {"provider": "openai", "pool": "default", "upstream_model": "upstream-model"}
     ]
+
+
+def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "openai": {
+                        "base_url": "https://api.openai.com",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"], "models": ["gpt-4o-mini"]}},
+                    }
+                },
+                "models": {
+                    "local-existing": {
+                        "targets": [
+                            {"provider": "openai", "pool": "default", "upstream_model": "old-model"}
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "1", "1", "local-existing"])
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
+    monkeypatch.setattr(
+        config_editor,
+        "prompt_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("existing model should be selected")),
+    )
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    result = config_editor.add_model_route_interactively(config_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "添加完成" in render_plain(result)
+    assert data["models"]["local-existing"]["targets"][-1] == {
+        "provider": "openai",
+        "pool": "default",
+        "upstream_model": "gpt-4o-mini",
+    }
+
+
+def test_update_model_target_selects_pool_model(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "openai": {
+                        "base_url": "https://api.openai.com",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"], "models": ["gpt-4o-mini", "gpt-4o"]}},
+                    }
+                },
+                "models": {
+                    "local": {
+                        "targets": [
+                            {"provider": "openai", "pool": "default", "upstream_model": "gpt-4o-mini"}
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "gpt-4o")
+    monkeypatch.setattr(
+        config_editor,
+        "prompt_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upstream model should be selected")),
+    )
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    result = config_editor.update_model_target_interactively(config_path, "local", 0, "1")
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert "gpt-4o-mini → gpt-4o" in render_plain(result)
+    assert data["models"]["local"]["targets"][0]["upstream_model"] == "gpt-4o"
 
 
 def test_add_provider_key_keeps_in_memory_draft_on_cancel(tmp_path, monkeypatch) -> None:
