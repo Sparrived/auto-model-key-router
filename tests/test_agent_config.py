@@ -65,7 +65,22 @@ def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: 
     target = tmp_path / ".codex" / "config.toml"
     auth = tmp_path / ".codex" / "auth.json"
     backup = tmp_path / "backups" / "codex.json"
-    original = b'# keep this comment\nsandbox_mode = "workspace-write"\n\n[features]\nweb_search = true\n'
+    original = (
+        b'# keep this comment\n'
+        b'sandbox_mode = "workspace-write"\n'
+        b'disable_response_storage = false\n'
+        b'network_access = "restricted"\n'
+        b'windows_wsl_setup_acknowledged = false\n\n'
+        b'[features]\n'
+        b'web_search = true\n'
+        b'goals = false\n\n'
+        b'[model_providers.OpenAI]\n'
+        b'name = "Existing OpenAI"\n'
+        b'base_url = "https://old.example/v1"\n'
+        b'wire_api = "chat"\n'
+        b'requires_openai_auth = false\n'
+        b'custom_header = "keep"\n'
+    )
     original_auth = b'{\n  "OTHER_TOKEN": "keep",\n  "OPENAI_API_KEY": "old-key"\n}\n'
     target.parent.mkdir()
     target.write_bytes(original)
@@ -78,20 +93,21 @@ def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: 
     provider = configured["model_providers"]["OpenAI"]
     assert configured["sandbox_mode"] == "workspace-write"
     assert configured["features"]["web_search"] is True
-    assert configured["features"]["goals"] is True
+    assert configured["features"]["goals"] is False
+    assert configured["disable_response_storage"] is False
+    assert configured["network_access"] == "restricted"
+    assert configured["windows_wsl_setup_acknowledged"] is False
     assert configured["model_provider"] == "OpenAI"
     assert configured["model"] == UNIFIED_MODEL_ID
     assert configured["review_model"] == UNIFIED_MODEL_ID
     assert configured["model_reasoning_effort"] == "xhigh"
-    assert configured["disable_response_storage"] is True
-    assert configured["network_access"] == "enabled"
-    assert configured["windows_wsl_setup_acknowledged"] is True
     assert provider["name"] == "OpenAI"
     assert provider["base_url"] == "http://127.0.0.1:8000/v1"
     assert provider["wire_api"] == "responses"
     assert provider["requires_openai_auth"] is True
+    assert provider["custom_header"] == "keep"
     assert "experimental_bearer_token" not in provider
-    assert auth_configured == {"OPENAI_API_KEY": "local-key"}
+    assert auth_configured == {"OTHER_TOKEN": "keep", "OPENAI_API_KEY": "local-key"}
     assert result.router_url == "http://127.0.0.1:8000/v1"
     assert result.extra_target_paths == (auth.resolve(),)
     assert get_agent_config_status(CODEX, target_path=target, backup_path=backup).current_is_applied
@@ -151,6 +167,55 @@ def test_rollback_rejects_corrupted_backup(tmp_path: Path) -> None:
 
     with pytest.raises(AgentConfigError, match="备份内容已损坏"):
         rollback_agent(CODEX, target_path=target, backup_path=backup)
+
+
+def test_configure_codex_rejects_invalid_auth_without_overwriting_files(tmp_path: Path) -> None:
+    target = tmp_path / ".codex" / "config.toml"
+    auth = tmp_path / ".codex" / "auth.json"
+    backup = tmp_path / "backups" / "codex.json"
+    original = b'model = "existing"\n'
+    invalid_auth = b'["not", "an", "object"]\n'
+    target.parent.mkdir()
+    target.write_bytes(original)
+    auth.write_bytes(invalid_auth)
+
+    with pytest.raises(AgentConfigError, match="Codex 鉴权配置必须是 JSON 对象"):
+        configure_agent(CODEX, make_config(), target_path=target, backup_path=backup)
+
+    assert target.read_bytes() == original
+    assert auth.read_bytes() == invalid_auth
+    assert not backup.exists()
+
+
+def test_configure_codex_rejects_malformed_auth_without_overwriting_files(tmp_path: Path) -> None:
+    target = tmp_path / ".codex" / "config.toml"
+    auth = tmp_path / ".codex" / "auth.json"
+    backup = tmp_path / "backups" / "codex.json"
+    original = b'model = "existing"\n'
+    invalid_auth = b'{invalid json\n'
+    target.parent.mkdir()
+    target.write_bytes(original)
+    auth.write_bytes(invalid_auth)
+
+    with pytest.raises(AgentConfigError, match="Codex 鉴权配置不是有效的 UTF-8 JSON"):
+        configure_agent(CODEX, make_config(), target_path=target, backup_path=backup)
+
+    assert target.read_bytes() == original
+    assert auth.read_bytes() == invalid_auth
+    assert not backup.exists()
+
+
+def test_configure_codex_writes_minimal_new_config(tmp_path: Path) -> None:
+    target = tmp_path / ".codex" / "config.toml"
+    backup = tmp_path / "backups" / "codex.json"
+
+    configure_agent(CODEX, make_config(), target_path=target, backup_path=backup)
+
+    configured = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert "disable_response_storage" not in configured
+    assert "network_access" not in configured
+    assert "windows_wsl_setup_acknowledged" not in configured
+    assert "features" not in configured
 
 
 def test_configure_codex_writes_model_reasoning_effort_from_config(tmp_path: Path) -> None:

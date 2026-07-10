@@ -132,7 +132,8 @@ def configure_agent(
     else:
         updated = _configure_codex(current, config)
         auth_target = _codex_auth_path(target)
-        extra_targets = ((auth_target, _configure_codex_auth(config)),)
+        current_auth = auth_target.read_bytes() if auth_target.exists() else b""
+        extra_targets = ((auth_target, _configure_codex_auth(current_auth, config)),)
         route_url = f"{router_origin(config)}/v1"
 
     new_state = {
@@ -272,9 +273,6 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
     document["model_reasoning_effort"] = (
         config.reasoning_effort_by_model.get(config.unified_model.model) or "xhigh"
     )
-    document["disable_response_storage"] = True
-    document["network_access"] = "enabled"
-    document["windows_wsl_setup_acknowledged"] = True
     providers = document.get("model_providers")
     if providers is None:
         providers = tomlkit.table()
@@ -282,19 +280,16 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
     if not isinstance(providers, MutableMapping):
         raise AgentConfigError("Codex 配置中的 model_providers 必须是 TOML 表")
 
-    provider = tomlkit.table()
+    provider = providers.get(CODEX_PROVIDER_ID)
+    if provider is None:
+        provider = tomlkit.table()
+        providers[CODEX_PROVIDER_ID] = provider
+    if not isinstance(provider, MutableMapping):
+        raise AgentConfigError("Codex 配置中的 model_providers.OpenAI 必须是 TOML 表")
     provider["name"] = CODEX_PROVIDER_ID
     provider["base_url"] = f"{router_origin(config)}/v1"
     provider["wire_api"] = "responses"
     provider["requires_openai_auth"] = True
-    providers[CODEX_PROVIDER_ID] = provider
-
-    features = document.get("features")
-    if features is None:
-        features = tomlkit.table(is_super_table=True)
-        document["features"] = features
-    if isinstance(features, MutableMapping):
-        features["goals"] = True
 
     return tomlkit.dumps(document).encode("utf-8")
 
@@ -305,8 +300,17 @@ def _codex_auth_path(config_path: Path) -> Path:
 
 
 
-def _configure_codex_auth(config: RouterConfig) -> bytes:
-    data = {"OPENAI_API_KEY": config.local_api_key}
+def _configure_codex_auth(current: bytes, config: RouterConfig) -> bytes:
+    if current:
+        try:
+            data = json.loads(current.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentConfigError(f"Codex 鉴权配置不是有效的 UTF-8 JSON: {exc}") from exc
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        raise AgentConfigError("Codex 鉴权配置必须是 JSON 对象")
+    data["OPENAI_API_KEY"] = config.local_api_key
     return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
 
 

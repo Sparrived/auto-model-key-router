@@ -572,27 +572,23 @@ model_provider = "OpenAI"
 model = "unified-model"
 review_model = "unified-model"
 model_reasoning_effort = "xhigh"
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
 
 [model_providers.OpenAI]
 name = "OpenAI"
 base_url = "http://127.0.0.1:8000/v1"
 wire_api = "responses"
 requires_openai_auth = true
-
-[features]
-goals = true
 ```
 
-`auth.json` 会写入本地鉴权 key：
+`auth.json` 会更新本地鉴权 key：
 
 ```json
 {
   "OPENAI_API_KEY": "amkr_your-local-api-key"
 }
 ```
+
+一键配置只会更新上述模型调用字段，以及 `auth.json` 中的 `OPENAI_API_KEY`。现有的其他 Codex 设置、注释、OpenAI Provider 自定义字段和其他鉴权字段都会保留；旧版本已经写入的非模型字段也不会被主动删除。
 
 应用前的原始配置同样会备份，可在 TUI 中回退。
 
