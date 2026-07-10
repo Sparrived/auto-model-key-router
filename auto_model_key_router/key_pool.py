@@ -2,35 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
 from time import time
 from typing import Any
 
 from .config import UNIFIED_MODEL_ID, KeyConfig, RouterConfig
-from .key_state_store import KeyStateStore
+from .endpoint_capabilities import EndpointCapabilityCache
+from .endpoint_capability_store import EndpointCapabilityStore
+from .key_health import KeyHealthStore
 from .visitor import VISITOR_MODEL_PREFIX
-
-
-MAX_CONSECUTIVE_KEY_FAILURES = 5
-NATIVE_NEGATIVE_TTL_SECONDS = 600
-NATIVE_ERROR_TTL_SECONDS = 60
-
-
-@dataclass
-class KeyState:
-    failures: int = 0
-    cooldown_until: float = 0.0
-    last_status_code: int | None = None
-    disabled: bool = False
-
-
-@dataclass
-class NativeSupportState:
-    supported: bool
-    checked_at: float
-    reason: str = "ok"
-    ttl_seconds: int = 0
 
 
 class KeyPool:
@@ -38,52 +17,13 @@ class KeyPool:
         self._apply_config(config)
         self._cursors = defaultdict(int)
         self._active_requests = defaultdict(int)
-        self._states = defaultdict(KeyState)
         self._sticky_keys: dict[tuple[str, bool, str], str] = {}
-        self._url_native_support: dict[str, NativeSupportState] = {}
         self._lock = asyncio.Lock()
-        self._persist_lock = asyncio.Lock()
-        self._load_states()
-        self.on_key_state_change: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
-
-    async def reconfigure(self, config: RouterConfig) -> None:
-        async with self._lock:
-            old_state_path = self._state_path
-            self._apply_config(config)
-            self._cursors = defaultdict(
-                int,
-                {
-                    model_id: cursor
-                    for model_id, cursor in self._cursors.items()
-                    if model_id in self._keys
-                },
-            )
-            valid_keys = self._valid_state_keys()
-            self._active_requests = defaultdict(
-                int,
-                {
-                    key: count
-                    for key, count in self._active_requests.items()
-                    if key in valid_keys and count > 0
-                },
-            )
-            self._states = defaultdict(
-                KeyState,
-                {
-                    key: state
-                    for key, state in self._states.items()
-                    if key in valid_keys
-                },
-            )
-            self._sticky_keys = {
-                sticky_key: key_name
-                for sticky_key, key_name in self._sticky_keys.items()
-                if sticky_key[0] in self._keys
-                and (sticky_key[0], key_name) in valid_keys
-            }
-            if self._state_path != old_state_path:
-                self._states = defaultdict(KeyState)
-                self._load_states()
+        endpoint_states = self._capability_store.load()
+        self._health = KeyHealthStore(clock=time)
+        self._endpoint_capabilities = EndpointCapabilityCache(
+            endpoint_states, clock=time
+        )
 
     def _apply_config(self, config: RouterConfig) -> None:
         self._keys = {model.id: model.keys for model in config.models}
@@ -93,8 +33,9 @@ class KeyPool:
         }
         self._failure_threshold = config.key_failure_threshold
         self._cooldown_seconds = config.key_cooldown_seconds
-        self._state_path = config.key_state_path
-        self._state_store = KeyStateStore(config.key_state_path)
+        self._capability_store = EndpointCapabilityStore(
+            config.endpoint_capabilities_path
+        )
         self._aliases = {
             name: model.id
             for model in config.models
@@ -121,7 +62,9 @@ class KeyPool:
             self._unified_key_name = config.unified_model.key
             self._aliases[UNIFIED_MODEL_ID] = self._unified_model_id
             if config.unified_model.image_model:
-                self._unified_image_model_id = self._aliases[config.unified_model.image_model]
+                self._unified_image_model_id = self._aliases[
+                    config.unified_model.image_model
+                ]
                 self._unified_image_key_name = config.unified_model.image_key
 
     @property
@@ -157,7 +100,10 @@ class KeyPool:
         self, model_id: str, key_name: str | None = None, *, path: str | None = None
     ) -> tuple[str, str | None]:
         if model_id == UNIFIED_MODEL_ID and key_name is None:
-            if path in ("images/generations", "images/edits") and self._unified_image_model_id is not None:
+            if (
+                path in ("images/generations", "images/edits")
+                and self._unified_image_model_id is not None
+            ):
                 return self._unified_image_model_id, self._unified_image_key_name
             key_name = self._unified_key_name
         return self.resolve_model_id(model_id), key_name
@@ -207,7 +153,6 @@ class KeyPool:
             key
             for key in self._keys.get(model_id, ())
             if key.enabled
-            and not self._is_disabled(model_id, key.name)
             and (not visitor_only or key.allow_visitor)
         )
 
@@ -222,7 +167,6 @@ class KeyPool:
             if (
                 key.name == key_name
                 and key.enabled
-                and not self._is_disabled(model_id, key.name)
                 and (not visitor_only or key.allow_visitor)
             ):
                 return key
@@ -318,21 +262,9 @@ class KeyPool:
                 self._active_requests[active_key] = count - 1
 
     async def mark_success(self, model_id: str, key_name: str) -> None:
-        changed = False
+        model_id = self.resolve_model_id(model_id)
         async with self._lock:
-            state_key = (self.resolve_model_id(model_id), key_name)
-            state = self._states.get(state_key)
-            if state is not None and (
-                state.failures
-                or state.cooldown_until
-                or state.last_status_code is not None
-                or state.disabled
-            ):
-                self._states[state_key] = KeyState()
-                changed = True
-        if changed:
-            await self._persist_states()
-            await self._notify_state_change(model_id, key_name)
+            self._health.mark_success((model_id, key_name))
 
     async def mark_failure(
         self,
@@ -343,252 +275,34 @@ class KeyPool:
     ) -> None:
         model_id = self.resolve_model_id(model_id)
         async with self._lock:
-            state = self._states[(model_id, key_name)]
-            state.failures += 1
-            state.last_status_code = status_code
-            if state.failures >= MAX_CONSECUTIVE_KEY_FAILURES:
-                state.disabled = True
-                state.cooldown_until = 0.0
-            cooldown_seconds = self._failure_cooldown_seconds(state, retry_after)
-            if cooldown_seconds > 0 and (
-                not state.disabled
-                and (status_code == 429 or state.failures >= self._failure_threshold)
-            ):
-                state.cooldown_until = max(
-                    state.cooldown_until, time() + cooldown_seconds
-                )
-        await self._persist_states()
-        await self._notify_state_change(model_id, key_name)
+            self._health.mark_failure(
+                (model_id, key_name),
+                status_code=status_code,
+                retry_after=retry_after,
+                failure_threshold=self._failure_threshold,
+                cooldown_seconds=self._cooldown_seconds,
+            )
 
-    async def _notify_state_change(self, model_id: str, key_name: str) -> None:
-        if self.on_key_state_change is None:
-            return
-        state_key = (self.resolve_model_id(model_id), key_name)
-        state = self._states.get(state_key)
-        now = time()
-        info = {
-            "failures": state.failures if state else 0,
-            "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)) if state else 0,
-            "last_status_code": state.last_status_code if state else None,
-            "disabled": state.disabled if state else False,
-        }
-        try:
-            await self.on_key_state_change(model_id, key_name, info)
-        except Exception:
-            pass
-
-    def key_states(self) -> dict[str, dict[str, Any]]:
-        now = time()
-        return {
-            f"{model_id}:{key_name}": {
-                "failures": state.failures,
-                "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)),
-                "last_status_code": state.last_status_code,
-                "disabled": state.disabled,
-            }
-            for (model_id, key_name), state in self._states.items()
-        }
-
-    def key_state(self, model_id: str, key_name: str) -> dict[str, Any]:
-        model_id = self.resolve_model_id(model_id)
-        state = self._states.get((model_id, key_name))
-        now = time()
-        return {
-            "failures": state.failures if state else 0,
-            "cooldown_remaining_seconds": max(0, round(state.cooldown_until - now)) if state else 0,
-            "last_status_code": state.last_status_code if state else None,
-            "disabled": state.disabled if state else False,
-        }
-
-    async def set_key_usage_state(
-        self,
-        model_id: str,
-        key_name: str,
-        *,
-        disabled: bool | None = None,
-        clear_cooldown: bool = False,
-    ) -> dict[str, Any]:
-        model_id = self.resolve_model_id(model_id)
-        async with self._lock:
-            state_key = (model_id, key_name)
-            state = self._states[state_key]
-            if disabled is not None:
-                state.disabled = disabled
-                if disabled:
-                    state.cooldown_until = 0.0
-            if clear_cooldown:
-                state.failures = 0
-                state.cooldown_until = 0.0
-                state.last_status_code = None
-                if disabled is None:
-                    state.disabled = False
-        await self._persist_states()
-        await self._notify_state_change(model_id, key_name)
-        return self.key_state(model_id, key_name)
-
-    def url_native_support_states(self) -> dict[str, dict[str, Any]]:
+    def endpoint_capability_states(self) -> dict[str, dict[str, Any]]:
         """返回所有 URL 的原生端点支持状态"""
-        now = time()
-        return {
-            key: self._native_support_state_payload(state, now)
-            for key, state in self._url_native_support.items()
-        }
+        return self._endpoint_capabilities.payloads()
 
-    def supports_native_messages(
+    def supports_native_endpoint(
         self, base_url: str, route_path: str = "v1/messages"
     ) -> bool | None:
         """返回 None=未测试, True/False=已测试结果"""
-        key = self._native_support_key(base_url, route_path)
-        state = self._url_native_support.get(key)
-        if state is None and route_path.strip("/") == "v1/messages":
-            state = self._url_native_support.get(base_url.rstrip("/"))
-        return self._fresh_native_support(state)
+        return self._endpoint_capabilities.get(base_url, route_path)
 
-    def supports_native_endpoint(
-        self, base_url: str, route_path: str
-    ) -> bool | None:
-        """Return None for untested, otherwise the cached native endpoint support."""
-        return self.supports_native_messages(base_url, route_path)
-
-    async def update_native_support(
+    async def update_native_endpoint(
         self,
         base_url: str,
         supported: bool,
         route_path: str = "v1/messages",
         reason: str = "ok",
     ) -> None:
-        key = self._native_support_key(base_url, route_path)
-        ttl_seconds = 0 if supported else _native_negative_ttl(reason)
         async with self._lock:
-            self._url_native_support[key] = NativeSupportState(
-                supported=supported,
-                checked_at=time(),
-                reason=reason,
-                ttl_seconds=ttl_seconds,
-            )
-        await self._persist_states()
-
-    async def update_native_endpoint(
-        self, base_url: str, supported: bool, route_path: str, reason: str = "ok"
-    ) -> None:
-        await self.update_native_support(base_url, supported, route_path, reason)
-
-    def _native_support_key(self, base_url: str, route_path: str) -> str:
-        route = route_path.strip("/") or "v1/messages"
-        return f"{base_url.rstrip('/')}|{route}"
-
-    def _fresh_native_support(self, state: NativeSupportState | None) -> bool | None:
-        if state is None:
-            return None
-        if state.ttl_seconds > 0 and time() - state.checked_at >= state.ttl_seconds:
-            return None
-        return state.supported
-
-    def _native_support_state_payload(
-        self, state: NativeSupportState, now: float
-    ) -> dict[str, Any]:
-        expires_at = (
-            state.checked_at + state.ttl_seconds if state.ttl_seconds > 0 else None
-        )
-        return {
-            "supported": state.supported,
-            "checked_at": state.checked_at,
-            "reason": state.reason,
-            "ttl_seconds": state.ttl_seconds,
-            "expires_at": expires_at,
-            "expires_in_seconds": (
-                max(0, int(expires_at - now)) if expires_at is not None else None
-            ),
-        }
-
-    def _failure_cooldown_seconds(
-        self, state: KeyState, retry_after: float | None
-    ) -> float:
-        cooldown_seconds = (
-            retry_after if retry_after is not None else self._cooldown_seconds
-        )
-        if cooldown_seconds <= 0:
-            return 0.0
-        return cooldown_seconds * max(1, state.failures)
-
-    def _is_disabled(self, model_id: str, key_name: str) -> bool:
-        state = self._states.get((model_id, key_name))
-        return state.disabled if state is not None else False
+            self._endpoint_capabilities.update(base_url, supported, route_path, reason)
+        await self._capability_store.save(self._endpoint_capabilities.persisted())
 
     def _is_cooling_down(self, model_id: str, key_name: str) -> bool:
-        return self._states[(model_id, key_name)].cooldown_until > time()
-
-    def _valid_state_keys(self) -> set[tuple[str, str]]:
-        return {
-            (model_id, key.name)
-            for model_id, keys in self._keys.items()
-            for key in keys
-        }
-
-    def _load_states(self) -> None:
-        valid_keys = self._valid_state_keys()
-        keys_data, url_native_support = self._state_store.load()
-        for item in keys_data:
-            if not isinstance(item, dict):
-                continue
-            model_id = str(item.get("model_id") or "")
-            key_name = str(item.get("key_name") or "")
-            if (model_id, key_name) not in valid_keys:
-                continue
-            self._states[(model_id, key_name)] = KeyState(
-                failures=max(0, int(item.get("failures") or 0)),
-                cooldown_until=max(0.0, float(item.get("cooldown_until") or 0.0)),
-                last_status_code=item.get("last_status_code"),
-                disabled=bool(item.get("disabled", False)),
-            )
-        # 加载 URL 级别的原生支持数据
-        for url, item in url_native_support.items():
-            state = _native_support_state_from_raw(item)
-            if state is not None:
-                self._url_native_support[url] = state
-
-    async def _persist_states(self) -> None:
-        async with self._persist_lock:
-            async with self._lock:
-                states = {
-                    key: KeyState(
-                        failures=state.failures,
-                        cooldown_until=state.cooldown_until,
-                        last_status_code=state.last_status_code,
-                        disabled=state.disabled,
-                    )
-                    for key, state in self._states.items()
-                }
-                url_native_support = {
-                    key: asdict(state)
-                    for key, state in self._url_native_support.items()
-                }
-            await self._state_store.save(states, url_native_support)
-
-
-def _native_negative_ttl(reason: str) -> int:
-    if reason == "error":
-        return NATIVE_ERROR_TTL_SECONDS
-    return NATIVE_NEGATIVE_TTL_SECONDS
-
-
-def _native_support_state_from_raw(item: Any) -> NativeSupportState | None:
-    if isinstance(item, bool):
-        return NativeSupportState(
-            supported=item,
-            checked_at=time() if item else 0.0,
-            reason="legacy",
-            ttl_seconds=0 if item else NATIVE_NEGATIVE_TTL_SECONDS,
-        )
-    if not isinstance(item, dict) or not isinstance(item.get("supported"), bool):
-        return None
-    reason = str(item.get("reason") or "ok")
-    ttl_seconds = int(item.get("ttl_seconds") or 0)
-    if not item["supported"] and ttl_seconds <= 0:
-        ttl_seconds = _native_negative_ttl(reason)
-    return NativeSupportState(
-        supported=item["supported"],
-        checked_at=float(item.get("checked_at") or time()),
-        reason=reason,
-        ttl_seconds=ttl_seconds,
-    )
+        return self._health.is_cooling_down((model_id, key_name))

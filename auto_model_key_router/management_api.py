@@ -56,11 +56,6 @@ class KeyUpdate(APIModel):
     upstream_routes: dict[str, str | None] | None = None
 
 
-class KeyStateUpdate(APIModel):
-    disabled: bool | None = None
-    clear_cooldown: bool = False
-
-
 class ModelCreate(APIModel):
     id: str = Field(min_length=1)
     aliases: list[str] = Field(default_factory=list)
@@ -314,44 +309,6 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                 except ValueError:
                     pass
             return await lease.resources.metrics.key_stats(model_id, key_name, hours=hours)
-        finally:
-            await lease.release()
-
-    @app.get("/api/models/{model_id}/keys/{key_name}/state", tags=["management"])
-    async def get_key_state(request: Request, model_id: str, key_name: str) -> dict[str, Any]:
-        state = request.app.state
-        await reload_config(state)
-        lease = await state.runtime_manager.acquire()
-        try:
-            config = lease.resources.config
-            if _authorization_mode(request, config.local_api_key) != "full":
-                raise HTTPException(status_code=401, detail="本地 API key 验证失败")
-            _find_key(_find_model(config, model_id), key_name)
-            return lease.resources.key_pool.key_state(model_id, key_name)
-        finally:
-            await lease.release()
-
-    @app.put("/api/models/{model_id}/keys/{key_name}/state", tags=["management"])
-    async def update_key_state(
-        request: Request, model_id: str, key_name: str, payload: KeyStateUpdate
-    ) -> dict[str, Any]:
-        updates = _payload_dict(payload)
-        if not updates:
-            raise HTTPException(status_code=400, detail="至少需要提供一个要更新的字段")
-        state = request.app.state
-        await reload_config(state)
-        lease = await state.runtime_manager.acquire()
-        try:
-            config = lease.resources.config
-            if _authorization_mode(request, config.local_api_key) != "full":
-                raise HTTPException(status_code=401, detail="本地 API key 验证失败")
-            _find_key(_find_model(config, model_id), key_name)
-            return await lease.resources.key_pool.set_key_usage_state(
-                model_id,
-                key_name,
-                disabled=updates.get("disabled"),
-                clear_cooldown=bool(updates.get("clear_cooldown", False)),
-            )
         finally:
             await lease.release()
 

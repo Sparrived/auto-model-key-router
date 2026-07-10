@@ -96,6 +96,28 @@ def test_runtime_migrates_legacy_list_model_config(tmp_path: Path) -> None:
     ]
 
 
+def test_legacy_key_state_path_maps_to_endpoint_capability_cache() -> None:
+    data = config_data()
+    data["key_state_path"] = "legacy-state.json"
+
+    config = RouterConfig.from_dict(data)
+
+    assert config.endpoint_capabilities_path == "legacy-state.json"
+
+
+def test_legacy_key_state_path_is_rewritten_on_commit(tmp_path: Path) -> None:
+    path = tmp_path / "router-config.json"
+    data = config_data()
+    data["key_state_path"] = "legacy-state.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    ConfigService(path).commit(data, old_config=RouterConfig.from_dict(data))
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    assert saved["endpoint_capabilities_path"] == "legacy-state.json"
+    assert "key_state_path" not in saved
+
+
 def test_upstream_routes_are_normalized_by_base_url_from_config() -> None:
     config = RouterConfig.from_dict(
         {

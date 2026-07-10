@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
-from auto_model_key_router.app import _probe_cooling_keys, create_app
+from auto_model_key_router.app import create_app
 from auto_model_key_router.config import (
     UNIFIED_MODEL_ID,
     VISITOR_API_KEY,
@@ -83,8 +83,7 @@ def make_config(
         max_retries=max_retries,
         key_failure_threshold=1,
         key_cooldown_seconds=60,
-        key_state_path=str(tmp_path / "key-state.json"),
-        upstream_health_check_interval=0,
+        endpoint_capabilities_path=str(tmp_path / "endpoint-capabilities.json"),
         metrics_db_path=str(tmp_path / "metrics.sqlite3"),
         log_file_path=str(tmp_path / "server.log"),
         local_api_key=local_api_key,
@@ -173,7 +172,7 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
                 }
             },
             "metrics_db_path": str(tmp_path / "metrics.sqlite3"),
-            "key_state_path": str(tmp_path / "key-state.json"),
+            "endpoint_capabilities_path": str(tmp_path / "endpoint-capabilities.json"),
             "log_file_path": str(tmp_path / "server.log"),
         }
     )
@@ -184,7 +183,9 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
         upstream_payloads.append(json.loads(request.content.decode("utf-8")))
         return httpx.Response(200, json={"id": "ok"})
 
-    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
 
     async def request(client: httpx.AsyncClient) -> httpx.Response:
         return await client.post(
@@ -266,7 +267,9 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
         upstream_calls.append(request)
         return httpx.Response(200, json={"id": "ok"})
 
-    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
 
     async def requests(
         client: httpx.AsyncClient,
@@ -355,7 +358,9 @@ def test_websocket_proxy_forwards_complete_sse_events(tmp_path: Path) -> None:
             ),
         )
 
-    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
 
     with TestClient(app) as client:
         with client.websocket_connect(
@@ -398,7 +403,9 @@ def test_websocket_proxy_preserves_non_stream_request(tmp_path: Path) -> None:
         upstream_payloads.append(json.loads(request.content))
         return httpx.Response(200, json={"id": "ok"})
 
-    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
 
     with TestClient(app) as client:
         with client.websocket_connect(
@@ -469,7 +476,9 @@ def test_anthropic_count_tokens_is_served_locally(tmp_path: Path) -> None:
         tmp_path, (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
     )
     app = create_app(config)
-    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
 
     response = run_client(
         app,
@@ -534,7 +543,7 @@ def test_metrics_group_local_and_visitor_calls(visitor_feature) -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -597,7 +606,7 @@ def test_stream_metrics_preserve_visitor_caller_type(visitor_feature) -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -702,7 +711,7 @@ def test_visitor_key_routes_only_to_allowed_upstream_keys(visitor_feature) -> No
             routing_mode="only_first",
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -803,7 +812,7 @@ def test_full_local_key_can_still_access_private_upstream_key(visitor_feature) -
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -956,7 +965,7 @@ def test_config_file_changes_are_hot_reloaded() -> None:
             "max_retries": 1,
             "key_failure_threshold": 1,
             "key_cooldown_seconds": 60,
-            "key_state_path": str(tmp_path / "key-state.json"),
+            "endpoint_capabilities_path": str(tmp_path / "endpoint-capabilities.json"),
             "upstream_health_check_interval": 0,
             "metrics_db_path": str(tmp_path / "metrics.sqlite3"),
             "log_file_path": str(tmp_path / "server.log"),
@@ -988,7 +997,7 @@ def test_config_file_changes_are_hot_reloaded() -> None:
             return httpx.Response(200, json={"id": "ok"})
 
         app = create_app(config, config_path)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1049,7 +1058,7 @@ def test_retryable_response_cools_down_failed_key() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1074,12 +1083,7 @@ def test_retryable_response_cools_down_failed_key() -> None:
             "https://upstream-one.test/v1/chat/completions",
             "https://upstream-two.test/v1/chat/completions",
         ]
-        assert (
-            health.json()["key_states"]["test-model:key-1"][
-                "cooldown_remaining_seconds"
-            ]
-            > 0
-        )
+        assert "key_states" not in health.json()
 
 
 def test_cloudflare_521_retries_and_returns_structured_error() -> None:
@@ -1102,7 +1106,7 @@ def test_cloudflare_521_retries_and_returns_structured_error() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1149,7 +1153,7 @@ def test_stream_request_disables_upstream_read_timeout() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1201,7 +1205,7 @@ def test_chat_completions_stream_splits_and_flushes_sse_events(
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1253,7 +1257,7 @@ def test_messages_response_is_converted_to_anthropic_schema() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1326,7 +1330,7 @@ def test_messages_tools_and_tool_history_are_converted_both_ways() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1465,7 +1469,7 @@ def test_messages_round_robin_sticks_by_prompt_cache_key() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1520,7 +1524,7 @@ def test_messages_round_robin_affinity_uses_full_message_list() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1567,7 +1571,7 @@ def test_messages_stream_is_converted_to_anthropic_sse() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1614,7 +1618,7 @@ def test_messages_stream_converts_openai_tool_calls_to_anthropic_tool_use() -> N
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1698,8 +1702,8 @@ def test_anthropic_stream_yields_between_sse_events(
             chunks = []
             async for chunk in _stream_anthropic_messages(
                 response,
-                app.state.metrics,
-                app.state.key_pool,
+                app.state.runtime_manager.current.metrics,
+                app.state.runtime_manager.current.key_pool,
                 "test-model",
                 "key-1",
                 "test-model",
@@ -1707,8 +1711,8 @@ def test_anthropic_stream_yields_between_sse_events(
                 perf_counter(),
             ):
                 chunks.append(chunk)
-            await app.state.metrics.close()
-            await app.state.http_client.aclose()
+            await app.state.runtime_manager.current.metrics.close()
+            await app.state.runtime_manager.current.http_client.aclose()
             return chunks
 
         chunks = anyio.run(consume_stream)
@@ -1734,7 +1738,7 @@ def test_messages_non_json_upstream_error_returns_anthropic_json() -> None:
             max_retries=0,
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1774,7 +1778,7 @@ def test_messages_cloudflare_521_returns_structured_anthropic_json() -> None:
             max_retries=0,
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1863,12 +1867,14 @@ def test_cooled_down_key_is_skipped_on_next_request() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
         async def requests(client: httpx.AsyncClient) -> httpx.Response:
-            await app.state.key_pool.mark_failure("test-model", "key-1", 429, 120)
+            await app.state.runtime_manager.current.key_pool.mark_failure(
+                "test-model", "key-1", 429, 120
+            )
             return await client.post(
                 "/v1/chat/completions",
                 headers={"x-api-key": "local-key"},
@@ -1884,7 +1890,7 @@ def test_cooled_down_key_is_skipped_on_next_request() -> None:
         assert calls == ["https://upstream-two.test/v1/chat/completions"]
 
 
-def test_disabled_after_repeated_failures_key_is_not_retried() -> None:
+def test_cooled_key_is_skipped_without_being_disabled() -> None:
     with tempfile.TemporaryDirectory() as directory:
         calls: list[str] = []
 
@@ -1900,13 +1906,17 @@ def test_disabled_after_repeated_failures_key_is_not_retried() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
-        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, httpx.Response]:
             for _ in range(5):
-                await app.state.key_pool.mark_failure("test-model", "key-1", 429, 10)
+                await app.state.runtime_manager.current.key_pool.mark_failure(
+                    "test-model", "key-1", 429, 10
+                )
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
@@ -1922,7 +1932,7 @@ def test_disabled_after_repeated_failures_key_is_not_retried() -> None:
 
         assert response.status_code == 200
         assert calls == ["https://upstream-two.test/v1/chat/completions"]
-        assert health.json()["key_states"]["test-model:key-1"]["disabled"] is True
+        assert "key_states" not in health.json()
 
 
 def test_only_first_retries_only_first_key_until_max_retries() -> None:
@@ -1943,7 +1953,7 @@ def test_only_first_retries_only_first_key_until_max_retries() -> None:
             max_retries=2,
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -1981,7 +1991,7 @@ def test_model_suffix_selects_explicit_key_by_alias() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2021,7 +2031,7 @@ def test_unified_model_routes_to_configured_model_and_key() -> None:
             unified_model=UnifiedModelConfig(model="alias-model", key="key-2"),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2058,7 +2068,7 @@ def test_switch_unified_model_hot_reloads_model_and_key() -> None:
         config_data = {
             "request_timeout": 10,
             "max_retries": 1,
-            "key_state_path": str(tmp_path / "key-state.json"),
+            "endpoint_capabilities_path": str(tmp_path / "endpoint-capabilities.json"),
             "upstream_health_check_interval": 0,
             "metrics_db_path": str(tmp_path / "metrics.sqlite3"),
             "log_file_path": str(tmp_path / "server.log"),
@@ -2104,7 +2114,7 @@ def test_switch_unified_model_hot_reloads_model_and_key() -> None:
             authorization_headers.append(request.headers["Authorization"])
             return httpx.Response(200, json={"id": "ok"})
 
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2248,9 +2258,9 @@ def test_acquired_key_is_released_when_proxy_raises() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        anyio.run(app.state.metrics.close)
-        app.state.metrics = FailingMetrics()
-        app.state.http_client = httpx.AsyncClient(
+        anyio.run(app.state.runtime_manager.current.metrics.close)
+        app.state.runtime_manager.current.metrics = FailingMetrics()
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2267,7 +2277,7 @@ def test_acquired_key_is_released_when_proxy_raises() -> None:
 
         run_client(app, requests)
 
-        assert dict(app.state.key_pool._active_requests) == {}
+        assert dict(app.state.runtime_manager.current.key_pool._active_requests) == {}
 
 
 def test_destination_addr_header_is_not_forwarded() -> None:
@@ -2282,7 +2292,7 @@ def test_destination_addr_header_is_not_forwarded() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2319,7 +2329,7 @@ def test_anthropic_auth_headers_are_not_forwarded() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2376,12 +2386,10 @@ def test_custom_anthropic_upstream_route_uses_native_messages_path() -> None:
         config = make_config(
             Path(directory),
             (key,),
-            upstream_routes={
-                "https://upstream.test": {"anthropic": "anthropic/"}
-            },
+            upstream_routes={"https://upstream.test": {"anthropic": "anthropic/"}},
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2425,8 +2433,8 @@ def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) ->
             chunks = []
             async for chunk in _stream_upstream(
                 response,
-                app.state.metrics,
-                app.state.key_pool,
+                app.state.runtime_manager.current.metrics,
+                app.state.runtime_manager.current.key_pool,
                 "test-model",
                 "key-1",
                 "test-model",
@@ -2434,8 +2442,8 @@ def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) ->
                 perf_counter(),
             ):
                 chunks.append(chunk)
-            await app.state.metrics.close()
-            await app.state.http_client.aclose()
+            await app.state.runtime_manager.current.metrics.close()
+            await app.state.runtime_manager.current.http_client.aclose()
             return chunks
 
         caplog.set_level(logging.WARNING, logger="auto_model_key_router.app")
@@ -2470,8 +2478,8 @@ def test_anthropic_stream_error_logs_upstream_context(
             chunks = []
             async for chunk in _stream_anthropic_messages(
                 response,
-                app.state.metrics,
-                app.state.key_pool,
+                app.state.runtime_manager.current.metrics,
+                app.state.runtime_manager.current.key_pool,
                 "test-model",
                 "key-1",
                 "test-model",
@@ -2479,8 +2487,8 @@ def test_anthropic_stream_error_logs_upstream_context(
                 perf_counter(),
             ):
                 chunks.append(chunk)
-            await app.state.metrics.close()
-            await app.state.http_client.aclose()
+            await app.state.runtime_manager.current.metrics.close()
+            await app.state.runtime_manager.current.http_client.aclose()
             return chunks
 
         caplog.set_level(logging.WARNING, logger="auto_model_key_router.app")
@@ -2544,55 +2552,24 @@ def test_duplicate_key_name_is_rejected() -> None:
         )
 
 
-def test_key_state_is_persisted_and_restored() -> None:
+def test_expired_cooldown_allows_key_selection(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = make_config(
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
-        first_app = create_app(config)
-
-        anyio.run(
-            first_app.state.key_pool.mark_failure, "test-model", "key-1", 429, 120
-        )
-        second_app = create_app(config)
-
-        state = second_app.state.key_pool.key_states()["test-model:key-1"]
-
-        anyio.run(first_app.state.metrics.close)
-        anyio.run(first_app.state.http_client.aclose)
-        anyio.run(second_app.state.metrics.close)
-        anyio.run(second_app.state.http_client.aclose)
-
-        assert state["failures"] == 1
-        assert state["cooldown_remaining_seconds"] > 0
-
-
-def test_health_probe_clears_recovered_key() -> None:
-    with tempfile.TemporaryDirectory() as directory:
-        calls: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            calls.append(str(request.url))
-            return httpx.Response(200, json={"object": "list", "data": []})
-
-        config = make_config(
-            Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
-        )
+        monkeypatch.setattr("auto_model_key_router.key_pool.time", lambda: 1000.0)
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler)
-        )
+        pool = app.state.runtime_manager.current.key_pool
 
-        anyio.run(app.state.key_pool.mark_failure, "test-model", "key-1", 429, 120)
-        anyio.run(_probe_cooling_keys, app.state)
-        state = app.state.key_pool.key_states()["test-model:key-1"]
+        anyio.run(pool.mark_failure, "test-model", "key-1", 429, 120)
+        pool._health._clock = lambda: 1121.0
+        selected = anyio.run(pool.next_key, "test-model")
+        anyio.run(pool.release_key, "test-model", selected.name)
 
-        anyio.run(app.state.metrics.close)
-        anyio.run(app.state.http_client.aclose)
+        anyio.run(app.state.runtime_manager.current.metrics.close)
+        anyio.run(app.state.runtime_manager.current.http_client.aclose)
 
-        assert calls == ["https://upstream.test/v1/models"]
-        assert state["failures"] == 0
-        assert state["cooldown_remaining_seconds"] == 0
+        assert selected.name == "key-1"
 
 
 def test_config_reasoning_effort_is_forwarded() -> None:
@@ -2609,7 +2586,7 @@ def test_config_reasoning_effort_is_forwarded() -> None:
             reasoning_effort="xhigh",
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2646,7 +2623,7 @@ def test_config_reasoning_effort_overrides_request_reasoning() -> None:
             reasoning_effort="high",
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2711,7 +2688,7 @@ def test_responses_request_and_response_are_converted_for_codex() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2815,7 +2792,7 @@ def test_responses_default_route_probes_native_before_fallback() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2876,12 +2853,10 @@ def test_custom_responses_upstream_route_uses_native_responses_path() -> None:
         config = make_config(
             Path(directory),
             (key,),
-            upstream_routes={
-                "https://upstream.test": {"responses": "responses/"}
-            },
+            upstream_routes={"https://upstream.test": {"responses": "responses/"}},
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -2907,7 +2882,7 @@ def test_custom_responses_upstream_route_uses_native_responses_path() -> None:
             (
                 "https://upstream.test/responses/v1/responses",
                 {"model": "test-model", "input": "inspect"},
-            )
+            ),
         ]
         assert response.json()["object"] == "response"
         assert response.json()["id"] == "resp-native"
@@ -2948,12 +2923,10 @@ def test_custom_responses_upstream_route_falls_back_when_native_probe_fails() ->
         config = make_config(
             Path(directory),
             (key,),
-            upstream_routes={
-                "https://upstream.test": {"responses": "responses/"}
-            },
+            upstream_routes={"https://upstream.test": {"responses": "responses/"}},
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3013,7 +2986,7 @@ def test_responses_stream_is_converted_to_codex_sse() -> None:
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3050,7 +3023,7 @@ def test_downstream_reasoning_effort_is_forwarded_without_config_override() -> N
             Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3086,7 +3059,7 @@ def test_none_reasoning_effort_disables_request_reasoning() -> None:
             reasoning_effort="none",
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3130,7 +3103,7 @@ def test_images_generations_proxies_to_upstream() -> None:
             (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3177,7 +3150,7 @@ def test_images_generations_unified_model_resolves_correctly() -> None:
             unified_model=UnifiedModelConfig(model="test-model"),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3218,7 +3191,7 @@ def test_images_generations_failover_across_keys() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3253,7 +3226,7 @@ def test_images_generations_custom_upstream_route() -> None:
             upstream_routes={"https://upstream.test": {"images": "custom/images/v2"}},
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3267,7 +3240,10 @@ def test_images_generations_custom_upstream_route() -> None:
         response = run_client(app, request)
 
         assert response.status_code == 200
-        assert upstream_urls[0] == "https://upstream.test/custom/images/v2/v1/images/generations"
+        assert (
+            upstream_urls[0]
+            == "https://upstream.test/custom/images/v2/v1/images/generations"
+        )
 
 
 def test_unified_model_routes_chat_and_image_to_different_models() -> None:
@@ -3311,15 +3287,20 @@ def test_unified_model_routes_chat_and_image_to_different_models() -> None:
             ),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
-        async def requests(client: httpx.AsyncClient) -> tuple[httpx.Response, httpx.Response]:
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, httpx.Response]:
             chat_resp = await client.post(
                 "/v1/chat/completions",
                 headers={"Authorization": "Bearer local-key"},
-                json={"model": "unified-model", "messages": [{"role": "user", "content": "hi"}]},
+                json={
+                    "model": "unified-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
             )
             img_resp = await client.post(
                 "/v1/images/generations",
@@ -3354,7 +3335,7 @@ def test_unified_model_image_request_without_image_model_uses_default() -> None:
             unified_model=UnifiedModelConfig(model="test-model"),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 
@@ -3380,7 +3361,10 @@ def test_images_edits_proxies_to_correct_upstream_path() -> None:
             upstream_urls.append(str(request.url))
             return httpx.Response(
                 200,
-                json={"created": 1, "data": [{"url": "https://example.com/edited.png"}]},
+                json={
+                    "created": 1,
+                    "data": [{"url": "https://example.com/edited.png"}],
+                },
             )
 
         config = make_config(
@@ -3388,7 +3372,7 @@ def test_images_edits_proxies_to_correct_upstream_path() -> None:
             (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
         )
         app = create_app(config)
-        app.state.http_client = httpx.AsyncClient(
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         )
 

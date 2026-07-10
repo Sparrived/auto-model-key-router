@@ -336,7 +336,7 @@ async def _execute_attempt(
         upstream_routes=upstream_routes,
     )
     if context.path == "messages" and use_native:
-        native_support = runtime.key_pool.supports_native_messages(
+        native_support = runtime.key_pool.supports_native_endpoint(
             key.base_url, native_route_path
         )
         if native_support is None:
@@ -347,7 +347,7 @@ async def _execute_attempt(
                 upstream_model_id,
                 native_route_path,
             )
-            await runtime.key_pool.update_native_support(
+            await runtime.key_pool.update_native_endpoint(
                 key.base_url, native_support, native_route_path, native_reason
             )
         use_native = native_support

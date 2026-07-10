@@ -8,7 +8,6 @@ import sys
 from time import monotonic, time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 from rich.console import Group
@@ -21,7 +20,7 @@ from .config import (
     UPSTREAM_ROUTE_MODES,
     CONFIG_VERSION,
     RouterConfig,
-    default_key_state_path,
+    default_endpoint_capabilities_path,
     default_metrics_db_path,
     generate_local_api_key,
     load_config_data,
@@ -87,26 +86,6 @@ def key_display_name(key: dict[str, Any], fallback: str, width: int = 28) -> str
     return short_text(name, width)
 
 
-def key_runtime_state_key(model_id: str, key_name: str) -> str:
-    return f"{model_id}:{key_name}"
-
-
-def format_key_runtime_status(state: dict[str, Any] | None) -> str:
-    if not state:
-        return "[green]可用[/green]"
-    if state.get("disabled"):
-        return "[red]运行态暂停[/red]"
-    cooldown = int(state.get("cooldown_remaining_seconds") or 0)
-    if cooldown > 0:
-        return f"[yellow]冷却中 {cooldown}s[/yellow]"
-    failures = int(state.get("failures") or 0)
-    status_code = state.get("last_status_code")
-    if failures or status_code is not None:
-        suffix = f" · HTTP {status_code}" if status_code is not None else ""
-        return f"[yellow]最近失败 {failures} 次{suffix}[/yellow]"
-    return "[green]可用[/green]"
-
-
 def service_management_base_url(data: dict[str, Any]) -> str:
     host = str(data.get("host") or "127.0.0.1")
     port = int(data.get("port") or 8000)
@@ -123,57 +102,19 @@ def management_headers(data: dict[str, Any]) -> dict[str, str] | None:
     return {"Authorization": f"Bearer {local_api_key}"}
 
 
-def load_key_runtime_states_from_file(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    path = Path(str(data.get("key_state_path") or default_key_state_path()))
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    now = time()
-    states: dict[str, dict[str, Any]] = {}
-    for item in raw.get("keys", []):
-        if not isinstance(item, dict):
-            continue
-        model_id = str(item.get("model_id") or "")
-        key_name = str(item.get("key_name") or "")
-        if not model_id or not key_name:
-            continue
-        cooldown_until = max(0.0, float(item.get("cooldown_until") or 0.0))
-        states[key_runtime_state_key(model_id, key_name)] = {
-            "failures": max(0, int(item.get("failures") or 0)),
-            "cooldown_remaining_seconds": max(0, round(cooldown_until - now)),
-            "last_status_code": item.get("last_status_code"),
-            "disabled": bool(item.get("disabled", False)),
-        }
-    return states
-
-
-def fetch_key_runtime_states(data: dict[str, Any], timeout: float = 0.5) -> dict[str, dict[str, Any]]:
-    states = load_key_runtime_states_from_file(data)
-    try:
-        response = httpx.get(f"{service_management_base_url(data)}/health", timeout=timeout)
-        response.raise_for_status()
-        service_states = response.json().get("key_states", {})
-    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError):
-        return states
-    if isinstance(service_states, dict):
-        states.update(
-            {
-                str(key): value
-                for key, value in service_states.items()
-                if isinstance(value, dict)
-            }
-        )
-    return states
-
-
 def load_native_endpoint_states_from_file(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    path = Path(str(data.get("key_state_path") or default_key_state_path()))
+    path = Path(
+        str(
+            data.get("endpoint_capabilities_path")
+            or data.get("key_state_path")
+            or default_endpoint_capabilities_path()
+        )
+    )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    states = raw.get("url_native_support", {})
+    states = raw.get("endpoint_capabilities", raw.get("url_native_support", {}))
     if not isinstance(states, dict):
         return {}
     return {
@@ -216,68 +157,6 @@ def _native_endpoint_state_payload(value: Any) -> dict[str, Any] | None:
             payload["expires_in_seconds"] = max(0, int(float(expires_at) - time()))
         return payload
     return None
-
-
-def fetch_key_runtime_state(
-    data: dict[str, Any], model_id: str, key_name: str, timeout: float = 1.0
-) -> dict[str, Any] | None:
-    headers = management_headers(data)
-    if headers is not None:
-        try:
-            response = httpx.get(
-                f"{service_management_base_url(data)}/api/models/{quote(model_id, safe='')}/keys/{quote(key_name, safe='')}/state",
-                headers=headers,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            state = response.json()
-            if isinstance(state, dict):
-                return state
-        except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError):
-            pass
-    return fetch_key_runtime_states(data).get(key_runtime_state_key(model_id, key_name))
-
-
-def configured_runtime_keys(data: dict[str, Any]) -> list[tuple[str, str, bool]]:
-    try:
-        config = RouterConfig.from_dict(data)
-    except (KeyError, TypeError, ValueError):
-        return []
-    return [
-        (model.id, key.name, key.enabled)
-        for model in config.models
-        for key in model.keys
-    ]
-
-
-def key_status_overview_panel(data: dict[str, Any]) -> Any:
-    runtime_states = fetch_key_runtime_states(data)
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("模型", overflow="fold")
-    table.add_column("Key", overflow="fold")
-    table.add_column("配置")
-    table.add_column("运行")
-    table.add_column("失败")
-    table.add_column("最近状态")
-    for model_id, key_name, enabled in configured_runtime_keys(data):
-        state = runtime_states.get(key_runtime_state_key(model_id, key_name))
-        last_status = state.get("last_status_code") if state else None
-        table.add_row(
-            short_text(model_id, 24),
-            short_text(key_name, 24),
-            "[green]启用[/green]" if enabled else "[red]禁用[/red]",
-            format_key_runtime_status(state),
-            str(int(state.get("failures") or 0)) if state else "0",
-            str(last_status) if last_status is not None else "-",
-        )
-    if not table.rows:
-        return section_panel("[yellow]暂无 Key。[/yellow]", "Key 状态", "yellow")
-    return section_panel(
-        table,
-        "Key 状态",
-        "cyan",
-        "[dim]运行状态来自服务 / key_state_path；冷却或暂停会影响实际路由使用。[/dim]",
-    )
 
 
 def format_visitor_status_text(visitor_allowed: bool, visitor_installed: bool) -> str:
@@ -741,7 +620,7 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
         model_table.add_row("-", "-", "-", "0")
     return Group(
         section_panel(provider_table, "供应商 Key", "cyan"),
-        section_panel(model_table, "模型映射", "magenta"),
+        section_panel(model_table, "模型设置", "magenta"),
     )
 
 
@@ -1274,7 +1153,7 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
     return Group(section_panel(message, "模型池", "green"), restart)
 
 
-def add_model_route_interactively(path: Path) -> Any:
+def add_model_route_interactively(path: Path, model_id: str | None = None) -> Any:
     draft = form_draft("add_model_route")
     data = load_v2_config_data(path)
     if not raw_providers(data):
@@ -1295,19 +1174,20 @@ def add_model_route_interactively(path: Path) -> Any:
         )
     upstream_choice = select_option(
         "选择启用模型",
-        [(str(index + 1), model_id) for index, model_id in enumerate(enabled_models)]
+        [(str(index + 1), available_model) for index, available_model in enumerate(enabled_models)]
         + [("0", "返回")],
     )
     if upstream_choice == "0":
         return None
     upstream_model = enabled_models[int(upstream_choice) - 1]
-    model_id = select_or_enter_model_id(
-        "添加模型路由",
-        "本地模型 ID",
-        models,
-        default=draft.get("model_id", upstream_model),
-    )
-    draft["model_id"] = model_id
+    if model_id is None:
+        model_id = select_or_enter_model_id(
+            "添加模型路由",
+            "本地模型 ID",
+            models,
+            default=draft.get("model_id", upstream_model),
+        )
+        draft["model_id"] = model_id
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
     model = models.setdefault(
@@ -1337,10 +1217,10 @@ def add_model_route_interactively(path: Path) -> Any:
     )
 
 
-def manage_model_routes_interactively(path: Path) -> None:
+def manage_model_routes_interactively(path: Path, selected_model_id: str | None = None) -> None:
     while True:
         data = load_v2_config_data(path)
-        model_id = select_v2_model(data, "选择模型路由")
+        model_id = selected_model_id or select_v2_model(data, "选择模型路由")
         if model_id is None:
             return
         model = raw_v2_models(data)[model_id]
@@ -1350,6 +1230,8 @@ def manage_model_routes_interactively(path: Path) -> None:
                 "模型路由",
                 section_panel("[yellow]该模型暂无 target。[/yellow]", "模型路由", "yellow"),
             )
+            if selected_model_id is not None:
+                return
             continue
         options = [
             (
@@ -1360,6 +1242,8 @@ def manage_model_routes_interactively(path: Path) -> None:
         ] + [("0", "返回")]
         target_choice = select_option(f"Target · {short_text(model_id, 28)}", options)
         if target_choice == "0":
+            if selected_model_id is not None:
+                return
             continue
         target_index = int(target_choice) - 1
         action = select_option(
@@ -1418,20 +1302,39 @@ def manage_v2_model_settings_interactively(path: Path) -> None:
             return
         model = raw_v2_models(data)[model_id]
         choice = select_option(
-            f"模型映射 · {short_text(model_id, 28)}",
-            [("1", "别名"), ("2", "路由模式"), ("0", "返回")],
+            f"模型设置 · {short_text(model_id, 28)}",
+            [
+                ("1", "别名"),
+                ("2", "路由模式"),
+                ("3", "路由目标"),
+                ("4", "添加路由目标"),
+                ("5", "删除模型"),
+                ("0", "返回"),
+            ],
             content=section_panel(
                 f"别名: [bold]{', '.join(model.get('aliases') or []) or '无'}[/bold]\n路由模式: [bold]{model.get('routing_mode') or 'round_robin'}[/bold]",
-                "模型映射",
+                "模型设置",
                 "cyan",
             ),
         )
         if choice == "0":
             continue
         clear_terminal_history()
-        result = update_v2_model_settings_interactively(path, model_id, choice)
+        if choice in {"1", "2"}:
+            result = update_v2_model_settings_interactively(path, model_id, choice)
+        elif choice == "3":
+            run_submodule(lambda: manage_model_routes_interactively(path, model_id))
+            continue
+        elif choice == "4":
+            result = run_submodule(lambda: add_model_route_interactively(path, model_id))
+        elif choice == "5":
+            result = delete_v2_model_interactively(path, model_id)
+        else:
+            continue
         if result is not None:
-            show_result_page("模型映射", result)
+            show_result_page("模型设置", result)
+        if choice == "5":
+            return
 
 
 def update_v2_model_settings_interactively(path: Path, model_id: str, choice: str) -> Any:
@@ -1458,6 +1361,26 @@ def update_v2_model_settings_interactively(path: Path, model_id: str, choice: st
         return None
     restart = commit_v2_config(path, data, old_config)
     return Group(section_panel(message, "模型映射", "green"), restart)
+
+
+def delete_v2_model_interactively(path: Path, model_id: str) -> Any:
+    data = load_v2_config_data(path)
+    models = raw_v2_models(data)
+    if model_id not in models:
+        return section_panel(f"[red]模型不存在: {model_id}[/red]", "模型设置", "red")
+    if not confirm_choice(f"确认删除模型 {model_id}？", default=False):
+        return section_panel("[yellow]配置未变化。[/yellow]", "模型设置", "yellow")
+    old_config = RouterConfig.from_dict(data)
+    models.pop(model_id)
+    unified = data.get("unified_model")
+    if isinstance(unified, dict) and unified.get("model") == model_id:
+        fallback_model = fallback_unified_model(models)
+        if fallback_model is None:
+            data.pop("unified_model", None)
+        else:
+            data["unified_model"] = {"model": fallback_model}
+    restart = commit_v2_config(path, data, old_config)
+    return Group(section_panel(f"已删除模型 {model_id}。", "模型设置", "green"), restart)
 
 
 def manage_provider_routes_interactively(path: Path) -> None:
@@ -1519,19 +1442,15 @@ def manage_model_keys_interactively(path: Path) -> None:
     def on_key(key: str) -> str | None:
         return _open_config_on_key(path, key)
     while True:
-        data = load_v2_config_data(path)
         choice = select_option(
             "供应商与模型",
             [
                 ("1", "添加供应商 Key"),
                 ("2", "管理供应商 Key"),
                 ("3", "模型池"),
-                ("4", "添加模型路由"),
-                ("5", "模型映射"),
-                ("6", "Key 运行态"),
+                ("4", "模型设置"),
                 ("0", "返回"),
             ],
-            content=Group(v2_summary_panel(data), key_status_overview_panel(data)),
             on_key=on_key,
         )
         if choice == "0":
@@ -1545,84 +1464,7 @@ def manage_model_keys_interactively(path: Path) -> None:
         elif choice == "3":
             run_submodule(lambda: manage_provider_pools_interactively(path))
         elif choice == "4":
-            result = run_submodule(lambda: add_model_route_interactively(path))
-            if result is not None:
-                show_result_page("添加模型路由", result)
-        elif choice == "5":
             run_submodule(lambda: manage_v2_model_settings_interactively(path))
-        elif choice == "6":
-            run_submodule(lambda: manage_key_runtime_states_interactively(path))
-
-
-def manage_key_runtime_states_interactively(path: Path) -> None:
-    def on_key(key: str) -> str | None:
-        return _open_config_on_key(path, key)
-
-    while True:
-        data = load_v2_config_data(path)
-        runtime_states = fetch_key_runtime_states(data)
-        keys = configured_runtime_keys(data)
-        if not keys:
-            show_result_page(
-                "Key 运行态",
-                section_panel(
-                    "[yellow]暂无可管理的运行态 Key。[/yellow]",
-                    "运行状态",
-                    "yellow",
-                ),
-            )
-            return
-        options = []
-        for index, (model_id, key_name, enabled) in enumerate(keys):
-            state = runtime_states.get(key_runtime_state_key(model_id, key_name))
-            config_status = "启用" if enabled else "配置禁用"
-            options.append(
-                (
-                    str(index + 1),
-                    f"{short_text(model_id, 24)} / {short_text(key_name, 24)}"
-                    f" · {config_status} · {format_key_runtime_status(state)}",
-                )
-            )
-        options.append(("0", "返回"))
-        choice = select_option(
-            "Key 运行态",
-            options,
-            content=key_status_overview_panel(data),
-            on_key=on_key,
-        )
-        if choice == "0":
-            return
-        model_id, key_name, _ = keys[int(choice) - 1]
-        state = runtime_states.get(key_runtime_state_key(model_id, key_name))
-        disabled = bool(state and state.get("disabled"))
-        action = select_option(
-            f"运行态 · {short_text(key_name, 24)}",
-            [
-                ("1", "恢复运行" if disabled else "暂停运行"),
-                ("2", "清除失败/冷却"),
-                ("0", "返回"),
-            ],
-            content=section_panel(
-                f"模型: [bold]{model_id}[/bold]\n"
-                f"Key: [bold]{key_name}[/bold]\n"
-                f"运行: {format_key_runtime_status(state)}",
-                "运行状态",
-                "cyan",
-            ),
-            on_key=on_key,
-        )
-        if action == "0":
-            continue
-        clear_terminal_history()
-        result = update_key_runtime_state_interactively(
-            path,
-            data,
-            model_id,
-            key_name,
-            disabled=not disabled if action == "1" else None,
-            clear_cooldown=action == "2",
-        )
-        show_result_page("Key 运行态", result)
 
 
 def manage_model_aliases_interactively(path: Path) -> None:
@@ -1835,7 +1677,6 @@ def manage_selected_key_interactively(path: Path) -> None:
                 ("2", "探测所有 Key"),
                 ("0", "返回"),
             ],
-            content=key_status_overview_panel(data),
             on_key=on_key,
         )
         if manage_choice == "0":
@@ -1856,8 +1697,6 @@ def manage_selected_key_interactively(path: Path) -> None:
         key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
         enabled = key.get("enabled", True)
         status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-        runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
-        runtime_status_text = format_key_runtime_status(runtime_state)
         visitor_allowed = bool(key.get("allow_visitor", False))
         visitor_installed = visitor_feature_available()
         visitor_status_text = format_visitor_status_text(
@@ -1880,24 +1719,12 @@ def manage_selected_key_interactively(path: Path) -> None:
             else:
                 probe_choice = "6"
             options.append((probe_choice, "可用性探测"))
-            usage_choice = "r" if runtime_state and (
-                runtime_state.get("disabled")
-                or int(runtime_state.get("cooldown_remaining_seconds") or 0) > 0
-                or int(runtime_state.get("failures") or 0) > 0
-            ) else "p"
-            options.append(
-                (
-                    usage_choice,
-                    "恢复运行使用 / 清除冷却" if usage_choice == "r" else "暂停运行使用",
-                )
-            )
             options.append(("0", "返回"))
             key_info_lines = [
                 f"模型: [bold]{short_text(model['id'], 32)}[/bold]",
                 f"Key: {key_display_name(key, key_name, 32)}",
                 f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]",
                 f"配置状态: {status_text}",
-                f"运行状态: {runtime_status_text}",
             ]
             if visitor_installed:
                 key_info_lines.append(f"访客访问: {visitor_status_text}")
@@ -1934,18 +1761,6 @@ def manage_selected_key_interactively(path: Path) -> None:
                 )
             elif choice == probe_choice:
                 result = probe_selected_key_interactively(path, data, model, key_index)
-            elif choice == "r":
-                result = update_key_runtime_state_interactively(
-                    path, data, str(model["id"]), key_name, clear_cooldown=True
-                )
-                runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
-                runtime_status_text = format_key_runtime_status(runtime_state)
-            elif choice == "p":
-                result = update_key_runtime_state_interactively(
-                    path, data, str(model["id"]), key_name, disabled=True
-                )
-                runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
-                runtime_status_text = format_key_runtime_status(runtime_state)
             else:
                 continue
             if result is not None:
@@ -1955,8 +1770,6 @@ def manage_selected_key_interactively(path: Path) -> None:
                     "4": "Key 开关",
                     "6": "访客访问",
                     probe_choice: "可用性探测",
-                    "r": "运行状态",
-                    "p": "运行状态",
                 }.get(choice, "Key 管理")
                 show_result_page(result_title, result)
             if choice in ("1", "4", "6"):
@@ -1969,8 +1782,6 @@ def manage_selected_key_interactively(path: Path) -> None:
                 key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
                 enabled = key.get("enabled", True)
                 status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-                runtime_state = fetch_key_runtime_state(data, str(model["id"]), key_name)
-                runtime_status_text = format_key_runtime_status(runtime_state)
                 visitor_allowed = bool(key.get("allow_visitor", False))
                 visitor_installed = visitor_feature_available()
                 visitor_status_text = format_visitor_status_text(
@@ -2256,53 +2067,6 @@ def toggle_selected_key_interactively(
             "green",
         ),
         restart_service_after_config_change(path, old_config, new_config),
-    )
-
-
-def update_key_runtime_state_interactively(
-    path: Path,
-    data: dict[str, Any],
-    model_id: str,
-    key_name: str,
-    *,
-    disabled: bool | None = None,
-    clear_cooldown: bool = False,
-) -> Any:
-    headers = management_headers(data)
-    if headers is None:
-        return section_panel(
-            "未配置本地鉴权密钥，无法通过管理 API 调控运行状态。",
-            "运行状态",
-            "yellow",
-        )
-    payload: dict[str, Any] = {"clear_cooldown": clear_cooldown}
-    if disabled is not None:
-        payload["disabled"] = disabled
-    try:
-        response = httpx.put(
-            f"{service_management_base_url(data)}/api/models/{quote(model_id, safe='')}/keys/{quote(key_name, safe='')}/state",
-            headers=headers,
-            json=payload,
-            timeout=5.0,
-        )
-        response.raise_for_status()
-        state = response.json()
-    except httpx.ConnectError:
-        return section_panel(
-            "路由服务未运行，无法调控实际使用状态；请先启动服务后重试。",
-            "运行状态",
-            "yellow",
-        )
-    except (httpx.RequestError, httpx.HTTPStatusError, ValueError, TypeError) as exc:
-        return section_panel(
-            f"更新运行状态失败: {exc}",
-            "运行状态",
-            "red",
-        )
-    return section_panel(
-        f"已更新运行状态。\n配置文件: [bold]{path.resolve()}[/bold]\n模型: [bold]{short_text(model_id, 32)}[/bold]\nKey: [bold]{short_text(key_name, 32)}[/bold]\n运行状态: {format_key_runtime_status(state)}",
-        "运行状态",
-        "green",
     )
 
 
@@ -3390,7 +3154,6 @@ def select_api_key(
     path: Path, title: str
 ) -> tuple[dict[str, Any], dict[str, Any], int] | None:
     data = load_config_data(path)
-    runtime_states = fetch_key_runtime_states(data)
     selectable_models = [model for model in data.get("models", []) if model.get("keys")]
     if not selectable_models:
         return None
@@ -3413,13 +3176,7 @@ def select_api_key(
         )
         enabled = key.get("enabled", True)
         status = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-        key_name = str(key.get("name") or f"{model['id']}-{index + 1}")
-        runtime_status = format_key_runtime_status(
-            runtime_states.get(key_runtime_state_key(str(model["id"]), key_name))
-        )
-        key_options.append(
-            (str(index + 1), f"{name} · {base_url} · {status} · {runtime_status}")
-        )
+        key_options.append((str(index + 1), f"{name} · {base_url} · {status}"))
     key_options.append(("0", "返回"))
     key_choice = select_option(title, key_options)
     if key_choice == "0":

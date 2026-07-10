@@ -748,7 +748,7 @@ def upstream_native_support_table(config: RouterConfig) -> Any | None:
         "host": config.host,
         "port": config.port,
         "local_api_key": config.local_api_key,
-        "key_state_path": config.key_state_path,
+        "endpoint_capabilities_path": config.endpoint_capabilities_path,
     })
     table = Table(show_lines=False, box=box.SIMPLE_HEAVY, expand=True)
     table.add_column("上游 URL", ratio=2)

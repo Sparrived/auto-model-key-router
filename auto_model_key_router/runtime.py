@@ -3,53 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from time import monotonic
-from typing import Any
 
 import httpx
 
 from .config import RouterConfig
 from .key_pool import KeyPool
 from .metrics import MetricsStore
-
-# 端点可用性缓存过期时间（秒）
-ENDPOINT_CACHE_TTL = 3600  # 1 小时后重试原生端点
-
-
-class EndpointAvailabilityCache:
-    """记录不支持原生 Anthropic 端点的上游地址"""
-
-    def __init__(self, ttl: float = ENDPOINT_CACHE_TTL) -> None:
-        self._unsupported: dict[str, float] = {}
-        self._ttl = ttl
-        self._lock = asyncio.Lock()
-
-    async def is_unsupported(self, base_url: str, path: str) -> bool:
-        key = f"{base_url.rstrip('/')}:{path}"
-        async with self._lock:
-            expires_at = self._unsupported.get(key)
-            if expires_at is None:
-                return False
-            if monotonic() > expires_at:
-                del self._unsupported[key]
-                return False
-            return True
-
-    async def mark_unsupported(self, base_url: str, path: str) -> None:
-        key = f"{base_url.rstrip('/')}:{path}"
-        async with self._lock:
-            self._unsupported[key] = monotonic() + self._ttl
-
-    async def clear(self, base_url: str | None = None) -> None:
-        async with self._lock:
-            if base_url is None:
-                self._unsupported.clear()
-            else:
-                prefix = base_url.rstrip("/")
-                self._unsupported = {
-                    k: v for k, v in self._unsupported.items()
-                    if not k.startswith(prefix + ":")
-                }
 
 
 @dataclass(eq=False)
@@ -58,8 +17,6 @@ class RuntimeResources:
     key_pool: KeyPool
     metrics: MetricsStore
     http_client: httpx.AsyncClient
-    endpoint_cache: EndpointAvailabilityCache = field(default_factory=EndpointAvailabilityCache)
-    event_bus: Any = None
     active_leases: int = 0
     retired: bool = False
     detached: bool = False
@@ -175,27 +132,3 @@ class RuntimeManager:
             await resources.http_client.aclose()
         if close_metrics:
             await resources.metrics.close()
-
-
-def resources_from_state(state: Any, previous: RuntimeResources | None = None) -> RuntimeResources:
-    return RuntimeResources(
-        config=state.config,
-        key_pool=state.key_pool,
-        metrics=state.metrics,
-        http_client=state.http_client,
-        endpoint_cache=previous.endpoint_cache if previous else EndpointAvailabilityCache(),
-        event_bus=getattr(state, "event_bus", None),
-    )
-
-
-async def sync_runtime_from_state(state: Any) -> None:
-    manager: RuntimeManager = state.runtime_manager
-    current = manager.current
-    if (
-        current.config is state.config
-        and current.key_pool is state.key_pool
-        and current.metrics is state.metrics
-        and current.http_client is state.http_client
-    ):
-        return
-    await manager.replace(resources_from_state(state, previous=current))

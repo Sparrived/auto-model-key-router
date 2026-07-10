@@ -165,8 +165,8 @@ def default_metrics_db_path() -> str:
     return str(default_cache_dir() / "metrics.sqlite3")
 
 
-def default_key_state_path() -> str:
-    return str(default_cache_dir() / "key-state.json")
+def default_endpoint_capabilities_path() -> str:
+    return str(default_cache_dir() / "endpoint-capabilities.json")
 
 
 def default_log_file_path() -> str:
@@ -188,8 +188,7 @@ def empty_config_dict() -> dict[str, Any]:
         "max_retries": 2,
         "key_failure_threshold": 2,
         "key_cooldown_seconds": 60,
-        "key_state_path": default_key_state_path(),
-        "upstream_health_check_interval": 30,
+        "endpoint_capabilities_path": default_endpoint_capabilities_path(),
         "metrics_db_path": default_metrics_db_path(),
         "log_file_path": default_log_file_path(),
         "local_api_key": generate_local_api_key(),
@@ -220,19 +219,25 @@ def save_config_data(path: Path, data: dict[str, Any]) -> None:
 
 
 def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
-    if int(raw.get("config_version") or 0) == CONFIG_VERSION and isinstance(
-        raw.get("models"), dict
+    normalized = dict(raw)
+    if "endpoint_capabilities_path" not in normalized and normalized.get(
+        "key_state_path"
     ):
-        return raw
-    models = raw.get("models")
+        normalized["endpoint_capabilities_path"] = normalized["key_state_path"]
+    normalized.pop("key_state_path", None)
+    if int(normalized.get("config_version") or 0) == CONFIG_VERSION and isinstance(
+        normalized.get("models"), dict
+    ):
+        return normalized
+    models = normalized.get("models")
     if not isinstance(models, list):
-        return raw
+        return normalized
 
-    migrated = dict(raw)
+    migrated = normalized
     migrated["config_version"] = CONFIG_VERSION
     providers: dict[str, Any] = {}
     migrated_models: dict[str, Any] = {}
-    upstream_routes = normalize_upstream_url_routes(raw.get("upstream_routes"))
+    upstream_routes = normalize_upstream_url_routes(normalized.get("upstream_routes"))
 
     for raw_model in models:
         if not isinstance(raw_model, dict):
@@ -398,8 +403,7 @@ class RouterConfig:
     max_retries: int
     key_failure_threshold: int
     key_cooldown_seconds: float
-    key_state_path: str
-    upstream_health_check_interval: float
+    endpoint_capabilities_path: str
     metrics_db_path: str
     log_file_path: str
     local_api_key: str
@@ -605,8 +609,11 @@ class RouterConfig:
             max_retries=int(raw.get("max_retries", 2)),
             key_failure_threshold=max(1, int(raw.get("key_failure_threshold", 2))),
             key_cooldown_seconds=max(0.0, float(raw.get("key_cooldown_seconds", 60))),
-            key_state_path=str(raw.get("key_state_path") or default_key_state_path()),
-            upstream_health_check_interval=max(0.0, float(raw.get("upstream_health_check_interval", 30))),
+            endpoint_capabilities_path=str(
+                raw.get("endpoint_capabilities_path")
+                or raw.get("key_state_path")
+                or default_endpoint_capabilities_path()
+            ),
             metrics_db_path=str(raw.get("metrics_db_path") or default_metrics_db_path()),
             log_file_path=str(raw.get("log_file_path") or default_log_file_path()),
             local_api_key=str(raw.get("local_api_key", "")),

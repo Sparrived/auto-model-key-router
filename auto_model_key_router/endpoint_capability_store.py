@@ -3,46 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 
-class KeyStateStore:
+class EndpointCapabilityStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._write_lock = asyncio.Lock()
 
-    def load(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def load(self) -> dict[str, Any]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return [], {}
-        keys = raw.get("keys", [])
-        url_native_support = raw.get("url_native_support", {})
-        return (
-            keys if isinstance(keys, list) else [],
-            url_native_support if isinstance(url_native_support, dict) else {},
-        )
+            return {}
+        states = raw.get("endpoint_capabilities", raw.get("url_native_support", {}))
+        return states if isinstance(states, dict) else {}
 
-    async def save(
-        self,
-        states: dict[tuple[str, str], Any],
-        url_native_support: dict[str, Any] | None = None,
-    ) -> None:
+    async def save(self, states: dict[str, Any]) -> None:
         payload = {
-            "version": 2,
-            "keys": [
-                {"model_id": model_id, "key_name": key_name, **asdict(state)}
-                for (model_id, key_name), state in sorted(states.items())
-                if state.failures
-                or state.cooldown_until
-                or state.last_status_code is not None
-                or state.disabled
-            ],
+            "version": 1,
+            "endpoint_capabilities": dict(sorted(states.items())),
         }
-        if url_native_support:
-            payload["url_native_support"] = dict(sorted(url_native_support.items()))
         async with self._write_lock:
             await asyncio.to_thread(self._write_atomic, payload)
 

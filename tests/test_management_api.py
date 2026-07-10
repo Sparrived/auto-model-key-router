@@ -44,7 +44,7 @@ def config_data(tmp_path: Path) -> dict[str, object]:
         "max_retries": 1,
         "key_failure_threshold": 1,
         "key_cooldown_seconds": 60,
-        "key_state_path": str(tmp_path / "key-state.json"),
+        "endpoint_capabilities_path": str(tmp_path / "endpoint-capabilities.json"),
         "upstream_health_check_interval": 0,
         "metrics_db_path": str(tmp_path / "metrics.sqlite3"),
         "log_file_path": str(tmp_path / "server.log"),
@@ -290,8 +290,7 @@ def test_management_writes_require_a_config_file_path(tmp_path: Path) -> None:
         max_retries=1,
         key_failure_threshold=1,
         key_cooldown_seconds=60,
-        key_state_path=str(tmp_path / "key-state.json"),
-        upstream_health_check_interval=0,
+        endpoint_capabilities_path=str(tmp_path / "endpoint-capabilities.json"),
         metrics_db_path=str(tmp_path / "metrics.sqlite3"),
         log_file_path=str(tmp_path / "server.log"),
         local_api_key="local-key",
@@ -429,46 +428,26 @@ def test_get_key_stats_returns_key_specific_metrics(
     assert with_hours.status_code == 200
 
 
-def test_key_state_endpoint_controls_runtime_usage(tmp_path: Path) -> None:
+def test_key_state_endpoint_is_not_exposed(tmp_path: Path) -> None:
     app, _ = create_file_backed_app(tmp_path)
 
     async def requests(
         client: httpx.AsyncClient,
-    ) -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
-        await app.state.runtime_manager.current.key_pool.mark_failure(
-            "model-a", "key-a", status_code=503
-        )
-        cooling = await client.get(
+    ) -> tuple[httpx.Response, httpx.Response]:
+        get_response = await client.get(
             "/api/models/model-a/keys/key-a/state", headers=AUTH_HEADERS
         )
-        paused = await client.put(
+        put_response = await client.put(
             "/api/models/model-a/keys/key-a/state",
             headers=AUTH_HEADERS,
             json={"disabled": True},
         )
-        restored = await client.put(
-            "/api/models/model-a/keys/key-a/state",
-            headers=AUTH_HEADERS,
-            json={"clear_cooldown": True},
-        )
-        unauthorized = await client.get("/api/models/model-a/keys/key-a/state")
-        return cooling, paused, restored, unauthorized
+        return get_response, put_response
 
-    cooling, paused, restored, unauthorized = run_client(app, requests)
+    get_response, put_response = run_client(app, requests)
 
-    assert cooling.status_code == 200
-    assert cooling.json()["cooldown_remaining_seconds"] > 0
-    assert cooling.json()["last_status_code"] == 503
-    assert paused.status_code == 200
-    assert paused.json()["disabled"] is True
-    assert restored.status_code == 200
-    assert restored.json() == {
-        "failures": 0,
-        "cooldown_remaining_seconds": 0,
-        "last_status_code": None,
-        "disabled": False,
-    }
-    assert unauthorized.status_code == 401
+    assert get_response.status_code == 404
+    assert put_response.status_code == 404
 
 
 def test_unified_model_crud_via_api(tmp_path: Path) -> None:

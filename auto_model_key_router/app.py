@@ -21,13 +21,11 @@ from .metrics import MetricsStore
 from .proxy_handler import handle_proxy_request
 from .proxy_support import (
     _authorization_mode,
-    _join_url,
 )
 from .runtime import (
     RuntimeLease,
     RuntimeManager,
     RuntimeResources,
-    sync_runtime_from_state,
 )
 from .visitor import visitor_feature_available
 from .websocket_proxy import register_websocket_proxy
@@ -48,18 +46,13 @@ def _new_http_client(timeout: float) -> httpx.AsyncClient:
 def create_app(config: RouterConfig, config_path: str | Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(lifespan_app: FastAPI) -> AsyncIterator[None]:
-        await sync_runtime_from_state(lifespan_app.state)
-        if lifespan_app.state.config.upstream_health_check_interval > 0:
-            lifespan_app.state.health_probe_task = asyncio.create_task(
-                _health_probe_loop(lifespan_app.state)
-            )
         lifespan_app.state._metrics_broadcast_task = asyncio.create_task(
             _broadcast_metrics_loop()
         )
         try:
             yield
         finally:
-            for attr in ("_metrics_broadcast_task", "health_probe_task"):
+            for attr in ("_metrics_broadcast_task",):
                 task = getattr(lifespan_app.state, attr, None)
                 if task is not None:
                     task.cancel()
@@ -70,32 +63,19 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             await lifespan_app.state.runtime_manager.close()
 
     app = FastAPI(title="Auto Model Key Router", version=__version__, lifespan=lifespan)
-    app.state.config = config
     app.state.config_path = (
         str(Path(config_path).resolve()) if config_path is not None else ""
     )
     app.state.config_mtime = _config_mtime(app.state.config_path)
     app.state.config_reload_lock = asyncio.Lock()
     app.state.config_write_lock = asyncio.Lock()
-    app.state.key_pool = KeyPool(config)
-    app.state.metrics = MetricsStore(config.metrics_db_path)
-    app.state.http_client = _new_http_client(config.request_timeout)
+    key_pool = KeyPool(config)
+    metrics = MetricsStore(config.metrics_db_path)
+    http_client = _new_http_client(config.request_timeout)
     app.state.runtime_manager = RuntimeManager(
-        RuntimeResources(
-            config, app.state.key_pool, app.state.metrics, app.state.http_client
-        )
+        RuntimeResources(config, key_pool, metrics, http_client)
     )
-    app.state.health_probe_task = None
     app.state.event_bus = EventBus()
-
-    async def _on_key_state_change(model_id: str, key_name: str, info: dict) -> None:
-        await app.state.event_bus.broadcast(
-            "key_state_change",
-            {"model_id": model_id, "key_name": key_name, "state": info},
-        )
-
-    app.state.key_pool.on_key_state_change = _on_key_state_change
-    app.state._on_key_state_change = _on_key_state_change
 
     # metrics_snapshot 节流广播
     _metrics_dirty = asyncio.Event()
@@ -103,7 +83,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
 
     async def _broadcast_metrics_snapshot() -> None:
         try:
-            snapshot = await app.state.metrics.snapshot(since=app.state.metrics._started_at)
+            metrics = app.state.runtime_manager.current.metrics
+            snapshot = await metrics.snapshot(since=metrics._started_at)
             await app.state.event_bus.broadcast("metrics_snapshot", snapshot)
         except Exception:
             LOGGER.debug("metrics_snapshot broadcast failed", exc_info=True)
@@ -125,13 +106,11 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         _metrics_dirty.set()
 
     async def _on_client_count_change(count: int) -> None:
-        app.state.event_bus.broadcast(
-            "client_count", {"count": count}
-        )
+        app.state.event_bus.broadcast("client_count", {"count": count})
         if count > 0:
             await _broadcast_metrics_snapshot()
 
-    app.state.metrics.on_record = _on_metrics_recorded
+    metrics.on_record = _on_metrics_recorded
     app.state.event_bus.on_client_count_change = _on_client_count_change
     app.state._metrics_broadcast_task: asyncio.Task | None = None
 
@@ -163,8 +142,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 "visitor_access_enabled": visitor_installed and visitor_key_count > 0,
                 "visitor_key_count": visitor_key_count if visitor_installed else 0,
                 "unified_model": runtime.key_pool.unified_route,
-                "key_states": runtime.key_pool.key_states(),
-                "native_endpoint_states": runtime.key_pool.url_native_support_states(),
+                "native_endpoint_states": runtime.key_pool.endpoint_capability_states(),
             }
         finally:
             await lease.release()
@@ -228,7 +206,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
         await websocket.accept()
         token = websocket.query_params.get("token", "")
         event_bus: EventBus = app.state.event_bus
-        if not await event_bus.authenticate(websocket, token, app.state.config.local_api_key):
+        config = app.state.runtime_manager.current.config
+        if not await event_bus.authenticate(websocket, token, config.local_api_key):
             return
         try:
             await websocket.send_json({"type": "connected", "data": {}})
@@ -282,7 +261,6 @@ async def _reload_config_if_changed(state: Any) -> None:
     if not mtime or mtime == getattr(state, "config_mtime", 0.0):
         return
     async with state.config_reload_lock:
-        await sync_runtime_from_state(state)
         mtime = _config_mtime(config_path)
         if not mtime or mtime == getattr(state, "config_mtime", 0.0):
             return
@@ -298,31 +276,10 @@ async def _reload_config_if_changed(state: Any) -> None:
             http_client = _new_http_client(config.request_timeout)
         if old_config.metrics_db_path != config.metrics_db_path:
             metrics = await asyncio.to_thread(MetricsStore, config.metrics_db_path)
-        if (
-            old_config.upstream_health_check_interval
-            <= 0
-            < config.upstream_health_check_interval
-        ):
-            state.health_probe_task = asyncio.create_task(_health_probe_loop(state))
-        if (
-            old_config.upstream_health_check_interval > 0
-            and config.upstream_health_check_interval <= 0
-        ):
-            task = getattr(state, "health_probe_task", None)
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                state.health_probe_task = None
-        state.config = config
-        state.key_pool = await asyncio.to_thread(KeyPool, config)
-        state.key_pool.on_key_state_change = getattr(state, "_on_key_state_change", None)
-        state.http_client = http_client
-        state.metrics = metrics
+        key_pool = await asyncio.to_thread(KeyPool, config)
+        metrics.on_record = old_runtime.metrics.on_record
         await state.runtime_manager.replace(
-            RuntimeResources(config, state.key_pool, metrics, http_client)
+            RuntimeResources(config, key_pool, metrics, http_client)
         )
         state.config_mtime = _config_mtime(config_path) or mtime
         event_bus: EventBus = state.event_bus
@@ -331,9 +288,8 @@ async def _reload_config_if_changed(state: Any) -> None:
 
 
 async def _acquire_runtime(state: Any) -> RuntimeLease:
-    async with state.config_reload_lock:
-        await sync_runtime_from_state(state)
-        return await state.runtime_manager.acquire()
+    await _reload_config_if_changed(state)
+    return await state.runtime_manager.acquire()
 
 
 async def _wrap_active_stream(
@@ -351,40 +307,3 @@ def _key_fingerprint(api_key: str) -> str:
     if not api_key:
         return ""
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-
-
-async def _health_probe_loop(state: Any) -> None:
-    while True:
-        interval = state.runtime_manager.current.config.upstream_health_check_interval
-        await asyncio.sleep(interval)
-        await _probe_cooling_keys(state)
-
-
-async def _probe_cooling_keys(state: Any) -> None:
-    lease = await _acquire_runtime(state)
-    runtime = lease.resources
-    try:
-        for model_id in runtime.key_pool.model_ids:
-            for key in runtime.key_pool.keys_for_model(model_id):
-                key_state = runtime.key_pool.key_states().get(
-                    f"{model_id}:{key.name}", {}
-                )
-                if int(key_state.get("cooldown_remaining_seconds") or 0) <= 0:
-                    continue
-                if await _probe_key(runtime.http_client, key):
-                    await runtime.key_pool.mark_success(model_id, key.name)
-    finally:
-        await lease.release()
-
-
-async def _probe_key(client: httpx.AsyncClient, key: Any) -> bool:
-    try:
-        response = await client.get(
-            _join_url(key.base_url, "/v1/models"),
-            headers={"Authorization": f"Bearer {key.api_key}"},
-        )
-        await response.aread()
-        await response.aclose()
-        return response.status_code < 400
-    except httpx.RequestError:
-        return False
