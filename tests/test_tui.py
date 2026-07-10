@@ -2004,7 +2004,7 @@ def test_pool_probe_models_records_common_models_and_routes(monkeypatch) -> None
     assert result["checked_at"]
 
 
-def test_apply_pool_probe_keeps_discovered_models_disabled_by_default(monkeypatch) -> None:
+def test_apply_pool_probe_enables_discovered_models(monkeypatch) -> None:
     monkeypatch.setattr(
         config_editor,
         "pool_probe_models",
@@ -2026,7 +2026,43 @@ def test_apply_pool_probe_keeps_discovered_models_disabled_by_default(monkeypatc
     config_editor.apply_pool_probe(provider, "default")
 
     assert provider["pools"]["default"]["available_models"] == ["gpt-a", "gpt-b"]
-    assert provider["pools"]["default"]["models"] == []
+    assert provider["pools"]["default"]["models"] == ["gpt-a", "gpt-b"]
+
+
+def test_enabled_pool_models_are_usable_by_unified_model(monkeypatch) -> None:
+    monkeypatch.setattr(
+        config_editor,
+        "pool_probe_models",
+        lambda *args, **kwargs: {
+            "models": ["gpt-a"],
+            "all_models": ["gpt-a", "gpt-b"],
+            "key_models": {"k1": ["gpt-a", "gpt-b"]},
+            "routes": {},
+            "manual_models": False,
+            "checked_at": "2026-01-01T00:00:00+00:00",
+        },
+    )
+    data = {
+        "config_version": 3,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {"k1": {"api_key": "sk-1"}},
+                "pools": {"default": {"keys": ["k1"]}},
+            }
+        },
+        "models": {},
+    }
+
+    config_editor.apply_pool_probe(data["providers"]["gateway"], "default")
+    config_editor.enable_pool_models(data, "gateway", "default", ["gpt-a"])
+    data["unified_model"] = {"model": "gpt-a"}
+
+    config = config_editor.RouterConfig.from_dict(data)
+
+    assert config.configured_model_id("gpt-a") == "gpt-a"
+    assert config.unified_model is not None
+    assert config.models[0].keys[0].upstream_model == "gpt-a"
 
 
 def test_pool_probe_models_accepts_manual_models_when_discovery_empty(monkeypatch) -> None:
@@ -2075,7 +2111,7 @@ def test_pool_update_prompts_manual_models_when_discovery_empty(tmp_path, monkey
     result = config_editor.update_provider_pool_interactively(config_path, "gateway", "1")
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
-    assert "共同可用模型" in render_plain(result)
+    assert "已启用模型" in render_plain(result)
     assert data["providers"]["gateway"]["pools"]["manual-pool"]["models"] == [
         "gpt-manual",
         "gpt-extra",
