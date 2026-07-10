@@ -581,12 +581,9 @@ def apply_pool_probe(
     )
     if isinstance(pool, dict):
         available_models = probe["models"]
-        existing_enabled = pool_enabled_models(pool)
         pool["available_models"] = available_models
         pool["all_available_models"] = probe["all_models"]
-        pool["models"] = [
-            model_id for model_id in existing_enabled if model_id in available_models
-        ]
+        pool["models"] = available_models
         pool["key_models"] = probe["key_models"]
         pool["routes"] = probe["routes"]
         pool["manual_models"] = probe["manual_models"]
@@ -1115,8 +1112,7 @@ def manage_provider_pools_interactively(path: Path) -> None:
                 ("1", "新增/编辑模型池"),
                 ("2", "刷新可用性"),
                 ("3", "手动设置可用模型"),
-                ("4", "启用模型"),
-                ("5", "删除模型池"),
+                ("4", "删除模型池"),
                 ("0", "返回"),
             ],
             content=section_panel(rows, "模型池", "cyan"),
@@ -1177,9 +1173,12 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         )
         message = (
             f"已保存模型池 {provider_id}/{pool_name}，包含 {len(selected_keys)} 个 Key。\n"
-            f"共同可用模型: [bold]{model_count}[/bold]（默认未启用）\n"
+            f"已启用模型: [bold]{model_count}[/bold]\n"
             f"任一 Key 可用模型: [bold]{all_model_count}[/bold]\n"
             f"可用路由探测: [bold]{route_count}[/bold]"
+        )
+        enable_pool_models(
+            data, provider_id, pool_name, pool_enabled_models(pools[pool_name])
         )
     elif choice == "2":
         if not pools:
@@ -1205,8 +1204,11 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
                     )
         message = (
             f"已刷新模型池 {provider_id}/{pool_name}。\n"
-            f"共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]（新增模型默认未启用）\n"
+            f"已启用模型: [bold]{len(probe.get('models') or [])}[/bold]\n"
             f"任一 Key 可用模型: [bold]{len(probe.get('all_models') or [])}[/bold]"
+        )
+        enable_pool_models(
+            data, provider_id, pool_name, pool_enabled_models(pools[pool_name])
         )
     elif choice == "3":
         if not pools:
@@ -1228,42 +1230,12 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
             probe = apply_pool_probe(provider, pool_name, manual_models=manual_models)
         message = (
             f"已手动设置模型池 {provider_id}/{pool_name} 的可用模型。\n"
-            f"可用模型数: [bold]{len(probe.get('models') or [])}[/bold]（默认未启用）"
+            f"已启用模型: [bold]{len(probe.get('models') or [])}[/bold]"
+        )
+        enable_pool_models(
+            data, provider_id, pool_name, pool_enabled_models(pools[pool_name])
         )
     elif choice == "4":
-        if not pools:
-            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
-        pool_choice = select_option(
-            "启用模型",
-            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
-            + [("0", "返回")],
-        )
-        if pool_choice == "0":
-            return None
-        pool_name = sorted(pools)[int(pool_choice) - 1]
-        pool = pools[pool_name]
-        available_models = pool_available_models(pool)
-        if not available_models:
-            return section_panel(
-                "[yellow]该模型池暂无可用模型，请先刷新可用性或手动设置可用模型。[/yellow]",
-                "模型池",
-                "yellow",
-            )
-        enabled_models = select_multiple(
-            "启用模型",
-            [(model_id, model_id) for model_id in available_models],
-            content=section_panel(
-                "只启用要暴露给本地模型路由的上游模型。未启用的模型会留在可用清单中。",
-                "模型池",
-                "cyan",
-            ),
-        )
-        enable_pool_models(data, provider_id, pool_name, enabled_models)
-        message = (
-            f"已启用模型池 {provider_id}/{pool_name} 的 [bold]{len(enabled_models)}[/bold] 个模型，"
-            "并同步本地模型路由。"
-        )
-    elif choice == "5":
         if not pools:
             return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
         pool_choice = select_option(
@@ -1297,7 +1269,7 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
     else:
         return None
     restart = commit_v2_config(path, data, old_config)
-    if choice in {"1", "3", "4", "5"}:
+    if choice in {"1", "3", "4"}:
         FORM_DRAFTS.pop(f"provider_pool:{provider_id}", None)
     return Group(section_panel(message, "模型池", "green"), restart)
 
@@ -1317,7 +1289,7 @@ def add_model_route_interactively(path: Path) -> Any:
     enabled_models = pool_enabled_models(pool)
     if not enabled_models:
         return section_panel(
-            "[yellow]该模型池没有启用模型。请先在 模型池 → 启用模型 中选择要暴露的模型。[/yellow]",
+            "[yellow]该模型池没有启用模型。请先刷新模型池或手动设置可用模型。[/yellow]",
             "添加模型路由",
             "yellow",
         )
