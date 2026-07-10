@@ -105,7 +105,6 @@ cp router-config.example.json router-config.json
   "max_retries": 2,
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
-  "upstream_health_check_interval": 30,
   "local_api_key": "amkr_your-local-api-key",
   "unified_model": {
     "model": "gpt-4o-mini",
@@ -266,9 +265,11 @@ AMKR 会在转发给上游前把请求体里的模型名改写为真实模型 ID
 
 - `429` 会立即让当前 Key 进入冷却。
 - 其他可重试错误达到 `key_failure_threshold` 后进入冷却。
-- 上游返回 `Retry-After` 时优先使用该冷却时间；否则使用 `key_cooldown_seconds`。
-- 冷却状态会写入 `key-state.json`，服务重启后仍能保留。
-- `upstream_health_check_interval` 大于 `0` 时，冷却中的 Key 会被健康探测恢复。
+- 上游返回 `Retry-After` 时严格使用该冷却时间；否则按连续失败次数递增 `key_cooldown_seconds`，最长 300 秒。
+- 自动失败只产生临时冷却，不会自动永久禁用 Key。
+- 冷却和失败计数仅保存在内存中；冷却到期后请求会自然恢复，任意成功请求会立即清空失败状态。
+- Key 健康状态不对外暴露，也不接受人工清除；长期启停请修改配置中的 `enabled`。
+- 旧配置字段 `upstream_health_check_interval` 仍可读取，但已弃用且不再启动后台健康探测。
 
 ### 原生 Anthropic 端点优先
 
@@ -289,9 +290,9 @@ AMKR 会在转发给上游前把请求体里的模型名改写为真实模型 ID
 
 原生优先模式工作流程：
 1. 首次请求时自动测试上游是否支持 `/v1/messages` 端点
-2. 测试结果按“上游 URL + 实际原生路径”记录在 `key-state.json` 的 `url_native_support` 中
+2. 测试结果按“上游 URL + 实际原生路径”记录在 `endpoint-capabilities.json` 的 `endpoint_capabilities` 中
 3. 如果上游返回 404/405/501，自动回退到 `chat/completions` 格式并记录结果
-4. 如需重新测试，可删除 `key-state.json` 中对应的 `url_native_support` 条目
+4. 如需重新测试，可删除 `endpoint-capabilities.json` 中对应的 `endpoint_capabilities` 条目
 
 如果某个上游的 Anthropic 入口不是 `base_url/v1/messages`，可以按上游 URL 配置额外路由：
 

@@ -43,7 +43,7 @@ visitor 模型使用 `amkr-{真实模型ID}` 形式，例如 `amkr-gpt-5.5`。vi
 | 方法 | 路径 | 鉴权 | 用途 |
 | --- | --- | --- | --- |
 | `HEAD` | `/` | 无 | 存活探针，返回 `204` |
-| `GET` | `/health` | 无 | 服务、配置和 Key 状态 |
+| `GET` | `/health` | 无 | 服务、配置和端点能力状态 |
 | `GET` | `/v1/models` | 本地或 visitor | 查询当前调用方可用模型 |
 | `POST` | `/v1/chat/completions` | 本地或 visitor | OpenAI Chat Completions 兼容接口 |
 | `POST` | `/v1/messages` | 本地或 visitor | Anthropic Messages 兼容接口 |
@@ -126,7 +126,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **原生优先模式**（默认启用）：
 - 首次请求时自动测试上游是否支持 `/v1/messages` 端点
-- 测试结果按“上游 URL + 实际原生路径”缓存在 key_state 中，避免重复测试
+- 测试结果按“上游 URL + 实际原生路径”缓存在端点能力缓存中，避免重复测试
 - 支持原生端点时保留所有 Anthropic 原生字段，提高缓存命中率
 - 可通过配置 `native_first: false` 禁用
 
@@ -209,18 +209,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `visitor_access_enabled` | boolean | 是否存在启用且允许 visitor 的 Key |
 | `visitor_key_count` | integer | visitor 可用 Key 总数 |
 | `unified_model` | object/null | 当前真实模型和可选固定 Key |
-| `key_states` | object | Key 的失败、冷却、状态码和禁用状态 |
+| `native_endpoint_states` | object | 上游原生端点能力缓存 |
 
-`key_states` 中每项的键为 `模型ID:Key名称`，值包含：
-
-```json
-{
-  "failures": 0,
-  "cooldown_remaining_seconds": 0,
-  "last_status_code": null,
-  "disabled": false
-}
-```
+Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或管理 API 暴露。长期启停 Key 请更新配置中的 `enabled`。
 
 ### `GET /v1/models`
 
