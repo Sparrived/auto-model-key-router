@@ -127,6 +127,8 @@ auto-model-key-router --config router-config.json --switch-key auto
   "host": "127.0.0.1",
   "port": 8000,
   "request_timeout": 60,
+  "stream_first_byte_timeout": 90,
+  "stream_idle_timeout": 180,
   "max_retries": 2,
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
@@ -179,6 +181,8 @@ auto-model-key-router --config router-config.json --switch-key auto
 ```
 
 > `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`providers.*.pools` 表示同一模型能力池，TUI 创建或刷新模型池时会探测可用模型与路由并写入 `available_models` / `routes` 元信息，探测到的模型默认不启用；如果上游不支持 `/v1/models`，TUI 会允许手动填写可用模型并继续探测路由；`providers.*.pools.*.models` 是手动启用后可用于添加本地模型路由的模型清单。旧版 `models[].keys[]` 和 v2 的 `target.key` 会自动迁移为新版语义。
+
+流式请求使用分段超时：`stream_first_byte_timeout`（默认 90 秒）覆盖等待上游响应头和第一块响应体的总时间，`stream_idle_timeout`（默认 180 秒）限制首块之后相邻响应块的等待时间，两者都必须大于 0。响应头返回前超时会按现有重试策略切换 Key；下游流建立后超时只结束当前流，不会自动重放请求。可在 TUI 的 **CLI 设置 → 超时配置** 中统一调整普通请求和两个流式超时。
 
 ## 文档
 

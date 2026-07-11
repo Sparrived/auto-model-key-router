@@ -102,6 +102,8 @@ cp router-config.example.json router-config.json
   "port": 8000,
   "default_base_url": "https://api.openai.com",
   "request_timeout": 60,
+  "stream_first_byte_timeout": 90,
+  "stream_idle_timeout": 180,
   "max_retries": 2,
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
@@ -134,6 +136,14 @@ cp router-config.example.json router-config.json
 
 > 注意：`local_api_key` 是调用 AMKR 本地服务的 Key；`keys[].api_key` 是 AMKR 转发到上游时使用的真实模型供应商 Key。
 
+### 3.4 请求与流式超时
+
+- `request_timeout` 控制连接建立、请求写入和非流式请求。
+- `stream_first_byte_timeout` 默认 90 秒，从发起流式上游请求开始，覆盖等待响应头和第一块响应体的总时间。
+- `stream_idle_timeout` 默认 180 秒，控制收到第一块后相邻响应块的最大等待时间。
+
+三个值都应大于 0。流式响应头返回前超时时，下游响应尚未建立，AMKR 会按现有重试策略切换 Key；下游流建立后发生首块或空闲超时时，只结束当前流，不会自动重放请求，以免产生重复事件、重复计费或非幂等工具调用。可在 TUI 的 **CLI 设置 → 超时配置** 中统一修改这三个值。
+
 ---
 
 ## 4. 用 Terminal UI 配置和管理
@@ -153,7 +163,7 @@ TUI 里最常用的入口：
 | 一键配置 | 注册路由服务，或自动配置 Claude Code / Codex 使用 AMKR |
 | 模型 Key | 新增、编辑、删除、排序模型和上游 Key，设置路由模式、推理强度、访客权限 |
 | 统一模型 | 设置 `unified-model` 当前指向的真实模型，并选择自动路由或固定 Key |
-| CLI 设置 | 管理监听地址、端口、本地鉴权、配置迁移、版本更新等 |
+| CLI 设置 | 管理监听地址、端口、本地鉴权、请求超时、配置迁移、版本更新等 |
 
 推荐的新手流程：
 
