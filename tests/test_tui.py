@@ -39,6 +39,7 @@ def v3_config(models: dict[str, list[dict[str, object]]], **extra: object) -> di
         for index, key in enumerate(keys):
             key_name = str(key.get("name") or f"{model_id}-key-{index + 1}")
             provider_id = str(key.get("provider") or f"{model_id}-{key_name}")
+            upstream_model = str(key.get("upstream_model") or model_id)
             providers[provider_id] = {
                 "base_url": str(key.get("base_url") or "https://example.test"),
                 "keys": {
@@ -52,9 +53,9 @@ def v3_config(models: dict[str, list[dict[str, object]]], **extra: object) -> di
                         if value is not None
                     }
                 },
-                "pools": {key_name: {"keys": [key_name]}},
+                "pools": {key_name: {"keys": [key_name], "models": [upstream_model]}},
             }
-            targets.append({"provider": provider_id, "pool": key_name, "upstream_model": str(key.get("upstream_model") or model_id)})
+            targets.append({"provider": provider_id, "pool": key_name, "upstream_model": upstream_model})
             aliases.extend(str(alias) for alias in key.get("aliases", []) if str(alias))
         model_data[model_id] = {"targets": targets}
         if aliases:
@@ -2254,8 +2255,8 @@ def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkey
                             "backup": {"api_key": "sk-backup"},
                         },
                         "pools": {
-                            "main-pool": {"keys": ["main"]},
-                            "backup-pool": {"keys": ["backup"]},
+                            "main-pool": {"keys": ["main"], "models": ["gpt-a"]},
+                            "backup-pool": {"keys": ["backup"], "models": ["gpt-b"]},
                         },
                     }
                 },

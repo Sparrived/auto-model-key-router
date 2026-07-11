@@ -174,7 +174,7 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
                 "vendor": {
                     "base_url": "https://upstream.test",
                     "keys": {"main": {"api_key": "sk-main"}},
-                    "pools": {"premium": {"keys": ["main"]}},
+                    "pools": {"premium": {"keys": ["main"], "models": ["vendor-model"]}},
                 }
             },
             "models": {
