@@ -538,9 +538,9 @@ def duplicate_pool_memberships(
             for key_name in pool_key_names(pool):
                 memberships.setdefault(key_name, []).append(str(pool_name))
         duplicates.extend(
-            (str(provider_id), key_name, pool_names)
-            for key_name, pool_names in sorted(memberships.items())
-            if len(pool_names) > 1
+            (str(provider_id), key_name, memberships.get(key_name, []))
+            for key_name in sorted(provider_keys(provider))
+            if len(memberships.get(key_name, [])) != 1
         )
     return duplicates
 
@@ -554,17 +554,26 @@ def repair_duplicate_pool_memberships_interactively(path: Path) -> bool:
     for provider_id, key_name, pool_names in duplicates:
         provider = providers[provider_id]
         pools = provider_pools(provider)
+        for pool_name, pool in list(pools.items()):
+            if not isinstance(pool, dict):
+                pools[pool_name] = {
+                    "keys": pool_key_names(pool),
+                    "models": [],
+                }
         console.print(
             section_panel(
                 f"供应商: [bold]{provider_id}[/bold]\n"
                 f"Key: [bold]{key_name}[/bold]\n"
-                f"当前模型池: [yellow]{', '.join(pool_names)}[/yellow]\n"
+                f"当前模型池: [yellow]{', '.join(pool_names) or '未分配'}[/yellow]\n"
                 "请选择唯一保留的模型池，或新建模型池。",
                 "修复重复模型池归属",
                 "yellow",
             )
         )
-        selected_pool = select_or_enter_pool_name(pools, default=pool_names[0])
+        selected_pool = select_or_enter_pool_name(
+            pools,
+            default=pool_names[0] if pool_names else "default",
+        )
         if not selected_pool:
             return False
         for pool in pools.values():
@@ -1116,6 +1125,8 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         )
         if not selected_keys:
             return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
+        existing_keys = pool_key_names(pools.get(pool_name, {}))
+        selected_keys = list(dict.fromkeys([*existing_keys, *selected_keys]))
         for other_pool_name, other_pool in pools.items():
             if other_pool_name == pool_name or not isinstance(other_pool, dict):
                 continue
@@ -1193,6 +1204,12 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         if pool_choice == "0":
             return None
         pool_name = sorted(pools)[int(pool_choice) - 1]
+        if pool_key_names(pools[pool_name]):
+            return section_panel(
+                "[yellow]该模型池仍包含 Key，请先将 Key 移入其他模型池。[/yellow]",
+                "模型池",
+                "yellow",
+            )
         used_by = [
             model_id
             for model_id, model in raw_v2_models(data).items()
@@ -2278,7 +2295,10 @@ def merge_transferable_key_config(
             while target_pool_name in current_pools:
                 target_pool_name = f"{base_name}-{suffix}"
                 suffix += 1
-            current_pools[target_pool_name] = {"keys": mapped_keys}
+            target_pool = deepcopy(pool) if isinstance(pool, dict) else {}
+            target_pool["keys"] = mapped_keys
+            target_pool.setdefault("models", [])
+            current_pools[target_pool_name] = target_pool
             pool_name_map[(str(provider_id), str(pool_name))] = (target_provider_id, target_pool_name)
 
     for model_id, transferred_model in transfer_models.items():

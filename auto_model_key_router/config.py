@@ -518,7 +518,7 @@ class RouterConfig:
                         if previous_pool is not None:
                             raise ValueError(
                                 f"供应商 {provider_id} 的 key {key_name} 同时属于多个模型池: "
-                                f"{previous_pool}, {pool_name}"
+                                f"{previous_pool}, {pool_name}。请运行 amkr 交互修复"
                             )
                         key_pool_names[key_name] = str(pool_name)
                     pools.append(
@@ -527,6 +527,16 @@ class RouterConfig:
                             pool_key_names,
                             tuple(str(model_id) for model_id in pool_models if str(model_id)),
                         )
+                    )
+                missing_pool_keys = [
+                    key_name
+                    for key_name in key_configs_by_name
+                    if key_name not in key_pool_names
+                ]
+                if missing_pool_keys:
+                    raise ValueError(
+                        f"供应商 {provider_id} 的 key {missing_pool_keys[0]} 未加入模型池。"
+                        "请运行 amkr 交互修复"
                     )
                 provider_config = ProviderConfig(
                     id=str(provider_id),

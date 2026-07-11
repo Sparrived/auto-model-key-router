@@ -1443,7 +1443,7 @@ def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatc
             "new": {
                 "base_url": "https://new.example.com",
                 "keys": {"new": {"api_key": "sk-new", "allow_visitor": True}},
-                "pools": {"new": {"keys": ["new"]}},
+                "pools": {"new": {"keys": ["new"], "models": ["new-model"]}},
             }
         },
         "models": {
@@ -1466,6 +1466,7 @@ def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatc
     assert saved["request_timeout"] == 45
     assert saved["local_api_key"] == "old-local"
     assert saved["providers"]["new"]["keys"] == {"new": {"api_key": "sk-new"}}
+    assert saved["providers"]["new"]["pools"]["new"]["models"] == ["new-model"]
     assert saved["models"]["new-model"]["targets"] == [
         {"provider": "new", "pool": "new", "upstream_model": "new-model"}
     ]
@@ -1548,7 +1549,10 @@ def test_paste_config_interactively_appends_keys_without_overwriting_model_setti
         "main": {"api_key": "sk-old"},
         "main-2": {"api_key": "sk-new"},
     }
-    assert saved["providers"]["old"]["pools"]["main-2"] == {"keys": ["main-2"]}
+    assert saved["providers"]["old"]["pools"]["main-2"] == {
+        "keys": ["main-2"],
+        "models": [],
+    }
     assert saved["models"]["shared-model"]["targets"][-1] == {
         "provider": "old",
         "pool": "main-2",
@@ -2009,7 +2013,7 @@ def test_editing_pool_moves_selected_key_from_previous_pool(tmp_path, monkeypatc
         encoding="utf-8",
     )
     monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "current")
-    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["move-me", "stay"])
+    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["move-me"])
     monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
     monkeypatch.setattr(
         config_editor,
@@ -2021,7 +2025,7 @@ def test_editing_pool_moves_selected_key_from_previous_pool(tmp_path, monkeypatc
     config_editor.update_provider_pool_interactively(config_path, "vendor", "1")
     pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
-    assert pools["current"]["keys"] == ["move-me", "stay"]
+    assert pools["current"]["keys"] == ["stay", "move-me"]
     assert pools["old"]["keys"] == []
 
 
@@ -2088,6 +2092,85 @@ def test_valid_pool_memberships_do_not_prompt_or_rewrite(tmp_path, monkeypatch) 
 
     assert repaired is False
     assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+def test_unassigned_key_is_repaired_interactively(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "new-pool")
+
+    assert config_editor.repair_duplicate_pool_memberships_interactively(config_path) is True
+    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
+
+    assert pools == {"new-pool": {"keys": ["main"], "models": []}}
+
+
+def test_legacy_list_pool_memberships_are_repaired_interactively(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"legacy": ["main"], "other": {"keys": ["main"], "models": []}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "legacy")
+
+    assert config_editor.repair_duplicate_pool_memberships_interactively(config_path) is True
+    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
+
+    assert pools["legacy"] == {"keys": ["main"], "models": []}
+    assert pools["other"]["keys"] == []
+
+
+def test_nonempty_pool_cannot_be_deleted_until_keys_are_moved(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"only": {"keys": ["main"], "models": []}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
+
+    result = config_editor.update_provider_pool_interactively(config_path, "vendor", "4")
+
+    assert "请先将 Key 移入其他模型池" in render_plain(result)
+    assert "only" in json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
 
 def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> None:
@@ -2301,7 +2384,12 @@ def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
                             "cheap-2": {"api_key": "sk-2"},
                             "pro-1": {"api_key": "sk-3"},
                         },
-                        "pools": {},
+                        "pools": {
+                            "unassigned": {
+                                "keys": ["cheap-1", "cheap-2", "pro-1"],
+                                "models": [],
+                            }
+                        },
                     }
                 },
                 "models": {},
@@ -2312,6 +2400,7 @@ def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
     choices = iter(["1"])
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "cheap")
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "cheap")
     selections = iter([["cheap-1", "cheap-2"], ["gpt-a"]])
     monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: next(selections))
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
@@ -2492,7 +2581,7 @@ def test_pool_update_prompts_manual_models_when_discovery_empty(tmp_path, monkey
                     "gateway": {
                         "base_url": "https://gateway.example.test",
                         "keys": {"k1": {"api_key": "sk-1"}},
-                        "pools": {},
+                        "pools": {"unassigned": {"keys": ["k1"], "models": []}},
                     }
                 },
                 "models": {},
@@ -2500,8 +2589,9 @@ def test_pool_update_prompts_manual_models_when_discovery_empty(tmp_path, monkey
         ),
         encoding="utf-8",
     )
-    prompts = iter(["manual-pool", "gpt-manual,gpt-extra"])
+    prompts = iter(["gpt-manual,gpt-extra"])
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "manual-pool")
     monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["k1"])
     monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: {"models": [], "all_models": [], "routes": {}} if "manual_models" not in kwargs else provider["pools"][pool_name].update({"models": kwargs["manual_models"], "all_models": kwargs["manual_models"], "key_models": {"k1": kwargs["manual_models"]}, "routes": {}, "manual_models": True}) or {"models": kwargs["manual_models"], "all_models": kwargs["manual_models"], "routes": {}})
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))

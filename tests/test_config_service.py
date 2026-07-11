@@ -296,7 +296,7 @@ def test_provider_pool_without_enabled_models_produces_no_route_keys(pool: dict[
 
 
 def test_provider_key_cannot_belong_to_multiple_pools() -> None:
-    with pytest.raises(ValueError, match=r"供应商 vendor 的 key main 同时属于多个模型池: pool-a, pool-b"):
+    with pytest.raises(ValueError, match=r"供应商 vendor 的 key main 同时属于多个模型池: pool-a, pool-b.*运行 amkr"):
         RouterConfig.from_dict(
             {
                 "config_version": 3,
@@ -315,6 +315,23 @@ def test_provider_key_cannot_belong_to_multiple_pools() -> None:
         )
 
 
+def test_provider_key_must_belong_to_a_pool() -> None:
+    with pytest.raises(ValueError, match=r"供应商 vendor 的 key main 未加入模型池.*运行 amkr"):
+        RouterConfig.from_dict(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.example.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {},
+                    }
+                },
+                "models": {},
+            }
+        )
+
+
 def test_v3_rejects_provider_key_targets() -> None:
     with pytest.raises(ValueError, match="provider/key"):
         RouterConfig.from_dict(
@@ -324,7 +341,7 @@ def test_v3_rejects_provider_key_targets() -> None:
                     "vendor": {
                         "base_url": "https://vendor.example.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {},
+                        "pools": {"default": {"keys": ["main"], "models": []}},
                     }
                 },
                 "models": {
