@@ -1054,7 +1054,7 @@ def _combined_capability_probe(*probes: dict[str, Any]) -> dict[str, Any]:
         for probe in probes
         for key_name, error in probe.get("errors", {}).items()
     }
-    return {
+    combined = {
         "models": sorted(set.intersection(*model_sets)) if model_sets else [],
         "all_models": sorted(
             {
@@ -1067,6 +1067,21 @@ def _combined_capability_probe(*probes: dict[str, Any]) -> dict[str, Any]:
         "errors": errors,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    routes = {
+        str(key_name): deepcopy(route_results)
+        for probe in probes
+        for key_name, route_results in probe.get("routes", {}).items()
+    }
+    if routes:
+        combined["routes"] = routes
+    manual_values = [
+        bool(probe["manual_models"])
+        for probe in probes
+        if "manual_models" in probe
+    ]
+    if manual_values:
+        combined["manual_models"] = all(manual_values)
+    return combined
 
 
 def _update_pool_capability_probe(pool: dict[str, Any], probe: dict[str, Any]) -> None:
@@ -1077,6 +1092,9 @@ def _update_pool_capability_probe(pool: dict[str, Any], probe: dict[str, Any]) -
     pool["key_models"] = deepcopy(probe.get("key_models", {}))
     pool["errors"] = {}
     pool["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for field in ("routes", "manual_models"):
+        if field in probe:
+            pool[field] = deepcopy(probe[field])
 
 
 def _select_pool_after_probe_failure(
@@ -1085,22 +1103,27 @@ def _select_pool_after_probe_failure(
     key_name: str,
     key_probe: dict[str, Any],
 ) -> str:
+    pool_names = list(pools)
     options = []
-    for pool_name, pool in pools.items():
+    for index, (pool_name, pool) in enumerate(pools.items(), 1):
         probe = pool_probes[pool_name]
         errors = probe.get("errors", {})
         if errors:
             summary = "; ".join(f"{name}: {error}" for name, error in errors.items())
             status = f"[red]探测失败，信息可能过期 · {short_text(summary, 48)}[/red]"
+        elif not probe.get("models"):
+            status = "[yellow]未发现模型[/yellow]"
         else:
             status = f"[green]探测成功 · {len(probe.get('models', []))} 个共同模型[/green]"
-        options.append((pool_name, f"{pool_name} · {len(pool_key_names(pool))} Key · {status}"))
-    options.extend([("__new__", "新建模型池"), ("0", "返回")])
+        options.append((str(index), f"{pool_name} · {len(pool_key_names(pool))} Key · {status}"))
+    options.extend([("n", "新建模型池"), ("0", "返回")])
     key_errors = key_probe.get("errors", {})
     if key_errors:
         key_status = "[red]探测失败[/red] " + "; ".join(
             f"{name}: {error}" for name, error in key_errors.items()
         )
+    elif not key_probe.get("models"):
+        key_status = "[yellow]未发现模型[/yellow]"
     else:
         key_status = f"[green]探测成功[/green] · {len(key_probe.get('models', []))} 个模型"
     choice = select_option(
@@ -1115,11 +1138,11 @@ def _select_pool_after_probe_failure(
     )
     if choice == "0":
         return ""
-    if choice == "__new__":
+    if choice == "n":
         return prompt_text(
             "模型池", "Pool 名称", default=next_pool_name(pools)
         ).strip()
-    return choice
+    return pool_names[int(choice) - 1]
 
 
 def add_provider_key_interactively(
@@ -1192,10 +1215,16 @@ def add_provider_key_interactively(
     for pool_name, probe in pool_probes.items():
         pool = pools[pool_name]
         if isinstance(pool, dict):
+            if "routes" not in probe and isinstance(pool.get("routes"), dict):
+                probe["routes"] = deepcopy(pool["routes"])
+            probe.setdefault("manual_models", bool(pool.get("manual_models", False)))
             _update_pool_capability_probe(pool, probe)
 
-    all_probes_succeeded = not key_probe.get("errors") and all(
-        not probe.get("errors") for probe in pool_probes.values()
+    all_probes_succeeded = bool(key_probe.get("models")) and not key_probe.get(
+        "errors"
+    ) and all(
+        probe.get("models") and not probe.get("errors")
+        for probe in pool_probes.values()
     )
     assignment_probe: dict[str, Any] | None = None
     if all_probes_succeeded:
@@ -1227,8 +1256,9 @@ def add_provider_key_interactively(
     if key_name not in pool_keys:
         pool_keys.append(key_name)
     selected_probe = pool_probes.get(pool_name)
-    if not key_probe.get("errors") and (
-        selected_probe is None or not selected_probe.get("errors")
+    if key_probe.get("models") and not key_probe.get("errors") and (
+        selected_probe is None
+        or (selected_probe.get("models") and not selected_probe.get("errors"))
     ):
         _update_pool_capability_probe(
             pool,
