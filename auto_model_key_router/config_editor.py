@@ -3205,6 +3205,53 @@ def set_local_api_key_interactively(path: Path) -> Any:
     return ResultPage(content, copy_text=local_api_key, copy_label="复制本地鉴权 key")
 
 
+def set_timeouts_interactively(path: Path) -> Any:
+    data = load_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    fields = (
+        ("request_timeout", "普通请求超时（秒）", old_config.request_timeout),
+        (
+            "stream_first_byte_timeout",
+            "流式首字节超时（秒）",
+            old_config.stream_first_byte_timeout,
+        ),
+        (
+            "stream_idle_timeout",
+            "流式空闲超时（秒）",
+            old_config.stream_idle_timeout,
+        ),
+    )
+    values: dict[str, float] = {}
+    for field, label, current in fields:
+        try:
+            value = float(
+                prompt_text("超时配置", label, default=str(current)).strip()
+            )
+        except ValueError:
+            return section_panel(
+                "[red]超时必须是数字。[/red]", "超时配置", "red"
+            )
+        if value <= 0:
+            return section_panel(
+                "[red]超时必须大于 0。[/red]", "超时配置", "red"
+            )
+        values[field] = value
+
+    data.update(values)
+    new_config = commit_config_data(path, data, old_config).new_config
+    return Group(
+        section_panel(
+            "已更新超时配置。\n"
+            f"普通请求: [bold]{values['request_timeout']:g} 秒[/bold]\n"
+            f"流式首字节: [bold]{values['stream_first_byte_timeout']:g} 秒[/bold]\n"
+            f"流式空闲: [bold]{values['stream_idle_timeout']:g} 秒[/bold]",
+            "超时配置",
+            "green",
+        ),
+        restart_service_after_config_change(path, old_config, new_config),
+    )
+
+
 def set_listen_interactively(path: Path) -> Any:
     data = load_config_data(path)
     old_config = RouterConfig.from_dict(data)

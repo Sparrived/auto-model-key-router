@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 
 import httpx
+import pytest
 from rich.console import Console, ConsoleDimensions
 from rich.text import Text
 
@@ -906,9 +907,65 @@ def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
     assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
-    assert ("4", "配置迁移") in dashboard.SETTINGS_OPTIONS
-    assert ("5", "版本更新") in dashboard.SETTINGS_OPTIONS
+    assert ("4", "超时配置") in dashboard.SETTINGS_OPTIONS
+    assert ("5", "配置迁移") in dashboard.SETTINGS_OPTIONS
+    assert ("6", "版本更新") in dashboard.SETTINGS_OPTIONS
     assert all(label != "调用日志" for _, label in dashboard.SETTINGS_OPTIONS)
+
+
+def test_set_timeouts_interactively_updates_all_timeouts(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            v3_config(
+                {},
+                request_timeout=60,
+                stream_first_byte_timeout=90,
+                stream_idle_timeout=180,
+            )
+        ),
+        encoding="utf-8",
+    )
+    answers = iter(("75", "95", "185"))
+    monkeypatch.setattr(
+        config_editor, "prompt_text", lambda *args, **kwargs: next(answers)
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "restart_service_after_config_change",
+        lambda *args: Text("reloaded"),
+    )
+
+    result = config_editor.set_timeouts_interactively(config_path)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["request_timeout"] == 75.0
+    assert saved["stream_first_byte_timeout"] == 95.0
+    assert saved["stream_idle_timeout"] == 185.0
+    assert "已更新超时配置" in render_plain(result)
+
+
+@pytest.mark.parametrize("answers", [("invalid",), ("60", "0")])
+def test_set_timeouts_interactively_rejects_invalid_values(
+    tmp_path, monkeypatch, answers: tuple[str, ...]
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    original = v3_config(
+        {},
+        request_timeout=60,
+        stream_first_byte_timeout=90,
+        stream_idle_timeout=180,
+    )
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    responses = iter(answers)
+    monkeypatch.setattr(
+        config_editor, "prompt_text", lambda *args, **kwargs: next(responses)
+    )
+
+    result = config_editor.set_timeouts_interactively(config_path)
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+    assert "必须" in render_plain(result)
 
 
 def test_dashboard_model_table_focuses_on_model_mapping() -> None:
