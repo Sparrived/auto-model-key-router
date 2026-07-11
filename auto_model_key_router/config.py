@@ -283,6 +283,10 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
             pool_keys = pool.setdefault("keys", [])
             if key_name not in pool_keys:
                 pool_keys.append(key_name)
+            upstream_model = str(raw_key.get("upstream_model") or model_id)
+            pool_models = pool.setdefault("models", [])
+            if upstream_model not in pool_models:
+                pool_models.append(upstream_model)
             merge_upstream_routes_for_url(
                 upstream_routes,
                 base_url,
@@ -292,7 +296,7 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
                 {
                     "provider": provider_id,
                     "pool": pool_name,
-                    "upstream_model": str(raw_key.get("upstream_model") or model_id),
+                    "upstream_model": upstream_model,
                 }
             )
 
@@ -374,6 +378,7 @@ class ProviderKeyConfig:
 class ProviderPoolConfig:
     name: str
     keys: tuple[str, ...]
+    models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -462,7 +467,10 @@ class RouterConfig:
         default_routing_mode = str(raw.get("routing_mode") or "round_robin")
         upstream_routes: dict[str, dict[str, str]] = {}
         provider_keys: dict[tuple[str, str], tuple[ProviderConfig, ProviderKeyConfig]] = {}
-        provider_pools: dict[tuple[str, str], tuple[ProviderConfig, tuple[ProviderKeyConfig, ...]]] = {}
+        provider_pools: dict[
+            tuple[str, str],
+            tuple[ProviderConfig, tuple[ProviderKeyConfig, ...], frozenset[str]],
+        ] = {}
         raw_providers = raw.get("providers")
         if isinstance(raw_providers, dict):
             for provider_id, provider in raw_providers.items():
@@ -487,20 +495,39 @@ class RouterConfig:
                 if not isinstance(raw_pools, dict):
                     raw_pools = {}
                 raw_pool_items = raw_pools.items()
+                key_pool_names: dict[str, str] = {}
                 for pool_name, pool in raw_pool_items:
                     if isinstance(pool, dict):
                         pool_keys = pool.get("keys")
+                        pool_models = pool.get("models", [])
                     else:
                         pool_keys = pool
+                        pool_models = []
                     if not isinstance(pool_keys, list):
                         raise ValueError(f"供应商 {provider_id} 的 pool {pool_name} keys 必须是数组")
+                    if not isinstance(pool_models, list):
+                        raise ValueError(f"供应商 {provider_id} 的 pool {pool_name} models 必须是数组")
                     pool_key_names = tuple(str(key_name) for key_name in pool_keys)
                     missing_keys = [key_name for key_name in pool_key_names if key_name not in key_configs_by_name]
                     if missing_keys:
                         raise ValueError(
                             f"供应商 {provider_id} 的 pool {pool_name} 引用了未配置的 key: {', '.join(missing_keys)}"
                         )
-                    pools.append(ProviderPoolConfig(str(pool_name), pool_key_names))
+                    for key_name in pool_key_names:
+                        previous_pool = key_pool_names.get(key_name)
+                        if previous_pool is not None:
+                            raise ValueError(
+                                f"供应商 {provider_id} 的 key {key_name} 同时属于多个模型池: "
+                                f"{previous_pool}, {pool_name}"
+                            )
+                        key_pool_names[key_name] = str(pool_name)
+                    pools.append(
+                        ProviderPoolConfig(
+                            str(pool_name),
+                            pool_key_names,
+                            tuple(str(model_id) for model_id in pool_models if str(model_id)),
+                        )
+                    )
                 provider_config = ProviderConfig(
                     id=str(provider_id),
                     base_url=str(provider.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
@@ -518,6 +545,7 @@ class RouterConfig:
                     provider_pools[(provider_config.id, pool_config.name)] = (
                         provider_config,
                         tuple(key_configs_by_name[key_name] for key_name in pool_config.keys),
+                        frozenset(pool_config.models),
                     )
 
         raw_models = raw.get("models", {})
@@ -558,7 +586,9 @@ class RouterConfig:
                             raise ValueError(
                                 f"模型 {raw_model_id} 引用了未配置的供应商 pool: {provider_id}/{pool_name}"
                             )
-                        provider_config, pool_keys = provider_pool
+                        provider_config, pool_keys, pool_models = provider_pool
+                        if upstream_model not in pool_models:
+                            continue
                         for key_config in pool_keys:
                             model_keys.append(
                                 KeyConfig(
@@ -657,8 +687,6 @@ class RouterConfig:
                 model_names.add(name)
                 model_ids_by_name[name] = model.id
             models_by_id[model.id] = model
-            if not model.keys:
-                raise ValueError(f"模型 {model.id} 至少需要配置一个 key")
             key_names: set[str] = set()
             for key in model.keys:
                 if not key.name:

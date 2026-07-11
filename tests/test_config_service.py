@@ -17,7 +17,7 @@ def config_data(api_key: str = "sk-a") -> dict[str, object]:
             "example": {
                 "base_url": "https://example.test",
                 "keys": {"key-a": {"api_key": api_key}},
-                "pools": {"default": {"keys": ["key-a"]}},
+                "pools": {"default": {"keys": ["key-a"], "models": ["model-a"]}},
             }
         },
         "models": {
@@ -208,7 +208,7 @@ def test_provider_pool_targets_parse_to_runtime_models() -> None:
                     "keys": {
                         "main": {"api_key": "sk-main", "allow_visitor": True}
                     },
-                    "pools": {"premium": {"keys": ["main"]}},
+                    "pools": {"premium": {"keys": ["main"], "models": ["vendor-model"]}},
                 }
             },
             "models": {
@@ -237,6 +237,82 @@ def test_provider_pool_targets_parse_to_runtime_models() -> None:
     assert config.upstream_routes_for_base_url("https://vendor.example.test") == {
         "responses": "responses-v2/v1/responses"
     }
+
+
+def test_provider_pool_only_routes_keys_from_pools_that_enable_upstream_model() -> None:
+    config = RouterConfig.from_dict(
+        {
+            "config_version": 3,
+            "providers": {
+                "vendor": {
+                    "base_url": "https://vendor.example.test",
+                    "keys": {
+                        "pool-a-key": {"api_key": "sk-a"},
+                        "pool-b-key": {"api_key": "sk-b"},
+                    },
+                    "pools": {
+                        "pool-a": {"keys": ["pool-a-key"], "models": ["gpt-5.5"]},
+                        "pool-b": {"keys": ["pool-b-key"], "models": ["gpt-5.6"]},
+                    },
+                }
+            },
+            "models": {
+                "gpt-5.6": {
+                    "targets": [
+                        {"provider": "vendor", "pool": "pool-a", "upstream_model": "gpt-5.6"},
+                        {"provider": "vendor", "pool": "pool-b", "upstream_model": "gpt-5.6"},
+                    ]
+                }
+            },
+        }
+    )
+
+    assert [key.name for key in config.models[0].keys] == ["pool-b-key"]
+
+
+@pytest.mark.parametrize("pool", [{"keys": ["main"]}, {"keys": ["main"], "models": []}])
+def test_provider_pool_without_enabled_models_produces_no_route_keys(pool: dict[str, object]) -> None:
+    config = RouterConfig.from_dict(
+        {
+            "config_version": 3,
+            "providers": {
+                "vendor": {
+                    "base_url": "https://vendor.example.test",
+                    "keys": {"main": {"api_key": "sk-main"}},
+                    "pools": {"default": pool},
+                }
+            },
+            "models": {
+                "gpt-5.6": {
+                    "targets": [
+                        {"provider": "vendor", "pool": "default", "upstream_model": "gpt-5.6"}
+                    ]
+                }
+            },
+        }
+    )
+
+    assert config.models[0].keys == ()
+
+
+def test_provider_key_cannot_belong_to_multiple_pools() -> None:
+    with pytest.raises(ValueError, match=r"供应商 vendor 的 key main 同时属于多个模型池: pool-a, pool-b"):
+        RouterConfig.from_dict(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.example.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {
+                            "pool-a": {"keys": ["main"], "models": []},
+                            "pool-b": {"keys": ["main"], "models": []},
+                        },
+                    }
+                },
+                "models": {},
+            }
+        )
 
 
 def test_v3_rejects_provider_key_targets() -> None:
