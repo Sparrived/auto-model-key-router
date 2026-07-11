@@ -1084,13 +1084,19 @@ def _combined_capability_probe(*probes: dict[str, Any]) -> dict[str, Any]:
     return combined
 
 
-def _update_pool_capability_probe(pool: dict[str, Any], probe: dict[str, Any]) -> None:
-    if probe.get("errors"):
+def _update_pool_capability_probe(
+    pool: dict[str, Any],
+    probe: dict[str, Any],
+    *,
+    record_errors: bool = False,
+) -> None:
+    errors = probe.get("errors", {})
+    if errors and not record_errors:
         return
-    pool["available_models"] = deepcopy(probe.get("models", []))
+    pool["available_models"] = [] if errors else deepcopy(probe.get("models", []))
     pool["all_available_models"] = deepcopy(probe.get("all_models", []))
     pool["key_models"] = deepcopy(probe.get("key_models", {}))
-    pool["errors"] = {}
+    pool["errors"] = deepcopy(errors)
     pool["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for field in ("routes", "manual_models"):
         if field in probe:
@@ -1256,10 +1262,7 @@ def add_provider_key_interactively(
     if key_name not in pool_keys:
         pool_keys.append(key_name)
     selected_probe = pool_probes.get(pool_name)
-    if key_probe.get("models") and not key_probe.get("errors") and (
-        selected_probe is None
-        or (selected_probe.get("models") and not selected_probe.get("errors"))
-    ):
+    if selected_probe is None or not selected_probe.get("errors"):
         _update_pool_capability_probe(
             pool,
             assignment_probe
@@ -1267,6 +1270,7 @@ def add_provider_key_interactively(
                 key_probe,
                 *([selected_probe] if selected_probe is not None else []),
             ),
+            record_errors=True,
         )
     enabled_models = prompt_pool_enabled_models(pool)
     enable_pool_models(data, provider_id, pool_name, enabled_models)

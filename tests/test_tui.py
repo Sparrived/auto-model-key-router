@@ -2255,6 +2255,12 @@ def test_add_provider_key_empty_successful_probe_uses_manual_assignment(
     pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
     assert pools["existing"]["keys"] == ["old", "main"]
+    assert pools["existing"]["available_models"] == []
+    assert pools["existing"]["all_available_models"] == ["gpt-a"]
+    assert pools["existing"]["key_models"] == {
+        "main": [] if empty_probe == "new-key" else ["gpt-a"],
+        "old": ["gpt-a"] if empty_probe == "new-key" else [],
+    }
     assert "未发现模型" in menu_text[0]
     assert "探测失败" not in menu_text[0]
 
@@ -2306,6 +2312,8 @@ def test_add_provider_key_manual_pool_controls_do_not_collide_with_pool_names(
     pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
     assert "main" in pools[pool_name]["keys"]
+    assert pools[pool_name]["available_models"] == []
+    assert pools[pool_name]["errors"] == {"main": "HTTP 401"}
 
 
 def test_add_provider_key_manual_cancel_leaves_file_bytes_unchanged(
