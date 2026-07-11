@@ -1282,14 +1282,17 @@ def add_provider_key_interactively(
             | set(map(str, key_probe.get("all_models", [])))
         )
         historical_key_models = pool.get("key_models", {})
-        pool["key_models"] = {
-            **(
-                deepcopy(historical_key_models)
-                if isinstance(historical_key_models, dict)
-                else {}
-            ),
-            **deepcopy(key_probe.get("key_models", {})),
-        }
+        merged_key_models = (
+            deepcopy(historical_key_models)
+            if isinstance(historical_key_models, dict)
+            else {}
+        )
+        for failed_key_name, failed_models in selected_probe.get(
+            "key_models", {}
+        ).items():
+            merged_key_models.setdefault(failed_key_name, deepcopy(failed_models))
+        merged_key_models.update(deepcopy(key_probe.get("key_models", {})))
+        pool["key_models"] = merged_key_models
         pool["errors"] = {
             **deepcopy(selected_probe.get("errors", {})),
             **deepcopy(key_probe.get("errors", {})),

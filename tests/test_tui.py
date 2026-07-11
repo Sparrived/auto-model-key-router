@@ -2277,6 +2277,50 @@ def test_add_provider_key_selected_failed_pool_synchronizes_diagnostics(
     }
 
 
+def test_add_provider_key_selected_failed_pool_fills_missing_historical_key_models(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"old": {"api_key": "sk-old"}},
+                        "pools": {"existing": {"keys": ["old"], "models": []}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompts = iter(["main", "sk-main"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
+    monkeypatch.setattr(
+        config_editor,
+        "probe_provider_key_capabilities",
+        lambda provider, key_names, **kwargs: {
+            "models": ["gpt-new"] if key_names == ["main"] else [],
+            "all_models": ["gpt-new"] if key_names == ["main"] else [],
+            "key_models": {
+                key_names[0]: ["gpt-new"] if key_names == ["main"] else []
+            },
+            "errors": {} if key_names == ["main"] else {"old": "HTTP 401"},
+        },
+    )
+    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    config_editor.add_provider_key_interactively(config_path, "vendor")
+    pool = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]["existing"]
+
+    assert pool["key_models"] == {"old": [], "main": ["gpt-new"]}
+
+
 @pytest.mark.parametrize("empty_probe", ["new-key", "existing-pool"])
 def test_add_provider_key_empty_successful_probe_uses_manual_assignment(
     tmp_path, monkeypatch, empty_probe: str
