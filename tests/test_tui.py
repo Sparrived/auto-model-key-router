@@ -1904,11 +1904,12 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
         json.dumps({"config_version": 3, "local_api_key": "local-key", "providers": {}, "models": {}}),
         encoding="utf-8",
     )
-    prompts = iter(["openai", "https://api.openai.com", "main", "sk-main"])
+    prompts = iter(["openai", "https://api.openai.com", "main", "sk-main", "default"])
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "n")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
     monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: provider["pools"][pool_name].update({"available_models": ["upstream-model"], "all_available_models": ["upstream-model"], "models": []}) or {"models": ["upstream-model"], "all_models": ["upstream-model"], "routes": {}})
+    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: ["upstream-model"])
 
     result = config_editor.add_provider_key_interactively(config_path)
     data = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1921,7 +1922,7 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     config_path.write_text(json.dumps(data), encoding="utf-8")
 
     prompts = iter(["local-model"])
-    choices = iter(["1", "1", "1"])
+    choices = iter(["1", "1", "1", "__custom__"])
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
 
@@ -1932,6 +1933,95 @@ def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None
     assert data["models"]["local-model"]["targets"] == [
         {"provider": "openai", "pool": "default", "upstream_model": "upstream-model"}
     ]
+
+
+@pytest.mark.parametrize("pool_name", ["existing", "new-pool"])
+def test_add_provider_key_assigns_selected_pool_only(tmp_path, monkeypatch, pool_name: str) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "local_api_key": "local-key",
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {},
+                        "pools": {"existing": {"keys": [], "models": []}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompts = iter(["main", "sk-main"])
+    probed: list[str] = []
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: pool_name)
+    monkeypatch.setattr(
+        config_editor,
+        "apply_pool_probe",
+        lambda provider, selected_pool, **kwargs: probed.append(selected_pool)
+        or provider["pools"][selected_pool].update(
+            {"available_models": ["gpt-a"], "all_available_models": ["gpt-a"]}
+        )
+        or {"models": ["gpt-a"], "all_models": ["gpt-a"], "routes": {}},
+    )
+    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: ["gpt-a"])
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    config_editor.add_provider_key_interactively(config_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+
+    pools = data["providers"]["vendor"]["pools"]
+    assert pools[pool_name]["keys"] == ["main"]
+    assert [name for name, pool in pools.items() if "main" in pool["keys"]] == [pool_name]
+    assert "default" not in pools
+    assert pools[pool_name]["models"] == ["gpt-a"]
+    assert probed == [pool_name]
+
+
+def test_editing_pool_moves_selected_key_from_previous_pool(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {
+                            "move-me": {"api_key": "sk-move"},
+                            "stay": {"api_key": "sk-stay"},
+                        },
+                        "pools": {
+                            "old": {"keys": ["move-me"], "models": []},
+                            "current": {"keys": ["stay"], "models": []},
+                        },
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "current")
+    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["move-me", "stay"])
+    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
+    monkeypatch.setattr(
+        config_editor,
+        "apply_pool_probe",
+        lambda provider, pool_name, **kwargs: {"models": [], "all_models": [], "routes": {}},
+    )
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    config_editor.update_provider_pool_interactively(config_path, "vendor", "1")
+    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
+
+    assert pools["current"]["keys"] == ["move-me", "stay"]
+    assert pools["old"]["keys"] == []
 
 
 def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> None:

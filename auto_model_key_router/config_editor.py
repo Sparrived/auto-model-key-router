@@ -832,18 +832,28 @@ def add_provider_key_interactively(path: Path) -> Any:
     draft["api_key"] = api_key
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
+    pools = provider_pools(provider)
+    pool_name = select_or_enter_pool_name(
+        pools,
+        default=draft.get("pool_name", "default"),
+    )
+    draft["pool_name"] = pool_name
+    if not pool_name:
+        return section_panel("[yellow]配置未变化。[/yellow]", "添加 Key", "yellow")
     keys[key_name] = {"api_key": api_key, "enabled": True}
-    default_pool = provider_pools(provider).setdefault("default", {"keys": []})
-    default_keys = default_pool.setdefault("keys", [])
-    if key_name not in default_keys:
-        default_keys.append(key_name)
-    with console.status("[cyan]正在探测 default 模型池可用模型和路由...[/cyan]", spinner="dots"):
-        probe = apply_pool_probe(provider, "default")
+    pool = pools.setdefault(pool_name, {"keys": [], "models": []})
+    pool_keys = pool.setdefault("keys", [])
+    if key_name not in pool_keys:
+        pool_keys.append(key_name)
+    with console.status(f"[cyan]正在探测 {pool_name} 模型池可用模型和路由...[/cyan]", spinner="dots"):
+        probe = apply_pool_probe(provider, pool_name)
+    enabled_models = prompt_pool_enabled_models(pool)
+    enable_pool_models(data, provider_id, pool_name, enabled_models)
     restart = commit_v2_config(path, data, old_config)
     FORM_DRAFTS.pop("add_provider_key", None)
     return Group(
         section_panel(
-            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池 default 共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]",
+            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池: [bold]{pool_name}[/bold]\n已启用模型: [bold]{len(enabled_models)}[/bold]\n共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]",
             "添加完成",
             "green",
         ),
@@ -1053,10 +1063,19 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         )
         if not selected_keys:
             return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
-        pools[pool_name] = {"keys": selected_keys}
+        for other_pool_name, other_pool in pools.items():
+            if other_pool_name == pool_name or not isinstance(other_pool, dict):
+                continue
+            other_pool["keys"] = [
+                key_name
+                for key_name in pool_key_names(other_pool)
+                if key_name not in selected_keys
+            ]
+        pool = pools.setdefault(pool_name, {"keys": [], "models": []})
+        pool["keys"] = selected_keys
         with console.status("[cyan]正在探测模型池可用模型和路由...[/cyan]", spinner="dots"):
             probe = apply_pool_probe(provider, pool_name)
-        enabled_models = prompt_pool_enabled_models(pools[pool_name])
+        enabled_models = prompt_pool_enabled_models(pool)
         enable_pool_models(data, provider_id, pool_name, enabled_models)
         model_count = len(enabled_models)
         all_model_count = len(probe.get("all_models") or [])
