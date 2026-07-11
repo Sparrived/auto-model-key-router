@@ -2156,9 +2156,10 @@ def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
     choices = iter(["1"])
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "cheap")
-    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["cheap-1", "cheap-2"])
+    selections = iter([["cheap-1", "cheap-2"], ["gpt-a"]])
+    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: next(selections))
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: provider["pools"][pool_name].update({"models": ["gpt-a"], "all_models": ["gpt-a", "gpt-b"], "routes": {}}) or {"models": ["gpt-a"], "all_models": ["gpt-a", "gpt-b"], "routes": {}})
+    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: provider["pools"][pool_name].update({"available_models": ["gpt-a"], "all_available_models": ["gpt-a", "gpt-b"], "routes": {}}) or {"models": ["gpt-a"], "all_models": ["gpt-a", "gpt-b"], "routes": {}})
 
     result = config_editor.update_provider_pool_interactively(config_path, "gateway", "1")
     data = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2167,7 +2168,8 @@ def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
     assert data["providers"]["gateway"]["pools"]["cheap"] == {
         "keys": ["cheap-1", "cheap-2"],
         "models": ["gpt-a"],
-        "all_models": ["gpt-a", "gpt-b"],
+        "available_models": ["gpt-a"],
+        "all_available_models": ["gpt-a", "gpt-b"],
         "routes": {},
     }
 
@@ -2213,7 +2215,7 @@ def test_pool_probe_models_records_common_models_and_routes(monkeypatch) -> None
     assert result["checked_at"]
 
 
-def test_apply_pool_probe_enables_discovered_models(monkeypatch) -> None:
+def test_apply_pool_probe_preserves_enabled_models(monkeypatch) -> None:
     monkeypatch.setattr(
         config_editor,
         "pool_probe_models",
@@ -2229,13 +2231,44 @@ def test_apply_pool_probe_enables_discovered_models(monkeypatch) -> None:
     provider = {
         "base_url": "https://gateway.example.test",
         "keys": {"k1": {"api_key": "sk-1"}},
-        "pools": {"default": {"keys": ["k1"]}},
+        "pools": {"default": {"keys": ["k1"], "models": ["gpt-old"]}},
     }
 
     config_editor.apply_pool_probe(provider, "default")
 
     assert provider["pools"]["default"]["available_models"] == ["gpt-a", "gpt-b"]
-    assert provider["pools"]["default"]["models"] == ["gpt-a", "gpt-b"]
+    assert provider["pools"]["default"]["models"] == ["gpt-old"]
+
+
+def test_pool_model_selector_shows_all_models_and_current_checked_state(monkeypatch) -> None:
+    pool = {
+        "keys": ["k1"],
+        "models": ["gpt-a", "gpt-old"],
+        "available_models": ["gpt-a"],
+        "all_available_models": ["gpt-a", "gpt-new"],
+    }
+    calls: list[tuple[list[tuple[str, str]], set[str]]] = []
+
+    def select(title, options, content=None, *, checked_values=None):
+        calls.append((options, checked_values))
+        return ["gpt-a", "gpt-old"]
+
+    monkeypatch.setattr(config_editor, "select_multiple", select)
+
+    selected = config_editor.prompt_pool_enabled_models(pool)
+
+    assert selected == ["gpt-a", "gpt-old"]
+    assert calls[0][1] == {"gpt-a", "gpt-old"}
+    assert [value for value, _ in calls[0][0]] == [
+        "gpt-a",
+        "gpt-new",
+        "gpt-old",
+        "__custom__",
+    ]
+    labels = dict(calls[0][0])
+    assert "[yellow]" not in labels["gpt-a"]
+    assert "[yellow]" in labels["gpt-new"]
+    assert "[yellow]" in labels["gpt-old"]
 
 
 def test_enabled_pool_models_are_usable_by_unified_model(monkeypatch) -> None:

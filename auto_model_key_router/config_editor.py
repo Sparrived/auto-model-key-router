@@ -462,7 +462,6 @@ def apply_pool_probe(
         available_models = probe["models"]
         pool["available_models"] = available_models
         pool["all_available_models"] = probe["all_models"]
-        pool["models"] = available_models
         pool["key_models"] = probe["key_models"]
         pool["routes"] = probe["routes"]
         pool["manual_models"] = probe["manual_models"]
@@ -474,26 +473,48 @@ def parse_model_id_list(value: str) -> list[str]:
     return [model_id.strip() for model_id in value.split(",") if model_id.strip()]
 
 
-def prompt_manual_pool_models(default_models: list[str] | None = None) -> list[str]:
-    default_models = sorted(dict.fromkeys(default_models or []))
-    if default_models:
+def prompt_pool_enabled_models(pool: dict[str, Any]) -> list[str]:
+    enabled = set(pool_enabled_models(pool))
+    raw_available = pool.get("available_models")
+    available = (
+        {str(model_id) for model_id in raw_available if str(model_id)}
+        if isinstance(raw_available, list)
+        else set(enabled)
+    )
+    raw_all_available = pool.get("all_available_models")
+    all_available = (
+        {str(model_id) for model_id in raw_all_available if str(model_id)}
+        if isinstance(raw_all_available, list)
+        else set(available)
+    )
+    model_ids = sorted(all_available | enabled)
+    if model_ids:
         custom = "__custom__"
+        options = []
+        for model_id in model_ids:
+            if model_id in available:
+                label = model_id
+            elif model_id in all_available:
+                label = f"[yellow]{model_id} · 仅部分 Key 可用[/yellow]"
+            else:
+                label = f"[yellow]{model_id} · 本次未探测到[/yellow]"
+            options.append((model_id, label))
         selected = select_multiple(
             "模型池",
-            [(model_id, model_id) for model_id in default_models]
-            + [(custom, "自定义输入")],
+            options + [(custom, "自定义输入")],
             content=section_panel(
-                "选择要保留/设置的可用模型；需要新增未列出的模型时选择自定义输入。",
-                "手动可用模型",
+                "选择该模型池启用的模型。探测状态仅供参考，不会自动取消已有选择。",
+                "启用模型",
                 "cyan",
             ),
+            checked_values=enabled,
         )
         if custom not in selected:
             return selected
     text = prompt_text(
         "模型池",
         "手动可用模型，多个用逗号分隔",
-        default=", ".join(default_models),
+        default=", ".join(sorted(enabled)),
     ).strip()
     return parse_model_id_list(text)
 
@@ -1035,14 +1056,9 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         pools[pool_name] = {"keys": selected_keys}
         with console.status("[cyan]正在探测模型池可用模型和路由...[/cyan]", spinner="dots"):
             probe = apply_pool_probe(provider, pool_name)
-        if not probe.get("models") and not probe.get("all_models"):
-            manual_models = prompt_manual_pool_models()
-            if manual_models:
-                with console.status("[cyan]正在使用手动模型探测路由...[/cyan]", spinner="dots"):
-                    probe = apply_pool_probe(
-                        provider, pool_name, manual_models=manual_models
-                    )
-        model_count = len(probe.get("models") or [])
+        enabled_models = prompt_pool_enabled_models(pools[pool_name])
+        enable_pool_models(data, provider_id, pool_name, enabled_models)
+        model_count = len(enabled_models)
         all_model_count = len(probe.get("all_models") or [])
         route_count = sum(
             1
@@ -1055,9 +1071,6 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
             f"已启用模型: [bold]{model_count}[/bold]\n"
             f"任一 Key 可用模型: [bold]{all_model_count}[/bold]\n"
             f"可用路由探测: [bold]{route_count}[/bold]"
-        )
-        enable_pool_models(
-            data, provider_id, pool_name, pool_enabled_models(pools[pool_name])
         )
     elif choice == "2":
         if not pools:
@@ -1072,22 +1085,12 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         pool_name = sorted(pools)[int(pool_choice) - 1]
         with console.status("[cyan]正在刷新模型池可用性...[/cyan]", spinner="dots"):
             probe = apply_pool_probe(provider, pool_name)
-        if not probe.get("models") and not probe.get("all_models"):
-            pool = pools.get(pool_name)
-            defaults = pool.get("models") if isinstance(pool, dict) else []
-            manual_models = prompt_manual_pool_models(defaults)
-            if manual_models:
-                with console.status("[cyan]正在使用手动模型探测路由...[/cyan]", spinner="dots"):
-                    probe = apply_pool_probe(
-                        provider, pool_name, manual_models=manual_models
-                    )
+        enabled_models = prompt_pool_enabled_models(pools[pool_name])
+        enable_pool_models(data, provider_id, pool_name, enabled_models)
         message = (
             f"已刷新模型池 {provider_id}/{pool_name}。\n"
-            f"已启用模型: [bold]{len(probe.get('models') or [])}[/bold]\n"
+            f"已启用模型: [bold]{len(enabled_models)}[/bold]\n"
             f"任一 Key 可用模型: [bold]{len(probe.get('all_models') or [])}[/bold]"
-        )
-        enable_pool_models(
-            data, provider_id, pool_name, pool_enabled_models(pools[pool_name])
         )
     elif choice == "3":
         if not pools:
@@ -1101,18 +1104,11 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
             return None
         pool_name = sorted(pools)[int(pool_choice) - 1]
         pool = pools[pool_name]
-        current_models = pool_available_models(pool)
-        manual_models = prompt_manual_pool_models(current_models)
-        if not manual_models:
-            return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
-        with console.status("[cyan]正在使用手动模型探测路由...[/cyan]", spinner="dots"):
-            probe = apply_pool_probe(provider, pool_name, manual_models=manual_models)
+        enabled_models = prompt_pool_enabled_models(pool)
+        enable_pool_models(data, provider_id, pool_name, enabled_models)
         message = (
-            f"已手动设置模型池 {provider_id}/{pool_name} 的可用模型。\n"
-            f"已启用模型: [bold]{len(probe.get('models') or [])}[/bold]"
-        )
-        enable_pool_models(
-            data, provider_id, pool_name, pool_enabled_models(pools[pool_name])
+            f"已设置模型池 {provider_id}/{pool_name} 的启用模型。\n"
+            f"已启用模型: [bold]{len(enabled_models)}[/bold]"
         )
     elif choice == "4":
         if not pools:
