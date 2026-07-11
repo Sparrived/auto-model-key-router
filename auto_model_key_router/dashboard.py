@@ -35,7 +35,8 @@ from .config_service import commit_config_data
 from .config_editor import (
     fetch_native_endpoint_states,
     manage_config_transfer_interactively,
-    manage_model_keys_interactively,
+    manage_providers_interactively,
+    manage_v2_model_settings_interactively,
     native_endpoint_support_text,
     set_listen_interactively,
     set_local_api_key_interactively,
@@ -87,10 +88,11 @@ from .visitor import VISITOR_API_KEY, visitor_feature_available
 
 MENU_OPTIONS = [
     ("1", "一键配置"),
-    ("2", "供应商模型"),
-    ("3", "统一模型"),
-    ("4", "调用日志"),
-    ("5", "CLI 设置"),
+    ("2", "供应商"),
+    ("3", "模型设置"),
+    ("4", "统一模型"),
+    ("5", "调用日志"),
+    ("6", "CLI 设置"),
     ("0", "退出"),
 ]
 ONE_CLICK_OPTIONS = [
@@ -124,21 +126,25 @@ def run_terminal_ui(config_path: Path, config: RouterConfig) -> None:
             config = RouterConfig.load(config_path)
             continue
         if choice == "2":
-            run_submodule(lambda: manage_model_keys_interactively(config_path))
+            run_submodule(lambda: manage_providers_interactively(config_path))
             config = RouterConfig.load(config_path)
             continue
         if choice == "3":
-            run_submodule(lambda: manage_unified_model_interactively(config_path))
+            run_submodule(lambda: manage_v2_model_settings_interactively(config_path))
             config = RouterConfig.load(config_path)
             continue
         if choice == "4":
+            run_submodule(lambda: manage_unified_model_interactively(config_path))
+            config = RouterConfig.load(config_path)
+            continue
+        if choice == "5":
             config = RouterConfig.load(config_path)
             run_submodule(
                 lambda: watch_logs(config.metrics_db_path, config.log_file_path, 20)
             )
             config = RouterConfig.load(config_path)
             continue
-        if choice == "5":
+        if choice == "6":
             result = run_submodule(
                 lambda: manage_cli_settings_interactively(config_path, update_result)
             )

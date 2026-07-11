@@ -920,10 +920,13 @@ def select_provider(data: dict[str, Any], title: str) -> str | None:
     return sorted(providers)[int(choice) - 1]
 
 
-def select_provider_key(data: dict[str, Any], title: str) -> tuple[str, str] | None:
-    provider_id = select_provider(data, "选择供应商")
+def select_provider_key(
+    data: dict[str, Any], title: str, provider_id: str | None = None
+) -> tuple[str, str] | None:
     if provider_id is None:
-        return None
+        provider_id = select_provider(data, "选择供应商")
+        if provider_id is None:
+            return None
     keys = provider_keys(raw_providers(data)[provider_id])
     if not keys:
         return None
@@ -1152,7 +1155,7 @@ def _select_pool_after_probe_failure(
 
 
 def add_provider_key_interactively(
-    path: Path, provider_id: str | None = None
+    path: Path, provider_id: str | None = None, *, create_provider: bool = False
 ) -> Any:
     draft = form_draft("add_provider_key")
     data = load_v2_config_data(path)
@@ -1160,7 +1163,7 @@ def add_provider_key_interactively(
     providers = raw_providers(data)
     if provider_id is None:
         existing = sorted(providers)
-        provider_choice = select_option(
+        provider_choice = "n" if create_provider else select_option(
             "供应商",
             [("n", "新供应商")]
             + [(str(index + 1), current_id) for index, current_id in enumerate(existing)]
@@ -1318,10 +1321,14 @@ def add_provider_key_interactively(
     )
 
 
-def manage_provider_keys_interactively(path: Path) -> None:
+def manage_provider_keys_interactively(
+    path: Path, provider_id: str | None = None
+) -> None:
     while True:
         data = load_v2_config_data(path)
-        selected = select_provider_key(data, "选择供应商 Key")
+        if provider_id is not None and provider_id not in raw_providers(data):
+            return
+        selected = select_provider_key(data, "选择供应商 Key", provider_id)
         if selected is None:
             return
         provider_id, key_name = selected
@@ -1331,11 +1338,10 @@ def manage_provider_keys_interactively(path: Path) -> None:
         options = [
             ("1", "开关"),
             ("2", "重命名"),
-            ("3", "替换 API key"),
         ]
         if visitor_installed:
-            options.append(("4", "访客访问"))
-        options.extend([("5", "删除"), ("0", "返回")])
+            options.append(("3", "访客访问"))
+        options.extend([("4", "删除"), ("0", "返回")])
         lines = [
             f"供应商: [bold]{provider_id}[/bold]",
             f"Key: [bold]{key_name}[/bold]",
@@ -1390,16 +1396,10 @@ def update_provider_key_interactively(
                 if target.get("provider") == provider_id and target.get("key") == key_name:
                     target["key"] = new_name
         message = f"已重命名 {provider_id}/{key_name} → {new_name}。"
-    elif choice == "3":
-        api_key = prompt_text("替换 API key", "API key", password=True).strip()
-        if not api_key:
-            return section_panel("[red]API key 不能为空[/red]", "替换 API key", "red")
-        key["api_key"] = api_key
-        message = f"已替换 {provider_id}/{key_name} 的 API key。"
-    elif choice == "4" and visitor_feature_available():
+    elif choice == "3" and visitor_feature_available():
         key["allow_visitor"] = not bool(key.get("allow_visitor", False))
         message = f"已{'允许' if key['allow_visitor'] else '禁止'}访客访问 {provider_id}/{key_name}。"
-    elif choice == "5":
+    elif choice == "4":
         key_pools = pools_containing_key(provider, key_name)
         used_by = [
             model_id
@@ -1457,13 +1457,20 @@ def update_provider_key_interactively(
     return Group(section_panel(message, "供应商 Key", "green"), restart)
 
 
-def manage_provider_pools_interactively(path: Path) -> None:
+def manage_provider_pools_interactively(
+    path: Path, provider_id: str | None = None
+) -> None:
     while True:
         data = load_v2_config_data(path)
-        provider_id = select_provider(data, "选择供应商模型池")
         if provider_id is None:
-            return
-        provider = raw_providers(data)[provider_id]
+            selected_provider_id = select_provider(data, "选择供应商模型池")
+            if selected_provider_id is None:
+                return
+        else:
+            selected_provider_id = provider_id
+            if selected_provider_id not in raw_providers(data):
+                return
+        provider = raw_providers(data)[selected_provider_id]
         ensure_default_pool(provider)
         pools = provider_pools(provider)
         rows = "\n".join(
@@ -1474,20 +1481,20 @@ def manage_provider_pools_interactively(path: Path) -> None:
             for pool_name, pool in sorted(pools.items())
         ) or "[yellow]暂无模型池[/yellow]"
         choice = select_option(
-            f"模型池 · {provider_id}",
+            f"模型池 · {selected_provider_id}",
             [
                 ("1", "新增/编辑模型池"),
-                ("2", "刷新可用性"),
-                ("3", "手动设置可用模型"),
-                ("4", "删除模型池"),
+                ("2", "手动设置可用模型"),
                 ("0", "返回"),
             ],
             content=section_panel(rows, "模型池", "cyan"),
         )
         if choice == "0":
+            if provider_id is not None:
+                return
             continue
         clear_terminal_history()
-        result = update_provider_pool_interactively(path, provider_id, choice)
+        result = update_provider_pool_interactively(path, selected_provider_id, choice)
         if result is not None:
             show_result_page("模型池", result)
 
@@ -1554,26 +1561,6 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         if not pools:
             return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
         pool_choice = select_option(
-            "刷新模型池",
-            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
-            + [("0", "返回")],
-        )
-        if pool_choice == "0":
-            return None
-        pool_name = sorted(pools)[int(pool_choice) - 1]
-        with console.status("[cyan]正在刷新模型池可用性...[/cyan]", spinner="dots"):
-            probe = apply_pool_probe(provider, pool_name)
-        enabled_models = prompt_pool_enabled_models(pools[pool_name])
-        enable_pool_models(data, provider_id, pool_name, enabled_models)
-        message = (
-            f"已刷新模型池 {provider_id}/{pool_name}。\n"
-            f"已启用模型: [bold]{len(enabled_models)}[/bold]\n"
-            f"任一 Key 可用模型: [bold]{len(probe.get('all_models') or [])}[/bold]"
-        )
-    elif choice == "3":
-        if not pools:
-            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
-        pool_choice = select_option(
             "手动设置模型",
             [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
             + [("0", "返回")],
@@ -1588,47 +1575,10 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
             f"已设置模型池 {provider_id}/{pool_name} 的启用模型。\n"
             f"已启用模型: [bold]{len(enabled_models)}[/bold]"
         )
-    elif choice == "4":
-        if not pools:
-            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
-        pool_choice = select_option(
-            "删除模型池",
-            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
-            + [("0", "返回")],
-        )
-        if pool_choice == "0":
-            return None
-        pool_name = sorted(pools)[int(pool_choice) - 1]
-        if pool_key_names(pools[pool_name]):
-            return section_panel(
-                "[yellow]该模型池仍包含 Key，请先将 Key 移入其他模型池。[/yellow]",
-                "模型池",
-                "yellow",
-            )
-        used_by = [
-            model_id
-            for model_id, model in raw_v2_models(data).items()
-            for target in model_targets(model)
-            if target.get("provider") == provider_id and target.get("pool") == pool_name
-        ]
-        if used_by and not confirm_choice(
-            f"该模型池被 {len(used_by)} 个模型路由使用，删除会一并移除这些 target。继续？",
-            default=False,
-        ):
-            return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
-        pools.pop(pool_name)
-        for model in raw_v2_models(data).values():
-            targets = model_targets(model)
-            targets[:] = [
-                target
-                for target in targets
-                if not (target.get("provider") == provider_id and target.get("pool") == pool_name)
-            ]
-        message = f"已删除模型池 {provider_id}/{pool_name}。"
     else:
         return None
     restart = commit_v2_config(path, data, old_config)
-    if choice in {"1", "3", "4"}:
+    if choice in {"1", "2"}:
         FORM_DRAFTS.pop(f"provider_pool:{provider_id}", None)
     return Group(section_panel(message, "模型池", "green"), restart)
 
@@ -1863,13 +1813,20 @@ def delete_v2_model_interactively(path: Path, model_id: str) -> Any:
     return Group(section_panel(f"已删除模型 {model_id}。", "模型设置", "green"), restart)
 
 
-def manage_provider_routes_interactively(path: Path) -> None:
+def manage_provider_routes_interactively(
+    path: Path, provider_id: str | None = None
+) -> None:
     while True:
         data = load_v2_config_data(path)
-        provider_id = select_provider(data, "选择供应商路径")
         if provider_id is None:
-            return
-        provider = raw_providers(data)[provider_id]
+            selected_provider_id = select_provider(data, "选择供应商路径")
+            if selected_provider_id is None:
+                return
+        else:
+            selected_provider_id = provider_id
+            if selected_provider_id not in raw_providers(data):
+                return
+        provider = raw_providers(data)[selected_provider_id]
         routes = provider.setdefault("routes", {})
         route_rows = "\n".join(
             f"{UPSTREAM_ROUTE_LABELS[mode]}: [bold]{upstream_route_path(routes, mode)}[/bold]"
@@ -1880,14 +1837,16 @@ def manage_provider_routes_interactively(path: Path) -> None:
             for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
         ] + [("c", "清空自定义路径"), ("0", "返回")]
         choice = select_option(
-            f"供应商路径 · {provider_id}",
+            f"供应商路径 · {selected_provider_id}",
             mode_options,
             content=section_panel(route_rows, "当前路径", "cyan"),
         )
         if choice == "0":
+            if provider_id is not None:
+                return
             continue
         clear_terminal_history()
-        result = update_provider_routes_interactively(path, provider_id, choice)
+        result = update_provider_routes_interactively(path, selected_provider_id, choice)
         if result is not None:
             show_result_page("供应商路径", result)
 
@@ -1918,33 +1877,116 @@ def update_provider_routes_interactively(path: Path, provider_id: str, choice: s
     return Group(section_panel(message, "供应商路径", "green"), restart)
 
 
-def manage_model_keys_interactively(path: Path) -> None:
-    def on_key(key: str) -> str | None:
-        return _open_config_on_key(path, key)
+def delete_provider_interactively(path: Path, provider_id: str) -> Any:
+    data = load_v2_config_data(path)
+    providers = raw_providers(data)
+    if provider_id not in providers:
+        return section_panel(f"[red]供应商不存在: {provider_id}[/red]", "删除供应商", "red")
+    if not confirm_choice(f"确认删除供应商 {provider_id}？", default=False):
+        return section_panel("[yellow]配置未变化。[/yellow]", "删除供应商", "yellow")
+
+    old_config = RouterConfig.from_dict(data)
+    providers.pop(provider_id)
+    models = raw_v2_models(data)
+    removed_models: set[str] = set()
+    for model_id, model in list(models.items()):
+        targets = model_targets(model)
+        targets[:] = [
+            target for target in targets if target.get("provider") != provider_id
+        ]
+        if not targets:
+            models.pop(model_id)
+            removed_models.add(str(model_id))
+
+    unified = data.get("unified_model")
+    if isinstance(unified, dict) and unified.get("model") in removed_models:
+        fallback_model = fallback_unified_model(models)
+        if fallback_model is None:
+            data.pop("unified_model", None)
+        else:
+            data["unified_model"] = {"model": fallback_model}
+
+    restart = commit_v2_config(path, data, old_config)
+    return Group(
+        section_panel(
+            f"已删除供应商 {provider_id}。\n已移除空模型: [bold]{len(removed_models)}[/bold]",
+            "删除供应商",
+            "green",
+        ),
+        restart,
+    )
+
+
+def manage_providers_interactively(path: Path) -> None:
     while True:
+        data = load_v2_config_data(path)
+        providers = raw_providers(data)
+        provider_ids = sorted(providers)
         choice = select_option(
-            "供应商与模型",
-            [
-                ("1", "添加供应商 Key"),
-                ("2", "管理供应商 Key"),
-                ("3", "模型池"),
-                ("4", "模型设置"),
-                ("0", "返回"),
-            ],
-            on_key=on_key,
+            "供应商",
+            [("n", "添加供应商")]
+            + [
+                (
+                    str(index + 1),
+                    f"{short_text(provider_id, 22)} · {compact_url(str(providers[provider_id].get('base_url') or '-'), 42)} · {len(provider_keys(providers[provider_id]))} Key",
+                )
+                for index, provider_id in enumerate(provider_ids)
+            ]
+            + [("0", "返回")],
+            content=v2_summary_panel(data),
         )
         if choice == "0":
             return
-        if choice == "1":
-            result = run_submodule(lambda: add_provider_key_interactively(path))
+        if choice == "n":
+            result = run_submodule(
+                lambda: add_provider_key_interactively(path, create_provider=True)
+            )
             if result is not None:
-                show_result_page("添加供应商 Key", result)
-        elif choice == "2":
-            run_submodule(lambda: manage_provider_keys_interactively(path))
-        elif choice == "3":
-            run_submodule(lambda: manage_provider_pools_interactively(path))
-        elif choice == "4":
-            run_submodule(lambda: manage_v2_model_settings_interactively(path))
+                show_result_page("添加供应商", result)
+            continue
+
+        provider_id = provider_ids[int(choice) - 1]
+        while provider_id in raw_providers(load_v2_config_data(path)):
+            choice = select_option(
+                f"供应商 · {provider_id}",
+                [
+                    ("1", "添加 Key"),
+                    ("2", "管理 Key"),
+                    ("3", "模型池"),
+                    ("4", "Base URL / 路由设置"),
+                    ("5", "删除供应商"),
+                    ("0", "返回"),
+                ],
+            )
+            if choice == "0":
+                break
+            if choice == "1":
+                result = run_submodule(
+                    lambda: add_provider_key_interactively(path, provider_id)
+                )
+                if result is not None:
+                    show_result_page("添加供应商 Key", result)
+            elif choice == "2":
+                run_submodule(
+                    lambda: manage_provider_keys_interactively(path, provider_id)
+                )
+            elif choice == "3":
+                run_submodule(
+                    lambda: manage_provider_pools_interactively(path, provider_id)
+                )
+            elif choice == "4":
+                run_submodule(
+                    lambda: manage_provider_routes_interactively(path, provider_id)
+                )
+            elif choice == "5":
+                result = delete_provider_interactively(path, provider_id)
+                if result is not None:
+                    show_result_page("删除供应商", result)
+                break
+
+
+def manage_model_keys_interactively(path: Path) -> None:
+    manage_providers_interactively(path)
 
 
 def manage_model_aliases_interactively(path: Path) -> None:

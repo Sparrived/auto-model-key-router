@@ -935,7 +935,15 @@ def test_request_stats_pages_support_legacy_database_without_caller_type(tmp_pat
 
 
 def test_main_menu_keeps_one_click_config_on_homepage() -> None:
-    assert dashboard.MENU_OPTIONS == [("1", "一键配置"), ("2", "供应商模型"), ("3", "统一模型"), ("4", "调用日志"), ("5", "CLI 设置"), ("0", "退出")]
+    assert dashboard.MENU_OPTIONS == [
+        ("1", "一键配置"),
+        ("2", "供应商"),
+        ("3", "模型设置"),
+        ("4", "统一模型"),
+        ("5", "调用日志"),
+        ("6", "CLI 设置"),
+        ("0", "退出"),
+    ]
     assert dashboard.ONE_CLICK_OPTIONS == [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("0", "返回")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
@@ -944,6 +952,73 @@ def test_main_menu_keeps_one_click_config_on_homepage() -> None:
     assert ("5", "配置迁移") in dashboard.SETTINGS_OPTIONS
     assert ("6", "版本更新") in dashboard.SETTINGS_OPTIONS
     assert all(label != "调用日志" for _, label in dashboard.SETTINGS_OPTIONS)
+
+
+def test_cli_settings_routes_transfer_and_update_by_current_numbers(
+    tmp_path, monkeypatch
+) -> None:
+    choices = iter(["5", "6", "0"])
+    opened: list[str] = []
+    monkeypatch.setattr(dashboard, "select_option", lambda *args, **kwargs: next(choices))
+    monkeypatch.setattr(dashboard, "run_submodule", lambda action: action())
+    monkeypatch.setattr(
+        dashboard,
+        "manage_config_transfer_interactively",
+        lambda path: opened.append("transfer"),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "manage_version_update_interactively",
+        lambda path, latest: opened.append("update"),
+    )
+
+    dashboard.manage_cli_settings_interactively(tmp_path / "router-config.json")
+
+    assert opened == ["transfer", "update"]
+
+
+def test_dashboard_routes_provider_and_model_settings_separately(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        encoding="utf-8",
+    )
+    config = dashboard.RouterConfig.load(config_path)
+    choices = iter([("2", 0), ("3", 0), ("0", 0)])
+    opened: list[str] = []
+
+    monkeypatch.setattr(dashboard, "check_latest_version", lambda timeout: None)
+    monkeypatch.setattr(dashboard, "select_menu_option", lambda *args: next(choices))
+    monkeypatch.setattr(dashboard, "run_submodule", lambda action: action())
+    monkeypatch.setattr(
+        dashboard,
+        "manage_providers_interactively",
+        lambda path: opened.append("providers"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "manage_v2_model_settings_interactively",
+        lambda path: opened.append("models"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "manage_model_keys_interactively",
+        lambda path: opened.append("legacy-provider-models"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "manage_unified_model_interactively",
+        lambda path: opened.append("legacy-unified"),
+    )
+
+    dashboard.run_terminal_ui(config_path, config)
+
+    assert opened == ["providers", "models"]
 
 
 def test_set_timeouts_interactively_updates_all_timeouts(tmp_path, monkeypatch) -> None:
@@ -1113,7 +1188,7 @@ def test_terminal_ui_exits_immediately_after_windows_update_handoff(tmp_path, mo
     config = dashboard.RouterConfig.from_dict({"config_version": 3, "providers": {}, "models": {}})
     shown: list[object] = []
     monkeypatch.setattr(dashboard, "check_latest_version", lambda timeout: None)
-    monkeypatch.setattr(dashboard, "select_menu_option", lambda *args: ("5", 0))
+    monkeypatch.setattr(dashboard, "select_menu_option", lambda *args: ("6", 0))
     monkeypatch.setattr(dashboard, "run_submodule", lambda action: dashboard.UpdateInstallOutcome(Text("updater"), updated=True, handoff=True))
     monkeypatch.setattr(dashboard, "show_result_page", lambda title, content: shown.append(content))
 
@@ -1696,24 +1771,291 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
     assert model["targets"] == [{"provider": "default", "pool": "primary", "upstream_model": "new-model"}]
 
 
-def test_provider_model_menu_opens_model_settings(tmp_path, monkeypatch) -> None:
-    menus: list[list[tuple[str, str]]] = []
+def test_provider_menu_uses_provider_context_without_reselection(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "1", "2", "3", "4", "0", "0"])
+    menus: list[tuple[str, list[tuple[str, str]]]] = []
+    opened: list[tuple[str, str]] = []
 
-    def choose(title, options, selected=0, content=None, *, on_key=None):
-        menus.append(options)
-        return "0"
+    def choose(title, options, selected=0, content=None, **kwargs):
+        menus.append((title, options))
+        return next(choices)
 
     monkeypatch.setattr(config_editor, "select_option", choose)
+    monkeypatch.setattr(config_editor, "run_submodule", lambda action: action())
+    monkeypatch.setattr(
+        config_editor,
+        "add_provider_key_interactively",
+        lambda path, provider_id=None, **kwargs: opened.append(("add", provider_id)),
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "manage_provider_keys_interactively",
+        lambda path, provider_id=None: opened.append(("keys", provider_id)),
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "manage_provider_pools_interactively",
+        lambda path, provider_id=None: opened.append(("pools", provider_id)),
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "manage_provider_routes_interactively",
+        lambda path, provider_id=None: opened.append(("routes", provider_id)),
+    )
 
-    config_editor.manage_model_keys_interactively(tmp_path / "router-config.json")
+    config_editor.manage_providers_interactively(config_path)
 
-    assert menus[0] == [
-        ("1", "添加供应商 Key"),
-        ("2", "管理供应商 Key"),
+    assert menus[1][1] == [
+        ("1", "添加 Key"),
+        ("2", "管理 Key"),
         ("3", "模型池"),
-        ("4", "模型设置"),
+        ("4", "Base URL / 路由设置"),
+        ("5", "删除供应商"),
         ("0", "返回"),
     ]
+    assert opened == [
+        ("add", "vendor"),
+        ("keys", "vendor"),
+        ("pools", "vendor"),
+        ("routes", "vendor"),
+    ]
+
+
+def test_add_provider_menu_enters_creation_without_second_provider_selection(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        encoding="utf-8",
+    )
+    choices = iter(["n", "0"])
+    calls: list[tuple[str | None, bool]] = []
+
+    monkeypatch.setattr(
+        config_editor,
+        "select_option",
+        lambda title, options, selected=0, content=None, **kwargs: next(choices),
+    )
+    monkeypatch.setattr(config_editor, "run_submodule", lambda action: action())
+    monkeypatch.setattr(
+        config_editor,
+        "add_provider_key_interactively",
+        lambda path, provider_id=None, *, create_provider=False: calls.append(
+            (provider_id, create_provider)
+        ),
+    )
+
+    config_editor.manage_providers_interactively(config_path)
+
+    assert calls == [(None, True)]
+
+
+def test_provider_key_and_pool_menus_remove_old_actions(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    key_menus: list[list[tuple[str, str]]] = []
+    key_choices = iter(["1", "0", "0"])
+
+    def choose_key(title, options, selected=0, content=None, **kwargs):
+        key_menus.append(options)
+        return next(key_choices)
+
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
+    monkeypatch.setattr(config_editor, "select_option", choose_key)
+    monkeypatch.setattr(
+        config_editor,
+        "select_provider",
+        lambda *args: pytest.fail("provider context must not be selected again"),
+    )
+    config_editor.manage_provider_keys_interactively(config_path, "vendor")
+
+    assert key_menus[1] == [
+        ("1", "开关"),
+        ("2", "重命名"),
+        ("4", "删除"),
+        ("0", "返回"),
+    ]
+    assert all("替换 API key" not in label for menu in key_menus for _, label in menu)
+
+    pool_menus: list[list[tuple[str, str]]] = []
+    monkeypatch.setattr(
+        config_editor,
+        "select_option",
+        lambda title, options, selected=0, content=None, **kwargs: pool_menus.append(options)
+        or "0",
+    )
+    config_editor.manage_provider_pools_interactively(config_path, "vendor")
+
+    assert pool_menus[0] == [
+        ("1", "新增/编辑模型池"),
+        ("2", "手动设置可用模型"),
+        ("0", "返回"),
+    ]
+
+
+def test_provider_key_menu_keeps_stable_visitor_action_number(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "0", "0"])
+    menus: list[list[tuple[str, str]]] = []
+
+    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: True)
+    monkeypatch.setattr(
+        config_editor,
+        "select_option",
+        lambda title, options, selected=0, content=None, **kwargs: menus.append(options)
+        or next(choices),
+    )
+
+    config_editor.manage_provider_keys_interactively(config_path, "vendor")
+
+    assert menus[1] == [
+        ("1", "开关"),
+        ("2", "重命名"),
+        ("3", "访客访问"),
+        ("4", "删除"),
+        ("0", "返回"),
+    ]
+
+
+def test_provider_routes_use_context_without_reselecting_provider(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {},
+                        "pools": {},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    titles: list[str] = []
+    monkeypatch.setattr(
+        config_editor,
+        "select_provider",
+        lambda *args: pytest.fail("provider context must not be selected again"),
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "select_option",
+        lambda title, options, selected=0, content=None, **kwargs: titles.append(title)
+        or "0",
+    )
+
+    config_editor.manage_provider_routes_interactively(config_path, "vendor")
+
+    assert titles == ["供应商路径 · vendor"]
+
+
+def test_delete_provider_cleans_targets_models_and_unified_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "remove": {
+                        "base_url": "https://remove.test",
+                        "keys": {"main": {"api_key": "sk-remove"}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    },
+                    "keep": {
+                        "base_url": "https://keep.test",
+                        "keys": {"main": {"api_key": "sk-keep"}},
+                        "pools": {"default": {"keys": ["main"]}},
+                    },
+                },
+                "models": {
+                    "remove-only": {
+                        "targets": [{"provider": "remove", "pool": "default"}]
+                    },
+                    "shared": {
+                        "targets": [
+                            {"provider": "remove", "pool": "default"},
+                            {"provider": "keep", "pool": "default"},
+                        ]
+                    },
+                },
+                "unified_model": {"model": "remove-only"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        config_editor,
+        "restart_service_after_config_change",
+        lambda *args: Text("reloaded"),
+    )
+
+    config_editor.delete_provider_interactively(config_path, "remove")
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert set(saved["providers"]) == {"keep"}
+    assert set(saved["models"]) == {"shared"}
+    assert saved["models"]["shared"]["targets"] == [
+        {"provider": "keep", "pool": "default"}
+    ]
+    assert saved["unified_model"] == {"model": "shared"}
 
 
 def test_model_settings_menu_includes_route_controls(tmp_path, monkeypatch) -> None:
@@ -2629,7 +2971,7 @@ def test_legacy_list_pool_memberships_are_repaired_interactively(tmp_path, monke
     assert pools["other"]["keys"] == []
 
 
-def test_nonempty_pool_cannot_be_deleted_until_keys_are_moved(tmp_path, monkeypatch) -> None:
+def test_explicit_pool_delete_action_is_removed(tmp_path) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
@@ -2647,11 +2989,9 @@ def test_nonempty_pool_cannot_be_deleted_until_keys_are_moved(tmp_path, monkeypa
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
-
     result = config_editor.update_provider_pool_interactively(config_path, "vendor", "4")
 
-    assert "请先将 Key 移入其他模型池" in render_plain(result)
+    assert result is None
     assert "only" in json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
 
@@ -2796,7 +3136,7 @@ def test_deleting_last_provider_key_removes_empty_pool_and_model(tmp_path, monke
     monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
 
-    result = config_editor.update_provider_key_interactively(config_path, "gateway", "main", "5")
+    result = config_editor.update_provider_key_interactively(config_path, "gateway", "main", "4")
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert "已删除 gateway/main" in render_plain(result)
@@ -2845,7 +3185,7 @@ def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkey
     monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
 
-    config_editor.update_provider_key_interactively(config_path, "gateway", "main", "5")
+    config_editor.update_provider_key_interactively(config_path, "gateway", "main", "4")
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert "local-model" not in data["models"]
