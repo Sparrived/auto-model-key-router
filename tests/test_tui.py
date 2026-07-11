@@ -2992,6 +2992,130 @@ def test_discover_upstream_models_failure(monkeypatch) -> None:
     assert result == []
 
 
+def test_discover_upstream_models_result_distinguishes_empty_success(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"object": "list", "data": []}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, headers=None):
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
+
+    assert config_editor.discover_upstream_models_result(
+        "https://api.example.com", "sk-test", set()
+    ) == ([], None)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        ("http", "HTTP 401"),
+        ("network", "connection refused"),
+        ("json", "JSON"),
+        ("non-ascii", "ASCII"),
+    ],
+)
+def test_discover_upstream_models_result_reports_failures(
+    monkeypatch, failure, expected_error
+) -> None:
+    class FakeResponse:
+        status_code = 401 if failure == "http" else 200
+        text = "invalid response"
+
+        def raise_for_status(self):
+            if failure == "http":
+                request = config_editor.httpx.Request(
+                    "GET", "https://api.example.com/v1/models"
+                )
+                response = config_editor.httpx.Response(401, request=request)
+                raise config_editor.httpx.HTTPStatusError(
+                    "unauthorized", request=request, response=response
+                )
+
+        def json(self):
+            if failure == "json":
+                raise ValueError("invalid JSON")
+            return {"data": []}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, headers=None):
+            if failure == "network":
+                raise config_editor.httpx.ConnectError("connection refused")
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
+    api_key = "sk-\u6d4b\u8bd5" if failure == "non-ascii" else "sk-test"
+
+    models, error = config_editor.discover_upstream_models_result(
+        "https://api.example.com", api_key, set()
+    )
+
+    assert models == []
+    assert error is not None
+    assert expected_error in error
+
+
+def test_probe_provider_key_capabilities_records_models_and_errors(monkeypatch) -> None:
+    results = {
+        "sk-1": (["gpt-a", "gpt-b"], None),
+        "sk-2": (["gpt-a", "gpt-c"], None),
+        "sk-3": ([], "HTTP 401"),
+    }
+    monkeypatch.setattr(
+        config_editor,
+        "discover_upstream_models_result",
+        lambda base_url, api_key, existing_model_ids, timeout=15.0: results[api_key],
+    )
+
+    result = config_editor.probe_provider_key_capabilities(
+        {
+            "base_url": "https://gateway.example.test",
+            "keys": {
+                "k1": {"api_key": "sk-1"},
+                "k2": {"api_key": "sk-2"},
+                "k3": {"api_key": "sk-3"},
+            },
+        },
+        ["k1", "k2", "k3"],
+    )
+
+    assert result == {
+        "models": ["gpt-a"],
+        "all_models": ["gpt-a", "gpt-b", "gpt-c"],
+        "key_models": {
+            "k1": ["gpt-a", "gpt-b"],
+            "k2": ["gpt-a", "gpt-c"],
+            "k3": [],
+        },
+        "errors": {"k3": "HTTP 401"},
+    }
+
+
 def test_probe_key_availability_posts_all_text_routes(monkeypatch) -> None:
     requests = []
 

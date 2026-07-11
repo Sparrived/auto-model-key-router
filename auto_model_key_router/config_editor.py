@@ -448,6 +448,42 @@ def pool_probe_models(
     }
 
 
+def probe_provider_key_capabilities(
+    provider: dict[str, Any],
+    key_names: list[str],
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    base_url = str(provider.get("base_url") or "").strip()
+    keys = provider_keys(provider)
+    key_models: dict[str, list[str]] = {}
+    errors: dict[str, str] = {}
+    successful: list[set[str]] = []
+    for key_name in key_names:
+        key = keys.get(key_name)
+        api_key = str(key.get("api_key") or "") if isinstance(key, dict) else ""
+        if not base_url:
+            models, error = [], "缺少 Base URL"
+        elif not isinstance(key, dict):
+            models, error = [], "Key 不存在"
+        elif not api_key:
+            models, error = [], "API Key 为空"
+        else:
+            models, error = discover_upstream_models_result(
+                base_url, api_key, set(), timeout=timeout
+            )
+        key_models[key_name] = models
+        if error:
+            errors[key_name] = error
+        else:
+            successful.append(set(models))
+    return {
+        "models": sorted(set.intersection(*successful)) if successful else [],
+        "all_models": sorted(set().union(*successful)) if successful else [],
+        "key_models": key_models,
+        "errors": errors,
+    }
+
+
 def apply_pool_probe(
     provider: dict[str, Any],
     pool_name: str,
@@ -2461,29 +2497,52 @@ def select_base_url_for_new_key(
     return base_urls[int(choice) - 1]
 
 
+def discover_upstream_models_result(
+    base_url: str,
+    api_key: str,
+    existing_model_ids: set[str],
+    timeout: float = 15.0,
+) -> tuple[list[str], str | None]:
+    try:
+        auth_header = f"Bearer {api_key}"
+        auth_header.encode("ascii")
+    except UnicodeEncodeError:
+        return [], "API Key 仅支持 ASCII 字符"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(
+                _join_url(base_url, "/v1/models"),
+                headers={"Authorization": auth_header},
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        return [], f"HTTP {exc.response.status_code}"
+    except httpx.RequestError as exc:
+        return [], f"网络错误: {exc}"[:160]
+    except ValueError as exc:
+        return [], f"JSON 解析失败: {exc}"[:160]
+    try:
+        items = data.get("data", [])
+        if not isinstance(items, list):
+            raise TypeError
+        model_ids = [item["id"] for item in items]
+        if not all(isinstance(model_id, str) for model_id in model_ids):
+            raise TypeError
+    except (AttributeError, KeyError, TypeError):
+        return [], "响应 JSON 格式无效"
+    return sorted(model_ids), None
+
+
 def discover_upstream_models(
     base_url: str,
     api_key: str,
     existing_model_ids: set[str],
     timeout: float = 15.0,
 ) -> list[str]:
-    try:
-        auth_header = f"Bearer {api_key}"
-        auth_header.encode("ascii")
-    except UnicodeEncodeError:
-        return []
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(
-                _join_url(base_url, "/v1/models"),
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-            response.raise_for_status()
-            data = response.json()
-        model_ids = [item["id"] for item in data.get("data", [])]
-        return sorted(model_ids)
-    except (httpx.RequestError, httpx.HTTPStatusError, KeyError, TypeError, ValueError):
-        return []
+    return discover_upstream_models_result(
+        base_url, api_key, existing_model_ids, timeout=timeout
+    )[0]
 
 
 def probe_payload_for_mode(mode: str, model_id: str) -> dict[str, Any]:
