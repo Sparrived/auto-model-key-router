@@ -5,7 +5,7 @@
 ## 主要能力
 
 - **多 Key 路由**：同一模型可配置多个 Key，支持 `round_robin`、`priority`、`only_first`。
-- **失败切换与冷却**：遇到 `401/403/429/5xx` 等可重试错误时自动重试或切换 Key，并持久化冷却状态。
+- **失败切换与冷却**：遇到 `401/403/429/5xx` 等可重试错误时自动重试或切换 Key，并在进程内临时冷却异常 Key。
 - **统一模型名**：客户端固定请求 `unified-model`，真实模型和固定 Key 可在路由器侧随时切换。
 - **OpenAI-compatible 代理**：支持 `/v1/chat/completions`、`/v1/models`，并兼容 Claude Code 的 `/v1/messages` 与 Codex 的 `/v1/responses`；可为不同协议模式配置上游额外路径。
 - **Terminal UI 管理**：在 TUI 中配置模型、Key、统一模型、服务注册和客户端接入。
