@@ -499,12 +499,40 @@ def cleanup_empty_pools_and_models(
             removed_models.add(str(model_id))
 
     unified = data.get("unified_model")
-    if isinstance(unified, dict) and unified.get("model") not in models:
+    if not isinstance(unified, dict):
+        return removed_models
+
+    config_data = deepcopy(data)
+    config_data.pop("unified_model", None)
+    config_data.setdefault("config_version", CONFIG_VERSION)
+    config = RouterConfig.from_dict(config_data)
+    configured_models = {model.id: model for model in config.models}
+    unified_model_id = config.configured_model_id(str(unified.get("model") or ""))
+    if unified_model_id is None:
         fallback_model = fallback_unified_model(models)
         if fallback_model is None:
             data.pop("unified_model", None)
         else:
             data["unified_model"] = {"model": fallback_model}
+        return removed_models
+
+    unified_key = unified.get("key")
+    if unified_key and not any(
+        key.name == unified_key and key.enabled
+        for key in configured_models[unified_model_id].keys
+    ):
+        unified.pop("key", None)
+
+    image_model = unified.get("image_model")
+    image_model_id = config.configured_model_id(str(image_model or ""))
+    if image_model_id is None:
+        unified.pop("image_model", None)
+        unified.pop("image_key", None)
+    elif unified.get("image_key") and not any(
+        key.name == unified["image_key"] and key.enabled
+        for key in configured_models[image_model_id].keys
+    ):
+        unified.pop("image_key", None)
     return removed_models
 
 

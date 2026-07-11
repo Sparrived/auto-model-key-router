@@ -3311,6 +3311,136 @@ def test_cleanup_empty_pools_removes_targets_models_and_updates_unified_model() 
     assert data["unified_model"] == {"model": "keep"}
 
 
+def test_cleanup_empty_pools_preserves_valid_unified_model_alias() -> None:
+    data = {
+        "providers": {
+            "vendor": {
+                "keys": {"live": {"api_key": "sk-live"}},
+                "pools": {
+                    "empty": {"keys": [], "models": ["gpt-old"]},
+                    "live": {"keys": ["live"], "models": ["gpt-live"]},
+                },
+            }
+        },
+        "models": {
+            "local": {
+                "aliases": ["friendly"],
+                "targets": [
+                    {"provider": "vendor", "pool": "live", "upstream_model": "gpt-live"}
+                ],
+            }
+        },
+        "unified_model": {"model": "friendly", "key": "live"},
+    }
+
+    config_editor.cleanup_empty_pools_and_models(data, "vendor")
+
+    assert data["unified_model"] == {"model": "friendly", "key": "live"}
+
+
+def test_cleanup_empty_pools_clears_removed_image_model_and_key() -> None:
+    data = {
+        "providers": {
+            "vendor": {
+                "keys": {"main": {"api_key": "sk-main"}},
+                "pools": {
+                    "main": {"keys": ["main"], "models": ["gpt-main"]},
+                    "empty": {"keys": [], "models": ["gpt-image"]},
+                },
+            }
+        },
+        "models": {
+            "main": {
+                "targets": [
+                    {"provider": "vendor", "pool": "main", "upstream_model": "gpt-main"}
+                ]
+            },
+            "image": {
+                "targets": [
+                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-image"}
+                ]
+            },
+        },
+        "unified_model": {
+            "model": "main",
+            "key": "main",
+            "image_model": "image",
+            "image_key": "removed",
+        },
+    }
+
+    config_editor.cleanup_empty_pools_and_models(data, "vendor")
+
+    assert data["unified_model"] == {"model": "main", "key": "main"}
+
+
+def test_cleanup_empty_pools_clears_invalid_unified_key() -> None:
+    data = {
+        "providers": {
+            "vendor": {
+                "keys": {"live": {"api_key": "sk-live"}},
+                "pools": {
+                    "empty": {"keys": [], "models": ["gpt-main"]},
+                    "live": {"keys": ["live"], "models": ["gpt-main"]},
+                },
+            }
+        },
+        "models": {
+            "main": {
+                "targets": [
+                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-main"},
+                    {"provider": "vendor", "pool": "live", "upstream_model": "gpt-main"},
+                ]
+            }
+        },
+        "unified_model": {"model": "main", "key": "removed"},
+    }
+
+    config_editor.cleanup_empty_pools_and_models(data, "vendor")
+
+    assert data["unified_model"] == {"model": "main"}
+
+
+def test_cleanup_empty_pools_clears_invalid_image_key() -> None:
+    data = {
+        "providers": {
+            "vendor": {
+                "keys": {
+                    "main": {"api_key": "sk-main"},
+                    "image-live": {"api_key": "sk-image-live"},
+                },
+                "pools": {
+                    "main": {"keys": ["main"], "models": ["gpt-main"]},
+                    "empty": {"keys": [], "models": ["gpt-image"]},
+                    "image": {"keys": ["image-live"], "models": ["gpt-image"]},
+                },
+            }
+        },
+        "models": {
+            "main": {
+                "targets": [
+                    {"provider": "vendor", "pool": "main", "upstream_model": "gpt-main"}
+                ]
+            },
+            "image": {
+                "targets": [
+                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-image"},
+                    {"provider": "vendor", "pool": "image", "upstream_model": "gpt-image"},
+                ]
+            },
+        },
+        "unified_model": {
+            "model": "main",
+            "image_model": "image",
+            "image_key": "removed",
+        },
+    }
+
+    config_editor.cleanup_empty_pools_and_models(data, "vendor")
+
+    assert data["unified_model"] == {"model": "main", "image_model": "image"}
+
+
 def test_probe_key_availability_posts_all_text_routes(monkeypatch) -> None:
     requests = []
 
