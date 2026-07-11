@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-model-key-router"
-version = "3.1.0"
+version = "3.1.1"
 description = "A lightweight local OpenAI-compatible model API key router"
 readme = "README.md"
 requires-python = ">=3.12"
