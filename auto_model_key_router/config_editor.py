@@ -2522,14 +2522,14 @@ def discover_upstream_models_result(
         return [], f"网络错误: {exc}"[:160]
     except ValueError as exc:
         return [], f"JSON 解析失败: {exc}"[:160]
+    if not isinstance(data, dict) or "data" not in data:
+        return [], "响应 JSON 格式无效"
+    items = data["data"]
+    if not isinstance(items, list):
+        return [], "响应 JSON 格式无效"
     try:
-        items = data.get("data", [])
-        if not isinstance(items, list):
-            raise TypeError
-        model_ids = [item["id"] for item in items]
-        if not all(isinstance(model_id, str) for model_id in model_ids):
-            raise TypeError
-    except (AttributeError, KeyError, TypeError):
+        model_ids = [str(item["id"]) for item in items]
+    except (KeyError, TypeError, ValueError):
         return [], "响应 JSON 格式无效"
     return sorted(model_ids), None
 

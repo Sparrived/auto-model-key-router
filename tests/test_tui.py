@@ -3023,6 +3023,77 @@ def test_discover_upstream_models_result_distinguishes_empty_success(monkeypatch
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"data": {}},
+        {"data": ["gpt-a"]},
+        {"data": [{}]},
+    ],
+)
+def test_discover_upstream_models_result_rejects_invalid_structure(
+    monkeypatch, payload
+) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, headers=None):
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
+
+    models, error = config_editor.discover_upstream_models_result(
+        "https://api.example.com", "sk-test", set()
+    )
+
+    assert models == []
+    assert error is not None
+    assert "JSON" in error
+
+
+def test_discover_upstream_models_result_stringifies_model_ids(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": 42}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, url, headers=None):
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
+
+    assert config_editor.discover_upstream_models_result(
+        "https://api.example.com", "sk-test", set()
+    ) == (["42"], None)
+
+
+@pytest.mark.parametrize(
     ("failure", "expected_error"),
     [
         ("http", "HTTP 401"),
