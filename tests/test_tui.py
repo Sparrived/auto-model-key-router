@@ -2058,6 +2058,107 @@ def test_delete_provider_cleans_targets_models_and_unified_fallback(
     assert saved["unified_model"] == {"model": "shared"}
 
 
+def test_delete_provider_falls_back_when_unified_model_uses_removed_alias(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "remove": {
+                        "base_url": "https://remove.test",
+                        "keys": {"main": {"api_key": "sk-remove"}},
+                        "pools": {
+                            "default": {"keys": ["main"], "models": ["remove-only"]}
+                        },
+                    },
+                    "keep": {
+                        "base_url": "https://keep.test",
+                        "keys": {"main": {"api_key": "sk-keep"}},
+                        "pools": {
+                            "default": {"keys": ["main"], "models": ["shared"]}
+                        },
+                    },
+                },
+                "models": {
+                    "remove-only": {
+                        "aliases": ["removed-alias"],
+                        "targets": [{"provider": "remove", "pool": "default"}],
+                    },
+                    "shared": {
+                        "targets": [{"provider": "keep", "pool": "default"}]
+                    },
+                },
+                "unified_model": {"model": "removed-alias"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        config_editor,
+        "restart_service_after_config_change",
+        lambda *args: Text("reloaded"),
+    )
+
+    config_editor.delete_provider_interactively(config_path, "remove")
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["unified_model"] == {"model": "shared"}
+
+
+def test_delete_provider_clears_removed_unified_model_key(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "remove": {
+                        "base_url": "https://remove.test",
+                        "keys": {"main": {"api_key": "sk-remove"}},
+                        "pools": {
+                            "default": {"keys": ["main"], "models": ["shared"]}
+                        },
+                    },
+                    "keep": {
+                        "base_url": "https://keep.test",
+                        "keys": {"main": {"api_key": "sk-keep"}},
+                        "pools": {
+                            "default": {"keys": ["main"], "models": ["shared"]}
+                        },
+                    },
+                },
+                "models": {
+                    "shared": {
+                        "targets": [
+                            {"provider": "remove", "pool": "default"},
+                            {"provider": "keep", "pool": "default"},
+                        ]
+                    }
+                },
+                "unified_model": {"model": "shared", "key": "main"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        config_editor,
+        "restart_service_after_config_change",
+        lambda *args: Text("reloaded"),
+    )
+
+    config_editor.delete_provider_interactively(config_path, "remove")
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["unified_model"] == {"model": "shared"}
+
+
 def test_model_settings_menu_includes_route_controls(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(

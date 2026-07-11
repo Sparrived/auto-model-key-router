@@ -1899,12 +1899,42 @@ def delete_provider_interactively(path: Path, provider_id: str) -> Any:
             removed_models.add(str(model_id))
 
     unified = data.get("unified_model")
-    if isinstance(unified, dict) and unified.get("model") in removed_models:
-        fallback_model = fallback_unified_model(models)
-        if fallback_model is None:
-            data.pop("unified_model", None)
-        else:
-            data["unified_model"] = {"model": fallback_model}
+    if isinstance(unified, dict):
+        unified_key_from_removed_provider = False
+        if unified.get("key"):
+            old_unified_model_id = old_config.configured_model_id(
+                str(unified.get("model") or "")
+            )
+            if old_unified_model_id is not None:
+                old_unified_model = next(
+                    model
+                    for model in old_config.models
+                    if model.id == old_unified_model_id
+                )
+                unified_key_from_removed_provider = any(
+                    key.name == unified["key"] and key.provider == provider_id
+                    for key in old_unified_model.keys
+                )
+        config_data = deepcopy(data)
+        config_data.pop("unified_model", None)
+        config_data.setdefault("config_version", CONFIG_VERSION)
+        config = RouterConfig.from_dict(config_data)
+        configured_models = {model.id: model for model in config.models}
+        unified_model_id = config.configured_model_id(str(unified.get("model") or ""))
+        if unified_model_id is None:
+            fallback_model = fallback_unified_model(models)
+            if fallback_model is None:
+                data.pop("unified_model", None)
+            else:
+                data["unified_model"] = {"model": fallback_model}
+        elif unified.get("key") and (
+            unified_key_from_removed_provider
+            or not any(
+                key.name == unified["key"] and key.enabled
+                for key in configured_models[unified_model_id].keys
+            )
+        ):
+            unified.pop("key", None)
 
     restart = commit_v2_config(path, data, old_config)
     return Group(
