@@ -2024,6 +2024,71 @@ def test_editing_pool_moves_selected_key_from_previous_pool(tmp_path, monkeypatc
     assert pools["old"]["keys"] == []
 
 
+def test_duplicate_pool_memberships_are_repaired_interactively(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"main": {"api_key": "sk-main"}},
+                        "pools": {
+                            "pool-a": {"keys": ["main"], "models": ["gpt-a"]},
+                            "pool-b": {"keys": ["main"], "models": ["gpt-b"]},
+                        },
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    choices: list[tuple[list[str], str]] = []
+
+    def choose(pools, *, default):
+        choices.append((sorted(pools), default))
+        return "new-pool"
+
+    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", choose)
+
+    repaired = config_editor.repair_duplicate_pool_memberships_interactively(config_path)
+    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
+
+    assert repaired is True
+    assert choices == [(["pool-a", "pool-b"], "pool-a")]
+    assert pools["pool-a"]["keys"] == []
+    assert pools["pool-b"]["keys"] == []
+    assert pools["new-pool"] == {"keys": ["main"], "models": []}
+
+
+def test_valid_pool_memberships_do_not_prompt_or_rewrite(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    original = {
+        "config_version": 3,
+        "providers": {
+            "vendor": {
+                "base_url": "https://vendor.test",
+                "keys": {"main": {"api_key": "sk-main"}},
+                "pools": {"only": {"keys": ["main"], "models": []}},
+            }
+        },
+        "models": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.setattr(
+        config_editor,
+        "select_or_enter_pool_name",
+        lambda *args, **kwargs: pytest.fail("valid config must not prompt"),
+    )
+
+    repaired = config_editor.repair_duplicate_pool_memberships_interactively(config_path)
+
+    assert repaired is False
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
 def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(

@@ -26,6 +26,7 @@ from .config import (
     load_config_data,
     normalize_upstream_base_url,
     normalize_upstream_route_path,
+    save_config_data,
     upstream_route_path,
 )
 from .config_service import commit_config_data
@@ -525,6 +526,58 @@ def pools_containing_key(provider: dict[str, Any], key_name: str) -> set[str]:
         for pool_name, pool in provider_pools(provider).items()
         if key_name in pool_key_names(pool)
     }
+
+
+def duplicate_pool_memberships(
+    data: dict[str, Any],
+) -> list[tuple[str, str, list[str]]]:
+    duplicates: list[tuple[str, str, list[str]]] = []
+    for provider_id, provider in sorted(raw_providers(data).items()):
+        memberships: dict[str, list[str]] = {}
+        for pool_name, pool in sorted(provider_pools(provider).items()):
+            for key_name in pool_key_names(pool):
+                memberships.setdefault(key_name, []).append(str(pool_name))
+        duplicates.extend(
+            (str(provider_id), key_name, pool_names)
+            for key_name, pool_names in sorted(memberships.items())
+            if len(pool_names) > 1
+        )
+    return duplicates
+
+
+def repair_duplicate_pool_memberships_interactively(path: Path) -> bool:
+    data = load_config_data(path)
+    duplicates = duplicate_pool_memberships(data)
+    if not duplicates:
+        return False
+    providers = raw_providers(data)
+    for provider_id, key_name, pool_names in duplicates:
+        provider = providers[provider_id]
+        pools = provider_pools(provider)
+        console.print(
+            section_panel(
+                f"供应商: [bold]{provider_id}[/bold]\n"
+                f"Key: [bold]{key_name}[/bold]\n"
+                f"当前模型池: [yellow]{', '.join(pool_names)}[/yellow]\n"
+                "请选择唯一保留的模型池，或新建模型池。",
+                "修复重复模型池归属",
+                "yellow",
+            )
+        )
+        selected_pool = select_or_enter_pool_name(pools, default=pool_names[0])
+        if not selected_pool:
+            return False
+        for pool in pools.values():
+            if isinstance(pool, dict):
+                pool["keys"] = [
+                    current_key
+                    for current_key in pool_key_names(pool)
+                    if current_key != key_name
+                ]
+        target_pool = pools.setdefault(selected_pool, {"keys": [], "models": []})
+        target_pool.setdefault("keys", []).append(key_name)
+    save_config_data(path, data)
+    return True
 
 
 def fallback_unified_model(models: dict[str, Any]) -> str | None:
