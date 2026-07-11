@@ -782,9 +782,14 @@ def select_multiple(
     title: str,
     options: list[tuple[str, str]],
     content: Any | None = None,
+    *,
+    checked_values: set[str] | None = None,
 ) -> list[str]:
     selected = 0
-    checked: set[int] = set()
+    checked_values = checked_values or set()
+    checked = {
+        index for index, (value, _) in enumerate(options) if value in checked_values
+    }
     frame_offset = 0
     frame_state = render_multi_select_state(title, options, selected, checked, content, frame_offset)
     last_wheel_key: str | None = None

@@ -669,6 +669,38 @@ def test_select_option_q_returns_back_option(monkeypatch) -> None:
     assert tui.select_option("menu", [("1", "one"), ("0", "返回")]) == "0"
 
 
+def test_select_multiple_returns_initial_checked_values(monkeypatch) -> None:
+    @contextmanager
+    def input_mode():
+        yield
+
+    class FakeLive:
+        def __init__(self, renderable, **kwargs):
+            self.renderable = renderable
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def update(self, renderable, refresh=False):
+            self.renderable = renderable
+
+    monkeypatch.setattr(tui, "posix_input_mode", input_mode)
+    monkeypatch.setattr(tui, "mouse_wheel_mode", input_mode)
+    monkeypatch.setattr(tui, "Live", FakeLive)
+    monkeypatch.setattr(tui, "read_key_responsive", lambda on_resize=None: "enter")
+
+    selected = tui.select_multiple(
+        "模型池",
+        [("model-a", "model-a"), ("model-b", "model-b")],
+        checked_values={"model-b"},
+    )
+
+    assert selected == ["model-b"]
+
+
 def test_watch_logs_reads_keys_inside_posix_input_mode(monkeypatch) -> None:
     events: list[str] = []
 
