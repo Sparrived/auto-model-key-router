@@ -1042,35 +1042,126 @@ def select_or_enter_pool_name(
     return choice
 
 
-def add_provider_key_interactively(path: Path) -> Any:
+def _combined_capability_probe(*probes: dict[str, Any]) -> dict[str, Any]:
+    key_models = {
+        str(key_name): list(models)
+        for probe in probes
+        for key_name, models in probe.get("key_models", {}).items()
+    }
+    model_sets = [set(map(str, models)) for models in key_models.values()]
+    errors = {
+        str(key_name): str(error)
+        for probe in probes
+        for key_name, error in probe.get("errors", {}).items()
+    }
+    return {
+        "models": sorted(set.intersection(*model_sets)) if model_sets else [],
+        "all_models": sorted(
+            {
+                str(model_id)
+                for probe in probes
+                for model_id in probe.get("all_models", [])
+            }
+        ),
+        "key_models": key_models,
+        "errors": errors,
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def _update_pool_capability_probe(pool: dict[str, Any], probe: dict[str, Any]) -> None:
+    if probe.get("errors"):
+        return
+    pool["available_models"] = deepcopy(probe.get("models", []))
+    pool["all_available_models"] = deepcopy(probe.get("all_models", []))
+    pool["key_models"] = deepcopy(probe.get("key_models", {}))
+    pool["errors"] = {}
+    pool["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _select_pool_after_probe_failure(
+    pools: dict[str, Any],
+    pool_probes: dict[str, dict[str, Any]],
+    key_name: str,
+    key_probe: dict[str, Any],
+) -> str:
+    options = []
+    for pool_name, pool in pools.items():
+        probe = pool_probes[pool_name]
+        errors = probe.get("errors", {})
+        if errors:
+            summary = "; ".join(f"{name}: {error}" for name, error in errors.items())
+            status = f"[red]探测失败，信息可能过期 · {short_text(summary, 48)}[/red]"
+        else:
+            status = f"[green]探测成功 · {len(probe.get('models', []))} 个共同模型[/green]"
+        options.append((pool_name, f"{pool_name} · {len(pool_key_names(pool))} Key · {status}"))
+    options.extend([("__new__", "新建模型池"), ("0", "返回")])
+    key_errors = key_probe.get("errors", {})
+    if key_errors:
+        key_status = "[red]探测失败[/red] " + "; ".join(
+            f"{name}: {error}" for name, error in key_errors.items()
+        )
+    else:
+        key_status = f"[green]探测成功[/green] · {len(key_probe.get('models', []))} 个模型"
+    choice = select_option(
+        "选择模型池",
+        options,
+        content=section_panel(
+            f"新 Key: [bold]{key_name}[/bold] · {key_status}\n"
+            "自动分组已停止，请根据本次探测状态选择现有池或新建池。",
+            "人工分组",
+            "yellow",
+        ),
+    )
+    if choice == "0":
+        return ""
+    if choice == "__new__":
+        return prompt_text(
+            "模型池", "Pool 名称", default=next_pool_name(pools)
+        ).strip()
+    return choice
+
+
+def add_provider_key_interactively(
+    path: Path, provider_id: str | None = None
+) -> Any:
     draft = form_draft("add_provider_key")
     data = load_v2_config_data(path)
     old_config = RouterConfig.from_dict(data)
     providers = raw_providers(data)
-    existing = sorted(providers)
-    provider_choice = select_option(
-        "供应商",
-        [("n", "新供应商")]
-        + [(str(index + 1), provider_id) for index, provider_id in enumerate(existing)]
-        + [("0", "返回")],
-        content=v2_summary_panel(data),
-    )
-    if provider_choice == "0":
-        return None
-    if provider_choice == "n":
-        provider_id = prompt_text("添加供应商", "供应商 ID", default=draft.get("provider_id", "openai")).strip()
-        draft["provider_id"] = provider_id
-        if not provider_id:
-            return section_panel("[red]供应商 ID 不能为空[/red]", "添加失败", "red")
-        if provider_id in providers:
-            return section_panel(f"[red]供应商已存在: {provider_id}[/red]", "添加失败", "red")
-        base_url = prompt_text(
-            "添加供应商", "Base URL", default=draft.get("base_url", "https://api.openai.com")
-        ).strip()
-        draft["base_url"] = base_url
-        providers[provider_id] = {"base_url": base_url, "keys": {}, "pools": {}}
-    else:
-        provider_id = existing[int(provider_choice) - 1]
+    if provider_id is None:
+        existing = sorted(providers)
+        provider_choice = select_option(
+            "供应商",
+            [("n", "新供应商")]
+            + [(str(index + 1), current_id) for index, current_id in enumerate(existing)]
+            + [("0", "返回")],
+            content=v2_summary_panel(data),
+        )
+        if provider_choice == "0":
+            return None
+        if provider_choice == "n":
+            provider_id = prompt_text(
+                "添加供应商",
+                "供应商 ID",
+                default=draft.get("provider_id", "openai"),
+            ).strip()
+            draft["provider_id"] = provider_id
+            if not provider_id:
+                return section_panel("[red]供应商 ID 不能为空[/red]", "添加失败", "red")
+            if provider_id in providers:
+                return section_panel(f"[red]供应商已存在: {provider_id}[/red]", "添加失败", "red")
+            base_url = prompt_text(
+                "添加供应商",
+                "Base URL",
+                default=draft.get("base_url", "https://api.openai.com"),
+            ).strip()
+            draft["base_url"] = base_url
+            providers[provider_id] = {"base_url": base_url, "keys": {}, "pools": {}}
+        else:
+            provider_id = existing[int(provider_choice) - 1]
+    elif provider_id not in providers:
+        return section_panel(f"[red]供应商不存在: {provider_id}[/red]", "添加失败", "red")
     provider = providers[provider_id]
     keys = provider_keys(provider)
     key_name = prompt_text(
@@ -1085,28 +1176,76 @@ def add_provider_key_interactively(path: Path) -> Any:
     draft["api_key"] = api_key
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
-    pools = provider_pools(provider)
-    pool_name = select_or_enter_pool_name(
-        pools,
-        default=draft.get("pool_name", "default"),
-    )
-    draft["pool_name"] = pool_name
-    if not pool_name:
-        return section_panel("[yellow]配置未变化。[/yellow]", "添加 Key", "yellow")
     keys[key_name] = {"api_key": api_key, "enabled": True}
+    pools = provider_pools(provider)
+    pool_names = list(pools)
+    with console.status(
+        "[cyan]正在探测新 Key 和现有模型池...[/cyan]", spinner="dots"
+    ):
+        key_probe = probe_provider_key_capabilities(provider, [key_name])
+        pool_probes = {
+            pool_name: probe_provider_key_capabilities(
+                provider, pool_key_names(pools[pool_name])
+            )
+            for pool_name in pool_names
+        }
+    for pool_name, probe in pool_probes.items():
+        pool = pools[pool_name]
+        if isinstance(pool, dict):
+            _update_pool_capability_probe(pool, probe)
+
+    all_probes_succeeded = not key_probe.get("errors") and all(
+        not probe.get("errors") for probe in pool_probes.values()
+    )
+    assignment_probe: dict[str, Any] | None = None
+    if all_probes_succeeded:
+        matches = matching_pool_names(pools, key_probe.get("models", []), pool_probes)
+        if len(matches) > 1:
+            assignment_probe = _combined_capability_probe(
+                key_probe, *(pool_probes[name] for name in matches)
+            )
+            pool_name = merge_provider_pools(
+                data, provider_id, matches, assignment_probe
+            )
+        elif matches:
+            pool_name = matches[0]
+            assignment_probe = _combined_capability_probe(
+                key_probe, pool_probes[pool_name]
+            )
+        else:
+            pool_name = next_pool_name(pools)
+            assignment_probe = _combined_capability_probe(key_probe)
+    else:
+        pool_name = _select_pool_after_probe_failure(
+            pools, pool_probes, key_name, key_probe
+        )
+        if not pool_name:
+            return section_panel("[yellow]配置未变化。[/yellow]", "添加 Key", "yellow")
+    draft["pool_name"] = pool_name
     pool = pools.setdefault(pool_name, {"keys": [], "models": []})
     pool_keys = pool.setdefault("keys", [])
     if key_name not in pool_keys:
         pool_keys.append(key_name)
-    with console.status(f"[cyan]正在探测 {pool_name} 模型池可用模型和路由...[/cyan]", spinner="dots"):
-        probe = apply_pool_probe(provider, pool_name)
+    selected_probe = pool_probes.get(pool_name)
+    if not key_probe.get("errors") and (
+        selected_probe is None or not selected_probe.get("errors")
+    ):
+        _update_pool_capability_probe(
+            pool,
+            assignment_probe
+            or _combined_capability_probe(
+                key_probe,
+                *([selected_probe] if selected_probe is not None else []),
+            ),
+        )
     enabled_models = prompt_pool_enabled_models(pool)
     enable_pool_models(data, provider_id, pool_name, enabled_models)
+    RouterConfig.from_dict(data)
     restart = commit_v2_config(path, data, old_config)
     FORM_DRAFTS.pop("add_provider_key", None)
     return Group(
         section_panel(
-            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池: [bold]{pool_name}[/bold]\n已启用模型: [bold]{len(enabled_models)}[/bold]\n共同可用模型: [bold]{len(probe.get('models') or [])}[/bold]",
+            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池: [bold]{pool_name}[/bold]\n已启用模型: [bold]{len(enabled_models)}[/bold]\n共同可用模型: [bold]{len(pool_available_models(pool))}[/bold]",
             "添加完成",
             "green",
         ),
