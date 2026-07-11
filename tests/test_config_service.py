@@ -34,6 +34,37 @@ def config_data(api_key: str = "sk-a") -> dict[str, object]:
     }
 
 
+def test_stream_timeouts_have_defaults_and_accept_custom_values() -> None:
+    defaults = RouterConfig.from_dict(config_data())
+    custom_data = config_data()
+    custom_data["stream_first_byte_timeout"] = 12.5
+    custom_data["stream_idle_timeout"] = 34.5
+
+    custom = RouterConfig.from_dict(custom_data)
+
+    assert defaults.stream_first_byte_timeout == 90
+    assert defaults.stream_idle_timeout == 180
+    assert custom.stream_first_byte_timeout == 12.5
+    assert custom.stream_idle_timeout == 34.5
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("stream_first_byte_timeout", 0),
+        ("stream_first_byte_timeout", -1),
+        ("stream_idle_timeout", 0),
+        ("stream_idle_timeout", -1),
+    ],
+)
+def test_stream_timeouts_must_be_positive(field: str, value: float) -> None:
+    data = config_data()
+    data[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        RouterConfig.from_dict(data)
+
+
 def test_update_validates_and_atomically_commits_config(tmp_path: Path) -> None:
     path = tmp_path / "router-config.json"
     path.write_text(json.dumps(config_data()), encoding="utf-8")

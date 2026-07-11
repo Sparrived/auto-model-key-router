@@ -185,6 +185,8 @@ def empty_config_dict() -> dict[str, Any]:
         "default_base_url": "https://api.openai.com",
         "upstream_routes": {},
         "request_timeout": 60,
+        "stream_first_byte_timeout": 90,
+        "stream_idle_timeout": 180,
         "max_retries": 2,
         "key_failure_threshold": 2,
         "key_cooldown_seconds": 60,
@@ -408,6 +410,8 @@ class RouterConfig:
     log_file_path: str
     local_api_key: str
     models: tuple[ModelConfig, ...]
+    stream_first_byte_timeout: float = 90
+    stream_idle_timeout: float = 180
     providers: tuple[ProviderConfig, ...] = ()
     upstream_routes: dict[str, dict[str, str]] = field(default_factory=dict)
     unified_model: UnifiedModelConfig | None = None
@@ -606,6 +610,10 @@ class RouterConfig:
             host=str(raw.get("host", "127.0.0.1")),
             port=int(raw.get("port", 8000)),
             request_timeout=float(raw.get("request_timeout", 60)),
+            stream_first_byte_timeout=float(
+                raw.get("stream_first_byte_timeout", 90)
+            ),
+            stream_idle_timeout=float(raw.get("stream_idle_timeout", 180)),
             max_retries=int(raw.get("max_retries", 2)),
             key_failure_threshold=max(1, int(raw.get("key_failure_threshold", 2))),
             key_cooldown_seconds=max(0.0, float(raw.get("key_cooldown_seconds", 60))),
@@ -626,6 +634,10 @@ class RouterConfig:
         return config
 
     def validate(self) -> None:
+        if self.stream_first_byte_timeout <= 0:
+            raise ValueError("stream_first_byte_timeout 必须大于 0")
+        if self.stream_idle_timeout <= 0:
+            raise ValueError("stream_idle_timeout 必须大于 0")
         if self.local_api_key == VISITOR_API_KEY:
             raise ValueError(f"local_api_key 不能使用保留的访客 key: {VISITOR_API_KEY}")
 
