@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -13,6 +15,36 @@ from .metrics import MetricsStore
 
 
 RETRYABLE_STATUS_CODES = frozenset({401, 403, 429, 500, 502, 503, 504, 521})
+
+
+async def iter_stream_bytes(
+    chunks: AsyncIterator[bytes],
+    *,
+    first_byte_deadline: float,
+    idle_timeout: float,
+) -> AsyncIterator[bytes]:
+    iterator = aiter(chunks)
+    remaining = max(
+        0, first_byte_deadline - asyncio.get_running_loop().time()
+    )
+    try:
+        async with asyncio.timeout(remaining):
+            first = await anext(iterator)
+    except StopAsyncIteration:
+        return
+    except TimeoutError as exc:
+        raise TimeoutError("timed out waiting for first stream byte") from exc
+    yield first
+
+    while True:
+        try:
+            async with asyncio.timeout(idle_timeout):
+                chunk = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            raise TimeoutError("timed out waiting for next stream byte") from exc
+        yield chunk
 
 
 @dataclass
