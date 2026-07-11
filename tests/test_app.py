@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -52,6 +53,18 @@ class ChunkedStream(httpx.AsyncByteStream):
             yield chunk
 
 
+class HangingStream(httpx.AsyncByteStream):
+    def __init__(self, *, delay_first: bool = False) -> None:
+        self.delay_first = delay_first
+
+    async def __aiter__(self):
+        if self.delay_first:
+            await anyio.sleep(0.05)
+        yield b'data: {"choices":[{"delta":{"content":"one"}}]}\n\n'
+        await anyio.sleep(0.05)
+        yield b"data: [DONE]\n\n"
+
+
 def run_client(app: FastAPI, action: Callable[[httpx.AsyncClient], Awaitable[T]]) -> T:
     return anyio.run(_run_client, app, action)
 
@@ -73,6 +86,8 @@ def make_config(
     reasoning_effort: str | None = None,
     routing_mode: str = "round_robin",
     max_retries: int = 1,
+    stream_first_byte_timeout: float = 90,
+    stream_idle_timeout: float = 180,
     unified_model: UnifiedModelConfig | None = None,
     upstream_routes: dict[str, dict[str, str]] | None = None,
 ) -> RouterConfig:
@@ -80,6 +95,8 @@ def make_config(
         host="127.0.0.1",
         port=8000,
         request_timeout=10,
+        stream_first_byte_timeout=stream_first_byte_timeout,
+        stream_idle_timeout=stream_idle_timeout,
         max_retries=max_retries,
         key_failure_threshold=1,
         key_cooldown_seconds=60,
@@ -1176,6 +1193,143 @@ def test_stream_request_disables_upstream_read_timeout() -> None:
         assert upstream_timeouts[0]["connect"] == config.request_timeout
 
 
+def test_stream_response_header_timeout_retries_next_key() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        calls: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            authorization = request.headers["authorization"]
+            calls.append(authorization)
+            if authorization == "Bearer sk-1":
+                await anyio.sleep(0.05)
+            return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+            stream_first_byte_timeout=0.01,
+        )
+        app = create_app(config)
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [], "stream": True},
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert response.text == "data: [DONE]\n\n"
+        assert calls == ["Bearer sk-1", "Bearer sk-2"]
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("chat/completions", {"model": "test-model", "messages": [], "stream": True}),
+        (
+            "messages",
+            {"model": "test-model", "messages": [], "max_tokens": 16, "stream": True},
+        ),
+        ("responses", {"model": "test-model", "input": "hi", "stream": True}),
+    ],
+)
+def test_protocol_stream_idle_timeout_records_failure_and_releases_key(
+    path: str, payload: dict[str, object]
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        stream_calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if request.url.path.endswith("/v1/responses") and not body.get("stream"):
+                return httpx.Response(404, json={"error": "unsupported"})
+            stream_calls.append(str(request.url))
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=HangingStream(),
+            )
+
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+            stream_idle_timeout=0.01,
+        )
+        app = create_app(config)
+        runtime = app.state.runtime_manager.current
+        runtime.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, dict[str, object], dict[tuple[str, str], int]]:
+            response = await client.post(
+                f"/v1/{path}",
+                headers={"Authorization": "Bearer local-key"},
+                json=payload,
+            )
+            snapshot = await runtime.metrics.snapshot()
+            return response, snapshot, dict(runtime.key_pool._active_requests)
+
+        response, snapshot, active_requests = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert len(stream_calls) == 1
+        assert snapshot["keys"]["test-model"]["key-1"]["failures"] == 1
+        assert active_requests == {}
+
+
+def test_stream_body_first_byte_timeout_does_not_replay_request() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.headers["authorization"])
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=HangingStream(delay_first=True),
+            )
+
+        config = make_config(
+            Path(directory),
+            (
+                KeyConfig("key-1", "sk-1", "https://upstream-one.test"),
+                KeyConfig("key-2", "sk-2", "https://upstream-two.test"),
+            ),
+            stream_first_byte_timeout=0.01,
+        )
+        app = create_app(config)
+        runtime = app.state.runtime_manager.current
+        runtime.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, dict[str, object], dict[tuple[str, str], int]]:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "test-model", "messages": [], "stream": True},
+            )
+            snapshot = await runtime.metrics.snapshot()
+            return response, snapshot, dict(runtime.key_pool._active_requests)
+
+        response, snapshot, active_requests = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert calls == ["Bearer sk-1"]
+        assert snapshot["keys"]["test-model"]["key-1"]["failures"] == 1
+        assert active_requests == {}
+
+
 def test_chat_completions_stream_splits_and_flushes_sse_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1709,6 +1863,8 @@ def test_anthropic_stream_yields_between_sse_events(
                 "test-model",
                 "https://upstream.test/v1/chat/completions",
                 perf_counter(),
+                first_byte_deadline=asyncio.get_running_loop().time() + 1,
+                idle_timeout=1,
             ):
                 chunks.append(chunk)
             await app.state.runtime_manager.current.metrics.close()
@@ -2440,6 +2596,8 @@ def test_stream_error_logs_upstream_context(caplog: pytest.LogCaptureFixture) ->
                 "test-model",
                 "https://upstream.test/v1/chat/completions",
                 perf_counter(),
+                first_byte_deadline=asyncio.get_running_loop().time() + 1,
+                idle_timeout=1,
             ):
                 chunks.append(chunk)
             await app.state.runtime_manager.current.metrics.close()
@@ -2485,6 +2643,8 @@ def test_anthropic_stream_error_logs_upstream_context(
                 "test-model",
                 "https://upstream.test/v1/chat/completions",
                 perf_counter(),
+                first_byte_deadline=asyncio.get_running_loop().time() + 1,
+                idle_timeout=1,
             ):
                 chunks.append(chunk)
             await app.state.runtime_manager.current.metrics.close()

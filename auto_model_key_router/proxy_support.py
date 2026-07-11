@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -283,6 +284,7 @@ async def _send_upstream(
     body: bytes,
     stream: bool = False,
     timeout: httpx.Timeout | None = None,
+    first_byte_deadline: float | None = None,
 ) -> httpx.Response:
     request_kwargs: dict[str, Any] = {
         "params": request.query_params,
@@ -291,14 +293,25 @@ async def _send_upstream(
     }
     if timeout is not None:
         request_kwargs["timeout"] = timeout
-    response = await client.send(
-        client.build_request(
-            request.method,
-            upstream,
-            **request_kwargs,
-        ),
-        stream=True,
+    upstream_request = client.build_request(
+        request.method,
+        upstream,
+        **request_kwargs,
     )
+    try:
+        if first_byte_deadline is None:
+            response = await client.send(upstream_request, stream=True)
+        else:
+            remaining = max(
+                0, first_byte_deadline - asyncio.get_running_loop().time()
+            )
+            async with asyncio.timeout(remaining):
+                response = await client.send(upstream_request, stream=True)
+    except TimeoutError as exc:
+        raise httpx.ReadTimeout(
+            "timed out waiting for upstream response headers",
+            request=upstream_request,
+        ) from exc
     try:
         if not stream:
             await response.aread()

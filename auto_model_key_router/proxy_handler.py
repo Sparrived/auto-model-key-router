@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -54,7 +55,12 @@ from .proxy_support import (
 )
 from .runtime import RuntimeResources
 from .routing import RetryPolicy
-from .streaming import RETRYABLE_STATUS_CODES, StreamLifecycle, retry_after_seconds
+from .streaming import (
+    RETRYABLE_STATUS_CODES,
+    StreamLifecycle,
+    iter_stream_bytes,
+    retry_after_seconds,
+)
 
 
 LOGGER = logging.getLogger("auto_model_key_router.app")
@@ -413,6 +419,12 @@ async def _execute_attempt(
         },
     )
     started = perf_counter()
+    first_byte_deadline = (
+        asyncio.get_running_loop().time()
+        + runtime.config.stream_first_byte_timeout
+        if context.is_stream
+        else None
+    )
     try:
         response = await _send_upstream(
             runtime.http_client,
@@ -422,6 +434,7 @@ async def _execute_attempt(
             upstream_body,
             stream=context.is_stream,
             timeout=_upstream_timeout(runtime.config, context.is_stream),
+            first_byte_deadline=first_byte_deadline,
         )
     except httpx.RequestError as exc:
         duration_ms = _elapsed_ms(started)
@@ -498,6 +511,12 @@ async def _execute_attempt(
             },
         )
         fallback_started = perf_counter()
+        first_byte_deadline = (
+            asyncio.get_running_loop().time()
+            + runtime.config.stream_first_byte_timeout
+            if context.is_stream
+            else None
+        )
         try:
             fallback_response = await _send_upstream(
                 runtime.http_client,
@@ -507,6 +526,7 @@ async def _execute_attempt(
                 fallback_body,
                 stream=context.is_stream,
                 timeout=_upstream_timeout(runtime.config, context.is_stream),
+                first_byte_deadline=first_byte_deadline,
             )
         except httpx.RequestError as exc:
             fallback_duration_ms = _elapsed_ms(fallback_started)
@@ -599,6 +619,12 @@ async def _execute_attempt(
                 reasoning_model_id=context.model_id,
             )
             retry_started = perf_counter()
+            first_byte_deadline = (
+                asyncio.get_running_loop().time()
+                + runtime.config.stream_first_byte_timeout
+                if context.is_stream
+                else None
+            )
             try:
                 retry_response = await _send_upstream(
                     runtime.http_client,
@@ -608,6 +634,7 @@ async def _execute_attempt(
                     filtered_body,
                     stream=context.is_stream,
                     timeout=_upstream_timeout(runtime.config, context.is_stream),
+                    first_byte_deadline=first_byte_deadline,
                 )
                 retry_duration_ms = _elapsed_ms(retry_started)
                 # 如果重试成功，使用重试的响应
@@ -677,9 +704,16 @@ async def _execute_attempt(
             )
 
     if context.is_stream:
+        assert first_byte_deadline is not None
         return AttemptOutcome(
             response=_streaming_response(
-                context, key, response, upstream, started, native_upstream=use_native
+                context,
+                key,
+                response,
+                upstream,
+                started,
+                first_byte_deadline,
+                native_upstream=use_native,
             ),
             stream_owns_key=True,
         )
@@ -696,6 +730,7 @@ def _streaming_response(
     response: httpx.Response,
     upstream: str,
     started: float,
+    first_byte_deadline: float,
     *,
     native_upstream: bool = False,
 ) -> StreamingResponse:
@@ -721,6 +756,8 @@ def _streaming_response(
         upstream,
         started,
         context.caller_type,
+        first_byte_deadline=first_byte_deadline,
+        idle_timeout=runtime.config.stream_idle_timeout,
     )
     media_type = response.headers.get("content-type")
     response_headers = _response_headers(response)
@@ -737,6 +774,8 @@ def _streaming_response(
             upstream,
             started,
             context.caller_type,
+            first_byte_deadline=first_byte_deadline,
+            idle_timeout=runtime.config.stream_idle_timeout,
         )
         media_type = "text/event-stream"
         _set_streaming_headers(response_headers)
@@ -751,6 +790,8 @@ def _streaming_response(
             upstream,
             started,
             context.caller_type,
+            first_byte_deadline=first_byte_deadline,
+            idle_timeout=runtime.config.stream_idle_timeout,
         )
         media_type = "text/event-stream"
         _set_streaming_headers(response_headers)
@@ -925,6 +966,9 @@ async def _stream_upstream(
     upstream: str,
     started: float,
     caller_type: str = "local",
+    *,
+    first_byte_deadline: float,
+    idle_timeout: float,
 ):
     lifecycle = StreamLifecycle(
         response,
@@ -942,7 +986,11 @@ async def _stream_upstream(
     is_sse = _is_sse_media_type(response.headers.get("content-type"))
     failed = False
     try:
-        async for chunk in response.aiter_bytes():
+        async for chunk in iter_stream_bytes(
+            response.aiter_bytes(),
+            first_byte_deadline=first_byte_deadline,
+            idle_timeout=idle_timeout,
+        ):
             lifecycle.observe_chunk(chunk)
             buffer, chunk_usage = _stream_usage(buffer, chunk)
             if chunk_usage is not None:
@@ -1008,6 +1056,9 @@ async def _stream_anthropic_messages(
     upstream: str,
     started: float,
     caller_type: str = "local",
+    *,
+    first_byte_deadline: float,
+    idle_timeout: float,
 ):
     lifecycle = StreamLifecycle(
         response,
@@ -1047,7 +1098,11 @@ async def _stream_anthropic_messages(
                 },
             },
         )
-        async for chunk in response.aiter_bytes():
+        async for chunk in iter_stream_bytes(
+            response.aiter_bytes(),
+            first_byte_deadline=first_byte_deadline,
+            idle_timeout=idle_timeout,
+        ):
             lifecycle.observe_chunk(chunk)
             buffer, events, chunk_usage = _anthropic_stream_events(
                 buffer, chunk, stream_state
@@ -1132,6 +1187,9 @@ async def _stream_responses(
     upstream: str,
     started: float,
     caller_type: str = "local",
+    *,
+    first_byte_deadline: float,
+    idle_timeout: float,
 ):
     lifecycle = StreamLifecycle(
         response,
@@ -1148,7 +1206,11 @@ async def _stream_responses(
     failed = False
     stream_state: dict[str, Any] = {"text": [], "text_started": False, "tool_calls": {}}
     try:
-        async for chunk in response.aiter_bytes():
+        async for chunk in iter_stream_bytes(
+            response.aiter_bytes(),
+            first_byte_deadline=first_byte_deadline,
+            idle_timeout=idle_timeout,
+        ):
             lifecycle.observe_chunk(chunk)
             buffer, events, chunk_usage = _responses_stream_events(
                 buffer, chunk, stream_state
