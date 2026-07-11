@@ -3187,6 +3187,130 @@ def test_probe_provider_key_capabilities_records_models_and_errors(monkeypatch) 
     }
 
 
+def test_next_pool_name_uses_default_then_first_free_number() -> None:
+    assert config_editor.next_pool_name({}) == "default"
+    assert config_editor.next_pool_name({"custom": {}}) == "pool-2"
+    assert config_editor.next_pool_name(
+        {"default": {}, "pool-2": {}, "pool-4": {}}
+    ) == "pool-3"
+
+
+def test_matching_pool_names_uses_only_latest_successful_model_sets() -> None:
+    pools = {
+        "first": {"available_models": ["gpt-b", "gpt-a"]},
+        "enabled-only": {"models": ["gpt-a", "gpt-b"]},
+        "extra": {"available_models": ["gpt-a", "gpt-b", "gpt-c"]},
+    }
+
+    assert config_editor.matching_pool_names(pools, ["gpt-a", "gpt-b"]) == [
+        "first"
+    ]
+    assert config_editor.matching_pool_names(
+        pools,
+        ["gpt-a", "gpt-b"],
+        {
+            "first": {"models": ["gpt-a", "gpt-b"], "errors": {"k1": "HTTP 401"}},
+            "enabled-only": {"models": ["gpt-b", "gpt-a"], "errors": {}},
+        },
+    ) == ["enabled-only"]
+
+
+def test_merge_provider_pools_preserves_order_and_applies_latest_probe() -> None:
+    data = {
+        "providers": {
+            "vendor": {
+                "keys": {},
+                "pools": {
+                    "first": {
+                        "keys": ["k2", "k1"],
+                        "models": ["gpt-a"],
+                        "available_models": ["stale"],
+                        "errors": {"k1": "stale"},
+                    },
+                    "other": {"keys": ["k4"], "models": ["gpt-c"]},
+                    "duplicate": {
+                        "keys": ["k1", "k3"],
+                        "models": ["gpt-b", "gpt-a"],
+                    },
+                },
+            }
+        },
+        "models": {
+            "local": {
+                "targets": [
+                    {"provider": "vendor", "pool": "duplicate", "upstream_model": "gpt-a"},
+                    {"provider": "vendor", "pool": "first", "upstream_model": "gpt-a"},
+                    {"provider": "other", "pool": "duplicate", "upstream_model": "gpt-a"},
+                ]
+            }
+        },
+    }
+    probe = {
+        "models": ["gpt-a", "gpt-b"],
+        "all_models": ["gpt-a", "gpt-b", "gpt-new"],
+        "key_models": {"k1": ["gpt-a"], "k2": ["gpt-a", "gpt-b"]},
+        "routes": {"k1": {"openai": True}},
+        "errors": {},
+        "checked_at": "2026-07-11T01:02:03+00:00",
+    }
+
+    kept = config_editor.merge_provider_pools(
+        data, "vendor", ["duplicate", "first"], probe
+    )
+
+    assert kept == "first"
+    assert list(data["providers"]["vendor"]["pools"]) == ["first", "other"]
+    assert data["providers"]["vendor"]["pools"]["first"] == {
+        "keys": ["k2", "k1", "k3"],
+        "models": ["gpt-a", "gpt-b"],
+        "available_models": ["gpt-a", "gpt-b"],
+        "all_available_models": ["gpt-a", "gpt-b", "gpt-new"],
+        "key_models": {"k1": ["gpt-a"], "k2": ["gpt-a", "gpt-b"]},
+        "routes": {"k1": {"openai": True}},
+        "errors": {},
+        "checked_at": "2026-07-11T01:02:03+00:00",
+    }
+    assert data["models"]["local"]["targets"] == [
+        {"provider": "vendor", "pool": "first", "upstream_model": "gpt-a"},
+        {"provider": "other", "pool": "duplicate", "upstream_model": "gpt-a"},
+    ]
+
+
+def test_cleanup_empty_pools_removes_targets_models_and_updates_unified_model() -> None:
+    data = {
+        "providers": {
+            "vendor": {
+                "keys": {"live": {"api_key": "sk-live"}},
+                "pools": {
+                    "empty": {"keys": [], "models": ["gpt-old"]},
+                    "live": {"keys": ["live"], "models": ["gpt-live"]},
+                },
+            }
+        },
+        "models": {
+            "remove": {
+                "targets": [
+                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-old"}
+                ]
+            },
+            "keep": {
+                "targets": [
+                    {"provider": "vendor", "pool": "live", "upstream_model": "gpt-live"}
+                ]
+            },
+            "already-empty": {"targets": [], "aliases": ["legacy"]},
+        },
+        "unified_model": {"model": "remove", "key": "old"},
+    }
+
+    removed = config_editor.cleanup_empty_pools_and_models(data, "vendor")
+
+    assert removed == {"remove", "already-empty"}
+    assert list(data["providers"]["vendor"]["pools"]) == ["live"]
+    assert list(data["models"]) == ["keep"]
+    assert data["unified_model"] == {"model": "keep"}
+
+
 def test_probe_key_availability_posts_all_text_routes(monkeypatch) -> None:
     requests = []
 

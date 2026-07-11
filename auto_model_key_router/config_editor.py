@@ -381,6 +381,133 @@ def pool_enabled_models(pool: Any) -> list[str]:
     return [str(model_id) for model_id in models if str(model_id)] if isinstance(models, list) else []
 
 
+def next_pool_name(pools: dict[str, Any]) -> str:
+    if not pools:
+        return "default"
+    index = 2
+    while f"pool-{index}" in pools:
+        index += 1
+    return f"pool-{index}"
+
+
+def matching_pool_names(
+    pools: dict[str, Any],
+    models: list[str],
+    probes: dict[str, Any] | None = None,
+) -> list[str]:
+    expected = set(models)
+    matches: list[str] = []
+    for pool_name, pool in pools.items():
+        source = probes.get(pool_name) if probes is not None else pool
+        if not isinstance(source, dict) or source.get("errors"):
+            continue
+        available = source.get("models") if probes is not None else source.get("available_models")
+        if isinstance(available, list) and set(map(str, available)) == expected:
+            matches.append(str(pool_name))
+    return matches
+
+
+def merge_provider_pools(
+    data: dict[str, Any],
+    provider_id: str,
+    pool_names: list[str],
+    probe: dict[str, Any],
+) -> str:
+    pools = provider_pools(raw_providers(data)[provider_id])
+    selected = set(pool_names)
+    ordered_names = [str(name) for name in pools if name in selected]
+    if not ordered_names:
+        raise ValueError("没有可合并的模型池")
+    selected = set(ordered_names)
+    kept_name = ordered_names[0]
+    kept_pool = pools[kept_name]
+    if not isinstance(kept_pool, dict):
+        kept_pool = {"keys": pool_key_names(kept_pool), "models": []}
+        pools[kept_name] = kept_pool
+
+    kept_pool["keys"] = list(
+        dict.fromkeys(
+            key_name
+            for pool_name in ordered_names
+            for key_name in pool_key_names(pools[pool_name])
+        )
+    )
+    kept_pool["models"] = list(
+        dict.fromkeys(
+            model_id
+            for pool_name in ordered_names
+            for model_id in pool_enabled_models(pools[pool_name])
+        )
+    )
+
+    metadata_names = {
+        "available_models",
+        "all_available_models",
+        "key_models",
+        "routes",
+        "errors",
+        "checked_at",
+        "manual_models",
+    }
+    for name in metadata_names:
+        kept_pool.pop(name, None)
+    if "models" in probe:
+        kept_pool["available_models"] = deepcopy(probe["models"])
+    if "all_models" in probe:
+        kept_pool["all_available_models"] = deepcopy(probe["all_models"])
+    for name, value in probe.items():
+        if name not in {"models", "all_models"}:
+            kept_pool[name] = deepcopy(value)
+
+    for model in raw_v2_models(data).values():
+        rewritten: list[dict[str, Any]] = []
+        for target in model_targets(model):
+            if target.get("provider") == provider_id and target.get("pool") in selected:
+                target["pool"] = kept_name
+            if target not in rewritten:
+                rewritten.append(target)
+        model["targets"] = rewritten
+    for pool_name in ordered_names[1:]:
+        pools.pop(pool_name)
+    return kept_name
+
+
+def cleanup_empty_pools_and_models(
+    data: dict[str, Any], provider_id: str
+) -> set[str]:
+    pools = provider_pools(raw_providers(data)[provider_id])
+    empty_pool_names = {
+        str(pool_name) for pool_name, pool in pools.items() if not pool_key_names(pool)
+    }
+    for pool_name in empty_pool_names:
+        pools.pop(pool_name)
+
+    models = raw_v2_models(data)
+    removed_models: set[str] = set()
+    for model_id, model in list(models.items()):
+        targets = model_targets(model)
+        targets[:] = [
+            target
+            for target in targets
+            if not (
+                target.get("provider") == provider_id
+                and target.get("pool") in empty_pool_names
+            )
+        ]
+        if not targets:
+            models.pop(model_id)
+            removed_models.add(str(model_id))
+
+    unified = data.get("unified_model")
+    if isinstance(unified, dict) and unified.get("model") not in models:
+        fallback_model = fallback_unified_model(models)
+        if fallback_model is None:
+            data.pop("unified_model", None)
+        else:
+            data["unified_model"] = {"model": fallback_model}
+    return removed_models
+
+
 def ensure_default_pool(provider: dict[str, Any]) -> None:
     keys = provider_keys(provider)
     pools = provider_pools(provider)
