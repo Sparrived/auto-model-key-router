@@ -1272,6 +1272,34 @@ def add_provider_key_interactively(
             ),
             record_errors=True,
         )
+    else:
+        historical_all = pool.get(
+            "all_available_models", pool.get("available_models", [])
+        )
+        pool["available_models"] = []
+        pool["all_available_models"] = sorted(
+            set(map(str, historical_all))
+            | set(map(str, key_probe.get("all_models", [])))
+        )
+        historical_key_models = pool.get("key_models", {})
+        pool["key_models"] = {
+            **(
+                deepcopy(historical_key_models)
+                if isinstance(historical_key_models, dict)
+                else {}
+            ),
+            **deepcopy(key_probe.get("key_models", {})),
+        }
+        pool["errors"] = {
+            **deepcopy(selected_probe.get("errors", {})),
+            **deepcopy(key_probe.get("errors", {})),
+        }
+        pool["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if key_probe.get("routes"):
+            pool["routes"] = {
+                **deepcopy(pool.get("routes", {})),
+                **deepcopy(key_probe["routes"]),
+            }
     enabled_models = prompt_pool_enabled_models(pool)
     enable_pool_models(data, provider_id, pool_name, enabled_models)
     RouterConfig.from_dict(data)

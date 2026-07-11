@@ -2200,10 +2200,81 @@ def test_add_provider_key_probe_failure_uses_status_marked_manual_assignment(
     pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
     assert "main" in pools[target_pool]["keys"]
-    assert pools["existing"]["available_models"] == ["stale"]
+    assert pools["existing"]["available_models"] == (
+        [] if target_pool == "existing" else ["stale"]
+    )
     labels = dict(menus[0][1])
     assert "探测失败" in labels["1"]
     assert "新建" in labels["n"]
+
+
+@pytest.mark.parametrize(
+    ("new_models", "new_error"),
+    [(["gpt-new"], None), ([], "HTTP 403")],
+)
+def test_add_provider_key_selected_failed_pool_synchronizes_diagnostics(
+    tmp_path, monkeypatch, new_models, new_error
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 3,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"old": {"api_key": "sk-old"}},
+                        "pools": {
+                            "existing": {
+                                "keys": ["old"],
+                                "models": [],
+                                "available_models": ["stale-common"],
+                                "all_available_models": ["stale-all"],
+                                "key_models": {"old": ["stale-all"]},
+                                "routes": {"old": {"openai": True}},
+                            }
+                        },
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompts = iter(["main", "sk-main"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
+
+    def probe(provider, key_names, **kwargs):
+        if key_names == ["main"]:
+            return {
+                "models": new_models,
+                "all_models": new_models,
+                "key_models": {"main": new_models},
+                "errors": {"main": new_error} if new_error else {},
+            }
+        return {
+            "models": [],
+            "all_models": [],
+            "key_models": {"old": []},
+            "errors": {"old": "HTTP 401"},
+        }
+
+    monkeypatch.setattr(config_editor, "probe_provider_key_capabilities", probe)
+    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+
+    config_editor.add_provider_key_interactively(config_path, "vendor")
+    pool = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]["existing"]
+
+    assert pool["available_models"] == []
+    assert pool["all_available_models"] == sorted(["stale-all", *new_models])
+    assert pool["key_models"] == {"old": ["stale-all"], "main": new_models}
+    assert pool["routes"] == {"old": {"openai": True}}
+    assert pool["errors"] == {
+        "old": "HTTP 401",
+        **({"main": new_error} if new_error else {}),
+    }
 
 
 @pytest.mark.parametrize("empty_probe", ["new-key", "existing-pool"])
