@@ -2804,6 +2804,31 @@ def test_model_suffix_returns_error_for_unknown_key() -> None:
         )
 
 
+def test_missing_model_error_names_requested_model_and_configuration_action() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
+        )
+        app = create_app(config)
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "codex-review-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 404
+        assert response.json()["error"]["message"] == (
+            "模型 codex-review-model 未配置；请先在 AMKR 的模型设置中配置该模型"
+        )
+
+
 def test_duplicate_key_name_is_rejected() -> None:
     with pytest.raises(ValueError, match="key name 重复"):
         RouterConfig.from_dict(

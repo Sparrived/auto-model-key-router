@@ -229,7 +229,15 @@ async def _prepare_proxy_request(
             path, requested_model_id, model_id, "no_configured_keys"
         )
         return JSONResponse(
-            {"error": {"message": f"未配置模型: {model_id}"}}, status_code=404
+            {
+                "error": {
+                    "message": (
+                        f"模型 {requested_model_id} 未配置；"
+                        "请先在 AMKR 的模型设置中配置该模型"
+                    )
+                }
+            },
+            status_code=404,
         )
     if key_count == 0:
         return JSONResponse(
@@ -336,7 +344,14 @@ async def _select_key(
             "key_selection_failed",
         )
         return JSONResponse(
-            {"error": {"message": f"未配置模型: {context.model_id}"}},
+            {
+                "error": {
+                    "message": (
+                        f"模型 {context.requested_model_id} 未配置；"
+                        "请先在 AMKR 的模型设置中配置该模型"
+                    )
+                }
+            },
             status_code=404,
         )
     except RuntimeError as exc:
