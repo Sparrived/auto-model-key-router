@@ -13,6 +13,8 @@ from rich.table import Table
 from rich.text import Text
 
 from .agent_config import (
+    AGENT_MODE_NATIVE,
+    AGENT_MODE_UNIFIED_MODEL,
     CLAUDE_CODE,
     CODEX,
     AgentConfigError,
@@ -372,13 +374,21 @@ def manage_agent_config_interactively(config_path: Path, agent: str) -> None:
         )
         choice = select_option(
             f"{name} 一键配置",
-            [("1", "应用路由配置"), ("2", rollback_label), ("0", "返回")],
+            [
+                ("1", "应用 unified-model 模式"),
+                ("2", "应用原生模式"),
+                ("3", rollback_label),
+                ("0", "返回"),
+            ],
             content=agent_config_status_panel(config, agent),
         )
         if choice == "0":
             return
-        if choice == "1":
-            result = configure_agent_interactively(config_path, agent)
+        if choice in {"1", "2"}:
+            mode = (
+                AGENT_MODE_UNIFIED_MODEL if choice == "1" else AGENT_MODE_NATIVE
+            )
+            result = configure_agent_interactively(config_path, agent, mode)
             show_result_page(f"{name} 配置", result)
             continue
         if not status.backup_available:
@@ -404,11 +414,11 @@ def manage_agent_config_interactively(config_path: Path, agent: str) -> None:
         show_result_page(f"{name} 回退", result)
 
 
-def configure_agent_interactively(config_path: Path, agent: str) -> Any:
+def configure_agent_interactively(config_path: Path, agent: str, mode: str) -> Any:
     name = agent_display_name(agent)
     try:
         config = RouterConfig.load(config_path)
-        result = configure_agent(agent, config)
+        result = configure_agent(agent, config, mode=mode)
     except (OSError, AgentConfigError) as exc:
         return section_panel(f"[red]{exc}[/red]", f"{name} 配置失败", "red")
 
@@ -420,13 +430,18 @@ def configure_agent_interactively(config_path: Path, agent: str) -> Any:
     extra_targets = "".join(
         f"附加文件: [bold]{path}[/bold]\n" for path in result.extra_target_paths
     )
+    model_status = (
+        f"请求模型: [bold cyan]{UNIFIED_MODEL_ID}[/bold cyan]\n"
+        if mode == AGENT_MODE_UNIFIED_MODEL
+        else "Agent 模型由用户配置，必须先在 AMKR 中配置。\n"
+    )
     return Group(
         section_panel(
             f"已将 {name} 指向本项目路由。\n"
             f"配置文件: [bold]{result.target_path}[/bold]\n"
             f"{extra_targets}"
             f"路由地址: [bold]{result.router_url}[/bold]\n"
-            f"请求模型: [bold cyan]{UNIFIED_MODEL_ID}[/bold cyan]\n"
+            f"{model_status}"
             f"原配置缓存: [bold]{result.backup_path}[/bold]\n\n"
             f"{service_status}",
             f"{name} 配置完成",
@@ -439,11 +454,16 @@ def agent_config_status_panel(config: RouterConfig, agent: str) -> Any:
     name = agent_display_name(agent)
     status = get_agent_config_status(agent)
     if status.current_is_applied:
-        applied_status = "[green]已应用当前路由配置[/green]"
+        mode_label = (
+            "原生模式"
+            if status.mode == AGENT_MODE_NATIVE
+            else "unified-model 模式"
+        )
+        applied_status = f"[green]AMKR 接管：{mode_label}[/green]"
     elif status.backup_available:
         applied_status = "[yellow]配置已变化，仍可回退到应用前内容[/yellow]"
     else:
-        applied_status = "[dim]尚未由本项目配置[/dim]"
+        applied_status = "[dim]尚未由 AMKR 接管[/dim]"
     unified_status = (
         f"[green]{UNIFIED_MODEL_ID} → {config.unified_model.model}[/green]"
         + (

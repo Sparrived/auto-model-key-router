@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 import sqlite3
 import subprocess
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -1226,6 +1227,131 @@ def test_one_click_config_menu_routes_to_agent_submenu(tmp_path, monkeypatch) ->
     dashboard.manage_one_click_config_interactively(config_path)
 
     assert agents == [dashboard.CLAUDE_CODE]
+
+
+@pytest.mark.parametrize(
+    ("choice", "expected_mode"),
+    [
+        ("1", "unified-model"),
+        ("2", "native"),
+    ],
+)
+def test_agent_config_menu_dispatches_selected_mode(
+    tmp_path, monkeypatch, choice, expected_mode
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        encoding="utf-8",
+    )
+    choices = iter([choice, "0"])
+    menus = []
+    modes = []
+    status = SimpleNamespace(
+        target_path=tmp_path / "config.toml",
+        backup_path=tmp_path / "backup.json",
+        backup_available=False,
+        current_is_applied=False,
+        mode=None,
+    )
+
+    def choose(title, options, selected=0, content=None, **kwargs):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(dashboard, "select_option", choose)
+    monkeypatch.setattr(dashboard, "get_agent_config_status", lambda agent: status)
+    monkeypatch.setattr(
+        dashboard,
+        "configure_agent_interactively",
+        lambda path, agent, mode: modes.append(mode) or Text("configured"),
+    )
+    monkeypatch.setattr(dashboard, "show_result_page", lambda *args: None)
+
+    dashboard.manage_agent_config_interactively(config_path, dashboard.CODEX)
+
+    assert menus[0] == [
+        ("1", "应用 unified-model 模式"),
+        ("2", "应用原生模式"),
+        ("3", "回退原配置（无备份）"),
+        ("0", "返回"),
+    ]
+    assert modes == [expected_mode]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_label"),
+    [
+        (
+            SimpleNamespace(
+                target_path=Path("config.toml"),
+                backup_path=Path("backup.json"),
+                backup_available=True,
+                current_is_applied=True,
+                mode="native",
+            ),
+            "AMKR 接管：原生模式",
+        ),
+        (
+            SimpleNamespace(
+                target_path=Path("config.toml"),
+                backup_path=Path("backup.json"),
+                backup_available=True,
+                current_is_applied=True,
+                mode="unified-model",
+            ),
+            "AMKR 接管：unified-model 模式",
+        ),
+        (
+            SimpleNamespace(
+                target_path=Path("config.toml"),
+                backup_path=Path("backup.json"),
+                backup_available=False,
+                current_is_applied=False,
+                mode=None,
+            ),
+            "尚未由 AMKR 接管",
+        ),
+    ],
+)
+def test_agent_config_status_panel_shows_managed_mode_label(
+    monkeypatch, status, expected_label
+) -> None:
+    config = dashboard.RouterConfig.from_dict(
+        {"config_version": 3, "providers": {}, "models": {}}
+    )
+    monkeypatch.setattr(dashboard, "get_agent_config_status", lambda agent: status)
+
+    assert expected_label in render_plain(
+        dashboard.agent_config_status_panel(config, dashboard.CODEX)
+    )
+
+
+def test_native_agent_config_success_explains_model_is_user_configured(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"config_version": 3, "local_api_key": "local-key", "providers": {}, "models": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "configure_agent",
+        lambda agent, config, mode: SimpleNamespace(
+            target_path=tmp_path / "config.toml",
+            backup_path=tmp_path / "backup.json",
+            router_url="http://127.0.0.1:8000/v1",
+            extra_target_paths=(),
+        ),
+    )
+    monkeypatch.setattr(dashboard, "is_service_healthy", lambda *args, **kwargs: True)
+
+    result = dashboard.configure_agent_interactively(
+        config_path, dashboard.CODEX, "native"
+    )
+
+    assert "Agent 模型由用户配置，必须先在 AMKR 中配置。" in render_plain(result)
 
 
 def test_model_service_menu_moves_autostart_into_single_entry(tmp_path, monkeypatch) -> None:
