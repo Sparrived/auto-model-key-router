@@ -169,6 +169,7 @@ GET/POST/PUT/DELETE /api/providers/{id}/pools
 GET/POST/PUT/DELETE /api/routes
 POST /api/probes/keys
 POST /api/probes/pools
+POST /api/probes/{probe_id}/cancel
 POST /api/config/export
 POST /api/config/import
 ```
@@ -319,4 +320,3 @@ POST /api/config/import
 | 用户误泄露上游 Key | API 不返回明文、UI 默认遮罩、复制操作短暂反馈 |
 | 后端升级导致桌面端不兼容 | 健康检查返回版本，维护兼容范围并提供只读降级 |
 | Windows 权限变化 | 默认用户级任务；系统级任务单独 UAC 流程 |
-
