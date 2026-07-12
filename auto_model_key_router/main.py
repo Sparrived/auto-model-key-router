@@ -12,7 +12,7 @@ from .dashboard import render_config, run_terminal_ui
 from .logs_tui import render_logs
 from .service import background_status_panel, manage_system_service, service_status_panel, start_service_background, start_service_foreground, stop_background_service
 from .tui import clear_terminal_history, console, section_panel
-from .unified_model import switch_unified_model
+from .unified_model import switch_unified_model, switch_unified_target
 from .update import check_latest_version, render_version_check_result, restart_service_after_update, update_latest_version
 
 
@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--show-config", action="store_true", help="只展示配置摘要，不启动服务")
     parser.add_argument("--switch-model", metavar="MODEL", help=f"切换 {UNIFIED_MODEL_ID} 指向的已有模型或别名")
     parser.add_argument("--switch-key", metavar="KEY", help=f"切换 {UNIFIED_MODEL_ID} 使用的已有 key；传 auto 恢复自动路由")
+    parser.add_argument("--unified-target", choices=["default.primary", "default.fallback", "image.primary", "image.fallback"], default="default.primary", help="选择要修改的 unified 路由目标")
     parser.add_argument("--show-unified-model", action="store_true", help=f"查看 {UNIFIED_MODEL_ID} 当前指向")
     parser.add_argument("--show-logs", nargs="?", const=20, type=int, help="进入调用日志，显示最近 N 行运行日志，调用统计明细固定 10 行/页")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -77,8 +78,9 @@ def main() -> None:
 
         if args.switch_model is not None or args.switch_key is not None:
             try:
-                config = switch_unified_model(
+                config = switch_unified_target(
                     config_path,
+                    args.unified_target,
                     args.switch_model,
                     None if args.switch_key == "auto" else args.switch_key,
                     update_key=args.switch_key is not None,

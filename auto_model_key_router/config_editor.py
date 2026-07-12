@@ -2191,8 +2191,17 @@ def replace_unified_model_alias(
     data: dict[str, Any], model: dict[str, Any], alias: str
 ) -> None:
     unified_model = data.get("unified_model")
-    if isinstance(unified_model, dict) and unified_model.get("model") == alias:
+    if not isinstance(unified_model, dict):
+        return
+    if unified_model.get("model") == alias:
         unified_model["model"] = model["id"]
+        return
+    for plan in (unified_model.get("default"), unified_model.get("image")):
+        if not isinstance(plan, dict):
+            continue
+        for target in (plan.get("primary"), plan.get("fallback")):
+            if isinstance(target, dict) and target.get("model") == alias:
+                target["model"] = model["id"]
 
 
 def save_model_alias_change(

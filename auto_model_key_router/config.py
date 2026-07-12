@@ -222,6 +222,23 @@ def save_config_data(path: Path, data: dict[str, Any]) -> None:
 
 def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(raw)
+    unified_model = normalized.get("unified_model")
+    if isinstance(unified_model, dict) and "default" not in unified_model:
+        model = str(unified_model.get("model") or "").strip()
+        if model:
+            default: dict[str, Any] = {
+                "primary": {"model": model, "key": unified_model.get("key")}
+            }
+            migrated_unified: dict[str, Any] = {"default": default}
+            image_model = str(unified_model.get("image_model") or "").strip()
+            if image_model:
+                migrated_unified["image"] = {
+                    "primary": {
+                        "model": image_model,
+                        "key": unified_model.get("image_key"),
+                    }
+                }
+            normalized["unified_model"] = migrated_unified
     if "endpoint_capabilities_path" not in normalized and normalized.get(
         "key_state_path"
     ):
@@ -395,11 +412,57 @@ class ProviderConfig:
 
 
 @dataclass(frozen=True)
-class UnifiedModelConfig:
+class RouteTarget:
     model: str
     key: str | None = None
-    image_model: str | None = None
-    image_key: str | None = None
+
+
+@dataclass(frozen=True)
+class RoutePlan:
+    primary: RouteTarget
+    fallback: RouteTarget | None = None
+
+
+@dataclass(frozen=True, init=False)
+class UnifiedModelConfig:
+    default: RoutePlan
+    image: RoutePlan | None = None
+
+    def __init__(
+        self,
+        default: RoutePlan | None = None,
+        image: RoutePlan | None = None,
+        *,
+        model: str | None = None,
+        key: str | None = None,
+        image_model: str | None = None,
+        image_key: str | None = None,
+    ) -> None:
+        # Legacy constructor compatibility; parsed configs always use RoutePlan.
+        if default is None:
+            if not model:
+                raise ValueError("unified_model.default.primary.model 不能为空")
+            default = RoutePlan(RouteTarget(model, key))
+        if image is None and image_model:
+            image = RoutePlan(RouteTarget(image_model, image_key))
+        object.__setattr__(self, "default", default)
+        object.__setattr__(self, "image", image)
+
+    @property
+    def model(self) -> str:
+        return self.default.primary.model
+
+    @property
+    def key(self) -> str | None:
+        return self.default.primary.key
+
+    @property
+    def image_model(self) -> str | None:
+        return self.image.primary.model if self.image else None
+
+    @property
+    def image_key(self) -> str | None:
+        return self.image.primary.key if self.image else None
 
 
 @dataclass(frozen=True)
@@ -633,18 +696,40 @@ class RouterConfig:
         if raw_unified_model is not None:
             if not isinstance(raw_unified_model, dict):
                 raise ValueError("unified_model 必须是对象")
-            target_model = str(raw_unified_model.get("model") or "").strip()
-            target_key = str(raw_unified_model.get("key") or "").strip() or None
-            if not target_model:
-                raise ValueError("unified_model.model 不能为空")
-            target_image_model = str(raw_unified_model.get("image_model") or "").strip() or None
-            target_image_key = str(raw_unified_model.get("image_key") or "").strip() or None
-            unified_model = UnifiedModelConfig(
-                model=target_model,
-                key=target_key,
-                image_model=target_image_model,
-                image_key=target_image_key,
+            model_ids_by_name = {
+                name: model.id
+                for model in models
+                for name in (model.id, *model.aliases)
+            }
+
+            def parse_target(value: Any, field_name: str) -> RouteTarget:
+                if not isinstance(value, dict):
+                    raise ValueError(f"{field_name} 必须是对象")
+                model_name = str(value.get("model") or "").strip()
+                model_id = model_ids_by_name.get(model_name)
+                if model_id is None:
+                    raise ValueError(f"{field_name} 引用了未配置的模型: {model_name}")
+                key_name = str(value.get("key") or "").strip() or None
+                return RouteTarget(model_id, key_name)
+
+            def parse_plan(value: Any, field_name: str) -> RoutePlan:
+                if not isinstance(value, dict):
+                    raise ValueError(f"{field_name} 必须是对象")
+                primary = parse_target(value.get("primary"), f"{field_name}.primary")
+                fallback = (
+                    parse_target(value["fallback"], f"{field_name}.fallback")
+                    if value.get("fallback") is not None
+                    else None
+                )
+                return RoutePlan(primary, fallback)
+
+            default_plan = parse_plan(raw_unified_model.get("default"), "unified_model.default")
+            image_plan = (
+                parse_plan(raw_unified_model["image"], "unified_model.image")
+                if raw_unified_model.get("image") is not None
+                else None
             )
+            unified_model = UnifiedModelConfig(default_plan, image_plan)
 
         config = cls(
             host=str(raw.get("host", "127.0.0.1")),
@@ -721,14 +806,21 @@ class RouterConfig:
             return
         if UNIFIED_MODEL_ID in model_names:
             raise ValueError(f"启用 unified_model 时，模型 ID 和别名不能使用保留名称: {UNIFIED_MODEL_ID}")
-        target_model_id = model_ids_by_name.get(self.unified_model.model)
-        if target_model_id is None:
-            raise ValueError(f"unified_model 引用了未配置的模型: {self.unified_model.model}")
-        if self.unified_model.key is None:
-            return
-        target_model = models_by_id[target_model_id]
-        if not any(key.name == self.unified_model.key and key.enabled for key in target_model.keys):
-            raise ValueError(f"模型 {target_model_id} 未配置可用 key: {self.unified_model.key}")
+        for plan_name, plan in (("default", self.unified_model.default), ("image", self.unified_model.image)):
+            if plan is None:
+                continue
+            if plan.fallback and plan.primary.model == plan.fallback.model:
+                raise ValueError(f"unified_model.{plan_name} 的 primary 和 fallback 不能引用同一模型")
+            for target_name, target in (("primary", plan.primary), ("fallback", plan.fallback)):
+                if target is None:
+                    continue
+                target_model = models_by_id.get(target.model)
+                if target_model is None:
+                    raise ValueError(f"unified_model.{plan_name}.{target_name} 引用了未配置的模型: {target.model}")
+                if target.key is not None and not any(
+                    key.name == target.key and key.enabled for key in target_model.keys
+                ):
+                    raise ValueError(f"模型 {target.model} 未配置可用 key: {target.key}")
 
     def configured_model_id(self, model_name: str) -> str | None:
         for model in self.models:

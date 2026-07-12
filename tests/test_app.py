@@ -23,6 +23,8 @@ from auto_model_key_router.config import (
     VISITOR_API_KEY,
     KeyConfig,
     ModelConfig,
+    RoutePlan,
+    RouteTarget,
     RouterConfig,
     UnifiedModelConfig,
 )
@@ -335,9 +337,8 @@ def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
         visitor_internal_alias,
     ) = run_client(app, requests)
 
-    assert [model["id"] for model in local_models.json()["data"]] == [
-        UNIFIED_MODEL_ID,
-    ]
+    assert UNIFIED_MODEL_ID in {model["id"] for model in local_models.json()["data"]}
+    assert "gpt-5.5" in {model["id"] for model in local_models.json()["data"]}
     assert [model["id"] for model in visitor_models.json()["data"]] == [
         "amkr-external-public-model",
         "amkr-gpt-5.5",
@@ -2212,7 +2213,9 @@ def test_unified_model_routes_to_configured_model_and_key() -> None:
 
         assert response.status_code == 200
         assert UNIFIED_MODEL_ID in {model["id"] for model in models.json()["data"]}
-        assert health.json()["unified_model"] == {"model": "test-model", "key": "key-2"}
+        assert health.json()["unified_model"] == {
+            "default": {"primary": {"model": "test-model", "key": "key-2"}}
+        }
         assert upstream_bodies[0]["model"] == "test-model"
         assert authorization_headers == ["Bearer sk-2"]
 
@@ -2309,8 +2312,7 @@ def test_switch_unified_model_hot_reloads_model_and_key() -> None:
         assert upstream_models == ["model-one", "model-two"]
         assert authorization_headers == ["Bearer sk-one", "Bearer sk-two-b"]
         assert json.loads(config_path.read_text(encoding="utf-8"))["unified_model"] == {
-            "model": "model-two",
-            "key": "two-b",
+            "default": {"primary": {"model": "model-two", "key": "two-b"}}
         }
 
 
@@ -2363,6 +2365,31 @@ def test_switching_unified_model_clears_old_key_and_can_restore_auto_routing(
     assert automatic.unified_model == UnifiedModelConfig(model="model-two")
 
 
+def test_switch_unified_target_updates_default_fallback(tmp_path: Path) -> None:
+    from auto_model_key_router.unified_model import switch_unified_target
+
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "local_api_key": "local-key",
+                "models": [
+                    {"id": "main", "keys": [{"name": "main-key", "api_key": "sk-main", "base_url": "https://main.test"}]},
+                    {"id": "backup", "keys": [{"name": "backup-key", "api_key": "sk-backup", "base_url": "https://backup.test"}]},
+                ],
+                "unified_model": {"model": "main"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = switch_unified_target(config_path, "default.fallback", "backup")
+
+    assert config.unified_model is not None
+    assert config.unified_model.default.fallback is not None
+    assert config.unified_model.default.fallback.model == "backup"
+
+
 def test_unified_model_rejects_unknown_or_disabled_key() -> None:
     with pytest.raises(ValueError, match="未配置可用 key"):
         RouterConfig.from_dict(
@@ -2383,6 +2410,88 @@ def test_unified_model_rejects_unknown_or_disabled_key() -> None:
                 ],
             }
         )
+
+
+def test_unified_model_parses_nested_primary_and_fallback_routes() -> None:
+    config = RouterConfig.from_dict(
+        {
+            "unified_model": {
+                "default": {
+                    "primary": {"model": "chat-alias", "key": "chat-key"},
+                    "fallback": {"model": "backup-model"},
+                },
+                "image": {
+                    "primary": {"model": "image-model"},
+                    "fallback": {"model": "backup-image"},
+                },
+            },
+            "models": [
+                {"id": "chat-model", "aliases": ["chat-alias"], "keys": [{"name": "chat-key", "api_key": "sk-chat", "base_url": "https://chat.test"}]},
+                {"id": "backup-model", "keys": [{"name": "backup-key", "api_key": "sk-backup", "base_url": "https://backup.test"}]},
+                {"id": "image-model", "keys": [{"name": "image-key", "api_key": "sk-image", "base_url": "https://image.test"}]},
+                {"id": "backup-image", "keys": [{"name": "backup-image-key", "api_key": "sk-backup-image", "base_url": "https://backup-image.test"}]},
+            ],
+        }
+    )
+
+    assert config.unified_model is not None
+    assert config.unified_model.default.primary.model == "chat-model"
+    assert config.unified_model.default.primary.key == "chat-key"
+    assert config.unified_model.default.fallback is not None
+    assert config.unified_model.default.fallback.model == "backup-model"
+    assert config.unified_model.image is not None
+    assert config.unified_model.image.primary.model == "image-model"
+
+
+def test_unified_model_uses_fallback_after_primary_retryable_failure() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_models: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            model = json.loads(request.content.decode("utf-8"))["model"]
+            upstream_models.append(model)
+            if model == "primary-model":
+                return httpx.Response(503, json={"error": {"message": "unavailable"}})
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = replace(
+            make_config(
+                Path(directory),
+                (KeyConfig("primary-key", "sk-primary", "https://primary.test"),),
+                unified_model=UnifiedModelConfig(
+                    RoutePlan(
+                        RouteTarget("primary-model"), RouteTarget("fallback-model")
+                    )
+                ),
+            ),
+            models=(
+                ModelConfig(
+                    "primary-model",
+                    (KeyConfig("primary-key", "sk-primary", "https://primary.test"),),
+                ),
+                ModelConfig(
+                    "fallback-model",
+                    (KeyConfig("fallback-key", "sk-fallback", "https://fallback.test"),),
+                ),
+            ),
+        )
+        app = create_app(config)
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def request(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": UNIFIED_MODEL_ID, "messages": []},
+            )
+
+        response = run_client(app, request)
+
+        assert response.status_code == 200
+        assert response.headers["x-amkr-fallback"] == "true"
+        assert upstream_models == ["primary-model", "primary-model", "fallback-model"]
 
 
 def test_acquired_key_is_released_when_proxy_raises() -> None:

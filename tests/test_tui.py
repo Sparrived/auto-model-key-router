@@ -1150,7 +1150,9 @@ def test_tui_switches_unified_model_and_key(tmp_path, monkeypatch) -> None:
     result = dashboard.switch_unified_model_interactively(config_path, choose_model=True)
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert data["unified_model"] == {"model": "model-two", "key": "two-b"}
+    assert data["unified_model"] == {
+        "default": {"primary": {"model": "model-two", "key": "two-b"}}
+    }
     assert "model-two" in render_plain(result)
     assert "two-b" in render_plain(result)
     assert all("disabled" not in label for _, label in menus[1])
@@ -1179,7 +1181,9 @@ def test_tui_can_restore_unified_model_auto_routing(tmp_path, monkeypatch) -> No
     result = dashboard.switch_unified_model_interactively(config_path, choose_model=False)
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert data["unified_model"] == {"model": "test-model"}
+    assert data["unified_model"] == {
+        "default": {"primary": {"model": "test-model"}}
+    }
     assert "自动路由" in render_plain(result)
 
 
@@ -2055,7 +2059,9 @@ def test_delete_provider_cleans_targets_models_and_unified_fallback(
     assert saved["models"]["shared"]["targets"] == [
         {"provider": "keep", "pool": "default"}
     ]
-    assert saved["unified_model"] == {"model": "shared"}
+    assert saved["unified_model"] == {
+        "default": {"primary": {"model": "shared", "key": None}}
+    }
 
 
 def test_delete_provider_falls_back_when_unified_model_uses_removed_alias(
@@ -2106,7 +2112,9 @@ def test_delete_provider_falls_back_when_unified_model_uses_removed_alias(
     config_editor.delete_provider_interactively(config_path, "remove")
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert saved["unified_model"] == {"model": "shared"}
+    assert saved["unified_model"] == {
+        "default": {"primary": {"model": "shared", "key": None}}
+    }
 
 
 def test_delete_provider_clears_removed_unified_model_key(
@@ -2156,7 +2164,9 @@ def test_delete_provider_clears_removed_unified_model_key(
     config_editor.delete_provider_interactively(config_path, "remove")
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert saved["unified_model"] == {"model": "shared"}
+    assert saved["unified_model"] == {
+        "default": {"primary": {"model": "shared", "key": None}}
+    }
 
 
 def test_model_settings_menu_includes_route_controls(tmp_path, monkeypatch) -> None:
@@ -2305,7 +2315,9 @@ def test_delete_model_updates_unified_model_fallback(tmp_path, monkeypatch) -> N
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert "delete-me" not in saved["models"]
-    assert saved["unified_model"] == {"model": "keep-me"}
+    assert saved["unified_model"] == {
+        "default": {"primary": {"model": "keep-me", "key": None}}
+    }
 
 
 def test_v2_summary_model_section_focuses_on_mapping() -> None:
@@ -3290,7 +3302,9 @@ def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkey
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert "local-model" not in data["models"]
-    assert data["unified_model"] == {"model": "backup-model"}
+    assert data["unified_model"] == {
+        "default": {"primary": {"model": "backup-model", "key": None}}
+    }
 
 
 def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
@@ -3601,7 +3615,9 @@ def test_model_alias_crud_updates_config_and_preserves_unified_model(tmp_path, m
                         "targets": [{"provider": "gateway", "pool": "main", "upstream_model": "model-one"}],
                     }
                 },
-                "unified_model": {"model": "old-alias"},
+                "unified_model": {
+                    "default": {"primary": {"model": "old-alias"}}
+                },
             },
             ensure_ascii=False,
         ),
@@ -3629,7 +3645,9 @@ def test_model_alias_crud_updates_config_and_preserves_unified_model(tmp_path, m
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["models"]["model-one"]["aliases"] == ["renamed-alias"]
-    assert saved["unified_model"] == {"model": "model-one"}
+    assert saved["unified_model"] == {
+        "default": {"primary": {"model": "model-one"}}
+    }
 
 
 def test_add_model_alias_rejects_name_collision_without_saving(tmp_path, monkeypatch) -> None:

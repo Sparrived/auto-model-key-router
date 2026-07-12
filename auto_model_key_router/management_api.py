@@ -72,10 +72,12 @@ class ModelUpdate(APIModel):
 
 
 class UnifiedModelUpdate(APIModel):
-    model: str = Field(min_length=1)
+    model: str | None = Field(default=None, min_length=1)
     key: str | None = None
     image_model: str | None = None
     image_key: str | None = None
+    default: dict[str, Any] | None = None
+    image: dict[str, Any] | None = None
 
 
 class ManagementAPIError(Exception):
@@ -86,25 +88,41 @@ class ManagementAPIError(Exception):
 
 
 def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
+    def serialize_unified(config: RouterConfig) -> dict[str, Any] | None:
+        unified = config.unified_model
+        if unified is None:
+            return None
+        def serialize_plan(plan: Any) -> dict[str, Any]:
+            result = {"primary": {"model": plan.primary.model, "key": plan.primary.key}}
+            if plan.fallback:
+                result["fallback"] = {"model": plan.fallback.model, "key": plan.fallback.key}
+            return result
+        result = {"default": serialize_plan(unified.default)}
+        if unified.image:
+            result["image"] = serialize_plan(unified.image)
+        return result
+
     @app.get("/api/unified-model", tags=["management"])
     async def get_unified_model(request: Request) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
-        if config.unified_model is None:
-            return {"unified_model": None}
-        result: dict[str, Any] = {
-            "model": config.unified_model.model,
-            "key": config.unified_model.key,
-        }
-        if config.unified_model.image_model:
-            result["image_model"] = config.unified_model.image_model
-            result["image_key"] = config.unified_model.image_key
-        return {"unified_model": result}
+        return {"unified_model": serialize_unified(config)}
 
     @app.put("/api/unified-model", tags=["management"])
     async def update_unified_model(
         request: Request, payload: UnifiedModelUpdate
     ) -> dict[str, Any]:
         fields = _payload_dict(payload)
+        if fields.get("default") is not None:
+            def nested_mutation(data: dict[str, Any]) -> None:
+                unified_data: dict[str, Any] = {"default": fields["default"]}
+                if fields.get("image") is not None:
+                    unified_data["image"] = fields["image"]
+                data["unified_model"] = unified_data
+
+            config = await _update_config(request, reload_config, nested_mutation)
+            return {"unified_model": serialize_unified(config)}
+        if fields.get("model") is None:
+            raise ManagementAPIError(422, "必须提供 model 或 default")
         target_model = str(fields["model"]).strip()
         key_provided = "key" in fields
         target_key = str(fields["key"]).strip() if fields.get("key") else None
@@ -127,19 +145,28 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                     raise ManagementAPIError(
                         404, f"模型 {resolved_id} 的 key 不存在: {target_key}"
                     )
+            existing = data.get("unified_model")
+            existing_primary = (
+                existing.get("default", {}).get("primary", {})
+                if isinstance(existing, dict)
+                else {}
+            )
+            existing_key = (
+                existing_primary.get("key")
+                if isinstance(existing_primary, dict)
+                else (existing.get("key") if isinstance(existing, dict) else None)
+            )
             unified_data: dict[str, Any] = {"model": resolved_id}
             if key_provided:
                 if target_key:
                     unified_data["key"] = target_key
             else:
-                existing = data.get("unified_model")
-                if isinstance(existing, dict) and existing.get("key"):
-                    unified_data["key"] = existing["key"]
+                if existing_key:
+                    unified_data["key"] = existing_key
             # 图像模型映射
             existing_image_model = None
-            existing = data.get("unified_model")
             if isinstance(existing, dict):
-                existing_image_model = existing.get("image_model")
+                existing_image_model = existing.get("image_model") or existing.get("image", {}).get("primary", {}).get("model")
             if image_model_provided:
                 if target_image_model:
                     resolved_image_id = _resolve_model_id(models, target_image_model)
@@ -157,14 +184,7 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             data["unified_model"] = unified_data
 
         config = await _update_config(request, reload_config, mutation)
-        result: dict[str, Any] = {
-            "model": config.unified_model.model,
-            "key": config.unified_model.key,
-        }
-        if config.unified_model.image_model:
-            result["image_model"] = config.unified_model.image_model
-            result["image_key"] = config.unified_model.image_key
-        return {"unified_model": result}
+        return {"unified_model": serialize_unified(config)}
 
     @app.delete(
         "/api/unified-model",

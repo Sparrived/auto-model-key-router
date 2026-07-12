@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Any
 
@@ -100,7 +100,39 @@ async def handle_proxy_request(
     prepared = await _prepare_proxy_request(path, request, runtime)
     if isinstance(prepared, Response):
         return prepared
-    context = prepared
+    response = await _handle_single_target(prepared)
+    if prepared.requested_model_name != UNIFIED_MODEL_ID or response.status_code not in RETRYABLE_STATUS_CODES:
+        return response
+    plan = runtime.key_pool.resolve_unified_plan(
+        "image" if path in ("images/generations", "images/edits") else "default",
+        prepared.requested_key_name,
+    )
+    if plan.fallback is None:
+        return response
+    fallback_key_count = runtime.key_pool.key_count(plan.fallback.model)
+    if fallback_key_count == 0:
+        return response
+    fallback_context = replace(
+        prepared,
+        model_id=plan.fallback.model,
+        requested_key_name=plan.fallback.key,
+        key_count=fallback_key_count,
+        only_first=runtime.key_pool.routing_mode(plan.fallback.model) == "only_first",
+        attempts=RetryPolicy(runtime.config.max_retries).attempts(
+            key_count=fallback_key_count,
+            requested_key_name=plan.fallback.key,
+            only_first=runtime.key_pool.routing_mode(plan.fallback.model) == "only_first",
+        ),
+        cache_affinity_key=_cache_affinity_key(path, prepared.payload, plan.fallback.model),
+    )
+    response = await _handle_single_target(fallback_context)
+    if response.status_code < 400:
+        response.headers["X-AMKR-Fallback"] = "true"
+    return response
+
+
+async def _handle_single_target(context: ProxyRequestContext) -> Response:
+    runtime = context.runtime
     excluded: set[str] = set()
     last_error: JSONResponse | None = None
 

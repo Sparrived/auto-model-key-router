@@ -5,7 +5,7 @@ from collections import defaultdict
 from time import time
 from typing import Any
 
-from .config import UNIFIED_MODEL_ID, KeyConfig, RouterConfig
+from .config import UNIFIED_MODEL_ID, KeyConfig, RoutePlan, RouteTarget, RouterConfig
 from .endpoint_capabilities import EndpointCapabilityCache
 from .endpoint_capability_store import EndpointCapabilityStore
 from .key_health import KeyHealthStore
@@ -53,19 +53,16 @@ class KeyPool:
                 if model_id.startswith(VISITOR_MODEL_PREFIX)
             }
         )
-        self._unified_model_id = None
-        self._unified_key_name = None
-        self._unified_image_model_id = None
-        self._unified_image_key_name = None
-        if config.unified_model is not None:
-            self._unified_model_id = self._aliases[config.unified_model.model]
-            self._unified_key_name = config.unified_model.key
-            self._aliases[UNIFIED_MODEL_ID] = self._unified_model_id
-            if config.unified_model.image_model:
-                self._unified_image_model_id = self._aliases[
-                    config.unified_model.image_model
-                ]
-                self._unified_image_key_name = config.unified_model.image_key
+        def canonical_plan(plan: RoutePlan) -> RoutePlan:
+            def canonical_target(target: RouteTarget) -> RouteTarget:
+                return RouteTarget(self._aliases[target.model], target.key)
+            return RoutePlan(
+                canonical_target(plan.primary),
+                canonical_target(plan.fallback) if plan.fallback else None,
+            )
+
+        self._unified_default = canonical_plan(config.unified_model.default) if config.unified_model else None
+        self._unified_image = canonical_plan(config.unified_model.image) if config.unified_model and config.unified_model.image else None
 
     @property
     def model_ids(self) -> list[str]:
@@ -82,13 +79,14 @@ class KeyPool:
                 for public_model_id, model_id in self._visitor_routes.items()
                 if self.keys_for_model(model_id, visitor_only=True)
             )
-        if self._unified_model_id is not None:
-            return [UNIFIED_MODEL_ID]
-        return sorted(
+        result = sorted(
             name
             for name, model_id in self._aliases.items()
             if self.keys_for_model(model_id)
         )
+        if self._unified_default is not None:
+            result.append(UNIFIED_MODEL_ID)
+        return result
 
     def resolve_model_id(self, model_id: str) -> str:
         return self._aliases.get(model_id, model_id)
@@ -99,26 +97,31 @@ class KeyPool:
     def resolve_route(
         self, model_id: str, key_name: str | None = None, *, path: str | None = None
     ) -> tuple[str, str | None]:
-        if model_id == UNIFIED_MODEL_ID and key_name is None:
-            if (
-                path in ("images/generations", "images/edits")
-                and self._unified_image_model_id is not None
-            ):
-                return self._unified_image_model_id, self._unified_image_key_name
-            key_name = self._unified_key_name
+        if model_id == UNIFIED_MODEL_ID:
+            plan = self.resolve_unified_plan("image" if path in ("images/generations", "images/edits") else "default", key_name)
+            return plan.primary.model, plan.primary.key
         return self.resolve_model_id(model_id), key_name
+
+    def resolve_unified_plan(self, route_kind: str, key_name: str | None = None) -> RoutePlan:
+        plan = self._unified_image if route_kind == "image" and self._unified_image else self._unified_default
+        if plan is None:
+            raise KeyError(UNIFIED_MODEL_ID)
+        if key_name is None:
+            return plan
+        return RoutePlan(RouteTarget(plan.primary.model, key_name), plan.fallback)
 
     @property
     def unified_route(self) -> dict[str, str | None] | None:
-        if self._unified_model_id is None:
+        if self._unified_default is None:
             return None
-        result: dict[str, str | None] = {
-            "model": self._unified_model_id,
-            "key": self._unified_key_name,
-        }
-        if self._unified_image_model_id is not None:
-            result["image_model"] = self._unified_image_model_id
-            result["image_key"] = self._unified_image_key_name
+        def serialize(plan: RoutePlan) -> dict[str, Any]:
+            result: dict[str, Any] = {"primary": {"model": plan.primary.model, "key": plan.primary.key}}
+            if plan.fallback:
+                result["fallback"] = {"model": plan.fallback.model, "key": plan.fallback.key}
+            return result
+        result: dict[str, Any] = {"default": serialize(self._unified_default)}
+        if self._unified_image:
+            result["image"] = serialize(self._unified_image)
         return result
 
     def key_count(self, model_id: str) -> int:

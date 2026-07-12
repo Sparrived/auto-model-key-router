@@ -498,20 +498,39 @@ def test_unified_model_crud_via_api(tmp_path: Path) -> None:
     assert get_empty.status_code == 200
     assert get_empty.json()["unified_model"] is None
     assert set_ok.status_code == 200
-    assert set_ok.json()["unified_model"]["model"] == "model-a"
-    assert set_ok.json()["unified_model"]["key"] is None
+    assert set_ok.json()["unified_model"]["default"]["primary"] == {"model": "model-a", "key": None}
     assert get_after_set.status_code == 200
-    assert get_after_set.json()["unified_model"]["model"] == "model-a"
+    assert get_after_set.json()["unified_model"]["default"]["primary"]["model"] == "model-a"
     assert update_with_key.status_code == 200
-    assert update_with_key.json()["unified_model"]["key"] == "key-a"
+    assert update_with_key.json()["unified_model"]["default"]["primary"]["key"] == "key-a"
     # Same model without key → keeps existing key
     assert change_model.status_code == 200
-    assert change_model.json()["unified_model"]["key"] == "key-a"
+    assert change_model.json()["unified_model"]["default"]["primary"]["key"] == "key-a"
     # Explicit key then null → auto routing
     assert set_key_again.status_code == 200
-    assert set_key_again.json()["unified_model"]["key"] == "key-a"
+    assert set_key_again.json()["unified_model"]["default"]["primary"]["key"] == "key-a"
     assert clear_key.status_code == 200
-    assert clear_key.json()["unified_model"]["key"] is None
+    assert clear_key.json()["unified_model"]["default"]["primary"]["key"] is None
+
+
+def test_unified_model_accepts_nested_api_payload(tmp_path: Path) -> None:
+    app, _ = create_file_backed_app(tmp_path)
+
+    response = run_client(
+        app,
+        lambda client: client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={
+                "default": {
+                    "primary": {"model": "model-a"},
+                }
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["unified_model"]["default"]["primary"]["model"] == "model-a"
 
 
 def test_unified_model_rejects_unknown_model(tmp_path: Path) -> None:

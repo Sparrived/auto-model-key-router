@@ -276,7 +276,10 @@ async def _reload_config_if_changed(state: Any) -> None:
             http_client = _new_http_client(config.request_timeout)
         if old_config.metrics_db_path != config.metrics_db_path:
             metrics = await asyncio.to_thread(MetricsStore, config.metrics_db_path)
-        key_pool = await asyncio.to_thread(KeyPool, config)
+        try:
+            key_pool = await asyncio.to_thread(KeyPool, config)
+        except (OSError, ValueError, KeyError):
+            return
         metrics.on_record = old_runtime.metrics.on_record
         await state.runtime_manager.replace(
             RuntimeResources(config, key_pool, metrics, http_client)

@@ -287,11 +287,23 @@ def unified_model_status_panel(
             f"目标模型: [bold]{config.unified_model.model}[/bold]\n"
             f"使用 Key: [bold green]{config.unified_model.key or '自动路由'}[/bold green]"
         )
+        fallback = config.unified_model.default.fallback
+        if fallback:
+            content += (
+                f"\n熔断模型: [bold]{fallback.model}[/bold]\n"
+                f"熔断 Key: [bold green]{fallback.key or '自动路由'}[/bold green]"
+            )
         if config.unified_model.image_model:
             content += (
                 f"\n图像模型: [bold]{config.unified_model.image_model}[/bold]\n"
                 f"图像 Key: [bold green]{config.unified_model.image_key or '自动路由'}[/bold green]"
             )
+            image_fallback = config.unified_model.image.fallback if config.unified_model.image else None
+            if image_fallback:
+                content += (
+                    f"\n图像熔断模型: [bold]{image_fallback.model}[/bold]\n"
+                    f"图像熔断 Key: [bold green]{image_fallback.key or '自动路由'}[/bold green]"
+                )
     return section_panel(content, title, color)
 
 
