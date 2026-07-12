@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tomllib
 from pathlib import Path
@@ -7,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from auto_model_key_router.agent_config import (
+    AGENT_MODE_NATIVE,
+    AGENT_MODE_UNIFIED_MODEL,
     CLAUDE_CODE,
     CODEX,
     AgentConfigError,
@@ -31,6 +34,20 @@ def make_config(*, host: str = "127.0.0.1", port: int = 8000, local_api_key: str
                     "keys": [{"name": "main", "api_key": "upstream-key", "base_url": "https://upstream.test"}],
                 }
             ],
+        }
+    )
+
+
+def make_native_config(
+    *, host: str = "127.0.0.1", port: int = 8000, local_api_key: str = "local-key"
+) -> RouterConfig:
+    return RouterConfig.from_dict(
+        {
+            "config_version": 3,
+            "host": host,
+            "port": port,
+            "local_api_key": local_api_key,
+            "models": {},
         }
     )
 
@@ -246,3 +263,129 @@ def test_configure_codex_writes_model_reasoning_effort_from_config(tmp_path: Pat
 def test_router_origin_uses_loopback_for_wildcard_and_brackets_ipv6() -> None:
     assert router_origin(make_config(host="0.0.0.0")) == "http://127.0.0.1:8000"
     assert router_origin(make_config(host="::1")) == "http://[::1]:8000"
+
+
+@pytest.mark.parametrize(
+    ("agent", "target_name"),
+    ((CLAUDE_CODE, "settings.json"), (CODEX, "config.toml")),
+)
+def test_configure_native_mode_needs_no_unified_model_and_reports_mode(
+    tmp_path: Path, agent: str, target_name: str
+) -> None:
+    target = tmp_path / target_name
+    backup = tmp_path / "backups" / f"{agent}.json"
+    if agent == CLAUDE_CODE:
+        target.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "KEEP": "yes",
+                        "ANTHROPIC_MODEL": "old",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "old",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "old",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    result = configure_agent(
+        agent,
+        make_native_config(),
+        mode=AGENT_MODE_NATIVE,
+        target_path=target,
+        backup_path=backup,
+    )
+
+    status = get_agent_config_status(agent, target_path=target, backup_path=backup)
+    assert result.mode == AGENT_MODE_NATIVE
+    assert status.mode == AGENT_MODE_NATIVE
+    assert status.current_is_applied
+    if agent == CLAUDE_CODE:
+        env = json.loads(target.read_text(encoding="utf-8"))["env"]
+        assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "local-key"
+        assert env["KEEP"] == "yes"
+        assert not {
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        } & env.keys()
+    else:
+        configured = tomllib.loads(target.read_text(encoding="utf-8"))
+        assert configured["model_provider"] == "OpenAI"
+        assert {"model", "review_model", "model_reasoning_effort"}.isdisjoint(configured)
+        assert json.loads((target.parent / "auth.json").read_text(encoding="utf-8"))["OPENAI_API_KEY"] == "local-key"
+
+
+def test_unified_to_native_transition_rolls_back_exactly_including_codex_auth(tmp_path: Path) -> None:
+    target = tmp_path / ".codex" / "config.toml"
+    auth = target.parent / "auth.json"
+    backup = tmp_path / "backups" / "codex.json"
+    original = b'profile = "keep"\n'
+    original_auth = b'{"OPENAI_API_KEY": "original", "other": "keep"}\n'
+    target.parent.mkdir()
+    target.write_bytes(original)
+    auth.write_bytes(original_auth)
+
+    configure_agent(CODEX, make_config(), target_path=target, backup_path=backup)
+    configure_agent(
+        CODEX,
+        make_native_config(local_api_key="native-key"),
+        mode=AGENT_MODE_NATIVE,
+        target_path=target,
+        backup_path=backup,
+    )
+
+    configured = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert {"model", "review_model", "model_reasoning_effort"}.isdisjoint(configured)
+    assert get_agent_config_status(CODEX, target_path=target, backup_path=backup).mode == AGENT_MODE_NATIVE
+    rollback = rollback_agent(CODEX, target_path=target, backup_path=backup)
+
+    assert rollback.mode == AGENT_MODE_NATIVE
+    assert target.read_bytes() == original
+    assert auth.read_bytes() == original_auth
+
+
+def test_matching_legacy_backup_reports_unified_model_mode(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    backup = tmp_path / "backup.json"
+    configured = b'model = "router/unified"\n'
+    target.write_bytes(configured)
+    backup.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agent": CODEX,
+                "target_path": str(target.resolve()),
+                "original_exists": False,
+                "original_content": "",
+                "applied_sha256": hashlib.sha256(configured).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = get_agent_config_status(CODEX, target_path=target, backup_path=backup)
+
+    assert status.current_is_applied
+    assert status.mode == AGENT_MODE_UNIFIED_MODEL
+    target.write_bytes(b'model = "changed"\n')
+    assert get_agent_config_status(CODEX, target_path=target, backup_path=backup).mode is None
+
+
+def test_invalid_mode_does_not_change_files(tmp_path: Path) -> None:
+    target = tmp_path / "config.toml"
+    backup = tmp_path / "backup.json"
+    original = b'model = "existing"\n'
+    backup_content = b'{"existing": true}\n'
+    target.write_bytes(original)
+    backup.write_bytes(backup_content)
+
+    with pytest.raises(AgentConfigError, match="模式"):
+        configure_agent(CODEX, make_config(), mode="invalid", target_path=target, backup_path=backup)
+
+    assert target.read_bytes() == original
+    assert backup.read_bytes() == backup_content

@@ -19,6 +19,9 @@ from .config import UNIFIED_MODEL_ID, RouterConfig, default_cache_dir
 CLAUDE_CODE = "claude-code"
 CODEX = "codex"
 SUPPORTED_AGENTS = (CLAUDE_CODE, CODEX)
+AGENT_MODE_NATIVE = "native"
+AGENT_MODE_UNIFIED_MODEL = "unified-model"
+SUPPORTED_AGENT_MODES = (AGENT_MODE_NATIVE, AGENT_MODE_UNIFIED_MODEL)
 CODEX_PROVIDER_ID = "OpenAI"
 
 
@@ -33,6 +36,7 @@ class AgentConfigStatus:
     backup_path: Path
     backup_available: bool
     current_is_applied: bool
+    mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,7 @@ class AgentConfigResult:
     router_url: str
     extra_target_paths: tuple[Path, ...] = ()
     restored: bool = False
+    mode: str | None = None
 
 
 def agent_display_name(agent: str) -> str:
@@ -90,18 +95,21 @@ def get_agent_config_status(
             _sha256(target.read_bytes()) == state.get("applied_sha256")
             and _extra_targets_are_applied(state)
         )
-    return AgentConfigStatus(agent, target, backup, backup_available, current_is_applied)
+    mode = _backup_mode(state) if current_is_applied else None
+    return AgentConfigStatus(agent, target, backup, backup_available, current_is_applied, mode)
 
 
 def configure_agent(
     agent: str,
     config: RouterConfig,
     *,
+    mode: str = AGENT_MODE_UNIFIED_MODEL,
     target_path: Path | None = None,
     backup_path: Path | None = None,
 ) -> AgentConfigResult:
     _validate_agent(agent)
-    if config.unified_model is None:
+    _validate_mode(mode)
+    if mode == AGENT_MODE_UNIFIED_MODEL and config.unified_model is None:
         raise AgentConfigError(f"请先配置 {UNIFIED_MODEL_ID}，再应用 {agent_display_name(agent)} 路由配置")
     if not config.local_api_key:
         raise AgentConfigError("本地鉴权 key 为空，无法配置 Agent")
@@ -127,18 +135,19 @@ def configure_agent(
 
     extra_targets: tuple[tuple[Path, bytes], ...] = ()
     if agent == CLAUDE_CODE:
-        updated = _configure_claude_code(current, config)
+        updated = _configure_claude_code(current, config, mode)
         route_url = router_origin(config)
     else:
-        updated = _configure_codex(current, config)
+        updated = _configure_codex(current, config, mode)
         auth_target = _codex_auth_path(target)
         current_auth = auth_target.read_bytes() if auth_target.exists() else b""
         extra_targets = ((auth_target, _configure_codex_auth(current_auth, config)),)
         route_url = f"{router_origin(config)}/v1"
 
     new_state = {
-        "version": 1,
+        "version": 2,
         "agent": agent,
+        "mode": mode,
         "target_path": str(target),
         "original_exists": original_exists,
         "original_content": original_content,
@@ -171,6 +180,7 @@ def configure_agent(
         backup,
         route_url,
         tuple(path for path, _ in extra_targets),
+        mode=mode,
     )
 
 
@@ -221,10 +231,11 @@ def rollback_agent(
         route_url,
         tuple(path for path, _, _ in restores[1:]),
         restored=True,
+        mode=_backup_mode(state),
     )
 
 
-def _configure_claude_code(current: bytes, config: RouterConfig) -> bytes:
+def _configure_claude_code(current: bytes, config: RouterConfig, mode: str) -> bytes:
     if current:
         try:
             data = json.loads(current.decode("utf-8-sig"))
@@ -242,23 +253,34 @@ def _configure_claude_code(current: bytes, config: RouterConfig) -> bytes:
     if not isinstance(env, dict):
         raise AgentConfigError("Claude Code 配置中的 env 必须是 JSON 对象")
 
-    env.update(
-        {
-            "ANTHROPIC_BASE_URL": router_origin(config),
-            "ANTHROPIC_AUTH_TOKEN": config.local_api_key,
+    env.update({
+        "ANTHROPIC_BASE_URL": router_origin(config),
+        "ANTHROPIC_AUTH_TOKEN": config.local_api_key,
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "false",
+    })
+    if mode == AGENT_MODE_UNIFIED_MODEL:
+        env.update(
+            {
             "ANTHROPIC_MODEL": UNIFIED_MODEL_ID,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": UNIFIED_MODEL_ID,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": UNIFIED_MODEL_ID,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": UNIFIED_MODEL_ID,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "CLAUDE_CODE_ATTRIBUTION_HEADER": "false",
         }
-    )
+        )
+    else:
+        for name in (
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        ):
+            env.pop(name, None)
     data["attribution"] = {"commit": "", "pr": ""}
     return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
 
 
-def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
+def _configure_codex(current: bytes, config: RouterConfig, mode: str) -> bytes:
     if current:
         try:
             document = tomlkit.parse(current.decode("utf-8-sig"))
@@ -268,11 +290,15 @@ def _configure_codex(current: bytes, config: RouterConfig) -> bytes:
         document = tomlkit.document()
 
     document["model_provider"] = CODEX_PROVIDER_ID
-    document["model"] = UNIFIED_MODEL_ID
-    document["review_model"] = UNIFIED_MODEL_ID
-    document["model_reasoning_effort"] = (
-        config.reasoning_effort_by_model.get(config.unified_model.model) or "xhigh"
-    )
+    if mode == AGENT_MODE_UNIFIED_MODEL:
+        document["model"] = UNIFIED_MODEL_ID
+        document["review_model"] = UNIFIED_MODEL_ID
+        document["model_reasoning_effort"] = (
+            config.reasoning_effort_by_model.get(config.unified_model.model) or "xhigh"
+        )
+    else:
+        for name in ("model", "review_model", "model_reasoning_effort"):
+            document.pop(name, None)
     providers = document.get("model_providers")
     if providers is None:
         providers = tomlkit.table()
@@ -406,6 +432,15 @@ def _load_backup_state(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _backup_mode(state: dict[str, Any]) -> str | None:
+    mode = state.get("mode")
+    if mode in SUPPORTED_AGENT_MODES:
+        return mode
+    if state.get("version") == 1:
+        return AGENT_MODE_UNIFIED_MODEL
+    return None
+
+
 def _write_atomic(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
@@ -429,3 +464,8 @@ def _sha256(content: bytes) -> str:
 def _validate_agent(agent: str) -> None:
     if agent not in SUPPORTED_AGENTS:
         raise AgentConfigError(f"不支持的 Agent: {agent}")
+
+
+def _validate_mode(mode: str) -> None:
+    if mode not in SUPPORTED_AGENT_MODES:
+        raise AgentConfigError(f"不支持的 Agent 路由模式: {mode}")
