@@ -132,13 +132,18 @@ def configure_agent(
     else:
         original_exists = target.exists()
         original_content = base64.b64encode(current).decode("ascii")
+    remove_unified_model_overrides = (
+        mode == AGENT_MODE_NATIVE
+        and preserve_existing_backup
+        and _backup_mode(state) == AGENT_MODE_UNIFIED_MODEL
+    )
 
     extra_targets: tuple[tuple[Path, bytes], ...] = ()
     if agent == CLAUDE_CODE:
-        updated = _configure_claude_code(current, config, mode)
+        updated = _configure_claude_code(current, config, mode, remove_unified_model_overrides)
         route_url = router_origin(config)
     else:
-        updated = _configure_codex(current, config, mode)
+        updated = _configure_codex(current, config, mode, remove_unified_model_overrides)
         auth_target = _codex_auth_path(target)
         current_auth = auth_target.read_bytes() if auth_target.exists() else b""
         extra_targets = ((auth_target, _configure_codex_auth(current_auth, config)),)
@@ -235,7 +240,12 @@ def rollback_agent(
     )
 
 
-def _configure_claude_code(current: bytes, config: RouterConfig, mode: str) -> bytes:
+def _configure_claude_code(
+    current: bytes,
+    config: RouterConfig,
+    mode: str,
+    remove_unified_model_overrides: bool,
+) -> bytes:
     if current:
         try:
             data = json.loads(current.decode("utf-8-sig"))
@@ -268,7 +278,7 @@ def _configure_claude_code(current: bytes, config: RouterConfig, mode: str) -> b
             "ANTHROPIC_DEFAULT_OPUS_MODEL": UNIFIED_MODEL_ID,
         }
         )
-    else:
+    elif remove_unified_model_overrides:
         for name in (
             "ANTHROPIC_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -280,7 +290,12 @@ def _configure_claude_code(current: bytes, config: RouterConfig, mode: str) -> b
     return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
 
 
-def _configure_codex(current: bytes, config: RouterConfig, mode: str) -> bytes:
+def _configure_codex(
+    current: bytes,
+    config: RouterConfig,
+    mode: str,
+    remove_unified_model_overrides: bool,
+) -> bytes:
     if current:
         try:
             document = tomlkit.parse(current.decode("utf-8-sig"))
@@ -296,7 +311,7 @@ def _configure_codex(current: bytes, config: RouterConfig, mode: str) -> bytes:
         document["model_reasoning_effort"] = (
             config.reasoning_effort_by_model.get(config.unified_model.model) or "xhigh"
         )
-    else:
+    elif remove_unified_model_overrides:
         for name in ("model", "review_model", "model_reasoning_effort"):
             document.pop(name, None)
     providers = document.get("model_providers")

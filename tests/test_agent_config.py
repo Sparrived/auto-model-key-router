@@ -274,21 +274,6 @@ def test_configure_native_mode_needs_no_unified_model_and_reports_mode(
 ) -> None:
     target = tmp_path / target_name
     backup = tmp_path / "backups" / f"{agent}.json"
-    if agent == CLAUDE_CODE:
-        target.write_text(
-            json.dumps(
-                {
-                    "env": {
-                        "KEEP": "yes",
-                        "ANTHROPIC_MODEL": "old",
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old",
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "old",
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "old",
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
 
     result = configure_agent(
         agent,
@@ -306,18 +291,59 @@ def test_configure_native_mode_needs_no_unified_model_and_reports_mode(
         env = json.loads(target.read_text(encoding="utf-8"))["env"]
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
         assert env["ANTHROPIC_AUTH_TOKEN"] == "local-key"
-        assert env["KEEP"] == "yes"
-        assert not {
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        } & env.keys()
     else:
         configured = tomllib.loads(target.read_text(encoding="utf-8"))
         assert configured["model_provider"] == "OpenAI"
         assert {"model", "review_model", "model_reasoning_effort"}.isdisjoint(configured)
         assert json.loads((target.parent / "auth.json").read_text(encoding="utf-8"))["OPENAI_API_KEY"] == "local-key"
+
+
+@pytest.mark.parametrize(("agent", "target_name"), ((CLAUDE_CODE, "settings.json"), (CODEX, "config.toml")))
+def test_first_native_apply_preserves_existing_manual_model_settings(
+    tmp_path: Path, agent: str, target_name: str
+) -> None:
+    target = tmp_path / target_name
+    backup = tmp_path / "backups" / f"{agent}.json"
+    target.parent.mkdir(exist_ok=True)
+    if agent == CLAUDE_CODE:
+        target.write_text(
+            json.dumps(
+                {
+                    "env": {
+                        "ANTHROPIC_MODEL": "manual-model",
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "manual-haiku",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "manual-sonnet",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "manual-opus",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+    else:
+        target.write_text(
+            'model = "manual-model"\nreview_model = "manual-review"\nmodel_reasoning_effort = "high"\n',
+            encoding="utf-8",
+        )
+
+    configure_agent(
+        agent,
+        make_native_config(),
+        mode=AGENT_MODE_NATIVE,
+        target_path=target,
+        backup_path=backup,
+    )
+
+    if agent == CLAUDE_CODE:
+        env = json.loads(target.read_text(encoding="utf-8"))["env"]
+        assert env["ANTHROPIC_MODEL"] == "manual-model"
+        assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "manual-haiku"
+        assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "manual-sonnet"
+        assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "manual-opus"
+    else:
+        configured = tomllib.loads(target.read_text(encoding="utf-8"))
+        assert configured["model"] == "manual-model"
+        assert configured["review_model"] == "manual-review"
+        assert configured["model_reasoning_effort"] == "high"
 
 
 def test_unified_to_native_transition_rolls_back_exactly_including_codex_auth(tmp_path: Path) -> None:
@@ -347,6 +373,28 @@ def test_unified_to_native_transition_rolls_back_exactly_including_codex_auth(tm
     assert rollback.mode == AGENT_MODE_NATIVE
     assert target.read_bytes() == original
     assert auth.read_bytes() == original_auth
+
+
+def test_unified_to_native_transition_removes_claude_model_settings(tmp_path: Path) -> None:
+    target = tmp_path / ".claude" / "settings.json"
+    backup = tmp_path / "backups" / "claude-code.json"
+
+    configure_agent(CLAUDE_CODE, make_config(), target_path=target, backup_path=backup)
+    configure_agent(
+        CLAUDE_CODE,
+        make_native_config(),
+        mode=AGENT_MODE_NATIVE,
+        target_path=target,
+        backup_path=backup,
+    )
+
+    env = json.loads(target.read_text(encoding="utf-8"))["env"]
+    assert not {
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    } & env.keys()
 
 
 def test_matching_legacy_backup_reports_unified_model_mode(tmp_path: Path) -> None:
