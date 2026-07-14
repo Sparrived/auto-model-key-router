@@ -1,0 +1,45 @@
+<h2>AMKR Desktop 主界面结构</h2>
+<p class="subtitle">请选择最适合长期管理本机路由服务的布局。三种方案都采用克制、清晰、内容优先的 Apple 式设计语言。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px;background:#f5f5f7">
+      <div style="display:grid;grid-template-columns:120px 1fr;height:250px;background:white;border:1px solid #d9d9de;border-radius:8px;overflow:hidden;color:#1d1d1f;font-size:12px">
+        <div style="background:#ececf0;padding:14px 10px;border-right:1px solid #d9d9de">
+          <div style="font-weight:700;margin-bottom:18px">AMKR</div>
+          <div style="background:#d8d8de;padding:7px;border-radius:6px">概览</div>
+          <div style="padding:7px">供应商</div><div style="padding:7px">模型路由</div><div style="padding:7px">活动</div><div style="padding:7px">集成</div><div style="padding:7px">设置</div>
+        </div>
+        <div style="padding:18px">
+          <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:18px">概览</b><span style="color:#248a3d">● 服务运行中</span></div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px"><div style="padding:12px;border:1px solid #ddd;border-radius:7px">RPM<br><b>24</b></div><div style="padding:12px;border:1px solid #ddd;border-radius:7px">成功率<br><b>99.2%</b></div><div style="padding:12px;border:1px solid #ddd;border-radius:7px">统一模型<br><b>gpt-5.5</b></div></div>
+          <div style="margin-top:14px;padding:12px;border-top:1px solid #eee">最近活动与异常提醒</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · 系统设置式侧边栏</h3><p>功能入口稳定、可扩展，适合高频管理和完整覆盖 CLI。推荐方案。</p></div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px;background:#f5f5f7">
+      <div style="height:250px;background:white;border:1px solid #d9d9de;border-radius:8px;overflow:hidden;color:#1d1d1f;font-size:12px">
+        <div style="height:38px;background:#ececf0;display:flex;align-items:center;justify-content:space-between;padding:0 14px"><b>AMKR</b><span style="color:#248a3d">● 运行中</span></div>
+        <div style="padding:22px 28px">
+          <b style="font-size:19px">今天一切正常</b><div style="color:#6e6e73;margin-top:5px">统一模型 gpt-5.5 · 自动路由</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:18px"><div style="padding:16px;border:1px solid #ddd;border-radius:7px"><b>配置路由</b><br>供应商、Key 与模型池</div><div style="padding:16px;border:1px solid #ddd;border-radius:7px"><b>查看活动</b><br>请求、延迟与日志</div><div style="padding:16px;border:1px solid #ddd;border-radius:7px"><b>连接工具</b><br>Claude Code 与 Codex</div><div style="padding:16px;border:1px solid #ddd;border-radius:7px"><b>服务设置</b><br>端口、鉴权与更新</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · 控制中心式首页</h3><p>首屏亲和、适合新手，但深层配置会产生更多页面跳转。</p></div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:14px;background:#f5f5f7">
+      <div style="display:grid;grid-template-columns:1fr 150px;height:250px;background:white;border:1px solid #d9d9de;border-radius:8px;overflow:hidden;color:#1d1d1f;font-size:12px">
+        <div style="padding:18px"><div style="display:flex;gap:16px;border-bottom:1px solid #ddd;padding-bottom:9px"><b>路由</b><span>活动</span><span>日志</span><span>设置</span></div><b style="font-size:18px;display:block;margin-top:20px">模型路由</b><div style="margin-top:14px;border:1px solid #ddd;border-radius:7px"><div style="padding:11px;border-bottom:1px solid #eee">gpt-5.5 <span style="float:right">2 个目标 ›</span></div><div style="padding:11px;border-bottom:1px solid #eee">claude-sonnet <span style="float:right">1 个目标 ›</span></div><div style="padding:11px">image-model <span style="float:right">2 个目标 ›</span></div></div></div>
+        <div style="background:#f5f5f7;border-left:1px solid #ddd;padding:16px"><b>检查器</b><div style="margin-top:16px">路由模式</div><div style="margin-top:6px;background:white;border:1px solid #ddd;padding:7px;border-radius:6px">优先级</div><div style="margin-top:14px">推理强度</div><div style="margin-top:6px;background:white;border:1px solid #ddd;padding:7px;border-radius:6px">High</div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>C · 专业工具式检查器</h3><p>批量编辑效率高，但学习成本更高，苹果设计感偏专业创作软件。</p></div>
+  </div>
+</div>
