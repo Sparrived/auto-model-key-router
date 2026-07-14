@@ -53,7 +53,15 @@ def test_check_latest_release_reads_github_response(monkeypatch) -> None:
 
 def test_check_latest_version_prefers_pypi(monkeypatch) -> None:
     def fake_urlopen(request: object, timeout: float) -> FakeResponse:
-        return FakeResponse({"info": {"version": "9.8.7", "package_url": "https://pypi.org/project/auto-model-key-router/9.8.7/"}})
+        return FakeResponse({
+            "info": {"version": "9.8.7", "package_url": "https://pypi.org/project/auto-model-key-router/9.8.7/"},
+            "urls": [{
+                "filename": "auto_model_key_router-9.8.7-py3-none-any.whl",
+                "packagetype": "bdist_wheel",
+                "url": "https://files.pythonhosted.org/packages/amkr.whl",
+                "digests": {"sha256": "a" * 64},
+            }],
+        })
 
     monkeypatch.setattr("auto_model_key_router.update.urlopen", fake_urlopen)
 
@@ -64,6 +72,8 @@ def test_check_latest_version_prefers_pypi(monkeypatch) -> None:
     assert result.latest_tag is None
     assert result.release_url == "https://pypi.org/project/auto-model-key-router/9.8.7/"
     assert result.source == "PyPI"
+    assert result.artifact_url == "https://files.pythonhosted.org/packages/amkr.whl"
+    assert result.artifact_sha256 == "a" * 64
     assert result.update_available
 
 

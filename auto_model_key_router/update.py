@@ -43,6 +43,8 @@ class VersionCheckResult:
     latest_tag: str | None = None
     release_url: str | None = None
     source: str | None = None
+    artifact_url: str | None = None
+    artifact_sha256: str | None = None
     fallback_error: str | None = None
     error: str | None = None
 
@@ -103,7 +105,27 @@ def check_latest_pypi(current_version: str = __version__, timeout: float = 3.0) 
     if not latest_version:
         return VersionCheckResult(current_version=current_version, error="PyPI 响应中缺少 version。")
     release_url = str(info.get("package_url") or info.get("project_url") or PYPI_PROJECT_URL)
-    return VersionCheckResult(current_version=current_version, latest_version=latest_version, release_url=release_url, source="PyPI")
+    wheels = data.get("urls")
+    wheel = next(
+        (
+            item
+            for item in wheels if isinstance(item, dict)
+            and item.get("packagetype") == "bdist_wheel"
+            and str(item.get("filename") or "").endswith("-py3-none-any.whl")
+        ),
+        None,
+    ) if isinstance(wheels, list) else None
+    digests = wheel.get("digests") if isinstance(wheel, dict) else None
+    artifact_url = str(wheel.get("url") or "") or None if isinstance(wheel, dict) else None
+    artifact_sha256 = str(digests.get("sha256") or "") or None if isinstance(digests, dict) else None
+    return VersionCheckResult(
+        current_version=current_version,
+        latest_version=latest_version,
+        release_url=release_url,
+        source="PyPI",
+        artifact_url=artifact_url,
+        artifact_sha256=artifact_sha256,
+    )
 
 
 def check_latest_release(current_version: str = __version__, timeout: float = 3.0) -> VersionCheckResult:

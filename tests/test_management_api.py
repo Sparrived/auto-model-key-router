@@ -213,6 +213,8 @@ def test_update_check_reuses_cli_version_source_and_requires_local_auth(
             latest_version="3.2.0",
             release_url="https://example.test/amkr/3.2.0",
             source="PyPI",
+            artifact_url="https://files.pythonhosted.org/packages/amkr.whl",
+            artifact_sha256="a" * 64,
         ),
     )
 
@@ -230,6 +232,8 @@ def test_update_check_reuses_cli_version_source_and_requires_local_auth(
         "latest_version": "3.2.0",
         "release_url": "https://example.test/amkr/3.2.0",
         "source": "PyPI",
+        "artifact_url": "https://files.pythonhosted.org/packages/amkr.whl",
+        "artifact_sha256": "a" * 64,
         "update_available": True,
         "error": None,
     }

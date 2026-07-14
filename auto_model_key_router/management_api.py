@@ -368,6 +368,8 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             "latest_version": result.latest_version,
             "release_url": result.release_url,
             "source": result.source,
+            "artifact_url": result.artifact_url,
+            "artifact_sha256": result.artifact_sha256,
             "update_available": result.update_available,
             "error": result.error,
         }
