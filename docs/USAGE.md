@@ -524,12 +524,13 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 AMKR 支持 Anthropic Messages 风格入口 `/v1/messages`，可供 Claude Code 使用。
 
-推荐在 TUI 中操作：
+在 **一键配置 → Claude Code** 中可选择三种状态：
 
-1. 先在 **统一模型** 中设置 `unified-model`。
-2. 确保 `local_api_key` 不为空。
-3. 进入 **一键配置 → Claude Code**。
-4. 应用配置后，必要时进入 **一键配置 → 路由服务** 启动服务。
+- **AMKR unified-model 模式**：先设置 `unified-model`，再由 AMKR 写入路由、本地鉴权和 `unified-model` 的 Claude 模型环境变量。
+- **AMKR 原生模式**：只写入路由和本地鉴权；首次接管会保留已有的 Claude 模型配置。从 unified-model 模式切换时会移除 AMKR 写入的模型变量，由用户手动配置 Claude Code 默认模型。
+- **未接管**：选择回退原配置，AMKR 会恢复首次应用前的完整文件内容。
+
+两种 AMKR 接管模式都要求 `local_api_key` 不为空。原生模式不要求设置 `unified-model`，但 Claude Code 使用的每个模型名必须先在 AMKR 的**模型设置**中配置；否则请求会明确提示缺失的模型名。
 
 AMKR 会更新：
 
@@ -538,7 +539,7 @@ AMKR 会更新：
 # 或 CLAUDE_CONFIG_DIR/settings.json
 ```
 
-写入的核心环境变量包括：
+unified-model 模式写入的核心环境变量包括：
 
 ```json
 {
@@ -553,7 +554,7 @@ AMKR 会更新：
 }
 ```
 
-应用前的原始配置会备份到 AMKR 缓存目录，可在 TUI 中回退。
+原生模式保留 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和 AMKR 流量控制变量，但不会注入模型名。应用前的原始配置会备份到 AMKR 缓存目录，可在 TUI 中回退。
 
 ---
 
@@ -561,12 +562,9 @@ AMKR 会更新：
 
 AMKR 支持 OpenAI Responses 风格入口 `/v1/responses`，可供 Codex 使用。
 
-推荐在 TUI 中操作：
+在 **一键配置 → Codex** 中可选择 unified-model 模式、原生模式或回退原配置。两种接管模式都写入 AMKR OpenAI Provider 和 `auth.json` 的本地鉴权 key；只有 unified-model 模式需要预先设置 `unified-model`。
 
-1. 先在 **统一模型** 中设置 `unified-model`。
-2. 确保 `local_api_key` 不为空。
-3. 进入 **一键配置 → Codex**。
-4. 应用配置后，必要时进入 **一键配置 → 路由服务** 启动服务。
+原生模式不会注入模型：首次接管会保留用户已有的 `model`、`review_model` 和 `model_reasoning_effort`；从 unified-model 模式切换时会移除这些 AMKR 写入字段。用户需要手动配置 Codex 的 `model`、`review_model` 等模型名，并先将每个名称添加到 AMKR 的**模型设置**中；模型不存在时路由器会返回包含该名称的配置提示。
 
 AMKR 会更新：
 
@@ -576,7 +574,7 @@ AMKR 会更新：
 # 或 CODEX_HOME/config.toml 与 CODEX_HOME/auth.json
 ```
 
-写入的核心配置类似：
+unified-model 模式写入的核心配置类似：
 
 ```toml
 model_provider = "OpenAI"
@@ -599,7 +597,7 @@ requires_openai_auth = true
 }
 ```
 
-一键配置只会更新上述模型调用字段，以及 `auth.json` 中的 `OPENAI_API_KEY`。现有的其他 Codex 设置、注释、OpenAI Provider 自定义字段和其他鉴权字段都会保留；旧版本已经写入的非模型字段也不会被主动删除。
+一键配置只会更新上述模型调用字段，以及 `auth.json` 中的 `OPENAI_API_KEY`。原生模式始终保留 Provider 与本地鉴权配置。现有的其他 Codex 设置、注释、OpenAI Provider 自定义字段和其他鉴权字段都会保留；旧版本已经写入的非模型字段也不会被主动删除。
 
 应用前的原始配置同样会备份，可在 TUI 中回退。
 
