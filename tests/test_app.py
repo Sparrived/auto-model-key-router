@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
+from auto_model_key_router import __version__
 from auto_model_key_router.app import create_app
 from auto_model_key_router.config import (
     UNIFIED_MODEL_ID,
@@ -477,7 +478,9 @@ def test_unknown_anthropic_model_logs_requested_model(tmp_path: Path, caplog) ->
     )
 
     assert response.status_code == 404
-    assert response.json()["error"]["message"] == "未配置模型: claude-haiku-test"
+    assert response.json()["error"]["message"] == (
+        "模型 claude-haiku-test 未配置；请先在 AMKR 的模型设置中配置该模型"
+    )
     assert "path=/v1/messages" in caplog.text
     assert "requested_model=claude-haiku-test" in caplog.text
     assert "resolved_model=claude-haiku-test" in caplog.text
@@ -898,6 +901,7 @@ def test_health_reports_visitor_access(visitor_feature) -> None:
 
         response = run_client(create_app(config), lambda client: client.get("/health"))
 
+        assert response.json()["version"] == __version__
         assert response.json()["visitor_feature_installed"] is True
         assert response.json()["visitor_access_enabled"] is True
         assert response.json()["visitor_key_count"] == 1

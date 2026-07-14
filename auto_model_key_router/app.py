@@ -69,6 +69,8 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
     app.state.config_mtime = _config_mtime(app.state.config_path)
     app.state.config_reload_lock = asyncio.Lock()
     app.state.config_write_lock = asyncio.Lock()
+    app.state.management_probes = {}
+    app.state.management_probe_tasks = {}
     key_pool = KeyPool(config)
     metrics = MetricsStore(config.metrics_db_path)
     http_client = _new_http_client(config.request_timeout)
@@ -134,6 +136,7 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             visitor_installed = visitor_feature_available()
             return {
                 "status": "ok",
+                "version": __version__,
                 "models": runtime.key_pool.public_model_ids,
                 "config_path": app.state.config_path,
                 "local_auth_enabled": bool(local_api_key),
