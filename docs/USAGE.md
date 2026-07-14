@@ -461,6 +461,18 @@ curl http://127.0.0.1:8000/metrics \
   -H "Authorization: Bearer amkr_your-local-api-key"
 ```
 
+查看最近一小时的分钟时间桶和最近 24 小时调用明细：
+
+```bash
+curl "http://127.0.0.1:8000/metrics/series?hours=1&bucket_seconds=60" \
+  -H "Authorization: Bearer amkr_your-local-api-key"
+
+curl "http://127.0.0.1:8000/metrics/requests?hours=24&limit=50" \
+  -H "Authorization: Bearer amkr_your-local-api-key"
+```
+
+调用明细传入 `all_history=true` 可与 CLI 的“全部”时间范围保持一致。
+
 统计会持久化写入 SQLite，默认文件为缓存目录下的 `metrics.sqlite3`。返回数据包含：
 
 - 总请求数、成功、失败、重试。
@@ -469,6 +481,10 @@ curl http://127.0.0.1:8000/metrics \
 - 总耗时、平均耗时、首 token 耗时。
 - 状态码分布。
 - 按真实模型、请求模型名、Key、本地调用和访客调用拆分的聚合。
+- 按供应商、模型池和上游模型拆分的历史归因。
+- 补零的服务端时间桶，以及带稳定游标的逐次上游调用明细。
+
+升级前缺少供应商归因的历史调用会单独汇总到 `unattributed`，不会根据当前配置反推。调用明细和时间桶支持 `attributed=true|false` 筛选。
 
 ---
 

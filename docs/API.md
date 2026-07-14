@@ -51,6 +51,8 @@ visitor 模型使用 `amkr-{真实模型ID}` 形式，例如 `amkr-gpt-5.5`。vi
 | `POST` | `/v1/responses` | 本地或 visitor | OpenAI Responses 兼容接口 |
 | 多种 | `/v1/{path}` | 本地或 visitor | 其他 OpenAI-compatible 接口透传 |
 | `GET` | `/metrics` | 仅本地 | 查询 SQLite 聚合调用统计 |
+| `GET` | `/metrics/requests` | 仅本地 | 分页查询持久化上游调用明细 |
+| `GET` | `/metrics/series` | 仅本地 | 查询补零的持久化统计时间桶 |
 | `GET/POST` | `/api/models` | 仅本地 | 查询或创建模型 |
 | `GET/PUT/DELETE` | `/api/models/{model_id}` | 仅本地 | 查询、更新或删除模型 |
 | `GET/POST` | `/api/models/{model_id}/keys` | 仅本地 | 查询或创建模型 Key |
@@ -251,12 +253,20 @@ Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或�
 
 ### `GET /metrics`
 
-仅接受本地完整权限，不接受 visitor key。无查询参数。
+仅接受本地完整权限，不接受 visitor key。
+
+可选查询参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `hours` | number | 无 | 仅聚合最近若干小时；必须大于 `0` 且不超过 `8760`。省略时聚合全部历史。 |
 
 顶层响应字段：
 
 | 字段 | 说明 |
 | --- | --- |
+| `count_semantics` | 固定为 `upstream_attempt`，表示请求数按上游调用尝试计数 |
+| `window` | 本次聚合的 `from`、`to` 和 `hours`；全量查询的 `from` 为 `null` |
 | `started_at` | 当前统计存储实例启动时间 |
 | `database_path` | SQLite 文件路径 |
 | `rate_window_seconds` | 当前 RPM/TPM 统计窗口秒数，默认 `60` |
@@ -268,6 +278,10 @@ Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或�
 | `requested_models` | 按请求中的模型名或别名拆分 |
 | `model_requested_models` | 真实模型到请求模型名的嵌套统计 |
 | `keys` | 真实模型到 Key 名称的嵌套统计 |
+| `providers` | 按请求发生时的供应商 ID 拆分 |
+| `provider_pools` | 按请求发生时的供应商和模型池拆分 |
+| `upstream_models` | 按实际发送给上游的模型 ID 拆分 |
+| `unattributed` | 缺少供应商、模型池或上游模型任一归因字段的调用汇总 |
 
 每组统计包含：
 
@@ -280,6 +294,131 @@ total_duration_ms, avg_duration_ms, min_duration_ms, max_duration_ms
 total_first_token_ms, avg_first_token_ms, min_first_token_ms, max_first_token_ms
 status_codes
 ```
+
+升级前产生的历史行没有供应商归因，统一计入 `unattributed`；三个归因维度聚合只包含字段完整的调用。AMKR 不会根据当前配置反推旧数据，避免配置改名后改变历史含义。供应商、池或模型的实际 ID 即使为 `unknown`，也仍按字面 ID 查询和聚合，不会与未归因数据混淆。
+
+### `GET /metrics/requests`
+
+返回持久化的上游调用明细、所选范围汇总和相同筛选条件下的近 60 秒速率。仅接受本地完整权限。
+
+查询参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `hours` | number | `24` | 最近小时数，必须大于 `0` 且不超过 `720` |
+| `all_history` | boolean | `false` | 为 `true` 时忽略 `hours` 并查询全部历史 |
+| `caller_type` | string | 无 | `local` 或 `visitor` |
+| `model_id` | string | 无 | 真实路由模型 ID |
+| `requested_model_id` | string | 无 | 客户端请求中的模型名或别名 |
+| `provider_id` | string | 无 | 请求发生时的供应商 ID |
+| `pool_name` | string | 无 | 请求发生时的模型池名称 |
+| `upstream_model_id` | string | 无 | 实际发送给上游的模型 ID |
+| `key_name` | string | 无 | 路由使用的 Key 名称 |
+| `status_code` | integer | 无 | `100..599` |
+| `success` | boolean | 无 | 是否成功 |
+| `attributed` | boolean | 无 | `true` 仅返回三个归因字段完整的调用；`false` 返回缺少任一字段的调用 |
+| `limit` | integer | `50` | 每页 `1..200` 条 |
+| `before_id` | integer | 无 | 仅返回 ID 小于该值的行，用于稳定加载下一页 |
+
+响应示例：
+
+```json
+{
+  "count_semantics": "upstream_attempt",
+  "window": {
+    "from": "2026-07-13T12:00:00+08:00",
+    "to": "2026-07-14T12:00:00+08:00",
+    "hours": 24
+  },
+  "filters": {
+    "caller_type": "local"
+  },
+  "rate_window_seconds": 60,
+  "current_rpm": 4,
+  "current_tpm": 18200,
+  "summary": {},
+  "latest_request_at": "2026-07-14T11:59:52+08:00",
+  "total_items": 1284,
+  "items": [
+    {
+      "id": 1284,
+      "created_at": "2026-07-14T11:59:52+08:00",
+      "caller_type": "local",
+      "model_id": "gpt-5.5",
+      "requested_model_id": "default",
+      "provider_id": "openai",
+      "pool_name": "primary",
+      "upstream_model_id": "gpt-5.5-2026-05-01",
+      "key_name": "main",
+      "status_code": 200,
+      "success": true,
+      "retried": false,
+      "prompt_tokens": 1200,
+      "uncached_prompt_tokens": 300,
+      "completion_tokens": 80,
+      "total_tokens": 1280,
+      "cached_tokens": 900,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 900,
+      "first_token_ms": 420,
+      "duration_ms": 3100
+    }
+  ],
+  "next_before_id": 1235
+}
+```
+
+当 `next_before_id` 为 `null` 时没有下一页。刷新第一页时不要携带 `before_id`。
+
+### `GET /metrics/series`
+
+返回 SQLite 历史数据生成的非重叠时间桶，用于趋势图。服务端按北京时间自然边界对齐起点并补齐没有调用的空桶，因此响应 `window.from` 可能略早于精确的 `hours` 起点；最后一个桶可能尚未结束。仅接受本地完整权限。
+
+查询参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `hours` | number | `1` | 最近小时数，必须大于 `0` 且不超过 `720` |
+| `bucket_seconds` | integer | `60` | 桶宽 `15..86400` 秒；一次查询最多返回 `500` 个桶 |
+| 其他筛选参数 | - | 无 | 与 `/metrics/requests` 的来源、模型、供应商、Key、状态、成功和归因筛选一致 |
+
+响应示例：
+
+```json
+{
+  "count_semantics": "upstream_attempt",
+  "window": {
+    "from": "2026-07-14T11:00:00+08:00",
+    "to": "2026-07-14T12:00:00+08:00",
+    "hours": 1
+  },
+  "filters": {},
+  "bucket_seconds": 60,
+  "points": [
+    {
+      "started_at": "2026-07-14T11:00:00+08:00",
+      "ended_at": "2026-07-14T11:01:00+08:00",
+      "complete": true,
+      "requests": 3,
+      "successes": 3,
+      "failures": 0,
+      "retries": 0,
+      "prompt_tokens": 12000,
+      "completion_tokens": 900,
+      "total_tokens": 12900,
+      "cached_tokens": 8600,
+      "cached_token_rate": 0.716667,
+      "avg_duration_ms": 2400,
+      "avg_first_token_ms": 380,
+      "status_codes": {
+        "200": 3
+      }
+    }
+  ]
+}
+```
+
+每个统计行代表一次上游调用尝试。发生自动重试时，同一个客户端请求会产生多行；在没有持久化请求关联 ID 前，API 不会把这些行错误合并成一个请求。
 
 ## 模型与 Key 管理 API
 
