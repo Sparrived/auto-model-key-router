@@ -55,6 +55,21 @@ visitor 模型使用 `amkr-{真实模型ID}` 形式，例如 `amkr-gpt-5.5`。vi
 | `GET/PUT/DELETE` | `/api/models/{model_id}` | 仅本地 | 查询、更新或删除模型 |
 | `GET/POST` | `/api/models/{model_id}/keys` | 仅本地 | 查询或创建模型 Key |
 | `GET/PUT/DELETE` | `/api/models/{model_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Key |
+| `GET/POST` | `/api/providers` | 仅本地 | 查询或创建 Provider |
+| `GET/PUT/DELETE` | `/api/providers/{provider_id}` | 仅本地 | 查询、更新或删除 Provider |
+| `GET/POST` | `/api/providers/{provider_id}/keys` | 仅本地 | 查询或创建 Provider Key |
+| `GET/PUT/DELETE` | `/api/providers/{provider_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Provider Key |
+| `GET/POST` | `/api/providers/{provider_id}/pools` | 仅本地 | 查询或创建 Pool |
+| `GET/PUT/DELETE` | `/api/providers/{provider_id}/pools/{pool_name}` | 仅本地 | 查询、更新或删除 Pool |
+| `GET/POST` | `/api/routes` | 仅本地 | 查询或创建模型路由 |
+| `GET/PUT/DELETE` | `/api/routes/{route_id}` | 仅本地 | 查询、更新或删除模型路由 |
+| `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
+| `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
+| `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 PyPI/GitHub 版本检查 |
+| `POST` | `/api/probes/keys`、`/api/probes/pools` | 仅本地 | 异步探测 Key 或 Pool |
+| `GET` | `/api/probes/{probe_id}` | 仅本地 | 查询探测进度和结果 |
+| `POST` | `/api/probes/{probe_id}/cancel` | 仅本地 | 取消探测 |
+| `POST` | `/api/config/export`、`/api/config/import` | 仅本地 | 导出或导入可迁移配置 |
 
 ## 代理接口通用参数
 
