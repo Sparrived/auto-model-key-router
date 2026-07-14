@@ -507,6 +507,9 @@ async def _execute_attempt(
             first_token_ms=duration_ms,
             requested_model_id=context.requested_model_id,
             caller_type=context.caller_type,
+            provider_id=key.provider,
+            pool_name=key.pool,
+            upstream_model_id=key.upstream_model or context.model_id,
         )
         await runtime.key_pool.mark_failure(context.model_id, key.name)
         await _broadcast_metrics(runtime)
@@ -518,9 +521,23 @@ async def _execute_attempt(
         )
 
     duration_ms = _elapsed_ms(started)
-    
+
     if use_native and response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
         content = await response.aread()
+        await _record_upstream_response(
+            runtime,
+            context.model_id,
+            key.name,
+            context.requested_model_id,
+            response,
+            content,
+            duration_ms,
+            retried=True,
+            caller_type=context.caller_type,
+            provider_id=key.provider,
+            pool_name=key.pool,
+            upstream_model_id=key.upstream_model or context.model_id,
+        )
         await response.aclose()
         LOGGER.info(
             "native endpoint returned %d for %s/%s, falling back to chat/completions",
@@ -587,6 +604,9 @@ async def _execute_attempt(
                 first_token_ms=fallback_duration_ms,
                 requested_model_id=context.requested_model_id,
                 caller_type=context.caller_type,
+                provider_id=key.provider,
+                pool_name=key.pool,
+                upstream_model_id=key.upstream_model or context.model_id,
             )
             await runtime.key_pool.mark_failure(context.model_id, key.name)
             await _broadcast_metrics(runtime)
@@ -598,8 +618,11 @@ async def _execute_attempt(
             )
         # 使用回退响应继续处理
         response = fallback_response
-        duration_ms = _elapsed_ms(started)
-    
+        duration_ms = _elapsed_ms(fallback_started)
+        started = fallback_started
+        upstream = fallback_upstream
+        use_native = False
+
     if (
         response.status_code in RETRYABLE_STATUS_CODES
         and attempt + 1 < context.attempts
@@ -620,6 +643,9 @@ async def _execute_attempt(
             duration_ms,
             retried=True,
             caller_type=context.caller_type,
+            provider_id=key.provider,
+            pool_name=key.pool,
+            upstream_model_id=key.upstream_model or context.model_id,
         )
         await response.aclose()
         return AttemptOutcome(retry_error=error)
@@ -640,6 +666,9 @@ async def _execute_attempt(
             content,
             duration_ms,
             caller_type=context.caller_type,
+            provider_id=key.provider,
+            pool_name=key.pool,
+            upstream_model_id=key.upstream_model or context.model_id,
         )
         return AttemptOutcome(
             response=_json_error_response_from_content(
@@ -654,6 +683,20 @@ async def _execute_attempt(
             _debug_report(
                 "upstream-tool-error-retry",
                 _response_debug_payload(context, key, response, duration_ms, content),
+            )
+            await _record_upstream_response(
+                runtime,
+                context.model_id,
+                key.name,
+                context.requested_model_id,
+                response,
+                content,
+                duration_ms,
+                retried=True,
+                caller_type=context.caller_type,
+                provider_id=key.provider,
+                pool_name=key.pool,
+                upstream_model_id=key.upstream_model or context.model_id,
             )
             await response.aclose()
             # 创建过滤后的请求体
@@ -697,35 +740,55 @@ async def _execute_attempt(
                     )
                     response = retry_response
                     duration_ms = retry_duration_ms
+                    started = retry_started
                 else:
                     # 重试也失败，返回原始错误
+                    retry_content = await retry_response.aread()
                     await retry_response.aclose()
                     await _record_upstream_response(
                         runtime,
                         context.model_id,
                         key.name,
                         context.requested_model_id,
-                        response,
-                        content,
-                        duration_ms,
+                        retry_response,
+                        retry_content,
+                        retry_duration_ms,
                         caller_type=context.caller_type,
+                        provider_id=key.provider,
+                        pool_name=key.pool,
+                        upstream_model_id=key.upstream_model or context.model_id,
                     )
                     return AttemptOutcome(
                         response=_json_error_response_from_content(
                             response, content, anthropic=context.path == "messages"
                         )
                     )
-            except httpx.RequestError:
+            except httpx.RequestError as exc:
                 # 重试请求失败，返回原始错误
-                await _record_upstream_response(
-                    runtime,
+                retry_duration_ms = _elapsed_ms(retry_started)
+                await runtime.metrics.record(
                     context.model_id,
                     key.name,
-                    context.requested_model_id,
-                    response,
-                    content,
-                    duration_ms,
+                    None,
+                    failed=True,
+                    duration_ms=retry_duration_ms,
+                    first_token_ms=retry_duration_ms,
+                    requested_model_id=context.requested_model_id,
                     caller_type=context.caller_type,
+                    provider_id=key.provider,
+                    pool_name=key.pool,
+                    upstream_model_id=key.upstream_model or context.model_id,
+                )
+                await runtime.key_pool.mark_failure(context.model_id, key.name)
+                await _broadcast_metrics(runtime)
+                _debug_report(
+                    "upstream-tool-filter-error",
+                    {
+                        "model_id": context.model_id,
+                        "key_name": key.name,
+                        "error_type": exc.__class__.__name__,
+                        "duration_ms": retry_duration_ms,
+                    },
                 )
                 return AttemptOutcome(
                     response=_json_error_response_from_content(
@@ -743,6 +806,9 @@ async def _execute_attempt(
                 content,
                 duration_ms,
                 caller_type=context.caller_type,
+                provider_id=key.provider,
+                pool_name=key.pool,
+                upstream_model_id=key.upstream_model or context.model_id,
             )
             return AttemptOutcome(
                 response=_json_error_response_from_content(
@@ -805,6 +871,9 @@ def _streaming_response(
         context.caller_type,
         first_byte_deadline=first_byte_deadline,
         idle_timeout=runtime.config.stream_idle_timeout,
+        provider_id=key.provider,
+        pool_name=key.pool,
+        upstream_model_id=key.upstream_model or context.model_id,
     )
     media_type = response.headers.get("content-type")
     response_headers = _response_headers(response)
@@ -823,6 +892,9 @@ def _streaming_response(
             context.caller_type,
             first_byte_deadline=first_byte_deadline,
             idle_timeout=runtime.config.stream_idle_timeout,
+            provider_id=key.provider,
+            pool_name=key.pool,
+            upstream_model_id=key.upstream_model or context.model_id,
         )
         media_type = "text/event-stream"
         _set_streaming_headers(response_headers)
@@ -839,6 +911,9 @@ def _streaming_response(
             context.caller_type,
             first_byte_deadline=first_byte_deadline,
             idle_timeout=runtime.config.stream_idle_timeout,
+            provider_id=key.provider,
+            pool_name=key.pool,
+            upstream_model_id=key.upstream_model or context.model_id,
         )
         media_type = "text/event-stream"
         _set_streaming_headers(response_headers)
@@ -873,6 +948,9 @@ async def _buffered_response(
         content,
         duration_ms,
         caller_type=context.caller_type,
+        provider_id=key.provider,
+        pool_name=key.pool,
+        upstream_model_id=key.upstream_model or context.model_id,
     )
     if response.status_code >= 400:
         return _json_error_response_from_content(
@@ -970,6 +1048,9 @@ async def _record_upstream_response(
     *,
     retried: bool = False,
     caller_type: str = "local",
+    provider_id: str | None = None,
+    pool_name: str | None = None,
+    upstream_model_id: str | None = None,
 ) -> None:
     await state.metrics.record(
         model_id,
@@ -981,6 +1062,9 @@ async def _record_upstream_response(
         first_token_ms=duration_ms,
         requested_model_id=requested_model_id,
         caller_type=caller_type,
+        provider_id=provider_id,
+        pool_name=pool_name,
+        upstream_model_id=upstream_model_id,
     )
     if response.status_code < 400:
         await state.key_pool.mark_success(model_id, key_name)
@@ -1016,6 +1100,9 @@ async def _stream_upstream(
     *,
     first_byte_deadline: float,
     idle_timeout: float,
+    provider_id: str | None = None,
+    pool_name: str | None = None,
+    upstream_model_id: str | None = None,
 ):
     lifecycle = StreamLifecycle(
         response,
@@ -1027,6 +1114,9 @@ async def _stream_upstream(
         upstream,
         started,
         caller_type,
+        provider_id=provider_id,
+        pool_name=pool_name,
+        upstream_model_id=upstream_model_id,
     )
     buffer = ""
     sse_buffer = b""
@@ -1106,6 +1196,9 @@ async def _stream_anthropic_messages(
     *,
     first_byte_deadline: float,
     idle_timeout: float,
+    provider_id: str | None = None,
+    pool_name: str | None = None,
+    upstream_model_id: str | None = None,
 ):
     lifecycle = StreamLifecycle(
         response,
@@ -1117,6 +1210,9 @@ async def _stream_anthropic_messages(
         upstream,
         started,
         caller_type,
+        provider_id=provider_id,
+        pool_name=pool_name,
+        upstream_model_id=upstream_model_id,
     )
     buffer = ""
     failed = False
@@ -1237,6 +1333,9 @@ async def _stream_responses(
     *,
     first_byte_deadline: float,
     idle_timeout: float,
+    provider_id: str | None = None,
+    pool_name: str | None = None,
+    upstream_model_id: str | None = None,
 ):
     lifecycle = StreamLifecycle(
         response,
@@ -1248,6 +1347,9 @@ async def _stream_responses(
         upstream,
         started,
         caller_type,
+        provider_id=provider_id,
+        pool_name=pool_name,
+        upstream_model_id=upstream_model_id,
     )
     buffer = ""
     failed = False

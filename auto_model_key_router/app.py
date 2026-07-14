@@ -6,10 +6,10 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__
@@ -182,7 +182,10 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
             await lease.release()
 
     @app.get("/metrics")
-    async def metrics(request: Request):
+    async def metrics(
+        request: Request,
+        hours: float | None = Query(default=None, gt=0, le=8760),
+    ):
         await _reload_config_if_changed(app.state)
         lease = await _acquire_runtime(app.state)
         try:
@@ -193,14 +196,101 @@ def create_app(config: RouterConfig, config_path: str | Path | None = None) -> F
                 return JSONResponse(
                     {"error": {"message": "本地 API key 验证失败"}}, status_code=401
                 )
-            hours: float | None = None
-            hours_param = request.query_params.get("hours")
-            if hours_param:
-                try:
-                    hours = float(hours_param)
-                except ValueError:
-                    pass
             return await lease.resources.metrics.snapshot(hours=hours)
+        finally:
+            await lease.release()
+
+    @app.get("/metrics/requests")
+    async def metric_requests(
+        request: Request,
+        hours: float = Query(default=24, gt=0, le=720),
+        all_history: bool = False,
+        caller_type: Literal["local", "visitor"] | None = None,
+        model_id: str | None = Query(default=None, min_length=1, max_length=512),
+        requested_model_id: str | None = Query(default=None, min_length=1, max_length=512),
+        provider_id: str | None = Query(default=None, min_length=1, max_length=512),
+        pool_name: str | None = Query(default=None, min_length=1, max_length=512),
+        upstream_model_id: str | None = Query(default=None, min_length=1, max_length=512),
+        key_name: str | None = Query(default=None, min_length=1, max_length=512),
+        status_code: int | None = Query(default=None, ge=100, le=599),
+        success: bool | None = None,
+        attributed: bool | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+        before_id: int | None = Query(default=None, ge=1),
+    ):
+        await _reload_config_if_changed(app.state)
+        lease = await _acquire_runtime(app.state)
+        try:
+            if (
+                _authorization_mode(request, lease.resources.config.local_api_key)
+                != "full"
+            ):
+                return JSONResponse(
+                    {"error": {"message": "本地 API key 验证失败"}}, status_code=401
+                )
+            return await lease.resources.metrics.request_history(
+                hours=None if all_history else hours,
+                caller_type=caller_type,
+                model_id=model_id,
+                requested_model_id=requested_model_id,
+                provider_id=provider_id,
+                pool_name=pool_name,
+                upstream_model_id=upstream_model_id,
+                key_name=key_name,
+                status_code=status_code,
+                success=success,
+                attributed=attributed,
+                limit=limit,
+                before_id=before_id,
+            )
+        finally:
+            await lease.release()
+
+    @app.get("/metrics/series")
+    async def metric_series(
+        request: Request,
+        hours: float = Query(default=1, gt=0, le=720),
+        bucket_seconds: int = Query(default=60, ge=15, le=86400),
+        caller_type: Literal["local", "visitor"] | None = None,
+        model_id: str | None = Query(default=None, min_length=1, max_length=512),
+        requested_model_id: str | None = Query(default=None, min_length=1, max_length=512),
+        provider_id: str | None = Query(default=None, min_length=1, max_length=512),
+        pool_name: str | None = Query(default=None, min_length=1, max_length=512),
+        upstream_model_id: str | None = Query(default=None, min_length=1, max_length=512),
+        key_name: str | None = Query(default=None, min_length=1, max_length=512),
+        status_code: int | None = Query(default=None, ge=100, le=599),
+        success: bool | None = None,
+        attributed: bool | None = None,
+    ):
+        await _reload_config_if_changed(app.state)
+        lease = await _acquire_runtime(app.state)
+        try:
+            if (
+                _authorization_mode(request, lease.resources.config.local_api_key)
+                != "full"
+            ):
+                return JSONResponse(
+                    {"error": {"message": "本地 API key 验证失败"}}, status_code=401
+                )
+            try:
+                return await lease.resources.metrics.time_series(
+                    hours=hours,
+                    bucket_seconds=bucket_seconds,
+                    caller_type=caller_type,
+                    model_id=model_id,
+                    requested_model_id=requested_model_id,
+                    provider_id=provider_id,
+                    pool_name=pool_name,
+                    upstream_model_id=upstream_model_id,
+                    key_name=key_name,
+                    status_code=status_code,
+                    success=success,
+                    attributed=attributed,
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": {"message": str(exc)}}, status_code=422
+                )
         finally:
             await lease.release()
 

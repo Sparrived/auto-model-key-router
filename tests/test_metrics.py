@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import anyio
 
-from auto_model_key_router.metrics import MetricsStore, extract_usage
+from auto_model_key_router import metrics as metrics_module
+from auto_model_key_router.metrics import BEIJING_TZ, MetricsStore, extract_usage
 
 
 def test_extract_usage_supports_responses_completed_event() -> None:
@@ -30,6 +32,9 @@ def test_snapshot_aggregates_dimensions_in_sql(tmp_path: Path) -> None:
             duration_ms=30,
             first_token_ms=10,
             requested_model_id="alias-a",
+            provider_id="provider-a",
+            pool_name="pool-a",
+            upstream_model_id="upstream-a",
         )
         await store.record(
             "model-a",
@@ -41,6 +46,9 @@ def test_snapshot_aggregates_dimensions_in_sql(tmp_path: Path) -> None:
             first_token_ms=20,
             requested_model_id="alias-a",
             caller_type="visitor",
+            provider_id="provider-b",
+            pool_name="pool-b",
+            upstream_model_id="upstream-b",
         )
         snapshot = await store.snapshot()
         await store.close()
@@ -48,6 +56,7 @@ def test_snapshot_aggregates_dimensions_in_sql(tmp_path: Path) -> None:
 
     snapshot = anyio.run(run)
     assert snapshot["rate_window_seconds"] == 60
+    assert snapshot["count_semantics"] == "upstream_attempt"
     assert snapshot["current_rpm"] == 2
     assert snapshot["current_tpm"] == 10
     total = snapshot["total"]
@@ -62,6 +71,181 @@ def test_snapshot_aggregates_dimensions_in_sql(tmp_path: Path) -> None:
     assert snapshot["caller_types"]["visitor"]["requests"] == 1
     assert snapshot["model_requested_models"]["model-a"]["alias-a"]["requests"] == 2
     assert snapshot["keys"]["model-a"]["key-b"]["failures"] == 1
+    assert snapshot["providers"]["provider-a"]["requests"] == 1
+    assert snapshot["provider_pools"]["provider-b"]["pool-b"]["requests"] == 1
+    assert snapshot["upstream_models"]["upstream-b"]["failures"] == 1
+
+
+def test_request_history_returns_filtered_cursor_page(
+    tmp_path: Path, monkeypatch
+) -> None:
+    clock = [datetime(2026, 7, 14, 11, 58, tzinfo=BEIJING_TZ)]
+    monkeypatch.setattr(metrics_module, "_now_beijing", lambda: clock[0])
+
+    async def run() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        for minute, key_name, status_code in (
+            (59, "key-a", 200),
+            (59, "key-b", 429),
+        ):
+            clock[0] = datetime(2026, 7, 14, 11, minute, 30, tzinfo=BEIJING_TZ)
+            await store.record(
+                "model-a",
+                key_name,
+                status_code,
+                {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "cached_tokens": 4,
+                },
+                retried=status_code == 429,
+                requested_model_id="alias-a",
+                caller_type="visitor",
+                provider_id="provider-a",
+                pool_name="pool-a",
+                upstream_model_id="upstream-a",
+            )
+        await store.record("model-legacy", "key-legacy", 200)
+        clock[0] = datetime(2026, 7, 14, 12, 0, tzinfo=BEIJING_TZ)
+        first = await store.request_history(
+            hours=1, caller_type="visitor", limit=1
+        )
+        second = await store.request_history(
+            hours=1,
+            caller_type="visitor",
+            limit=1,
+            before_id=first["next_before_id"],
+        )
+        unattributed = await store.request_history(hours=1, attributed=False)
+        await store.close()
+        return first, second, unattributed
+
+    first, second, unattributed = anyio.run(run)
+
+    assert first["total_items"] == 2
+    assert first["count_semantics"] == "upstream_attempt"
+    assert first["summary"]["requests"] == 2
+    assert first["summary"]["status_codes"] == {"200": 1, "429": 1}
+    assert first["next_before_id"] is not None
+    item = first["items"][0]
+    assert item["provider_id"] == "provider-a"
+    assert item["pool_name"] == "pool-a"
+    assert item["upstream_model_id"] == "upstream-a"
+    assert item["uncached_prompt_tokens"] == 6
+    assert isinstance(item["success"], bool)
+    assert second["items"][0]["id"] < item["id"]
+    assert unattributed["total_items"] == 1
+    assert unattributed["items"][0]["provider_id"] is None
+
+
+def test_attribution_keeps_real_unknown_id_separate_from_legacy_rows(
+    tmp_path: Path,
+) -> None:
+    async def run() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        await store.record("legacy-model", "legacy-key", 200)
+        await store.record(
+            "model-a",
+            "key-a",
+            200,
+            provider_id="unknown",
+            pool_name="unknown",
+            upstream_model_id="unknown",
+        )
+        snapshot = await store.snapshot()
+        real_unknown = await store.request_history(provider_id="unknown")
+        unattributed = await store.request_history(attributed=False)
+        await store.close()
+        return snapshot, real_unknown, unattributed
+
+    snapshot, real_unknown, unattributed = anyio.run(run)
+
+    assert snapshot["providers"]["unknown"]["requests"] == 1
+    assert snapshot["provider_pools"]["unknown"]["unknown"]["requests"] == 1
+    assert snapshot["upstream_models"]["unknown"]["requests"] == 1
+    assert snapshot["unattributed"]["requests"] == 1
+    assert real_unknown["total_items"] == 1
+    assert real_unknown["items"][0]["model_id"] == "model-a"
+    assert unattributed["total_items"] == 1
+    assert unattributed["items"][0]["model_id"] == "legacy-model"
+
+
+def test_time_series_returns_aligned_zero_filled_buckets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    clock = [datetime(2026, 7, 14, 12, 1, 10, tzinfo=BEIJING_TZ)]
+    monkeypatch.setattr(metrics_module, "_now_beijing", lambda: clock[0])
+
+    async def run() -> dict[str, object]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        await store.record(
+            "model-a",
+            "key-a",
+            200,
+            {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 4},
+            duration_ms=90,
+            first_token_ms=30,
+        )
+        clock[0] = datetime(2026, 7, 14, 12, 3, 30, tzinfo=BEIJING_TZ)
+        result = await store.time_series(
+            hours=0.05, bucket_seconds=60, model_id="model-a"
+        )
+        await store.close()
+        return result
+
+    result = anyio.run(run)
+    points = result["points"]
+
+    assert result["bucket_seconds"] == 60
+    assert result["count_semantics"] == "upstream_attempt"
+    assert result["window"]["from"] == "2026-07-14T12:00:00+08:00"
+    assert [point["requests"] for point in points] == [0, 1, 0, 0]
+    assert points[1]["total_tokens"] == 15
+    assert points[1]["cached_token_rate"] == 0.4
+    assert points[1]["avg_duration_ms"] == 90
+    assert points[-1]["complete"] is False
+
+
+def test_daily_series_aligns_to_beijing_midnight(tmp_path: Path, monkeypatch) -> None:
+    clock = [datetime(2026, 7, 14, 12, 0, tzinfo=BEIJING_TZ)]
+    monkeypatch.setattr(metrics_module, "_now_beijing", lambda: clock[0])
+
+    async def run() -> dict[str, object]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        result = await store.time_series(hours=24, bucket_seconds=86400)
+        await store.close()
+        return result
+
+    result = anyio.run(run)
+
+    assert result["window"]["from"] == "2026-07-13T00:00:00+08:00"
+    assert [point["started_at"] for point in result["points"]] == [
+        "2026-07-13T00:00:00+08:00",
+        "2026-07-14T00:00:00+08:00",
+    ]
+
+
+def test_queries_exclude_rows_newer_than_response_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    clock = [datetime(2026, 7, 14, 13, 0, tzinfo=BEIJING_TZ)]
+    monkeypatch.setattr(metrics_module, "_now_beijing", lambda: clock[0])
+
+    async def run() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+        store = MetricsStore(tmp_path / "metrics.sqlite3")
+        await store.record("future-model", "future-key", 200)
+        clock[0] = datetime(2026, 7, 14, 12, 0, tzinfo=BEIJING_TZ)
+        snapshot = await store.snapshot()
+        history = await store.request_history(hours=1)
+        series = await store.time_series(hours=1, bucket_seconds=60)
+        await store.close()
+        return snapshot, history, series
+
+    snapshot, history, series = anyio.run(run)
+
+    assert snapshot["total"]["requests"] == 0
+    assert history["total_items"] == 0
+    assert sum(point["requests"] for point in series["points"]) == 0
 
 
 def test_snapshot_counts_anthropic_cache_read_tokens_as_cached(

@@ -364,6 +364,7 @@ class KeyConfig:
     upstream_routes: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     provider: str | None = None
     upstream_model: str | None = None
+    pool: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -673,6 +674,7 @@ class RouterConfig:
                                     base_url=provider_config.base_url,
                                     provider=provider_id,
                                     upstream_model=upstream_model,
+                                    pool=pool_name,
                                     enabled=key_config.enabled and target_enabled,
                                     allow_visitor=key_config.allow_visitor,
                                 )

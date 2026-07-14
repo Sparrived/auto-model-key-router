@@ -62,6 +62,9 @@ class StreamLifecycle:
     byte_count: int = 0
     first_token_ms: int = 0
     usage: dict[str, Any] | None = None
+    provider_id: str | None = None
+    pool_name: str | None = None
+    upstream_model_id: str | None = None
 
     def observe_chunk(self, chunk: bytes) -> None:
         self.chunk_count += 1
@@ -98,6 +101,9 @@ class StreamLifecycle:
             first_token_ms=self.first_token_ms,
             requested_model_id=self.requested_model_id,
             caller_type=self.caller_type,
+            provider_id=self.provider_id,
+            pool_name=self.pool_name,
+            upstream_model_id=self.upstream_model_id,
         )
         if failed or self.response.status_code in RETRYABLE_STATUS_CODES:
             await self.key_pool.mark_failure(

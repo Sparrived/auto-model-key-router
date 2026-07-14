@@ -6,6 +6,7 @@ import logging
 import sqlite3
 import tempfile
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -218,6 +219,11 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
 
     assert response.status_code == 200
     assert upstream_payloads == [{"model": "vendor-model", "messages": []}]
+    with closing(sqlite3.connect(config.metrics_db_path)) as connection:
+        attribution = connection.execute(
+            "SELECT provider_id, pool_name, upstream_model_id FROM request_metrics"
+        ).fetchone()
+    assert attribution == ("vendor", "premium", "vendor-model")
 
 
 def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(
@@ -540,6 +546,86 @@ def test_metrics_requires_local_auth() -> None:
         assert authorized.json()["total"]["requests"] == 0
 
 
+def test_metrics_exposes_request_history_and_time_series() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+        )
+        app = create_app(config)
+
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+            await app.state.runtime_manager.current.metrics.record(
+                "test-model",
+                "key-1",
+                200,
+                {"prompt_tokens": 8, "completion_tokens": 2, "cached_tokens": 3},
+                requested_model_id="alias-model",
+                provider_id="provider-a",
+                pool_name="pool-a",
+                upstream_model_id="upstream-a",
+                duration_ms=120,
+                first_token_ms=40,
+            )
+            history = await client.get(
+                "/metrics/requests?all_history=true&provider_id=provider-a&attributed=true&limit=10",
+                headers={"Authorization": "Bearer local-key"},
+            )
+            series = await client.get(
+                "/metrics/series?hours=1&bucket_seconds=60&provider_id=provider-a&attributed=true",
+                headers={"Authorization": "Bearer local-key"},
+            )
+            unauthorized = await client.get("/metrics/requests")
+            return history, series, unauthorized
+
+        history, series, unauthorized = run_client(app, requests)
+
+        assert history.status_code == 200
+        history_body = history.json()
+        assert history_body["summary"]["requests"] == 1
+        assert history_body["window"]["hours"] is None
+        assert history_body["current_rpm"] == 1
+        assert history_body["items"][0]["requested_model_id"] == "alias-model"
+        assert history_body["items"][0]["provider_id"] == "provider-a"
+        assert series.status_code == 200
+        series_body = series.json()
+        assert series_body["bucket_seconds"] == 60
+        assert sum(point["requests"] for point in series_body["points"]) == 1
+        assert unauthorized.status_code == 401
+
+
+def test_metrics_query_parameters_are_strictly_validated() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = make_config(
+            Path(directory),
+            (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
+        )
+
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+            headers = {"Authorization": "Bearer local-key"}
+            invalid_hours = await client.get("/metrics?hours=invalid", headers=headers)
+            invalid_limit = await client.get(
+                "/metrics/requests?limit=201", headers=headers
+            )
+            too_many_points = await client.get(
+                "/metrics/series?hours=720&bucket_seconds=15", headers=headers
+            )
+            return invalid_hours, invalid_limit, too_many_points
+
+        invalid_hours, invalid_limit, too_many_points = run_client(
+            create_app(config), requests
+        )
+
+        assert invalid_hours.status_code == 422
+        assert invalid_limit.status_code == 422
+        assert too_many_points.status_code == 422
+        assert "500 points" in too_many_points.json()["error"]["message"]
+
+
 def test_metrics_group_local_and_visitor_calls(visitor_feature) -> None:
     with tempfile.TemporaryDirectory() as directory:
 
@@ -623,6 +709,9 @@ def test_stream_metrics_preserve_visitor_caller_type(visitor_feature) -> None:
                     "sk-visitor",
                     "https://upstream.test",
                     allow_visitor=True,
+                    provider="vendor",
+                    pool="premium",
+                    upstream_model="vendor-model",
                 ),
             ),
         )
@@ -653,6 +742,11 @@ def test_stream_metrics_preserve_visitor_caller_type(visitor_feature) -> None:
 
         assert metrics["caller_types"]["visitor"]["requests"] == 3
         assert metrics["caller_types"]["local"]["requests"] == 0
+        with closing(sqlite3.connect(config.metrics_db_path)) as connection:
+            attributions = connection.execute(
+                "SELECT DISTINCT provider_id, pool_name, upstream_model_id FROM request_metrics"
+            ).fetchall()
+        assert attributions == [("vendor", "premium", "vendor-model")]
 
 
 def test_metrics_migrates_existing_rows_to_local_calls(tmp_path: Path) -> None:
@@ -708,6 +802,10 @@ def test_metrics_migrates_existing_rows_to_local_calls(tmp_path: Path) -> None:
     assert caller_type == "local"
     assert snapshot["caller_types"]["local"]["requests"] == 1
     assert snapshot["caller_types"]["visitor"]["requests"] == 0
+    assert snapshot["providers"] == {}
+    assert snapshot["provider_pools"] == {}
+    assert snapshot["upstream_models"] == {}
+    assert snapshot["unattributed"]["requests"] == 1
 
 
 def test_visitor_key_routes_only_to_allowed_upstream_keys(visitor_feature) -> None:
@@ -3122,6 +3220,139 @@ def test_responses_default_route_probes_native_before_fallback() -> None:
             ),
         ]
         assert response.json()["output"][0]["content"][0]["text"] == "fallback"
+
+
+def test_native_fallback_records_each_upstream_attempt() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_urls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_urls.append(str(request.url))
+            if str(request.url) == "https://upstream.test/v1/responses":
+                return httpx.Response(404, json={"error": {"message": "missing"}})
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-fallback",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "fallback"},
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 1,
+                        "total_tokens": 3,
+                    },
+                },
+            )
+
+        config = make_config(
+            Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
+        )
+        app = create_app(config)
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, httpx.Response]:
+            await app.state.runtime_manager.current.key_pool.update_native_endpoint(
+                "https://upstream.test", True, "v1/responses", "test"
+            )
+            response = await client.post(
+                "/v1/responses",
+                headers={"Authorization": "Bearer local-key"},
+                json={"model": "alias-model", "input": "inspect"},
+            )
+            history = await client.get(
+                "/metrics/requests?hours=1",
+                headers={"Authorization": "Bearer local-key"},
+            )
+            return response, history
+
+        response, history = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert upstream_urls == [
+            "https://upstream.test/v1/responses",
+            "https://upstream.test/v1/chat/completions",
+        ]
+        items = history.json()["items"]
+        assert [item["status_code"] for item in items] == [200, 404]
+        assert [item["retried"] for item in items] == [False, True]
+
+
+def test_tool_filter_retry_records_each_upstream_attempt() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_bodies: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_bodies.append(json.loads(request.content.decode("utf-8")))
+            if len(upstream_bodies) == 1:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": "unsupported tool type"}},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-tool-filtered",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "ok"},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+                },
+            )
+
+        config = make_config(
+            Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
+        )
+        app = create_app(config)
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(
+            client: httpx.AsyncClient,
+        ) -> tuple[httpx.Response, httpx.Response]:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer local-key"},
+                json={
+                    "model": "alias-model",
+                    "messages": [{"role": "user", "content": "inspect"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "parameters": {"type": "object"},
+                            },
+                        },
+                        {"type": "web_search_preview"},
+                    ],
+                },
+            )
+            history = await client.get(
+                "/metrics/requests?hours=1",
+                headers={"Authorization": "Bearer local-key"},
+            )
+            return response, history
+
+        response, history = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert len(upstream_bodies) == 2
+        assert upstream_bodies[1]["tools"] == upstream_bodies[0]["tools"]
+        items = history.json()["items"]
+        assert [item["status_code"] for item in items] == [200, 400]
+        assert [item["retried"] for item in items] == [False, True]
 
 
 def test_custom_responses_upstream_route_uses_native_responses_path() -> None:
