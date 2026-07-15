@@ -1000,6 +1000,69 @@ def test_unified_model_accepts_nested_api_payload(tmp_path: Path) -> None:
     assert response.json()["unified_model"]["default"]["primary"]["model"] == "model-a"
 
 
+def test_unified_model_update_preserves_shared_v3_provider_pool(tmp_path: Path) -> None:
+    path = tmp_path / "router-config.json"
+    data = config_data(tmp_path)
+    data["config_version"] = 3
+    data["providers"] = {
+        "otokapi.com": {
+            "base_url": "https://otokapi.com",
+            "keys": {"Discount": {"api_key": "sk-discount"}},
+            "pools": {
+                "Discount": {
+                    "keys": ["Discount"],
+                    "models": ["gpt-5.5", "gpt-5.4-mini"],
+                }
+            },
+        }
+    }
+    data["models"] = {
+        "gpt-5.5": {
+            "targets": [
+                {
+                    "provider": "otokapi.com",
+                    "pool": "Discount",
+                    "upstream_model": "gpt-5.5",
+                }
+            ]
+        },
+        "gpt-5.4-mini": {
+            "targets": [
+                {
+                    "provider": "otokapi.com",
+                    "pool": "Discount",
+                    "upstream_model": "gpt-5.4-mini",
+                }
+            ]
+        },
+    }
+    data["unified_model"] = {"default": {"primary": {"model": "gpt-5.5"}}}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    app = create_app(RouterConfig.load(path), path)
+
+    response = run_client(
+        app,
+        lambda client: client.put(
+            "/api/unified-model",
+            headers=AUTH_HEADERS,
+            json={"model": "gpt-5.4-mini"},
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["unified_model"]["default"]["primary"] == {
+        "model": "gpt-5.4-mini",
+        "key": None,
+    }
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["providers"]["otokapi.com"]["pools"]["Discount"] == {
+        "keys": ["Discount"],
+        "models": ["gpt-5.5", "gpt-5.4-mini"],
+    }
+    assert saved["models"]["gpt-5.5"]["targets"][0]["pool"] == "Discount"
+    assert saved["models"]["gpt-5.4-mini"]["targets"][0]["pool"] == "Discount"
+
+
 def test_unified_model_rejects_unknown_model(tmp_path: Path) -> None:
     app, _ = create_file_backed_app(tmp_path)
 

@@ -194,6 +194,16 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             result["image"] = serialize_plan(unified.image)
         return result
 
+    def find_config_model(config: RouterConfig, model_name: str) -> ModelConfig:
+        for model in config.models:
+            if model_name == model.id or model_name in model.aliases:
+                return model
+        raise ManagementAPIError(404, f"未配置模型或别名: {model_name}")
+
+    def ensure_enabled_config_key(model: ModelConfig, key_name: str) -> None:
+        if not any(key.name == key_name and key.enabled for key in model.keys):
+            raise ManagementAPIError(404, f"模型 {model.id} 的 key 不存在: {key_name}")
+
     @app.get("/api/unified-model", tags=["management"])
     async def get_unified_model(request: Request) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
@@ -211,7 +221,12 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                     unified_data["image"] = fields["image"]
                 data["unified_model"] = unified_data
 
-            config = await _update_config(request, reload_config, nested_mutation)
+            config = await _update_config(
+                request,
+                reload_config,
+                nested_mutation,
+                v3=True,
+            )
             return {"unified_model": serialize_unified(config)}
         if fields.get("model") is None:
             raise ManagementAPIError(422, "必须提供 model 或 default")
@@ -224,58 +239,70 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         target_image_key = str(fields["image_key"]).strip() if fields.get("image_key") else None
 
         def mutation(data: dict[str, Any]) -> None:
-            models = _raw_models(data)
-            resolved_id = _resolve_model_id(models, target_model)
-            if resolved_id is None:
-                raise ManagementAPIError(404, f"未配置模型或别名: {target_model}")
+            config = RouterConfig.from_dict(data)
+            model = find_config_model(config, target_model)
+            resolved_id = model.id
             if target_key is not None:
-                model = _find_raw_model(models, resolved_id)
-                if model is None:
-                    raise ManagementAPIError(404, f"模型不存在: {resolved_id}")
-                keys = _raw_keys(model)
-                if _find_raw_key(keys, resolved_id, target_key) is None:
-                    raise ManagementAPIError(
-                        404, f"模型 {resolved_id} 的 key 不存在: {target_key}"
-                    )
+                ensure_enabled_config_key(model, target_key)
             existing = data.get("unified_model")
+            if not isinstance(existing, dict):
+                existing = {}
+            existing_default = existing.get("default")
             existing_primary = (
-                existing.get("default", {}).get("primary", {})
-                if isinstance(existing, dict)
+                existing_default.get("primary", {})
+                if isinstance(existing_default, dict)
                 else {}
             )
             existing_key = (
                 existing_primary.get("key")
                 if isinstance(existing_primary, dict)
-                else (existing.get("key") if isinstance(existing, dict) else None)
+                else existing.get("key")
             )
-            unified_data: dict[str, Any] = {"model": resolved_id}
+            unified_data: dict[str, Any] = {
+                "default": {"primary": {"model": resolved_id}}
+            }
             if key_provided:
                 if target_key:
-                    unified_data["key"] = target_key
+                    unified_data["default"]["primary"]["key"] = target_key
             else:
                 if existing_key:
-                    unified_data["key"] = existing_key
+                    unified_data["default"]["primary"]["key"] = existing_key
             # 图像模型映射
-            existing_image_model = None
-            if isinstance(existing, dict):
-                existing_image_model = existing.get("image_model") or existing.get("image", {}).get("primary", {}).get("model")
+            existing_image = existing.get("image")
+            existing_image_primary = (
+                existing_image.get("primary", {})
+                if isinstance(existing_image, dict)
+                else {}
+            )
+            existing_image_model = existing.get("image_model") or (
+                existing_image_primary.get("model")
+                if isinstance(existing_image_primary, dict)
+                else None
+            )
+            existing_image_key = existing.get("image_key") or (
+                existing_image_primary.get("key")
+                if isinstance(existing_image_primary, dict)
+                else None
+            )
             if image_model_provided:
                 if target_image_model:
-                    resolved_image_id = _resolve_model_id(models, target_image_model)
-                    if resolved_image_id is None:
-                        raise ManagementAPIError(404, f"未配置模型或别名: {target_image_model}")
-                    unified_data["image_model"] = resolved_image_id
+                    image_model = find_config_model(config, target_image_model)
+                    resolved_image_id = image_model.id
+                    image_primary: dict[str, Any] = {"model": resolved_image_id}
                     if image_key_provided and target_image_key:
-                        unified_data["image_key"] = target_image_key
-                    elif not image_key_provided and isinstance(existing, dict) and existing.get("image_key") and existing.get("image_model") == resolved_image_id:
-                        unified_data["image_key"] = existing["image_key"]
+                        ensure_enabled_config_key(image_model, target_image_key)
+                        image_primary["key"] = target_image_key
+                    elif not image_key_provided and existing_image_key and existing_image_model == resolved_image_id:
+                        image_primary["key"] = existing_image_key
+                    unified_data["image"] = {"primary": image_primary}
             elif existing_image_model:
-                unified_data["image_model"] = existing_image_model
-                if isinstance(existing, dict) and existing.get("image_key"):
-                    unified_data["image_key"] = existing["image_key"]
+                image_primary = {"model": existing_image_model}
+                if existing_image_key:
+                    image_primary["key"] = existing_image_key
+                unified_data["image"] = {"primary": image_primary}
             data["unified_model"] = unified_data
 
-        config = await _update_config(request, reload_config, mutation)
+        config = await _update_config(request, reload_config, mutation, v3=True)
         return {"unified_model": serialize_unified(config)}
 
     @app.delete(
@@ -288,7 +315,7 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         def mutation(data: dict[str, Any]) -> None:
             data.pop("unified_model", None)
 
-        await _update_config(request, reload_config, mutation)
+        await _update_config(request, reload_config, mutation, v3=True)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/api/models", tags=["management"])
