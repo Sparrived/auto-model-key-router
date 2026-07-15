@@ -463,14 +463,17 @@ async def test_native_messages_support(
         )
         # 如果返回这些状态码，说明端点不存在或不支持
         if response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
-            LOGGER.info(
+            LOGGER.warning(
                 "endpoint %s returned %d, native messages not supported",
                 test_url,
                 response.status_code,
             )
             return False, "unsupported"
         # 其他状态码（包括认证错误、参数错误等）说明端点存在
-        LOGGER.info(
+        LOGGER.log(
+            logging.ERROR if response.status_code >= 500 else logging.WARNING
+            if response.status_code >= 300
+            else logging.INFO,
             "endpoint %s returned %d, native messages supported",
             test_url,
             response.status_code,
@@ -513,13 +516,16 @@ async def test_native_responses_support(
             timeout=httpx.Timeout(10.0),
         )
         if response.status_code in UNSUPPORTED_ENDPOINT_STATUS_CODES:
-            LOGGER.info(
+            LOGGER.warning(
                 "endpoint %s returned %d, native responses not supported",
                 test_url,
                 response.status_code,
             )
             return False, "unsupported"
-        LOGGER.info(
+        LOGGER.log(
+            logging.ERROR if response.status_code >= 500 else logging.WARNING
+            if response.status_code >= 300
+            else logging.INFO,
             "endpoint %s returned %d, native responses supported",
             test_url,
             response.status_code,

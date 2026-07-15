@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import shlex
@@ -668,6 +669,16 @@ def service_health(
         return {"status": "ok"}
 
 
+class AccessLogLevelFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        status_code = getattr(record, "status_code", None)
+        if status_code is None or status_code < 300:
+            return True
+        record.levelno = logging.ERROR if status_code >= 500 else logging.WARNING
+        record.levelname = logging.getLevelName(record.levelno)
+        return True
+
+
 def uvicorn_log_config(log_file_path: str) -> dict[str, Any]:
     path = Path(log_file_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -682,10 +693,12 @@ def uvicorn_log_config(log_file_path: str) -> dict[str, Any]:
             "file": {
                 "class": "logging.FileHandler",
                 "formatter": "default",
+                "filters": ["access_level"],
                 "filename": str(path),
                 "encoding": "utf-8",
             }
         },
+        "filters": {"access_level": {"()": AccessLogLevelFilter}},
         "loggers": {
             "auto_model_key_router": {
                 "handlers": ["file"],

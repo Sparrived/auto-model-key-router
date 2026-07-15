@@ -539,7 +539,8 @@ async def _execute_attempt(
             upstream_model_id=key.upstream_model or context.model_id,
         )
         await response.aclose()
-        LOGGER.info(
+        LOGGER.log(
+            logging.ERROR if response.status_code >= 500 else logging.WARNING,
             "native endpoint returned %d for %s/%s, falling back to chat/completions",
             response.status_code,
             key.base_url,
