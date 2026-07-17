@@ -315,6 +315,32 @@ def test_provider_key_cannot_belong_to_multiple_pools() -> None:
         )
 
 
+def test_v3_model_named_pools_are_merged_as_models() -> None:
+    data = {
+        "config_version": 3,
+        "providers": {
+            "vendor": {
+                "base_url": "https://vendor.example",
+                "keys": {"main": {"api_key": "sk-main"}},
+                "pools": {
+                    "gpt-5.5": {"keys": ["main"], "models": ["gpt-5.5"]},
+                    "codex-auto-review": {"keys": ["main"], "models": ["codex-auto-review"]},
+                },
+            }
+        },
+        "models": {
+            "gpt-5.5": {"targets": [{"provider": "vendor", "pool": "gpt-5.5", "upstream_model": "gpt-5.5"}]},
+            "codex-auto-review": {"targets": [{"provider": "vendor", "pool": "codex-auto-review", "upstream_model": "codex-auto-review"}]},
+        },
+    }
+
+    config = RouterConfig.from_dict(data)
+
+    assert [pool.name for pool in config.providers[0].pools] == ["gpt-5.5"]
+    assert config.providers[0].pools[0].models == ("gpt-5.5", "codex-auto-review")
+    assert all(key.pool == "gpt-5.5" for model in config.models for key in model.keys)
+
+
 def test_provider_key_must_belong_to_a_pool() -> None:
     with pytest.raises(ValueError, match=r"供应商 vendor 的 key main 未加入模型池.*运行 amkr"):
         RouterConfig.from_dict(

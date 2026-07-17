@@ -247,6 +247,7 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
     if int(normalized.get("config_version") or 0) == CONFIG_VERSION and isinstance(
         normalized.get("models"), dict
     ):
+        _merge_legacy_model_named_pools(normalized)
         return normalized
     models = normalized.get("models")
     if not isinstance(models, list):
@@ -330,6 +331,58 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
     else:
         migrated.pop("upstream_routes", None)
     return migrated
+
+
+def _merge_legacy_model_named_pools(data: dict[str, Any]) -> None:
+    """Repair v3 data from clients that created one pool per model."""
+    providers = data.get("providers")
+    models = data.get("models")
+    if not isinstance(providers, dict) or not isinstance(models, dict):
+        return
+
+    model_ids = {str(model_id) for model_id in models}
+    for provider in providers.values():
+        pools = provider.get("pools") if isinstance(provider, dict) else None
+        if not isinstance(pools, dict):
+            continue
+        legacy_pools = {}
+        for name, pool in pools.items():
+            pool_models = pool.get("models") if isinstance(pool, dict) else None
+            if (
+                str(name) in model_ids
+                and isinstance(pool, dict)
+                and isinstance(pool.get("keys"), list)
+                and isinstance(pool_models, list)
+                and set(map(str, pool_models)) <= {str(name)}
+            ):
+                legacy_pools[str(name)] = pool
+
+        key_to_pool: dict[str, str] = {}
+        merged: dict[str, str] = {}
+        for pool_name, pool in legacy_pools.items():
+            keys = [str(key) for key in pool["keys"]]
+            existing_pool = next((key_to_pool[key] for key in keys if key in key_to_pool), None)
+            if existing_pool is None:
+                for key in keys:
+                    key_to_pool[key] = pool_name
+                continue
+            merged[pool_name] = existing_pool
+            kept = pools[existing_pool]
+            kept["keys"] = list(dict.fromkeys([*kept["keys"], *pool["keys"]]))
+            kept["models"] = list(dict.fromkeys([*kept.get("models", []), *pool.get("models", [])]))
+            for key in keys:
+                key_to_pool[key] = existing_pool
+            pools.pop(pool_name, None)
+
+        if not merged:
+            continue
+        for model in models.values():
+            targets = model.get("targets") if isinstance(model, dict) else None
+            if not isinstance(targets, list):
+                continue
+            for target in targets:
+                if isinstance(target, dict) and target.get("pool") in merged:
+                    target["pool"] = merged[target["pool"]]
 
 
 def _legacy_provider_id(base_url: str) -> str:
