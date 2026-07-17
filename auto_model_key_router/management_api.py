@@ -1269,7 +1269,7 @@ def _validate_pool(provider: dict[str, Any], keys: list[str], exclude: str | Non
     existing = provider.get("keys", {})
     if any(name not in existing for name in keys): raise ManagementAPIError(422, "Pool 引用了不存在的 key")
     for name, pool in provider.get("pools", {}).items():
-        if name != exclude and any(key in pool.get("keys", []) for key in keys): raise ManagementAPIError(422, "Key 只能属于一个 Pool")
+        if name != exclude and any(key in pool.get("keys", []) for key in keys): raise ManagementAPIError(422, "同一 Key 只能属于一个模型池；模型 ID 不应作为模型池名称")
 
 
 def _validate_targets(data: dict[str, Any], targets: list[dict[str, str]]) -> None:
