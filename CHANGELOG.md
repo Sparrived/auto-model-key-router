@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [3.2.4] - 2026-07-19
+
+### Fixed
+- disable upstream response compression
+
 ## [3.2.3] - 2026-07-19
 
 ### Fixed
