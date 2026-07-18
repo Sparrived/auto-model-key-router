@@ -520,6 +520,9 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             if isinstance(default_pool, dict):
                 default_pool["keys"] = [key for key in default_pool.get("keys", []) if key not in payload.keys]
             _validate_pool(provider, payload.keys, exclude=None); pools[payload.name] = {"keys": payload.keys, "models": payload.models}
+            from .config_editor import enable_pool_models
+
+            enable_pool_models(data, provider_id, payload.name, payload.models)
         data = await v3_update(request, payload.config_revision, mutation); pool = _require_provider(_providers(data), provider_id)["pools"][payload.name]
         return _with_revision(data, pool={"name": payload.name, **pool})
 
@@ -541,12 +544,33 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                 for route in _routes(data).values():
                     for target in route.get("targets", []):
                         if target.get("provider") == provider_id and target.get("pool") == pool_name: target["pool"] = new_name
+            if "models" in updates or new_name != pool_name:
+                from .config_editor import enable_pool_models
+
+                enable_pool_models(data, provider_id, new_name, list(pools[new_name].get("models", [])))
         data = await v3_update(request, payload.config_revision, mutation); name = updates.get("name", pool_name); pool = _require_pool(_require_provider(_providers(data), provider_id), name)
         return _with_revision(data, pool={"name": name, **pool})
 
     @app.delete("/api/providers/{provider_id}/pools/{pool_name}", status_code=204, response_class=Response, tags=["management"])
     async def delete_pool(request: Request, provider_id: str, pool_name: str, payload: RevisionPayload) -> Response:
-        def mutation(data: dict[str, Any]) -> None: _require_provider(_providers(data), provider_id).setdefault("pools", {}).pop(pool_name) if _require_pool(_require_provider(_providers(data), provider_id), pool_name) else None
+        def mutation(data: dict[str, Any]) -> None:
+            provider = _require_provider(_providers(data), provider_id)
+            pool = _require_pool(provider, pool_name)
+            pool_keys = list(pool.get("keys", []))
+            if pool_name == "default" and pool_keys:
+                raise ManagementAPIError(409, "默认模型池仍包含 Key，不能删除")
+            from .config_editor import enable_pool_models
+
+            enable_pool_models(data, provider_id, pool_name, [])
+            provider.setdefault("pools", {}).pop(pool_name)
+            if pool_keys:
+                default_pool = provider.setdefault("pools", {}).setdefault(
+                    "default", {"keys": [], "models": []}
+                )
+                default_pool["keys"] = list(dict.fromkeys([
+                    *default_pool.get("keys", []),
+                    *pool_keys,
+                ]))
         await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
 
     @app.get("/api/routes", tags=["management"])

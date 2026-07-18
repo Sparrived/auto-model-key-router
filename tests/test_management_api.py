@@ -398,7 +398,7 @@ def test_provider_key_pool_and_route_crud_uses_v3_config(tmp_path: Path) -> None
     ).hexdigest()[:12]
     assert "sk-secret-b" not in created_key.text
     assert created_pool.status_code == 201
-    assert created_route.status_code == 201
+    assert created_route.status_code == 200
     assert disabled.status_code == 409
     assert created_backup.status_code == 201
     assert deleted_key.status_code == 204
@@ -409,7 +409,89 @@ def test_provider_key_pool_and_route_crud_uses_v3_config(tmp_path: Path) -> None
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["config_version"] == 3
     assert "b.example.test" not in saved["providers"]
-    assert "model-b" not in saved["models"]
+    assert "upstream-b" not in saved["models"]
+
+
+def test_pool_crud_synchronizes_model_routes(tmp_path: Path) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(client: httpx.AsyncClient):
+        async def write(method: str, url: str, payload: dict[str, object]) -> httpx.Response:
+            revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+                "config_revision"
+            ]
+            return await client.request(
+                method.upper(),
+                url,
+                headers=AUTH_HEADERS,
+                json={"config_revision": revision, **payload},
+            )
+
+        await write(
+            "post",
+            "/api/providers",
+            {"id": "b.example.test", "base_url": "https://b.example.test"},
+        )
+        await write(
+            "post",
+            "/api/providers/b.example.test/keys",
+            {"name": "key-b", "api_key": "sk-secret-b"},
+        )
+        created = await write(
+            "post",
+            "/api/providers/b.example.test/pools",
+            {"name": "pool-b", "keys": ["key-b"], "models": ["upstream-b"]},
+        )
+        after_create = await client.get("/api/routes", headers=AUTH_HEADERS)
+        renamed = await write(
+            "put",
+            "/api/providers/b.example.test/pools/pool-b",
+            {"name": "pool-c", "models": ["upstream-c"]},
+        )
+        after_update = await client.get("/api/routes", headers=AUTH_HEADERS)
+        deleted = await write(
+            "delete",
+            "/api/providers/b.example.test/pools/pool-c",
+            {},
+        )
+        after_delete = await client.get("/api/routes", headers=AUTH_HEADERS)
+        return created, after_create, renamed, after_update, deleted, after_delete
+
+    created, after_create, renamed, after_update, deleted, after_delete = run_client(app, requests)
+
+    assert created.status_code == 201
+    assert renamed.status_code == 200
+    assert deleted.status_code == 204, deleted.text
+    created_route = next(
+        route for route in after_create.json()["routes"] if route["id"] == "upstream-b"
+    )
+    assert created_route["targets"] == [
+        {
+            "provider": "b.example.test",
+            "pool": "pool-b",
+            "upstream_model": "upstream-b",
+        }
+    ]
+    updated_routes = {
+        route["id"]: route for route in after_update.json()["routes"]
+    }
+    assert "upstream-b" not in updated_routes
+    assert updated_routes["upstream-c"]["targets"] == [
+        {
+            "provider": "b.example.test",
+            "pool": "pool-c",
+            "upstream_model": "upstream-c",
+        }
+    ]
+    assert all(route["id"] != "upstream-c" for route in after_delete.json()["routes"])
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "pool-c" not in saved["providers"]["b.example.test"]["pools"]
+    assert saved["providers"]["b.example.test"]["pools"]["default"]["keys"] == [
+        "key-b"
+    ]
+    assert "upstream-b" not in saved["models"]
+    assert "upstream-c" not in saved["models"]
 
 
 def test_key_probe_is_async_redacted_and_requires_full_access(
@@ -534,20 +616,7 @@ async def _provider_crud_requests(client: httpx.AsyncClient) -> list[httpx.Respo
             "/api/providers/b.example.test/pools",
             {"name": "pool-b", "keys": ["key-b"], "models": ["upstream-b"]},
         ),
-        await write(
-            "post",
-            "/api/routes",
-            {
-                "id": "model-b",
-                "targets": [
-                    {
-                        "provider": "b.example.test",
-                        "pool": "pool-b",
-                        "upstream_model": "upstream-b",
-                    }
-                ],
-            },
-        ),
+        await client.get("/api/routes", headers=AUTH_HEADERS),
         await write(
             "put",
             "/api/providers/b.example.test/keys/key-b",
@@ -563,7 +632,7 @@ async def _provider_crud_requests(client: httpx.AsyncClient) -> list[httpx.Respo
             "/api/providers/b.example.test/keys/key-b",
             {},
         ),
-        await write("delete", "/api/routes/model-b", {}),
+        await write("delete", "/api/routes/upstream-b", {}),
         await write(
             "delete",
             "/api/providers/b.example.test/pools/pool-b",
