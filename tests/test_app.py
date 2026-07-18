@@ -2682,6 +2682,41 @@ def test_destination_addr_header_is_not_forwarded() -> None:
         assert "destination-addr" not in upstream_headers[0]
 
 
+def test_upstream_compression_is_disabled() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        upstream_headers: list[httpx.Headers] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            upstream_headers.append(request.headers)
+            return httpx.Response(200, json={"id": "ok"})
+
+        config = make_config(
+            Path(directory), (KeyConfig("key-1", "sk-1", "https://upstream.test"),)
+        )
+        app = create_app(config)
+        app.state.runtime_manager.current.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        async def requests(client: httpx.AsyncClient) -> httpx.Response:
+            return await client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer local-key",
+                    "Accept-Encoding": "gzip, deflate, br",
+                },
+                json={
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        response = run_client(app, requests)
+
+        assert response.status_code == 200
+        assert upstream_headers[0]["accept-encoding"] == "identity"
+
+
 def test_anthropic_auth_headers_are_not_forwarded() -> None:
     with tempfile.TemporaryDirectory() as directory:
         upstream_headers: list[httpx.Headers] = []

@@ -233,6 +233,7 @@ def _upstream_headers(request: Request, api_key: str) -> dict[str, str]:
         "host",
         "content-length",
         "destination-addr",
+        "accept-encoding",
         "x-api-key",
         "anthropic-version",
         "anthropic-beta",
@@ -243,6 +244,7 @@ def _upstream_headers(request: Request, api_key: str) -> dict[str, str]:
         if key.lower() not in blocked
     }
     headers["Authorization"] = f"Bearer {api_key}"
+    headers["Accept-Encoding"] = "identity"
     return headers
 
 
