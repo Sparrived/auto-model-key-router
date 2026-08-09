@@ -18,11 +18,14 @@ from .config import UNIFIED_MODEL_ID, RouterConfig, default_cache_dir
 
 CLAUDE_CODE = "claude-code"
 CODEX = "codex"
-SUPPORTED_AGENTS = (CLAUDE_CODE, CODEX)
+PI_AGENT = "pi-agent"
+SUPPORTED_AGENTS = (CLAUDE_CODE, CODEX, PI_AGENT)
 AGENT_MODE_NATIVE = "native"
 AGENT_MODE_UNIFIED_MODEL = "unified-model"
 SUPPORTED_AGENT_MODES = (AGENT_MODE_NATIVE, AGENT_MODE_UNIFIED_MODEL)
 CODEX_PROVIDER_ID = "OpenAI"
+PI_PROVIDER_ID = "amkr"
+PI_CONTEXT_WINDOW = 262_144
 
 
 class AgentConfigError(ValueError):
@@ -54,6 +57,7 @@ def agent_display_name(agent: str) -> str:
     return {
         CLAUDE_CODE: "Claude Code",
         CODEX: "Codex",
+        PI_AGENT: "Pi Agent",
     }.get(agent, agent)
 
 
@@ -62,6 +66,9 @@ def agent_config_path(agent: str) -> Path:
     if agent == CLAUDE_CODE:
         config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         return (Path(config_dir).expanduser() if config_dir else Path.home() / ".claude") / "settings.json"
+    if agent == PI_AGENT:
+        config_dir = os.environ.get("PI_CODING_AGENT_DIR")
+        return (Path(config_dir).expanduser() if config_dir else Path.home() / ".pi" / "agent") / "models.json"
     codex_home = os.environ.get("CODEX_HOME")
     return (Path(codex_home).expanduser() if codex_home else Path.home() / ".codex") / "config.toml"
 
@@ -109,6 +116,8 @@ def configure_agent(
 ) -> AgentConfigResult:
     _validate_agent(agent)
     _validate_mode(mode)
+    if agent == PI_AGENT and mode != AGENT_MODE_UNIFIED_MODEL:
+        raise AgentConfigError("Pi Agent 仅支持 unified-model 模式")
     if mode == AGENT_MODE_UNIFIED_MODEL and config.unified_model is None:
         raise AgentConfigError(f"请先配置 {UNIFIED_MODEL_ID}，再应用 {agent_display_name(agent)} 路由配置")
     if not config.local_api_key:
@@ -142,6 +151,9 @@ def configure_agent(
     if agent == CLAUDE_CODE:
         updated = _configure_claude_code(current, config, mode, remove_unified_model_overrides)
         route_url = router_origin(config)
+    elif agent == PI_AGENT:
+        updated = _configure_pi_agent(current, config)
+        route_url = f"{router_origin(config)}/v1"
     else:
         updated = _configure_codex(current, config, mode, remove_unified_model_overrides)
         auth_target = _codex_auth_path(target)
@@ -333,6 +345,43 @@ def _configure_codex(
     provider["requires_openai_auth"] = True
 
     return tomlkit.dumps(document).encode("utf-8")
+
+
+def _configure_pi_agent(current: bytes, config: RouterConfig) -> bytes:
+    if current:
+        try:
+            data = json.loads(current.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentConfigError(f"Pi Agent 配置不是有效的 UTF-8 JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise AgentConfigError("Pi Agent 配置根节点必须是 JSON 对象")
+    else:
+        data = {}
+
+    providers = data.get("providers")
+    if providers is None:
+        providers = {}
+        data["providers"] = providers
+    if not isinstance(providers, dict):
+        raise AgentConfigError("Pi Agent 配置中的 providers 必须是 JSON 对象")
+    model_names = [UNIFIED_MODEL_ID]
+    for model in config.models:
+        if not any(key.enabled for key in model.keys):
+            continue
+        for model_name in (model.id, *model.aliases):
+            if model_name and model_name not in model_names:
+                model_names.append(model_name)
+    providers[PI_PROVIDER_ID] = {
+        "baseUrl": f"{router_origin(config)}/v1",
+        "api": "openai-completions",
+        "apiKey": config.local_api_key,
+        "authHeader": True,
+        "models": [
+            {"id": model_name, "contextWindow": PI_CONTEXT_WINDOW}
+            for model_name in model_names
+        ],
+    }
+    return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
 
 
 

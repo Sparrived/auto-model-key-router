@@ -1,6 +1,6 @@
 # Auto Model Key Router 使用教程
 
-本文是一份从零开始的完整使用教程，覆盖安装、配置模型与 Key、启动服务、发送请求、查看统计、访客 Key、统一模型切换，以及 Claude Code / Codex 接入。
+本文是一份从零开始的完整使用教程，覆盖安装、配置模型与 Key、启动服务、发送请求、查看统计、访客 Key、统一模型切换，以及 Claude Code / Codex / Pi Agent 接入。
 
 如果只想查 CLI 参数或 HTTP API 字段，请参考 [`CLI.md`](CLI.md) 和 [`API.md`](API.md)。
 
@@ -12,7 +12,7 @@ Auto Model Key Router（简称 AMKR）是一个本地 OpenAI-compatible API 路�
 
 - 给同一个模型配置多个上游 API key，并自动分流。
 - 在某个 key 限流、鉴权失败或上游异常时自动切换到其他 key。
-- 给 Claude Code、Codex 或其他 OpenAI-compatible 客户端提供一个稳定的本地入口。
+- 给 Claude Code、Codex、Pi Agent 或其他 OpenAI-compatible 客户端提供一个稳定的本地入口。
 - 使用固定模型名 `unified-model`，在路由器里随时切换真实模型或指定 key，避免反复改客户端配置。
 - 统计本地调用、访客调用、重试、状态码、token 和耗时。
 
@@ -160,7 +160,7 @@ TUI 里最常用的入口：
 
 | 菜单 | 主要用途 |
 | --- | --- |
-| 一键配置 | 注册路由服务，或自动配置 Claude Code / Codex 使用 AMKR |
+| 一键配置 | 注册路由服务，或自动配置 Claude Code / Codex / Pi Agent 使用 AMKR |
 | 模型 Key | 新增、编辑、删除、排序模型和上游 Key，设置路由模式、推理强度、访客权限 |
 | 统一模型 | 设置 `unified-model` 当前指向的真实模型，并选择自动路由或固定 Key |
 | CLI 设置 | 管理监听地址、端口、本地鉴权、请求超时、配置迁移、版本更新等 |
@@ -619,7 +619,42 @@ requires_openai_auth = true
 
 ---
 
-## 16. 请求兼容说明
+## 16. 接入 Pi Agent
+
+在 **一键配置 → Pi Agent** 中，AMKR 只提供 `unified-model` 模式，不提供原生模型模式。应用前需要先设置 `unified-model` 和本地鉴权 key；回退会恢复首次应用前的完整配置文件。
+
+AMKR 会更新：
+
+```text
+~/.pi/agent/models.json
+# 或 PI_CODING_AGENT_DIR/models.json
+```
+
+它会保留其他自定义提供商，并写入 `amkr` 提供商，其中包含 `unified-model` 以及当前有启用 Key 的 AMKR 模型和别名：
+
+```json
+{
+  "providers": {
+    "amkr": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "amkr_your-local-api-key",
+      "authHeader": true,
+      "models": [
+        { "id": "unified-model", "contextWindow": 262144 },
+        { "id": "gpt-5.5", "contextWindow": 262144 },
+        { "id": "my-gpt", "contextWindow": 262144 }
+      ]
+    }
+  }
+}
+```
+
+Pi 的 `/model` 会继续显示其内置及其他自定义提供商的模型；选择 `amkr/unified-model` 会经由 AMKR 的统一路由，选择其他 `amkr/<模型或别名>` 则直接请求对应的 AMKR 模型。重新执行一键配置即可同步新增或删除的模型。
+
+---
+
+## 17. 请求兼容说明
 
 AMKR 的代理入口是 `/v1/{path}`，主要兼容：
 

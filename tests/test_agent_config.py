@@ -12,6 +12,7 @@ from auto_model_key_router.agent_config import (
     AGENT_MODE_UNIFIED_MODEL,
     CLAUDE_CODE,
     CODEX,
+    PI_AGENT,
     AgentConfigError,
     configure_agent,
     get_agent_config_status,
@@ -21,19 +22,42 @@ from auto_model_key_router.agent_config import (
 from auto_model_key_router.config import UNIFIED_MODEL_ID, RouterConfig
 
 
-def make_config(*, host: str = "127.0.0.1", port: int = 8000, local_api_key: str = "local-key") -> RouterConfig:
+def make_config(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    local_api_key: str = "local-key",
+    model_aliases: tuple[str, ...] = (),
+    include_disabled_model: bool = False,
+) -> RouterConfig:
+    models = [
+        {
+            "id": "test-model",
+            "aliases": list(model_aliases),
+            "keys": [{"name": "main", "api_key": "upstream-key", "base_url": "https://upstream.test"}],
+        }
+    ]
+    if include_disabled_model:
+        models.append(
+            {
+                "id": "disabled-model",
+                "keys": [
+                    {
+                        "name": "disabled",
+                        "api_key": "disabled-key",
+                        "base_url": "https://disabled.test",
+                        "enabled": False,
+                    }
+                ],
+            }
+        )
     return RouterConfig.from_dict(
         {
             "host": host,
             "port": port,
             "local_api_key": local_api_key,
             "unified_model": {"model": "test-model"},
-            "models": [
-                {
-                    "id": "test-model",
-                    "keys": [{"name": "main", "api_key": "upstream-key", "base_url": "https://upstream.test"}],
-                }
-            ],
+            "models": models,
         }
     )
 
@@ -134,6 +158,53 @@ def test_configure_codex_preserves_other_toml_settings_and_rolls_back(tmp_path: 
 
     assert target.read_bytes() == original
     assert auth.read_bytes() == original_auth
+
+
+def test_configure_pi_agent_preserves_other_providers_and_rolls_back(tmp_path: Path) -> None:
+    target = tmp_path / ".pi" / "agent" / "models.json"
+    backup = tmp_path / "backups" / "pi-agent.json"
+    original = b'{\n  "providers": {"existing": {"baseUrl": "https://example.test", "api": "openai-completions", "models": [{"id": "keep"}]}}\n}\n'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(original)
+
+    result = configure_agent(
+        PI_AGENT,
+        make_config(model_aliases=("test-alias",), include_disabled_model=True),
+        target_path=target,
+        backup_path=backup,
+    )
+
+    configured = json.loads(target.read_text(encoding="utf-8"))
+    assert configured["providers"]["existing"]["models"] == [{"id": "keep"}]
+    assert configured["providers"]["amkr"] == {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "api": "openai-completions",
+        "apiKey": "local-key",
+        "authHeader": True,
+        "models": [
+            {"id": UNIFIED_MODEL_ID, "contextWindow": 262144},
+            {"id": "test-model", "contextWindow": 262144},
+            {"id": "test-alias", "contextWindow": 262144},
+        ],
+    }
+    assert result.router_url == "http://127.0.0.1:8000/v1"
+    assert get_agent_config_status(PI_AGENT, target_path=target, backup_path=backup).current_is_applied
+
+    configure_agent(PI_AGENT, make_config(port=9000), target_path=target, backup_path=backup)
+    rollback_agent(PI_AGENT, target_path=target, backup_path=backup)
+
+    assert target.read_bytes() == original
+
+
+def test_configure_pi_agent_rejects_native_mode(tmp_path: Path) -> None:
+    with pytest.raises(AgentConfigError, match="仅支持"):
+        configure_agent(
+            PI_AGENT,
+            make_native_config(),
+            mode=AGENT_MODE_NATIVE,
+            target_path=tmp_path / "models.json",
+            backup_path=tmp_path / "backup.json",
+        )
 
 
 def test_rollback_removes_agent_config_that_did_not_exist_before_apply(tmp_path: Path) -> None:

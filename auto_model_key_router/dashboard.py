@@ -17,6 +17,7 @@ from .agent_config import (
     AGENT_MODE_UNIFIED_MODEL,
     CLAUDE_CODE,
     CODEX,
+    PI_AGENT,
     AgentConfigError,
     agent_display_name,
     configure_agent,
@@ -101,6 +102,7 @@ ONE_CLICK_OPTIONS = [
     ("1", "路由服务"),
     ("2", "Claude Code"),
     ("3", "Codex"),
+    ("4", "Pi Agent"),
     ("0", "返回"),
 ]
 SETTINGS_OPTIONS = [
@@ -360,7 +362,7 @@ def manage_one_click_config_interactively(config_path: Path) -> None:
             if result is not None:
                 show_result_page("路由服务", result)
             continue
-        agent = CLAUDE_CODE if choice == "2" else CODEX
+        agent = {"2": CLAUDE_CODE, "3": CODEX, "4": PI_AGENT}[choice]
         run_submodule(lambda: manage_agent_config_interactively(config_path, agent))
 
 
@@ -372,19 +374,21 @@ def manage_agent_config_interactively(config_path: Path, agent: str) -> None:
         rollback_label = (
             "回退原配置" if status.backup_available else "回退原配置（无备份）"
         )
+        is_pi_agent = agent == PI_AGENT
+        options = [("1", "应用 unified-model 模式")]
+        if not is_pi_agent:
+            options.append(("2", "应用原生模式"))
+        options.extend(
+            [("3" if not is_pi_agent else "2", rollback_label), ("0", "返回")]
+        )
         choice = select_option(
             f"{name} 一键配置",
-            [
-                ("1", "应用 unified-model 模式"),
-                ("2", "应用原生模式"),
-                ("3", rollback_label),
-                ("0", "返回"),
-            ],
+            options,
             content=agent_config_status_panel(config, agent),
         )
         if choice == "0":
             return
-        if choice in {"1", "2"}:
+        if choice == "1" or (choice == "2" and not is_pi_agent):
             mode = (
                 AGENT_MODE_UNIFIED_MODEL if choice == "1" else AGENT_MODE_NATIVE
             )
@@ -475,7 +479,7 @@ def agent_config_status_panel(config: RouterConfig, agent: str) -> Any:
         else f"[yellow]未配置 {UNIFIED_MODEL_ID}，暂时不能应用[/yellow]"
     )
     route_url = router_origin(config)
-    if agent == CODEX:
+    if agent in {CODEX, PI_AGENT}:
         route_url += "/v1"
     return section_panel(
         f"配置文件: [bold]{status.target_path}[/bold]\n"

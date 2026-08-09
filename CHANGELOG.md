@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [3.2.5] - 2026-08-09
+
+### Changed
+- 支持 Pi Agent unified-model 一键配置，并将模型上下文上限设置为 256k。
+
 ## [3.2.4] - 2026-07-19
 
 ### Fixed

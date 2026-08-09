@@ -945,7 +945,7 @@ def test_main_menu_keeps_one_click_config_on_homepage() -> None:
         ("6", "CLI 设置"),
         ("0", "退出"),
     ]
-    assert dashboard.ONE_CLICK_OPTIONS == [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("0", "返回")]
+    assert dashboard.ONE_CLICK_OPTIONS == [("1", "路由服务"), ("2", "Claude Code"), ("3", "Codex"), ("4", "Pi Agent"), ("0", "返回")]
     assert ("1", "模型服务") in dashboard.SETTINGS_OPTIONS
     assert ("2", "本地鉴权") in dashboard.SETTINGS_OPTIONS
     assert ("3", "监听配置") in dashboard.SETTINGS_OPTIONS
@@ -1277,6 +1277,46 @@ def test_agent_config_menu_dispatches_selected_mode(
         ("0", "返回"),
     ]
     assert modes == [expected_mode]
+
+
+def test_pi_agent_config_menu_exposes_only_unified_model_mode(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        encoding="utf-8",
+    )
+    choices = iter(["1", "0"])
+    menus = []
+    modes = []
+    status = SimpleNamespace(
+        target_path=tmp_path / "models.json",
+        backup_path=tmp_path / "backup.json",
+        backup_available=False,
+        current_is_applied=False,
+        mode=None,
+    )
+
+    def choose(title, options, selected=0, content=None, **kwargs):
+        menus.append(options)
+        return next(choices)
+
+    monkeypatch.setattr(dashboard, "select_option", choose)
+    monkeypatch.setattr(dashboard, "get_agent_config_status", lambda agent: status)
+    monkeypatch.setattr(
+        dashboard,
+        "configure_agent_interactively",
+        lambda path, agent, mode: modes.append(mode) or Text("configured"),
+    )
+    monkeypatch.setattr(dashboard, "show_result_page", lambda *args: None)
+
+    dashboard.manage_agent_config_interactively(config_path, dashboard.PI_AGENT)
+
+    assert menus[0] == [
+        ("1", "应用 unified-model 模式"),
+        ("2", "回退原配置（无备份）"),
+        ("0", "返回"),
+    ]
+    assert modes == ["unified-model"]
 
 
 @pytest.mark.parametrize(
