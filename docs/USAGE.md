@@ -596,7 +596,7 @@ unified-model 模式写入的核心配置类似：
 model_provider = "OpenAI"
 model = "unified-model"
 review_model = "unified-model"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "max"
 
 [model_providers.OpenAI]
 name = "OpenAI"

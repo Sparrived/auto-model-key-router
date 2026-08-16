@@ -435,7 +435,7 @@ status_codes
 | `id` | string | 是 | 非空；不能与其他 ID 或别名重复 |
 | `aliases` | string[] | 否 | `[]`；所有模型名称必须全局唯一 |
 | `routing_mode` | string | 否 | `round_robin`；可选 `round_robin`、`priority`、`only_first` |
-| `reasoning_effort` | string/null | 否 | 可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh` |
+| `reasoning_effort` | string/null | 否 | 可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `keys` | KeyCreate[] | 是 | 至少一个 |
 
 #### ModelUpdate

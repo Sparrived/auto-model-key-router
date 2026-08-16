@@ -658,7 +658,7 @@ def test_model_and_key_crud_persist_and_hot_reload_visitor_access(
                     "id": "model-b",
                     "aliases": ["alias-b"],
                     "routing_mode": "priority",
-                    "reasoning_effort": "high",
+                    "reasoning_effort": "max",
                     "keys": [
                         {
                             "name": "main",
@@ -731,6 +731,7 @@ def test_model_and_key_crud_persist_and_hot_reload_visitor_access(
     ) = run_client(app, requests)
 
     assert created.status_code == 201
+    assert created.json()["reasoning_effort"] == "max"
     assert created.json()["visitor_available"] is True
     assert "api_key" not in created.json()["keys"][0]
     assert [item["id"] for item in visitor_models.json()["data"]] == ["amkr-model-b"]

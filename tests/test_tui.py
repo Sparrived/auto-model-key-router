@@ -1916,7 +1916,7 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
         encoding="utf-8",
     )
     prompts: list[str] = []
-    answers = iter(["https://primary.example.com", "sk-primary", "New Alias", "only_first", "low", "primary"])
+    answers = iter(["https://primary.example.com", "sk-primary", "New Alias", "only_first", "max", "primary"])
 
     def ask(title: str, prompt: str, **kwargs):
         prompts.append(prompt)
@@ -1935,7 +1935,7 @@ def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, 
     assert prompts == ["新的上游 base_url", "API key", "显示名称/别名，多个用逗号分隔", "路由模式", "推理强度", "Key 名称"]
     assert model["aliases"] == ["New Alias"]
     assert model["routing_mode"] == "only_first"
-    assert model["reasoning_effort"] == "low"
+    assert model["reasoning_effort"] == "max"
     assert provider["keys"]["primary"] == {"api_key": "sk-primary", "enabled": True}
     assert provider["pools"]["primary"] == {"keys": ["primary"]}
     assert model["targets"] == [{"provider": "default", "pool": "primary", "upstream_model": "new-model"}]

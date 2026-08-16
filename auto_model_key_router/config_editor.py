@@ -3222,7 +3222,7 @@ def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
         reasoning_effort = prompt_text(
             "添加 Key",
             "推理强度",
-            choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh"],
+            choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
             default=normalize_reasoning_effort_choice(model.get("reasoning_effort")),
         ).strip()
         if reasoning_effort == "downstream":
@@ -3675,6 +3675,7 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
             ("5", "medium"),
             ("6", "high"),
             ("7", "xhigh"),
+            ("8", "max"),
             ("0", "返回"),
         ],
         selected={
@@ -3685,6 +3686,7 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
             "medium": 4,
             "high": 5,
             "xhigh": 6,
+            "max": 7,
         }.get(current_effort, 0),
     )
     if effort_choice == "0":
@@ -3697,6 +3699,7 @@ def set_model_reasoning_effort_interactively(path: Path) -> Any:
         "5": "medium",
         "6": "high",
         "7": "xhigh",
+        "8": "max",
     }[effort_choice]
     if new_effort == current_effort:
         return section_panel(
@@ -3729,6 +3732,7 @@ def reasoning_effort_text(value: str | None) -> str:
         "medium": "medium",
         "high": "high",
         "xhigh": "xhigh",
+        "max": "max",
     }.get(effort, effort)
 
 

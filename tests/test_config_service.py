@@ -65,6 +65,15 @@ def test_stream_timeouts_must_be_positive(field: str, value: float) -> None:
         RouterConfig.from_dict(data)
 
 
+def test_reasoning_effort_accepts_max() -> None:
+    data = config_data()
+    data["models"]["model-a"]["reasoning_effort"] = "max"
+
+    config = RouterConfig.from_dict(data)
+
+    assert config.models[0].reasoning_effort == "max"
+
+
 def test_update_validates_and_atomically_commits_config(tmp_path: Path) -> None:
     path = tmp_path / "router-config.json"
     path.write_text(json.dumps(config_data()), encoding="utf-8")

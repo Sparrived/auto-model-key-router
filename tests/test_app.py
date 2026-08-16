@@ -3003,7 +3003,8 @@ def test_expired_cooldown_allows_key_selection(monkeypatch) -> None:
         assert selected.name == "key-1"
 
 
-def test_config_reasoning_effort_is_forwarded() -> None:
+@pytest.mark.parametrize("reasoning_effort", ("xhigh", "max"))
+def test_config_reasoning_effort_is_forwarded(reasoning_effort: str) -> None:
     with tempfile.TemporaryDirectory() as directory:
         upstream_bodies: list[dict[str, object]] = []
 
@@ -3014,7 +3015,7 @@ def test_config_reasoning_effort_is_forwarded() -> None:
         config = make_config(
             Path(directory),
             (KeyConfig("key-1", "sk-1", "https://upstream.test"),),
-            reasoning_effort="xhigh",
+            reasoning_effort=reasoning_effort,
         )
         app = create_app(config)
         app.state.runtime_manager.current.http_client = httpx.AsyncClient(
@@ -3035,7 +3036,7 @@ def test_config_reasoning_effort_is_forwarded() -> None:
 
         assert response.status_code == 200
         assert upstream_bodies[0]["model"] == "test-model"
-        assert upstream_bodies[0]["reasoning_effort"] == "xhigh"
+        assert upstream_bodies[0]["reasoning_effort"] == reasoning_effort
 
 
 def test_config_reasoning_effort_overrides_request_reasoning() -> None:
