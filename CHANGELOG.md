@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [3.2.8] - 2026-08-20
+
+### Added
+- add command to print local authorization key
+
 ## [3.2.7] - 2026-08-20
 
 ### Changed
