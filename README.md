@@ -16,11 +16,42 @@
 
 需要 Python `>=3.12`。
 
+使用 pipx：
+
 ```bash
 pipx install auto-model-key-router
-# 或
-uv tool install auto-model-key-router
+pipx ensurepath
 ```
+
+或使用 uv：
+
+```bash
+uv tool install auto-model-key-router
+uv tool update-shell
+```
+
+`pipx ensurepath` 和 `uv tool update-shell` 会把命令所在目录加入 PATH。执行后请关闭并重新打开终端（IDE、VS Code、Windows Terminal 也要重新启动），再验证：
+
+```bash
+amkr --version
+# 备用命令
+auto-model-key-router --version
+```
+
+Windows PowerShell 如果仍然提示“无法将 amkr 识别为命令”，先用下面的命令确认实际安装目录：
+
+```powershell
+uv tool dir --bin
+pipx environment --value PIPX_BIN_DIR
+```
+
+然后把输出目录加入当前用户的 PATH，并重新打开终端。也可以直接使用 PATH 无关的临时方式验证安装是否成功：
+
+```powershell
+uvx --from auto-model-key-router amkr --version
+```
+
+如果 `uvx` 能运行而 `amkr` 不能运行，说明安装和 console script 没问题，缺的是 PATH。安装状态可分别用 `pipx list` 或 `uv tool list` 查看。
 
 启用访客 Key 功能：
 
@@ -28,13 +59,6 @@ uv tool install auto-model-key-router
 pipx install "auto-model-key-router[visitor]"
 # 或
 uv tool install "auto-model-key-router[visitor]"
-```
-
-安装后可使用两个等价命令：
-
-```bash
-amkr --version
-auto-model-key-router --version
 ```
 
 ## 快速开始

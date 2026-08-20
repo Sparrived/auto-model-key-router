@@ -13,6 +13,56 @@ auto-model-key-router
 python -m auto_model_key_router.main
 ```
 
+> 只有在当前 Python 环境已经安装 AMKR 时，`python -m` 才能运行。`pipx` 和 `uv tool` 会使用独立环境，因此优先使用它们创建的 console script。
+
+## 安装后提示“找不到 amkr”
+
+这是 PATH 激活问题时最常见的表现：包已经安装，但当前终端没有找到 pipx/uv tool 的 bin 目录。先确认工具本身已安装：
+
+```bash
+pipx list
+uv tool list
+```
+
+然后执行对应的 PATH 设置命令，并关闭后重新打开终端：
+
+```bash
+pipx ensurepath
+uv tool update-shell
+```
+
+检查当前终端实际找到的命令：
+
+```bash
+# macOS / Linux
+command -v amkr
+
+# Windows PowerShell / CMD
+where.exe amkr
+```
+
+如果仍然找不到，查询安装目录：
+
+```bash
+uv tool dir --bin
+pipx environment --value PIPX_BIN_DIR
+```
+
+将输出目录加入当前用户 PATH 后重新打开终端。Windows PowerShell 也可以直接调用完整路径验证：
+
+```powershell
+& "$(uv tool dir --bin)\amkr.exe" --version
+& "$(pipx environment --value PIPX_BIN_DIR)\amkr.exe" --version
+```
+
+临时验证而不依赖 PATH：
+
+```bash
+uvx --from auto-model-key-router amkr --version
+```
+
+如果 `uvx` 能运行而 `amkr` 不能运行，说明分发包和入口配置正常，只需修复 PATH。PATH 变化不会自动刷新已经打开的终端、IDE 或系统服务进程。
+
 ## 基本语法
 
 ```bash

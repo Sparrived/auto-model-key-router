@@ -22,13 +22,38 @@ Auto Model Key Router（简称 AMKR）是一个本地 OpenAI-compatible API 路�
 
 AMKR 需要 Python `>=3.12`。
 
-推荐用 `pipx` 或 `uv tool` 安装成独立命令行工具：
+推荐用 `pipx` 或 `uv tool` 安装成独立命令行工具。两者都会把 `amkr` 安装到自己的 bin 目录；如果该目录尚未在 PATH 中，安装成功后仍可能提示找不到命令：
+
+使用 pipx：
 
 ```bash
 pipx install auto-model-key-router
-# 或
-uv tool install auto-model-key-router
+pipx ensurepath
 ```
+
+或使用 uv：
+
+```bash
+uv tool install auto-model-key-router
+uv tool update-shell
+```
+
+执行 PATH 设置命令后，请关闭并重新打开终端，再运行：
+
+```bash
+amkr --version
+auto-model-key-router --version
+```
+
+Windows PowerShell 中可用 `uv tool dir --bin` 或 `pipx environment --value PIPX_BIN_DIR` 查看需要加入 PATH 的目录；macOS/Linux 中可用 `command -v amkr` 检查命令位置。PATH 变化不会自动刷新已经打开的终端、IDE 或服务进程。
+
+如果暂时只想确认包本身可以运行，不依赖当前 shell 的 PATH，可使用：
+
+```bash
+uvx --from auto-model-key-router amkr --version
+```
+
+若 `uvx` 成功而 `amkr` 失败，就是 PATH 激活问题，不是项目没有提供命令入口。使用 `pipx list` 或 `uv tool list` 可确认工具是否已安装。
 
 如需启用访客 Key 功能，请安装 `visitor` extra：
 
@@ -36,19 +61,6 @@ uv tool install auto-model-key-router
 pipx install "auto-model-key-router[visitor]"
 # 或
 uv tool install "auto-model-key-router[visitor]"
-```
-
-临时试用可以使用：
-
-```bash
-uvx --from auto-model-key-router amkr --version
-```
-
-安装后有两个等价命令：
-
-```bash
-amkr --version
-auto-model-key-router --version
 ```
 
 ---
