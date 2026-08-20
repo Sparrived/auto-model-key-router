@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.2.7] - 2026-08-20
+
 ### Changed
 - 补充 pipx 与 uv tool 安装后的 PATH 配置、命令定位和临时验证说明，明确“找不到 amkr”通常是终端未刷新或工具 bin 目录未加入 PATH。
 - 增加打包元数据回归测试，确保 `amkr` 与 `auto-model-key-router` 两个 console script 始终指向同一个入口。
