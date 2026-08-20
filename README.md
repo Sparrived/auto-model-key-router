@@ -109,6 +109,9 @@ auto-model-key-router --config router-config.json --install-service
 auto-model-key-router --config router-config.json --service status
 auto-model-key-router --config router-config.json --service restart
 
+# 查询 AMKR 监听 IP 和端口
+auto-model-key-router --config router-config.json --show-address
+
 # 查看配置摘要、日志与统计
 auto-model-key-router --config router-config.json --show-config
 auto-model-key-router --config router-config.json --show-logs 50

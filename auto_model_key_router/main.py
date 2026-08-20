@@ -16,12 +16,25 @@ from .unified_model import switch_unified_model, switch_unified_target
 from .update import check_latest_version, render_version_check_result, restart_service_after_update, update_latest_version
 
 
+def router_address_text(config: RouterConfig) -> str:
+    host = config.host
+    url_host = host
+    if ":" in url_host and not url_host.startswith("["):
+        url_host = f"[{url_host}]"
+    return (
+        f"监听 IP: [bold]{host}[/bold]\n"
+        f"监听端口: [bold]{config.port}[/bold]\n"
+        f"服务地址: [bold]http://{url_host}:{config.port}[/bold]"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog=Path(sys.argv[0]).stem)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="配置文件路径")
     parser.add_argument("--host", help="覆盖配置中的监听地址")
     parser.add_argument("--port", type=int, help="覆盖配置中的监听端口")
     parser.add_argument("--show-config", action="store_true", help="只展示配置摘要，不启动服务")
+    parser.add_argument("--show-address", action="store_true", help="查询 AMKR 的监听 IP、端口和服务地址")
     parser.add_argument("--switch-model", metavar="MODEL", help=f"切换 {UNIFIED_MODEL_ID} 指向的已有模型或别名")
     parser.add_argument("--switch-key", metavar="KEY", help=f"切换 {UNIFIED_MODEL_ID} 使用的已有 key；传 auto 恢复自动路由")
     parser.add_argument("--unified-target", choices=["default.primary", "default.fallback", "image.primary", "image.fallback"], default="default.primary", help="选择要修改的 unified 路由目标")
@@ -49,6 +62,7 @@ def main() -> None:
         interactive_tui = not any(
             (
                 args.show_config,
+                args.show_address,
                 args.switch_model is not None,
                 args.switch_key is not None,
                 args.show_unified_model,
@@ -112,6 +126,9 @@ def main() -> None:
         if args.show_logs is not None:
             render_config(config, config_path)
             render_logs(config.metrics_db_path, config.log_file_path, args.show_logs)
+            return
+        if args.show_address:
+            console.print(section_panel(router_address_text(config), "AMKR 地址", "cyan"))
             return
         if args.show_config:
             render_config(config, config_path)

@@ -56,6 +56,7 @@ amkr
 | 参数 | 说明 |
 | --- | --- |
 | `--show-config` | 显示配置摘要后退出，不启动服务 |
+| `--show-address` | 显示 AMKR 的监听 IP、端口和服务地址后退出，不启动服务 |
 | `--show-unified-model` | 显示请求模型 `unified-model` 当前指向的真实模型和 Key |
 | `--show-logs [N]` | 打开调用日志界面，并显示最近 N 行运行日志；省略 N 时为 20 |
 
@@ -63,6 +64,7 @@ amkr
 
 ```bash
 amkr --config router-config.json --show-config
+amkr --config router-config.json --show-address
 amkr --config router-config.json --show-logs
 amkr --config router-config.json --show-logs 100
 ```
@@ -206,14 +208,15 @@ amkr --config router-config.json --update
 5. `--update`
 6. `--restart-service-after-update`
 7. `--show-logs`
-8. `--show-config`
-9. `--stop`
-10. `--status`
-11. `--install-service`
-12. `--service`
-13. `--serve-foreground`
-14. 无 `--serve` 时进入 Terminal UI
-15. `--serve`
+8. `--show-address`
+9. `--show-config`
+10. `--stop`
+11. `--status`
+12. `--install-service`
+13. `--service`
+14. `--serve-foreground`
+15. 无 `--serve` 时进入 Terminal UI
+16. `--serve`
 
 例如同时传入 `--show-config --serve` 时，只显示配置，不会启动服务。
 
