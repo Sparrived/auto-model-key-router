@@ -35,6 +35,14 @@ def main() -> None:
     parser.add_argument("--port", type=int, help="覆盖配置中的监听端口")
     parser.add_argument("--show-config", action="store_true", help="只展示配置摘要，不启动服务")
     parser.add_argument("--show-address", action="store_true", help="查询 AMKR 的监听 IP、端口和服务地址")
+    parser.add_argument(
+        "--show-api-key",
+        "--get-api-key",
+        "--get-key",
+        dest="show_api_key",
+        action="store_true",
+        help="获取当前 AMKR 的本地授权 Key",
+    )
     parser.add_argument("--switch-model", metavar="MODEL", help=f"切换 {UNIFIED_MODEL_ID} 指向的已有模型或别名")
     parser.add_argument("--switch-key", metavar="KEY", help=f"切换 {UNIFIED_MODEL_ID} 使用的已有 key；传 auto 恢复自动路由")
     parser.add_argument("--unified-target", choices=["default.primary", "default.fallback", "image.primary", "image.fallback"], default="default.primary", help="选择要修改的 unified 路由目标")
@@ -52,7 +60,9 @@ def main() -> None:
     parser.add_argument("--service", choices=["install", "install-user", "uninstall", "start", "stop", "restart", "status", "install-elevated", "uninstall-elevated", "start-elevated", "stop-elevated", "restart-elevated"], help="管理 Windows/Linux 内置服务")
     args = parser.parse_args()
 
-    clear_terminal_history()
+    # Keep machine-readable key output free of terminal control sequences.
+    if not args.show_api_key:
+        clear_terminal_history()
     if args.check_update:
         console.print(render_version_check_result(check_latest_version(timeout=10.0)))
         return
@@ -63,6 +73,7 @@ def main() -> None:
             (
                 args.show_config,
                 args.show_address,
+                args.show_api_key,
                 args.switch_model is not None,
                 args.switch_key is not None,
                 args.show_unified_model,
@@ -105,6 +116,9 @@ def main() -> None:
             unified = config.unified_model
             key_text = unified.key if unified and unified.key else "自动路由"
             console.print(section_panel(f"请求模型: [bold]{UNIFIED_MODEL_ID}[/bold]\n目标模型: [bold]{unified.model if unified else '-'}[/bold]\n使用 Key: [bold]{key_text}[/bold]", "统一模型已切换", "green"))
+            return
+        if args.show_api_key:
+            print(config.local_api_key)
             return
         if args.show_unified_model:
             unified = config.unified_model

@@ -136,6 +136,9 @@ auto-model-key-router --config router-config.json --service restart
 # 查询 AMKR 监听 IP 和端口
 auto-model-key-router --config router-config.json --show-address
 
+# 获取当前 AMKR 的本地授权 Key（也可使用 --show-api-key）
+auto-model-key-router --config router-config.json --get-key
+
 # 查看配置摘要、日志与统计
 auto-model-key-router --config router-config.json --show-config
 auto-model-key-router --config router-config.json --show-logs 50
@@ -238,6 +241,7 @@ pytest
 
 - 不要把真实上游 API Key 提交到 Git。
 - `local_api_key` 为空会关闭本地鉴权；仅建议在可信本机环境使用。
+- `amkr --get-key` / `--show-api-key` 会直接输出本地授权 Key，请勿在共享终端、日志或 CI 输出中执行。
 - 如果监听 `0.0.0.0` 或暴露到局域网/公网，请务必启用本地鉴权并配置防火墙。
 
 ## License

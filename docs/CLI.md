@@ -87,7 +87,9 @@ amkr
 | macOS | `~/Library/Caches/AutoModelKeyRouter/router-config.json` |
 | Linux | `${XDG_CACHE_HOME:-~/.cache}/auto-model-key-router/router-config.json` |
 
-首次加载不存在的配置时会创建配置；配置缺少 `local_api_key` 时会自动生成并写回。
+首次加载不存在的配置时会创建配置；配置缺少 `local_api_key` 时会自动生成并写回。因此，获取 Key 的命令在配置不存在时也会创建配置文件。
+
+> `--show-api-key`、`--get-api-key` 和 `--get-key` 会直接输出完整本地授权 Key。请勿在共享终端、命令历史、日志或 CI 输出中执行。
 
 ## 全局参数
 
@@ -107,6 +109,7 @@ amkr
 | --- | --- |
 | `--show-config` | 显示配置摘要后退出，不启动服务 |
 | `--show-address` | 显示 AMKR 的监听 IP、端口和服务地址后退出，不启动服务 |
+| `--show-api-key`（别名：`--get-api-key`、`--get-key`） | 输出当前 AMKR 的本地授权 Key 后退出，不启动服务 |
 | `--show-unified-model` | 显示请求模型 `unified-model` 当前指向的真实模型和 Key |
 | `--show-logs [N]` | 打开调用日志界面，并显示最近 N 行运行日志；省略 N 时为 20 |
 
@@ -115,6 +118,7 @@ amkr
 ```bash
 amkr --config router-config.json --show-config
 amkr --config router-config.json --show-address
+amkr --config router-config.json --get-key
 amkr --config router-config.json --show-logs
 amkr --config router-config.json --show-logs 100
 ```
@@ -254,19 +258,20 @@ amkr --config router-config.json --update
 1. `--version` 或 `--help`（由参数解析器直接处理）
 2. `--check-update`
 3. `--switch-model` / `--switch-key`
-4. `--show-unified-model`
-5. `--update`
-6. `--restart-service-after-update`
-7. `--show-logs`
-8. `--show-address`
-9. `--show-config`
-10. `--stop`
-11. `--status`
-12. `--install-service`
-13. `--service`
-14. `--serve-foreground`
-15. 无 `--serve` 时进入 Terminal UI
-16. `--serve`
+4. `--show-api-key` / `--get-api-key` / `--get-key`
+5. `--show-unified-model`
+6. `--update`
+7. `--restart-service-after-update`
+8. `--show-logs`
+9. `--show-address`
+10. `--show-config`
+11. `--stop`
+12. `--status`
+13. `--install-service`
+14. `--service`
+15. `--serve-foreground`
+16. 无 `--serve` 时进入 Terminal UI
+17. `--serve`
 
 例如同时传入 `--show-config --serve` 时，只显示配置，不会启动服务。
 
