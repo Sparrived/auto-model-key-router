@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.2.6] - 2026-08-20
+
 ### Added
 - 新增 `--show-address` CLI 指令，用于查询 AMKR 的监听 IP、端口和服务地址。
 - 推理强度设置新增 `max` 选项，并支持通过配置、管理 API 和 TUI 传递。

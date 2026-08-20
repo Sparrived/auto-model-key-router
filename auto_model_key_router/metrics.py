@@ -532,14 +532,21 @@ class MetricsStore:
         key_name: str,
         hours: float | None = None,
     ) -> dict[str, Any]:
+        now = _now_beijing()
         since: str | None = None
         if hours is not None:
-            since = (_now_beijing() - timedelta(hours=hours)).isoformat()
+            if hours == 0:
+                # A zero-hour window is explicitly empty. Use a future
+                # timestamp so clock resolution or clock adjustments cannot
+                # make the just-recorded request fall into the window.
+                since = datetime.max.replace(tzinfo=BEIJING_TZ).isoformat()
+            else:
+                since = (now - timedelta(hours=hours)).isoformat()
 
         stats = self._query_key_stats(model_id, key_name, since)
 
         current_window_started_at = (
-            _now_beijing() - timedelta(seconds=RATE_WINDOW_SECONDS)
+            now - timedelta(seconds=RATE_WINDOW_SECONDS)
         ).isoformat()
         rate = self._query_key_stats(model_id, key_name, current_window_started_at)
 
