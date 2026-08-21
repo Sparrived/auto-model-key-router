@@ -6,7 +6,7 @@ import sys
 
 from rich.console import Console
 
-from auto_model_key_router.update import VersionCheckResult, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, install_latest_version_outcome, is_newer_version, manual_update_command, post_update_commands, should_use_windows_update_helper, start_windows_update_helper, update_output_preview, windows_update_helper_script
+from auto_model_key_router.update import VersionCheckResult, check_latest_pypi, check_latest_release, check_latest_version, detected_installation_method, github_source_archive_url, install_latest_version, install_latest_version_outcome, is_newer_version, manual_update_command, post_update_commands, should_use_windows_update_helper, start_windows_update_helper, update_output_preview, windows_update_helper_script
 
 
 class FakeResponse:
@@ -54,7 +54,11 @@ def test_check_latest_release_reads_github_response(monkeypatch) -> None:
 def test_check_latest_version_prefers_pypi(monkeypatch) -> None:
     def fake_urlopen(request: object, timeout: float) -> FakeResponse:
         return FakeResponse({
-            "info": {"version": "9.8.7", "package_url": "https://pypi.org/project/auto-model-key-router/9.8.7/"},
+            "info": {
+                "version": "9.8.7",
+                "package_url": "https://pypi.org/project/auto-model-key-router/",
+                "release_url": "https://pypi.org/project/auto-model-key-router/9.8.7/",
+            },
             "urls": [{
                 "filename": "auto_model_key_router-9.8.7-py3-none-any.whl",
                 "packagetype": "bdist_wheel",
@@ -75,6 +79,23 @@ def test_check_latest_version_prefers_pypi(monkeypatch) -> None:
     assert result.artifact_url == "https://files.pythonhosted.org/packages/amkr.whl"
     assert result.artifact_sha256 == "a" * 64
     assert result.update_available
+
+
+def test_check_latest_pypi_builds_version_specific_release_url_when_metadata_omits_it(monkeypatch) -> None:
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        return FakeResponse({
+            "info": {
+                "version": "9.8.7",
+                "package_url": "https://pypi.org/project/auto-model-key-router/",
+            },
+            "urls": [],
+        })
+
+    monkeypatch.setattr("auto_model_key_router.update.urlopen", fake_urlopen)
+
+    result = check_latest_pypi(current_version="1.0.0")
+
+    assert result.release_url == "https://pypi.org/project/auto-model-key-router/9.8.7/"
 
 
 def test_check_latest_version_falls_back_to_github(monkeypatch) -> None:

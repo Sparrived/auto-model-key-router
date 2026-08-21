@@ -104,7 +104,12 @@ def check_latest_pypi(current_version: str = __version__, timeout: float = 3.0) 
     latest_version = str(info.get("version") or "").strip()
     if not latest_version:
         return VersionCheckResult(current_version=current_version, error="PyPI 响应中缺少 version。")
-    release_url = str(info.get("package_url") or info.get("project_url") or PYPI_PROJECT_URL)
+    # PyPI exposes both the project page and the version-specific release page.
+    # Prefer the latter so the update result links to the exact version found.
+    release_url = str(info.get("release_url") or "").strip()
+    if not release_url:
+        project_url = str(info.get("package_url") or info.get("project_url") or PYPI_PROJECT_URL).rstrip("/")
+        release_url = f"{project_url}/{latest_version}/"
     wheels = data.get("urls")
     wheel = next(
         (
