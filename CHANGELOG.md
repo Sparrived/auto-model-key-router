@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [3.2.9] - 2026-08-21
+
+### Fixed
+- link to version-specific PyPI release
+
 ## [3.2.8] - 2026-08-20
 
 ### Added
