@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-30
+
+### Added
+- align management mutations with TUI
+
+### Changed
+- use shared config operations
+- centralize mutation operations
+
 ## [3.2.9] - 2026-08-21
 
 ### Fixed
