@@ -30,6 +30,7 @@ from .config import (
     upstream_route_path,
 )
 from .config_service import commit_config_data
+from . import config_operations as operations
 from .formatting import compact_url, key_fingerprint, short_text
 from .proxy_support import _join_url
 from .service import restart_service_after_config_change
@@ -198,23 +199,20 @@ def upstream_routes_for_base_url(data: dict[str, Any], base_url: str) -> dict[st
 def set_upstream_routes_for_base_url(
     data: dict[str, Any], base_url: str, routes: dict[str, str]
 ) -> None:
-    normalized_base_url = normalize_upstream_base_url(base_url)
-    routes_by_url = raw_upstream_routes_by_url(data)
-    if routes:
-        routes_by_url[normalized_base_url] = routes
-        data["upstream_routes"] = routes_by_url
-    else:
-        routes_by_url.pop(normalized_base_url, None)
-        if routes_by_url:
-            data["upstream_routes"] = routes_by_url
-        else:
-            data.pop("upstream_routes", None)
+    operations.set_upstream_routes_for_base_url(data, base_url, routes)
+    # Retain cleanup for legacy documents until their next migration.
     for model in data.get("models", []):
+        if not isinstance(model, dict):
+            continue
         for key in model.get("keys", []):
+            if not isinstance(key, dict):
+                continue
             key_base_url = normalize_upstream_base_url(
-                key.get("base_url") or data.get("default_base_url") or "https://api.openai.com"
+                key.get("base_url")
+                or data.get("default_base_url")
+                or "https://api.openai.com"
             )
-            if key_base_url == normalized_base_url:
+            if key_base_url == normalize_upstream_base_url(base_url):
                 key.pop("upstream_routes", None)
 
 
@@ -330,41 +328,23 @@ def load_v2_config_data(path: Path) -> dict[str, Any]:
 
 
 def raw_providers(data: dict[str, Any]) -> dict[str, Any]:
-    providers = data.setdefault("providers", {})
-    if not isinstance(providers, dict):
-        raise ValueError("providers 必须是对象")
-    return providers
+    return operations.providers(data)
 
 
 def raw_v2_models(data: dict[str, Any]) -> dict[str, Any]:
-    models = data.setdefault("models", {})
-    if not isinstance(models, dict):
-        raise ValueError("models 必须是对象")
-    return models
+    return operations.models(data)
 
 
 def provider_keys(provider: dict[str, Any]) -> dict[str, Any]:
-    keys = provider.setdefault("keys", {})
-    if not isinstance(keys, dict):
-        raise ValueError("provider.keys 必须是对象")
-    return keys
+    return operations.provider_keys(provider)
 
 
 def provider_pools(provider: dict[str, Any]) -> dict[str, Any]:
-    pools = provider.setdefault("pools", {})
-    if not isinstance(pools, dict):
-        raise ValueError("provider.pools 必须是对象")
-    return pools
+    return operations.provider_pools(provider)
 
 
 def pool_key_names(pool: Any) -> list[str]:
-    if isinstance(pool, dict):
-        keys = pool.get("keys", [])
-    else:
-        keys = pool
-    if not isinstance(keys, list):
-        return []
-    return [str(key_name) for key_name in keys]
+    return operations.pool_key_names(pool)
 
 
 def pool_available_models(pool: Any) -> list[str]:
@@ -375,10 +355,7 @@ def pool_available_models(pool: Any) -> list[str]:
 
 
 def pool_enabled_models(pool: Any) -> list[str]:
-    if not isinstance(pool, dict):
-        return []
-    models = pool.get("models", [])
-    return [str(model_id) for model_id in models if str(model_id)] if isinstance(models, list) else []
+    return operations.pool_models(pool)
 
 
 def next_pool_name(pools: dict[str, Any]) -> str:
@@ -788,50 +765,13 @@ def fallback_unified_model(models: dict[str, Any]) -> str | None:
 
 
 def model_targets(model: dict[str, Any]) -> list[dict[str, Any]]:
-    targets = model.setdefault("targets", [])
-    if not isinstance(targets, list):
-        raise ValueError("model.targets 必须是数组")
-    return targets
+    return operations.model_targets(model)
 
 
 def enable_pool_models(
     data: dict[str, Any], provider_id: str, pool_name: str, enabled_models: list[str]
 ) -> None:
-    pool = provider_pools(raw_providers(data)[provider_id])[pool_name]
-    if isinstance(pool, dict):
-        pool["models"] = enabled_models
-    models = raw_v2_models(data)
-    enabled = set(enabled_models)
-    for model_id in enabled_models:
-        model = models.setdefault(model_id, {"targets": []})
-        targets = model_targets(model)
-        if not any(
-            target.get("provider") == provider_id
-            and target.get("pool") == pool_name
-            and str(target.get("upstream_model") or model_id) == model_id
-            for target in targets
-        ):
-            targets.append(
-                {
-                    "provider": provider_id,
-                    "pool": pool_name,
-                    "upstream_model": model_id,
-                }
-            )
-    for model_id, model in list(models.items()):
-        targets = model_targets(model)
-        targets[:] = [
-            target
-            for target in targets
-            if not (
-                target.get("provider") == provider_id
-                and target.get("pool") == pool_name
-                and str(target.get("upstream_model") or model_id) == model_id
-                and model_id not in enabled
-            )
-        ]
-        if not targets and not model.get("aliases"):
-            models.pop(model_id, None)
+    operations.enable_pool_models(data, provider_id, pool_name, enabled_models)
 
 
 def v2_summary_panel(data: dict[str, Any]) -> Any:
@@ -1189,7 +1129,10 @@ def add_provider_key_interactively(
                 default=draft.get("base_url", "https://api.openai.com"),
             ).strip()
             draft["base_url"] = base_url
-            providers[provider_id] = {"base_url": base_url, "keys": {}, "pools": {}}
+            try:
+                operations.create_provider(data, provider_id, base_url)
+            except operations.ConfigOperationError as exc:
+                return section_panel(f"[red]{exc}[/red]", "添加失败", "red")
         else:
             provider_id = existing[int(provider_choice) - 1]
     elif provider_id not in providers:
@@ -1208,7 +1151,14 @@ def add_provider_key_interactively(
     draft["api_key"] = api_key
     if not api_key:
         return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
-    keys[key_name] = {"api_key": api_key, "enabled": True}
+    operations.create_provider_key(
+        data,
+        provider_id,
+        key_name,
+        api_key,
+        enabled=True,
+        pool_name=None,
+    )
     pools = provider_pools(provider)
     pool_names = list(pools)
     with console.status(
@@ -1260,10 +1210,13 @@ def add_provider_key_interactively(
         if not pool_name:
             return section_panel("[yellow]配置未变化。[/yellow]", "添加 Key", "yellow")
     draft["pool_name"] = pool_name
-    pool = pools.setdefault(pool_name, {"keys": [], "models": []})
-    pool_keys = pool.setdefault("keys", [])
-    if key_name not in pool_keys:
-        pool_keys.append(key_name)
+    pool = operations.assign_pool_keys(
+        data,
+        provider_id,
+        pool_name,
+        [key_name],
+        retain_existing=True,
+    )
     selected_probe = pool_probes.get(pool_name)
     if selected_probe is None or not selected_probe.get("errors"):
         _update_pool_capability_probe(
@@ -1374,31 +1327,31 @@ def update_provider_key_interactively(
 ) -> Any:
     data = load_v2_config_data(path)
     old_config = RouterConfig.from_dict(data)
-    provider = raw_providers(data)[provider_id]
-    keys = provider_keys(provider)
-    key = keys[key_name]
+    provider = operations.require_provider(data, provider_id)
+    key = operations.require_key(provider, key_name)
     if choice == "1":
-        key["enabled"] = not bool(key.get("enabled", True))
-        message = f"已{'启用' if key['enabled'] else '禁用'} {provider_id}/{key_name}。"
+        enabled = not bool(key.get("enabled", True))
+        operations.update_provider_key(
+            data, provider_id, key_name, enabled=enabled
+        )
+        message = f"已{'启用' if enabled else '禁用'} {provider_id}/{key_name}。"
     elif choice == "2":
         new_name = prompt_text("重命名 Key", "新名称", default=key_name).strip()
         if not new_name or new_name == key_name:
             return section_panel("[yellow]配置未变化。[/yellow]", "重命名 Key", "yellow")
-        if new_name in keys:
-            return section_panel(f"[red]Key 已存在: {new_name}[/red]", "重命名 Key", "red")
-        keys[new_name] = keys.pop(key_name)
-        for pool in provider_pools(provider).values():
-            pool_keys = pool_key_names(pool)
-            if key_name in pool_keys and isinstance(pool, dict):
-                pool["keys"] = [new_name if item == key_name else item for item in pool_keys]
-        for model in raw_v2_models(data).values():
-            for target in model_targets(model):
-                if target.get("provider") == provider_id and target.get("key") == key_name:
-                    target["key"] = new_name
+        try:
+            operations.update_provider_key(
+                data, provider_id, key_name, new_name=new_name
+            )
+        except operations.ConfigOperationError as exc:
+            return section_panel(f"[red]{exc}[/red]", "重命名 Key", "red")
         message = f"已重命名 {provider_id}/{key_name} → {new_name}。"
     elif choice == "3" and visitor_feature_available():
-        key["allow_visitor"] = not bool(key.get("allow_visitor", False))
-        message = f"已{'允许' if key['allow_visitor'] else '禁止'}访客访问 {provider_id}/{key_name}。"
+        allowed = not bool(key.get("allow_visitor", False))
+        operations.update_provider_key(
+            data, provider_id, key_name, allow_visitor=allowed
+        )
+        message = f"已{'允许' if allowed else '禁止'}访客访问 {provider_id}/{key_name}。"
     elif choice == "4":
         key_pools = pools_containing_key(provider, key_name)
         used_by = [
@@ -1413,42 +1366,7 @@ def update_provider_key_interactively(
             default=False,
         ):
             return section_panel("[yellow]配置未变化。[/yellow]", "删除 Key", "yellow")
-        keys.pop(key_name)
-        empty_pools: set[str] = set()
-        for pool_name, pool in list(provider_pools(provider).items()):
-            if isinstance(pool, dict):
-                pool["keys"] = [item for item in pool_key_names(pool) if item != key_name]
-                if not pool["keys"]:
-                    empty_pools.add(str(pool_name))
-        for pool_name in empty_pools:
-            provider_pools(provider).pop(pool_name, None)
-        models = raw_v2_models(data)
-        removed_models: set[str] = set()
-        for model_id, model in list(models.items()):
-            targets = model_targets(model)
-            targets[:] = [
-                target
-                for target in targets
-                if not (
-                    target.get("provider") == provider_id
-                    and (
-                        target.get("key") == key_name
-                        or target.get("pool") in empty_pools
-                    )
-                )
-            ]
-            if not targets:
-                models.pop(model_id, None)
-                removed_models.add(str(model_id))
-        if not keys:
-            raw_providers(data).pop(provider_id, None)
-        unified = data.get("unified_model")
-        if isinstance(unified, dict) and unified.get("model") in removed_models:
-            fallback_model = fallback_unified_model(models)
-            if fallback_model is not None:
-                data["unified_model"] = {"model": fallback_model}
-            else:
-                data.pop("unified_model", None)
+        removed_models = operations.delete_provider_key(data, provider_id, key_name)
         suffix = f"\n已移除空模型: [bold]{len(removed_models)}[/bold]" if removed_models else ""
         message = f"已删除 {provider_id}/{key_name}。{suffix}"
     else:
@@ -1527,18 +1445,14 @@ def update_provider_pool_interactively(path: Path, provider_id: str, choice: str
         )
         if not selected_keys:
             return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
-        existing_keys = pool_key_names(pools.get(pool_name, {}))
-        selected_keys = list(dict.fromkeys([*existing_keys, *selected_keys]))
-        for other_pool_name, other_pool in pools.items():
-            if other_pool_name == pool_name or not isinstance(other_pool, dict):
-                continue
-            other_pool["keys"] = [
-                key_name
-                for key_name in pool_key_names(other_pool)
-                if key_name not in selected_keys
-            ]
-        pool = pools.setdefault(pool_name, {"keys": [], "models": []})
-        pool["keys"] = selected_keys
+        pool = operations.assign_pool_keys(
+            data,
+            provider_id,
+            pool_name,
+            selected_keys,
+            retain_existing=True,
+        )
+        selected_keys = pool_key_names(pool)
         with console.status("[cyan]正在探测模型池可用模型和路由...[/cyan]", spinner="dots"):
             probe = apply_pool_probe(provider, pool_name)
         enabled_models = prompt_pool_enabled_models(pool)
@@ -1620,21 +1534,20 @@ def add_model_route_interactively(path: Path, model_id: str | None = None) -> An
         draft["model_id"] = model_id
     if not model_id:
         return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
-    model = models.setdefault(
-        model_id,
-        {"aliases": [], "routing_mode": "round_robin", "targets": []},
-    )
-    targets = model_targets(model)
-    if any(
-        target.get("provider") == provider_id
-        and target.get("pool") == pool_name
-        and str(target.get("upstream_model") or model_id) == upstream_model
-        for target in targets
-    ):
-        return section_panel("[yellow]该路由已存在。[/yellow]", "添加模型路由", "yellow")
-    targets.append(
-        {"provider": provider_id, "pool": pool_name, "upstream_model": upstream_model}
-    )
+    if model_id not in models:
+        operations.create_model(data, model_id)
+    try:
+        operations.add_model_target(
+            data,
+            model_id,
+            {
+                "provider": provider_id,
+                "pool": pool_name,
+                "upstream_model": upstream_model,
+            },
+        )
+    except operations.ConfigOperationError as exc:
+        return section_panel(f"[yellow]{exc}[/yellow]", "添加模型路由", "yellow")
     restart = commit_v2_config(path, data, old_config)
     FORM_DRAFTS.pop("add_model_route", None)
     return Group(
@@ -1709,14 +1622,16 @@ def update_model_target_interactively(
         )
         if not upstream_model or upstream_model == current:
             return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
-        target["upstream_model"] = upstream_model
+        operations.update_model_target(
+            data, model_id, target_index, upstream_model
+        )
         message = f"已更新 {model_id} 的上游模型: {current} → {upstream_model}。"
     elif action == "2":
         if len(targets) == 1 and not confirm_choice(
             "这是该模型最后一个 target，删除后模型将不可用。继续？", default=False
         ):
             return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
-        removed = targets.pop(target_index)
+        removed = operations.delete_model_target(data, model_id, target_index)
         message = f"已删除 target: {removed.get('provider')}/{removed.get('pool') or removed.get('key')}。"
     else:
         return None
@@ -1775,7 +1690,11 @@ def update_v2_model_settings_interactively(path: Path, model_id: str, choice: st
         aliases_text = prompt_text(
             "模型别名", "别名，多个用逗号分隔", default=", ".join(model.get("aliases") or [])
         ).strip()
-        model["aliases"] = [alias.strip() for alias in aliases_text.split(",") if alias.strip()]
+        operations.update_model(
+            data,
+            model_id,
+            aliases=[alias.strip() for alias in aliases_text.split(",") if alias.strip()],
+        )
         message = f"已更新 {model_id} 的别名。"
     elif choice == "2":
         current = str(model.get("routing_mode") or "round_robin")
@@ -1785,7 +1704,9 @@ def update_v2_model_settings_interactively(path: Path, model_id: str, choice: st
             choices=["priority", "round_robin", "only_first"],
             default=current,
         ).strip()
-        model["routing_mode"] = routing_mode
+        operations.update_model(
+            data, model_id, routing_mode=routing_mode
+        )
         message = f"已更新 {model_id} 的路由模式: {routing_mode}。"
     else:
         return None
@@ -1801,14 +1722,7 @@ def delete_v2_model_interactively(path: Path, model_id: str) -> Any:
     if not confirm_choice(f"确认删除模型 {model_id}？", default=False):
         return section_panel("[yellow]配置未变化。[/yellow]", "模型设置", "yellow")
     old_config = RouterConfig.from_dict(data)
-    models.pop(model_id)
-    unified = data.get("unified_model")
-    if isinstance(unified, dict) and unified.get("model") == model_id:
-        fallback_model = fallback_unified_model(models)
-        if fallback_model is None:
-            data.pop("unified_model", None)
-        else:
-            data["unified_model"] = {"model": fallback_model}
+    operations.delete_model(data, model_id)
     restart = commit_v2_config(path, data, old_config)
     return Group(section_panel(f"已删除模型 {model_id}。", "模型设置", "green"), restart)
 
@@ -1857,7 +1771,9 @@ def update_provider_routes_interactively(path: Path, provider_id: str, choice: s
     provider = raw_providers(data)[provider_id]
     routes = provider.setdefault("routes", {})
     if choice == "c":
-        provider.pop("routes", None)
+        operations.update_provider(
+            data, provider_id, routes={}, update_routes=True
+        )
         message = f"已清空 {provider_id} 的自定义路径。"
     else:
         mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
@@ -1873,69 +1789,22 @@ def update_provider_routes_interactively(path: Path, provider_id: str, choice: s
         else:
             routes[mode] = normalize_upstream_route_path(mode, route)
             message = f"已更新 {provider_id} 的 {UPSTREAM_ROUTE_LABELS[mode]} 路径。"
+        operations.update_provider(
+            data, provider_id, routes=routes, update_routes=True
+        )
     restart = commit_v2_config(path, data, old_config)
     return Group(section_panel(message, "供应商路径", "green"), restart)
 
 
 def delete_provider_interactively(path: Path, provider_id: str) -> Any:
     data = load_v2_config_data(path)
-    providers = raw_providers(data)
-    if provider_id not in providers:
+    if provider_id not in raw_providers(data):
         return section_panel(f"[red]供应商不存在: {provider_id}[/red]", "删除供应商", "red")
     if not confirm_choice(f"确认删除供应商 {provider_id}？", default=False):
         return section_panel("[yellow]配置未变化。[/yellow]", "删除供应商", "yellow")
 
     old_config = RouterConfig.from_dict(data)
-    providers.pop(provider_id)
-    models = raw_v2_models(data)
-    removed_models: set[str] = set()
-    for model_id, model in list(models.items()):
-        targets = model_targets(model)
-        targets[:] = [
-            target for target in targets if target.get("provider") != provider_id
-        ]
-        if not targets:
-            models.pop(model_id)
-            removed_models.add(str(model_id))
-
-    unified = data.get("unified_model")
-    if isinstance(unified, dict):
-        unified_key_from_removed_provider = False
-        if unified.get("key"):
-            old_unified_model_id = old_config.configured_model_id(
-                str(unified.get("model") or "")
-            )
-            if old_unified_model_id is not None:
-                old_unified_model = next(
-                    model
-                    for model in old_config.models
-                    if model.id == old_unified_model_id
-                )
-                unified_key_from_removed_provider = any(
-                    key.name == unified["key"] and key.provider == provider_id
-                    for key in old_unified_model.keys
-                )
-        config_data = deepcopy(data)
-        config_data.pop("unified_model", None)
-        config_data.setdefault("config_version", CONFIG_VERSION)
-        config = RouterConfig.from_dict(config_data)
-        configured_models = {model.id: model for model in config.models}
-        unified_model_id = config.configured_model_id(str(unified.get("model") or ""))
-        if unified_model_id is None:
-            fallback_model = fallback_unified_model(models)
-            if fallback_model is None:
-                data.pop("unified_model", None)
-            else:
-                data["unified_model"] = {"model": fallback_model}
-        elif unified.get("key") and (
-            unified_key_from_removed_provider
-            or not any(
-                key.name == unified["key"] and key.enabled
-                for key in configured_models[unified_model_id].keys
-            )
-        ):
-            unified.pop("key", None)
-
+    removed_models = operations.delete_provider(data, provider_id)
     restart = commit_v2_config(path, data, old_config)
     return Group(
         section_panel(
@@ -2134,6 +2003,16 @@ def select_model_alias(model: dict[str, Any], title: str) -> int | None:
     return int(choice) - 1
 
 
+def _raw_model_id(data: dict[str, Any], model: dict[str, Any]) -> str:
+    explicit = str(model.get("id") or "").strip()
+    if explicit:
+        return explicit
+    for model_id, candidate in raw_v2_models(data).items():
+        if candidate is model:
+            return str(model_id)
+    return ""
+
+
 def add_model_alias_interactively(
     path: Path, data: dict[str, Any], model: dict[str, Any]
 ) -> Any:
@@ -2141,7 +2020,17 @@ def add_model_alias_interactively(
     if not alias:
         return section_panel("[red]模型别称不能为空。[/red]", "添加失败", "red")
     old_config = RouterConfig.from_dict(data)
-    model.setdefault("aliases", []).append(alias)
+    try:
+        if isinstance(data.get("models"), dict):
+            operations.update_model(
+                data,
+                _raw_model_id(data, model),
+                aliases=[*model.get("aliases", []), alias],
+            )
+        else:
+            model.setdefault("aliases", []).append(alias)
+    except operations.ConfigOperationError as exc:
+        return section_panel(f"[red]{exc}[/red]", "添加失败", "red")
     return save_model_alias_change(
         path, data, old_config, model, f"已添加别称: [bold]{alias}[/bold]", "添加完成"
     )
@@ -2158,8 +2047,20 @@ def edit_model_alias_interactively(
     if alias == old_alias:
         return section_panel("[yellow]别称未变化。[/yellow]", "编辑别称", "yellow")
     old_config = RouterConfig.from_dict(data)
-    aliases[alias_index] = alias
-    replace_unified_model_alias(data, model, old_alias)
+    updated_aliases = list(aliases)
+    updated_aliases[alias_index] = alias
+    try:
+        if isinstance(data.get("models"), dict):
+            operations.update_model(
+                data, _raw_model_id(data, model), aliases=updated_aliases
+            )
+        else:
+            aliases[alias_index] = alias
+    except operations.ConfigOperationError as exc:
+        return section_panel(f"[red]{exc}[/red]", "编辑失败", "red")
+    operations.replace_unified_model_name(
+        data, old_alias, _raw_model_id(data, model)
+    )
     return save_model_alias_change(
         path,
         data,
@@ -2180,8 +2081,20 @@ def delete_model_alias_interactively(
     ):
         return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
     old_config = RouterConfig.from_dict(data)
-    del aliases[alias_index]
-    replace_unified_model_alias(data, model, alias)
+    updated_aliases = list(aliases)
+    del updated_aliases[alias_index]
+    try:
+        if isinstance(data.get("models"), dict):
+            operations.update_model(
+                data, _raw_model_id(data, model), aliases=updated_aliases
+            )
+        else:
+            del aliases[alias_index]
+    except operations.ConfigOperationError as exc:
+        return section_panel(f"[red]{exc}[/red]", "删除失败", "red")
+    operations.replace_unified_model_name(
+        data, alias, _raw_model_id(data, model)
+    )
     return save_model_alias_change(
         path, data, old_config, model, f"已删除别称: [bold]{alias}[/bold]", "删除完成"
     )
@@ -2190,18 +2103,9 @@ def delete_model_alias_interactively(
 def replace_unified_model_alias(
     data: dict[str, Any], model: dict[str, Any], alias: str
 ) -> None:
-    unified_model = data.get("unified_model")
-    if not isinstance(unified_model, dict):
-        return
-    if unified_model.get("model") == alias:
-        unified_model["model"] = model["id"]
-        return
-    for plan in (unified_model.get("default"), unified_model.get("image")):
-        if not isinstance(plan, dict):
-            continue
-        for target in (plan.get("primary"), plan.get("fallback")):
-            if isinstance(target, dict) and target.get("model") == alias:
-                target["model"] = model["id"]
+    operations.replace_unified_model_name(
+        data, alias, _raw_model_id(data, model)
+    )
 
 
 def save_model_alias_change(
@@ -2541,8 +2445,7 @@ def edit_selected_key_interactively(
     key = model["keys"][key_index]
     old_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
     key_name = prompt_text("编辑 Key", "Key 名称", default=old_name).strip() or old_name
-    key["name"] = key_name
-    key["base_url"] = prompt_text(
+    base_url = prompt_text(
         "编辑 Key",
         "上游 base_url",
         default=str(
@@ -2554,8 +2457,24 @@ def edit_selected_key_interactively(
     api_key = prompt_text(
         "编辑 Key", "新 API key（留空则不修改）", default="", password=True
     ).strip()
-    if api_key:
-        key["api_key"] = api_key
+    try:
+        if isinstance(data.get("models"), dict) and "targets" in model:
+            operations.update_model_key_local(
+                data,
+                str(model["id"]),
+                old_name,
+                new_name=key_name,
+                api_key=api_key or None,
+                base_url=base_url,
+                update_base_url=True,
+            )
+        else:
+            key["name"] = key_name
+            key["base_url"] = base_url
+            if api_key:
+                key["api_key"] = api_key
+    except operations.ConfigOperationError as exc:
+        return section_panel(f"[red]{exc}[/red]", "编辑失败", "red")
     new_config = commit_config_data(path, data, old_config).new_config
     return Group(
         section_panel(
@@ -2577,14 +2496,21 @@ def delete_selected_key_interactively(
         f"确认删除模型 {model['id']} 的 Key {key_name}？", default=False
     ):
         return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
-    del model["keys"][key_index]
-    if not model["keys"]:
-        data["models"].remove(model)
-        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
+    if isinstance(data.get("models"), dict) and "targets" in model:
+        try:
+            operations.delete_model_key_local(data, str(model["id"]), key_name)
+        except operations.ConfigOperationError as exc:
+            return section_panel(f"[red]{exc}[/red]", "删除失败", "red")
+        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
     else:
-        message = (
-            f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
-        )
+        del model["keys"][key_index]
+        if not model["keys"]:
+            data["models"].remove(model)
+            message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
+        else:
+            message = (
+                f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
+            )
     new_config = commit_config_data(path, data, old_config).new_config
     return Group(
         section_panel(message, "删除完成", "green"),
@@ -2617,7 +2543,15 @@ def toggle_selected_key_interactively(
     key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
     current_enabled = key.get("enabled", True)
     new_enabled = not current_enabled
-    key["enabled"] = new_enabled
+    if isinstance(data.get("models"), dict) and "targets" in model:
+        try:
+            operations.update_model_key_local(
+                data, str(model["id"]), key_name, enabled=new_enabled
+            )
+        except operations.ConfigOperationError as exc:
+            return section_panel(f"[red]{exc}[/red]", "Key 开关失败", "red")
+    else:
+        key["enabled"] = new_enabled
     new_config = commit_config_data(path, data, old_config).new_config
     old_status = "启用" if current_enabled else "禁用"
     new_status = "启用" if new_enabled else "禁用"
@@ -2644,7 +2578,15 @@ def toggle_visitor_access_interactively(
     key = model["keys"][key_index]
     key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
     visitor_allowed = not bool(key.get("allow_visitor", False))
-    key["allow_visitor"] = visitor_allowed
+    if isinstance(data.get("models"), dict) and "targets" in model:
+        try:
+            operations.update_model_key_local(
+                data, str(model["id"]), key_name, allow_visitor=visitor_allowed
+            )
+        except operations.ConfigOperationError as exc:
+            return section_panel(f"[red]{exc}[/red]", "访客访问失败", "red")
+    else:
+        key["allow_visitor"] = visitor_allowed
     new_config = commit_config_data(path, data, old_config).new_config
     return Group(
         section_panel(
@@ -2680,137 +2622,15 @@ def manage_config_transfer_interactively(path: Path) -> None:
 def transferable_key_config(
     data: dict[str, Any], *, include_visitor: bool
 ) -> dict[str, Any]:
-    providers = deepcopy(raw_providers(data))
-    models = deepcopy(raw_v2_models(data))
-    if not include_visitor:
-        for provider in providers.values():
-            if isinstance(provider, dict):
-                for key in provider_keys(provider).values():
-                    if isinstance(key, dict):
-                        key.pop("allow_visitor", None)
-    return {
-        "config_version": CONFIG_VERSION,
-        "providers": providers,
-        "models": models,
-    }
+    return operations.transferable_config(
+        data, include_visitor=include_visitor
+    )
 
 
 def merge_transferable_key_config(
     current_data: dict[str, Any], transfer_data: dict[str, Any]
 ) -> tuple[dict[str, Any], int, int, int]:
-    merged_data = deepcopy(current_data)
-    merged_data["config_version"] = CONFIG_VERSION
-    current_providers = raw_providers(merged_data)
-    current_models = raw_v2_models(merged_data)
-    transfer_providers = raw_providers(transfer_data)
-    transfer_models = raw_v2_models(transfer_data)
-    added_models = 0
-    added_keys = 0
-    skipped_keys = 0
-    provider_name_map: dict[str, str] = {}
-    pool_name_map: dict[tuple[str, str], tuple[str, str]] = {}
-
-    for provider_id, provider in transfer_providers.items():
-        if not isinstance(provider, dict):
-            continue
-        target_provider_id = str(provider_id)
-        if target_provider_id in current_providers:
-            current_provider = current_providers[target_provider_id]
-            if normalize_upstream_base_url(current_provider.get("base_url")) != normalize_upstream_base_url(provider.get("base_url")):
-                base_name = target_provider_id
-                suffix = 2
-                while f"{base_name}-{suffix}" in current_providers:
-                    suffix += 1
-                target_provider_id = f"{base_name}-{suffix}"
-                current_provider = deepcopy(provider)
-                current_provider["keys"] = {}
-                current_provider["pools"] = {}
-                current_providers[target_provider_id] = current_provider
-        else:
-            current_provider = deepcopy(provider)
-            current_provider["keys"] = {}
-            current_provider["pools"] = {}
-            current_providers[target_provider_id] = current_provider
-        provider_name_map[str(provider_id)] = target_provider_id
-        current_keys = provider_keys(current_provider)
-        current_pools = provider_pools(current_provider)
-        existing_key_targets = {
-            str(key.get("api_key") or "")
-            for key in current_keys.values()
-            if isinstance(key, dict)
-        }
-        key_name_map: dict[str, str | None] = {}
-        for key_name, key in provider_keys(provider).items():
-            api_key = str(key.get("api_key") or "") if isinstance(key, dict) else ""
-            if api_key in existing_key_targets:
-                skipped_keys += 1
-                key_name_map[str(key_name)] = None
-                continue
-            target_key_name = str(key_name)
-            base_name = target_key_name
-            suffix = 2
-            while target_key_name in current_keys:
-                target_key_name = f"{base_name}-{suffix}"
-                suffix += 1
-            current_keys[target_key_name] = deepcopy(key)
-            key_name_map[str(key_name)] = target_key_name
-            existing_key_targets.add(api_key)
-            added_keys += 1
-        for pool_name, pool in provider_pools(provider).items():
-            mapped_keys = [
-                key_name_map[key_name]
-                for key_name in pool_key_names(pool)
-                if key_name_map.get(key_name)
-            ]
-            if not mapped_keys:
-                pool_name_map[(str(provider_id), str(pool_name))] = (target_provider_id, "")
-                continue
-            target_pool_name = str(pool_name)
-            base_name = target_pool_name
-            suffix = 2
-            while target_pool_name in current_pools:
-                target_pool_name = f"{base_name}-{suffix}"
-                suffix += 1
-            target_pool = deepcopy(pool) if isinstance(pool, dict) else {}
-            target_pool["keys"] = mapped_keys
-            target_pool.setdefault("models", [])
-            current_pools[target_pool_name] = target_pool
-            pool_name_map[(str(provider_id), str(pool_name))] = (target_provider_id, target_pool_name)
-
-    for model_id, transferred_model in transfer_models.items():
-        target_model = current_models.get(str(model_id))
-        if not isinstance(target_model, dict):
-            current_models[str(model_id)] = deepcopy(transferred_model)
-            target_model = current_models[str(model_id)]
-            target_model["targets"] = []
-            added_models += 1
-        targets = model_targets(target_model)
-        existing_targets = {
-            (
-                str(target.get("provider") or ""),
-                str(target.get("pool") or ""),
-                str(target.get("upstream_model") or model_id),
-            )
-            for target in targets
-        }
-        for target in model_targets(transferred_model):
-            mapped = pool_name_map.get((str(target.get("provider") or ""), str(target.get("pool") or "")))
-            if not mapped:
-                continue
-            provider_id, pool_name = mapped
-            if not pool_name:
-                continue
-            new_target = {
-                "provider": provider_id,
-                "pool": pool_name,
-                "upstream_model": str(target.get("upstream_model") or model_id),
-            }
-            target_key = (new_target["provider"], new_target["pool"], new_target["upstream_model"])
-            if target_key not in existing_targets:
-                targets.append(new_target)
-                existing_targets.add(target_key)
-
-    return merged_data, added_models, added_keys, skipped_keys
+    return operations.merge_transferable_config(current_data, transfer_data)
 
 
 def export_config_interactively(path: Path) -> ResultPage:
@@ -3356,14 +3176,21 @@ def delete_api_key_interactively(path: Path) -> Any:
         f"确认删除模型 {model['id']} 的 Key {key_name}？", default=False
     ):
         return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
-    del model["keys"][key_index]
-    if not model["keys"]:
-        data["models"].remove(model)
-        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
+    if isinstance(data.get("models"), dict) and "targets" in model:
+        try:
+            operations.delete_model_key_local(data, str(model["id"]), key_name)
+        except operations.ConfigOperationError as exc:
+            return section_panel(f"[red]{exc}[/red]", "删除失败", "red")
+        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
     else:
-        message = (
-            f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
-        )
+        del model["keys"][key_index]
+        if not model["keys"]:
+            data["models"].remove(model)
+            message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
+        else:
+            message = (
+                f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
+            )
     new_config = commit_config_data(path, data, old_config).new_config
     return Group(
         section_panel(message, "删除完成", "green"),
@@ -3441,7 +3268,15 @@ def toggle_key_enabled_interactively(path: Path) -> Any:
     key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
     current_enabled = key.get("enabled", True)
     new_enabled = not current_enabled
-    key["enabled"] = new_enabled
+    if isinstance(data.get("models"), dict) and "targets" in model:
+        try:
+            operations.update_model_key_local(
+                data, str(model["id"]), key_name, enabled=new_enabled
+            )
+        except operations.ConfigOperationError as exc:
+            return section_panel(f"[red]{exc}[/red]", "Key 开关失败", "red")
+    else:
+        key["enabled"] = new_enabled
     new_config = commit_config_data(path, data, old_config).new_config
     old_status = "启用" if current_enabled else "禁用"
     new_status = "启用" if new_enabled else "禁用"
@@ -3783,7 +3618,7 @@ def set_local_api_key_interactively(path: Path) -> Any:
     ):
         return section_panel("[yellow]配置未变化。[/yellow]", "本地鉴权", "yellow")
     local_api_key = generate_local_api_key()
-    data["local_api_key"] = local_api_key
+    operations.regenerate_local_api_key(data, local_api_key)
     new_config = commit_config_data(path, data, old_config).new_config
     content = Group(
         section_panel(
@@ -3828,7 +3663,7 @@ def set_timeouts_interactively(path: Path) -> Any:
             )
         values[field] = value
 
-    data.update(values)
+    operations.update_settings(data, **values)
     new_config = commit_config_data(path, data, old_config).new_config
     return Group(
         section_panel(
@@ -3876,8 +3711,7 @@ def set_listen_interactively(path: Path) -> Any:
         )
     ):
         return section_panel("[yellow]配置未变化。[/yellow]", "监听配置", "yellow")
-    data["host"] = host
-    data["port"] = port
+    operations.update_settings(data, host=host, port=port)
     new_config = commit_config_data(path, data, old_config).new_config
     warning = (
         "\n[bold red]风险提示: 0.0.0.0 会暴露到所有可达网络，请确保防火墙和本地鉴权已正确配置。[/bold red]"
