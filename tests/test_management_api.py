@@ -313,6 +313,55 @@ def test_provider_read_uses_one_raw_config_snapshot(tmp_path: Path) -> None:
     ).hexdigest()
 
 
+def test_api_provider_can_be_created_without_keys_and_pool_keys_can_be_cleared(
+    tmp_path: Path,
+) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(client: httpx.AsyncClient):
+        initial = await client.get("/api/providers", headers=AUTH_HEADERS)
+        created = await client.post(
+            "/api/providers",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": initial.json()["config_revision"],
+                "id": "empty-provider",
+                "base_url": "https://empty.example.test",
+            },
+        )
+        revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+            "config_revision"
+        ]
+        key = await client.post(
+            "/api/providers/empty-provider/keys",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": revision,
+                "name": "main",
+                "api_key": "sk-empty",
+            },
+        )
+        revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+            "config_revision"
+        ]
+        pool = await client.put(
+            "/api/providers/empty-provider/pools/default",
+            headers=AUTH_HEADERS,
+            json={"config_revision": revision, "keys": []},
+        )
+        return created, key, pool
+
+    created, key, pool = run_client(app, requests)
+
+    assert created.status_code == 201
+    assert key.status_code == 201
+    assert pool.status_code == 200
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["providers"]["empty-provider"]["pools"]["default"]["keys"] == [
+        "main"
+    ]
+
+
 def test_provider_routes_are_normalized_updated_and_cleared(tmp_path: Path) -> None:
     app, _ = create_file_backed_app(tmp_path)
 
@@ -399,11 +448,12 @@ def test_provider_key_pool_and_route_crud_uses_v3_config(tmp_path: Path) -> None
     assert "sk-secret-b" not in created_key.text
     assert created_pool.status_code == 201
     assert created_route.status_code == 200
-    assert disabled.status_code == 409
+    assert disabled.status_code == 200
     assert created_backup.status_code == 201
     assert deleted_key.status_code == 204
-    assert deleted_pool.status_code == 204
-    assert deleted_route.status_code == 204
+    # 与 TUI 相同：删除最后一个池成员会级联清理空 Pool 和空模型路由。
+    assert deleted_pool.status_code == 404
+    assert deleted_route.status_code == 404
     assert deleted_provider.status_code == 204
 
     saved = json.loads(path.read_text(encoding="utf-8"))
@@ -550,7 +600,7 @@ def test_key_probe_is_async_redacted_and_requires_full_access(
     assert "sk-secret-a" not in completed.text
 
 
-def test_config_transfer_excludes_machine_settings_and_keeps_them_on_import(
+def test_config_transfer_matches_tui_append_semantics_and_keeps_machine_settings(
     tmp_path: Path,
 ) -> None:
     app, path = create_file_backed_app(tmp_path)
@@ -558,8 +608,20 @@ def test_config_transfer_excludes_machine_settings_and_keeps_them_on_import(
     async def requests(client: httpx.AsyncClient):
         exported = await client.post("/api/config/export", headers=AUTH_HEADERS)
         exported_config = exported.json()["config"]
-        exported_config["providers"] = {}
-        exported_config["models"] = {}
+        exported_config["providers"]["new"] = {
+            "base_url": "https://new.example.test",
+            "keys": {"new": {"api_key": "sk-new"}},
+            "pools": {"new": {"keys": ["new"], "models": ["model-new"]}},
+        }
+        exported_config["models"]["model-new"] = {
+            "targets": [
+                {
+                    "provider": "new",
+                    "pool": "new",
+                    "upstream_model": "model-new",
+                }
+            ]
+        }
         imported = await client.post(
             "/api/config/import",
             headers=AUTH_HEADERS,
@@ -579,7 +641,14 @@ def test_config_transfer_excludes_machine_settings_and_keeps_them_on_import(
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["host"] == "127.0.0.1"
     assert saved["local_api_key"] == "local-key"
-    assert saved["providers"] == {}
+    assert set(saved["providers"]) == {"a.example.test", "new"}
+    assert "model-new" in saved["models"]
+    import_body = imported.json()
+    assert import_body["imported"] is True
+    assert import_body["added_models"] == 1
+    assert import_body["added_keys"] == 1
+    assert import_body["skipped_keys"] == 1
+    assert import_body["config_revision"]
     assert list(tmp_path.glob("router-config.json.*.bak"))
 
 
@@ -754,7 +823,7 @@ def test_model_and_key_crud_persist_and_hot_reload_visitor_access(
     assert "sk-secret-b" not in updated_key.text
 
 
-def test_key_update_preserves_secret_and_last_key_cannot_be_deleted(
+def test_key_update_preserves_secret_and_last_key_deletion_cascades(
     tmp_path: Path,
 ) -> None:
     app, path = create_file_backed_app(tmp_path)
@@ -776,12 +845,10 @@ def test_key_update_preserves_secret_and_last_key_cannot_be_deleted(
 
     assert updated.status_code == 200
     assert updated.json()["allow_visitor"] is True
-    assert deleted.status_code == 409
+    assert deleted.status_code == 204
     saved = json.loads(path.read_text(encoding="utf-8"))
-    saved_key = saved["providers"]["new.example.test"]["keys"]["key-a"]
-    assert saved_key["api_key"] == "sk-secret-a"
-    assert saved_key["allow_visitor"] is True
-    assert saved["providers"]["new.example.test"]["base_url"] == "https://new.example.test"
+    assert "new.example.test" not in saved["providers"]
+    assert "model-a" not in saved["models"]
 
 
 def test_key_update_persists_and_clears_base_url_upstream_routes(tmp_path: Path) -> None:
@@ -911,6 +978,56 @@ def test_management_rejects_null_for_non_nullable_update_fields(
     assert blank_name.status_code == 400
     assert blank_name.json()["detail"] == "key 名称不能为空"
     assert path.read_text(encoding="utf-8") == original
+
+
+def test_model_reads_and_writes_share_config_revision_and_model_key_is_local(
+    tmp_path: Path,
+) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(client: httpx.AsyncClient):
+        models = await client.get("/api/models", headers=AUTH_HEADERS)
+        model = await client.get("/api/models/model-a", headers=AUTH_HEADERS)
+        keys = await client.get("/api/models/model-a/keys", headers=AUTH_HEADERS)
+        stale = await client.put(
+            "/api/models/model-a",
+            headers=AUTH_HEADERS,
+            json={"config_revision": "stale", "aliases": ["stale"]},
+        )
+        shared = json.loads(path.read_text(encoding="utf-8"))
+        shared["models"]["model-b"] = {
+            "targets": [
+                {
+                    "provider": "a.example.test",
+                    "pool": "model-a",
+                    "upstream_model": "model-a",
+                }
+            ]
+        }
+        path.write_text(json.dumps(shared), encoding="utf-8")
+        app.state.config_mtime = path.stat().st_mtime
+        local_update = await client.put(
+            "/api/models/model-a/keys/key-a",
+            headers=AUTH_HEADERS,
+            json={"allow_visitor": True},
+        )
+        return models, model, keys, stale, local_update
+
+    models, model, keys, stale, local_update = run_client(app, requests)
+
+    assert models.status_code == 200
+    assert models.json()["config_revision"]
+    assert model.json()["config_revision"] == models.json()["config_revision"]
+    assert keys.json()["config_revision"] == models.json()["config_revision"]
+    assert stale.status_code == 409
+    assert local_update.status_code == 200
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["providers"]["a.example.test"]["keys"]["key-a"]["allow_visitor"] is False
+    assert any(
+        provider.get("keys", {}).get("key-a", {}).get("allow_visitor") is True
+        for name, provider in saved["providers"].items()
+        if name != "a.example.test"
+    )
 
 
 def test_get_key_stats_returns_key_specific_metrics(

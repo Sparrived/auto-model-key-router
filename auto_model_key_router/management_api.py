@@ -30,6 +30,7 @@ from .config import (
     save_config_data,
 )
 from .config_service import ConfigService
+from . import config_operations as operations
 from .proxy_support import _authorization_mode
 
 
@@ -40,10 +41,14 @@ if hasattr(BaseModel, "model_fields"):
 
     class APIModel(BaseModel):
         model_config = ConfigDict(extra="forbid")
+        # 兼容旧客户端：提供 revision 时启用乐观并发校验；省略时保留旧请求格式。
+        config_revision: str | None = Field(default=None, min_length=1)
 
 else:
 
     class APIModel(BaseModel):
+        config_revision: str | None = Field(default=None, min_length=1)
+
         class Config:
             extra = "forbid"
 
@@ -207,27 +212,33 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     @app.get("/api/unified-model", tags=["management"])
     async def get_unified_model(request: Request) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
-        return {"unified_model": serialize_unified(config)}
+        data = _management_config_data(request)
+        return _with_revision(data, unified_model=serialize_unified(config))
 
     @app.put("/api/unified-model", tags=["management"])
     async def update_unified_model(
         request: Request, payload: UnifiedModelUpdate
     ) -> dict[str, Any]:
         fields = _payload_dict(payload)
+        config_revision = fields.pop("config_revision", None)
         if fields.get("default") is not None:
             def nested_mutation(data: dict[str, Any]) -> None:
                 unified_data: dict[str, Any] = {"default": fields["default"]}
                 if fields.get("image") is not None:
                     unified_data["image"] = fields["image"]
-                data["unified_model"] = unified_data
+                operations.set_unified_model(data, unified_data)
 
             config = await _update_config(
                 request,
                 reload_config,
                 nested_mutation,
-                v3=True,
+                config_revision=config_revision,
             )
-            return {"unified_model": serialize_unified(config)}
+            data = _management_config_data(request)
+            return {
+                "unified_model": serialize_unified(config),
+                "config_revision": _config_revision(data),
+            }
         if fields.get("model") is None:
             raise ManagementAPIError(422, "必须提供 model 或 default")
         target_model = str(fields["model"]).strip()
@@ -239,71 +250,46 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         target_image_key = str(fields["image_key"]).strip() if fields.get("image_key") else None
 
         def mutation(data: dict[str, Any]) -> None:
-            config = RouterConfig.from_dict(data)
-            model = find_config_model(config, target_model)
-            resolved_id = model.id
-            if target_key is not None:
-                ensure_enabled_config_key(model, target_key)
-            existing = data.get("unified_model")
-            if not isinstance(existing, dict):
-                existing = {}
-            existing_default = existing.get("default")
-            existing_primary = (
-                existing_default.get("primary", {})
-                if isinstance(existing_default, dict)
-                else {}
+            operations.switch_unified_target(
+                data,
+                "default.primary",
+                target_model,
+                target_key,
+                update_key=key_provided,
             )
-            existing_key = (
-                existing_primary.get("key")
-                if isinstance(existing_primary, dict)
-                else existing.get("key")
-            )
-            unified_data: dict[str, Any] = {
-                "default": {"primary": {"model": resolved_id}}
-            }
-            if key_provided:
-                if target_key:
-                    unified_data["default"]["primary"]["key"] = target_key
-            else:
-                if existing_key:
-                    unified_data["default"]["primary"]["key"] = existing_key
-            # 图像模型映射
-            existing_image = existing.get("image")
-            existing_image_primary = (
-                existing_image.get("primary", {})
-                if isinstance(existing_image, dict)
-                else {}
-            )
-            existing_image_model = existing.get("image_model") or (
-                existing_image_primary.get("model")
-                if isinstance(existing_image_primary, dict)
-                else None
-            )
-            existing_image_key = existing.get("image_key") or (
-                existing_image_primary.get("key")
-                if isinstance(existing_image_primary, dict)
-                else None
-            )
-            if image_model_provided:
-                if target_image_model:
-                    image_model = find_config_model(config, target_image_model)
-                    resolved_image_id = image_model.id
-                    image_primary: dict[str, Any] = {"model": resolved_image_id}
-                    if image_key_provided and target_image_key:
-                        ensure_enabled_config_key(image_model, target_image_key)
-                        image_primary["key"] = target_image_key
-                    elif not image_key_provided and existing_image_key and existing_image_model == resolved_image_id:
-                        image_primary["key"] = existing_image_key
-                    unified_data["image"] = {"primary": image_primary}
-            elif existing_image_model:
-                image_primary = {"model": existing_image_model}
-                if existing_image_key:
-                    image_primary["key"] = existing_image_key
-                unified_data["image"] = {"primary": image_primary}
-            data["unified_model"] = unified_data
+            if image_model_provided and target_image_model:
+                operations.switch_unified_target(
+                    data,
+                    "image.primary",
+                    target_image_model,
+                    target_image_key,
+                    update_key=image_key_provided,
+                )
+            elif image_model_provided:
+                unified = migrate_config_data(data).get("unified_model")
+                if isinstance(unified, dict):
+                    unified.pop("image", None)
+                    operations.set_unified_model(data, unified)
+            elif image_key_provided:
+                operations.switch_unified_target(
+                    data,
+                    "image.primary",
+                    None,
+                    target_image_key,
+                    update_key=True,
+                )
 
-        config = await _update_config(request, reload_config, mutation, v3=True)
-        return {"unified_model": serialize_unified(config)}
+        config = await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=config_revision,
+        )
+        data = _management_config_data(request)
+        return {
+            "unified_model": serialize_unified(config),
+            "config_revision": _config_revision(data),
+        }
 
     @app.delete(
         "/api/unified-model",
@@ -311,17 +297,27 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         status_code=status.HTTP_204_NO_CONTENT,
         response_class=Response,
     )
-    async def delete_unified_model(request: Request) -> Response:
+    async def delete_unified_model(
+        request: Request, payload: RevisionPayload | None = None
+    ) -> Response:
         def mutation(data: dict[str, Any]) -> None:
-            data.pop("unified_model", None)
+            operations.set_unified_model(data, None)
 
-        await _update_config(request, reload_config, mutation, v3=True)
+        await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=_payload_revision(payload) if payload else None,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/api/models", tags=["management"])
     async def list_models(request: Request) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
-        return {"models": [_model_response(model) for model in config.models]}
+        data = _management_config_data(request)
+        return _with_revision(
+            data, models=[_model_response(model) for model in config.models]
+        )
 
     @app.get("/api/settings", tags=["management"])
     async def get_settings(request: Request) -> dict[str, Any]:
@@ -337,24 +333,14 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         updates.pop("config_revision")
         if not updates:
             raise HTTPException(status_code=422, detail="至少提供一个设置字段")
-        host = updates.get("host")
-        if host is not None:
-            updates["host"] = host.strip()
-            if not updates["host"] or "://" in updates["host"] or "/" in updates["host"]:
-                raise HTTPException(
-                    status_code=422,
-                    detail="监听地址只填写 IP 或主机名，不要包含协议或路径",
-                )
-
         def mutation(data: dict[str, Any]) -> None:
-            data.update(updates)
+            operations.update_settings(data, **updates)
 
         await _update_config(
             request,
             reload_config,
             mutation,
             config_revision=payload.config_revision,
-            v3=True,
         )
         data = _management_config_data(request)
         return _with_revision(data, settings=_settings_response(data))
@@ -366,14 +352,13 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         local_api_key = generate_local_api_key()
 
         def mutation(data: dict[str, Any]) -> None:
-            data["local_api_key"] = local_api_key
+            operations.regenerate_local_api_key(data, local_api_key)
 
         await _update_config(
             request,
             reload_config,
             mutation,
             config_revision=payload.config_revision,
-            v3=True,
         )
         data = _management_config_data(request)
         return _with_revision(
@@ -414,17 +399,13 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         )
 
     async def v3_update(request: Request, revision: str, mutation: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
-        await _update_config(request, reload_config, mutation, config_revision=revision, v3=True)
+        await _update_config(request, reload_config, mutation, config_revision=revision)
         return _management_config_data(request)
 
     @app.post("/api/providers", status_code=201, tags=["management"])
     async def create_provider(request: Request, payload: ProviderCreate) -> dict[str, Any]:
         def mutation(data: dict[str, Any]) -> None:
-            providers = _providers(data)
-            if payload.id in providers:
-                raise ManagementAPIError(409, f"供应商已存在: {payload.id}")
-            _valid_url(payload.base_url)
-            providers[payload.id] = {"base_url": payload.base_url.rstrip("/"), "keys": {}, "pools": {}}
+            operations.create_provider(data, payload.id, payload.base_url)
         data = await v3_update(request, payload.config_revision, mutation)
         return _with_revision(data, provider=_raw_provider_response(payload.id, _require_provider(_providers(data), payload.id)))
 
@@ -437,30 +418,22 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     @app.put("/api/providers/{provider_id}", tags=["management"])
     async def update_provider(request: Request, provider_id: str, payload: ProviderUpdate) -> dict[str, Any]:
         updates = _payload_dict(payload); updates.pop("config_revision")
-        if "routes" in updates:
-            try:
-                updates["routes"] = normalize_upstream_routes(updates["routes"])
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
         def mutation(data: dict[str, Any]) -> None:
-            providers = _providers(data); provider = _require_provider(providers, provider_id)
-            new_id = updates.get("id", provider_id)
-            if new_id != provider_id and new_id in providers: raise ManagementAPIError(409, f"供应商已存在: {new_id}")
-            if "base_url" in updates: _valid_url(updates["base_url"]); provider["base_url"] = updates["base_url"].rstrip("/")
-            if "routes" in updates:
-                if updates["routes"]: provider["routes"] = updates["routes"]
-                else: provider.pop("routes", None)
-            if new_id != provider_id:
-                providers[new_id] = providers.pop(provider_id)
-                for route in _routes(data).values():
-                    for target in route.get("targets", []):
-                        if target.get("provider") == provider_id: target["provider"] = new_id
+            operations.update_provider(
+                data,
+                provider_id,
+                new_id=updates.get("id"),
+                base_url=updates.get("base_url"),
+                routes=updates.get("routes"),
+                update_routes="routes" in updates,
+            )
         data = await v3_update(request, payload.config_revision, mutation); new_id = updates.get("id", provider_id)
         return _with_revision(data, provider=_raw_provider_response(new_id, _require_provider(_providers(data), new_id)))
 
     @app.delete("/api/providers/{provider_id}", status_code=204, response_class=Response, tags=["management"])
     async def delete_provider(request: Request, provider_id: str, payload: RevisionPayload) -> Response:
-        def mutation(data: dict[str, Any]) -> None: _providers(data).pop(provider_id) if _require_provider(_providers(data), provider_id) else None
+        def mutation(data: dict[str, Any]) -> None:
+            operations.delete_provider(data, provider_id)
         await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
 
     @app.get("/api/providers/{provider_id}/keys", tags=["management"])
@@ -471,10 +444,14 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     @app.post("/api/providers/{provider_id}/keys", status_code=201, tags=["management"])
     async def create_provider_key(request: Request, provider_id: str, payload: ProviderKeyCreate) -> dict[str, Any]:
         def mutation(data: dict[str, Any]) -> None:
-            keys = _require_provider(_providers(data), provider_id).setdefault("keys", {})
-            if payload.name in keys: raise ManagementAPIError(409, f"Key 已存在: {payload.name}")
-            keys[payload.name] = {"api_key": payload.api_key, "enabled": payload.enabled, "allow_visitor": payload.allow_visitor}
-            _require_provider(_providers(data), provider_id).setdefault("pools", {}).setdefault("default", {"keys": [], "models": []})["keys"].append(payload.name)
+            operations.create_provider_key(
+                data,
+                provider_id,
+                payload.name,
+                payload.api_key,
+                enabled=payload.enabled,
+                allow_visitor=payload.allow_visitor,
+            )
         data = await v3_update(request, payload.config_revision, mutation); key = _require_provider(_providers(data), provider_id)["keys"][payload.name]
         return _with_revision(data, **_raw_key_response(payload.name, key))
 
@@ -487,23 +464,22 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     async def update_provider_key(request: Request, provider_id: str, key_name: str, payload: ProviderKeyUpdate) -> dict[str, Any]:
         updates = _payload_dict(payload); updates.pop("config_revision")
         def mutation(data: dict[str, Any]) -> None:
-            provider = _require_provider(_providers(data), provider_id); keys = provider.setdefault("keys", {}); key = _require_key(provider, key_name); new_name = updates.get("name", key_name)
-            if new_name != key_name and new_name in keys: raise ManagementAPIError(409, f"Key 已存在: {new_name}")
-            if key.get("enabled", True) and updates.get("enabled") is False and _enabled_keys(provider) == 1: raise ManagementAPIError(409, "供应商至少需要一个启用的 key")
-            key.update(updates)
-            if new_name != key_name:
-                keys[new_name] = keys.pop(key_name)
-                for pool in provider.get("pools", {}).values(): pool["keys"] = [new_name if name == key_name else name for name in pool.get("keys", [])]
+            operations.update_provider_key(
+                data,
+                provider_id,
+                key_name,
+                new_name=updates.get("name"),
+                api_key=updates.get("api_key"),
+                enabled=updates.get("enabled"),
+                allow_visitor=updates.get("allow_visitor"),
+            )
         data = await v3_update(request, payload.config_revision, mutation); name = updates.get("name", key_name); key = _require_key(_require_provider(_providers(data), provider_id), name)
         return _with_revision(data, **_raw_key_response(name, key))
 
     @app.delete("/api/providers/{provider_id}/keys/{key_name}", status_code=204, response_class=Response, tags=["management"])
     async def delete_provider_key(request: Request, provider_id: str, key_name: str, payload: RevisionPayload) -> Response:
         def mutation(data: dict[str, Any]) -> None:
-            provider = _require_provider(_providers(data), provider_id); key = _require_key(provider, key_name)
-            if key.get("enabled", True) and _enabled_keys(provider) == 1: raise ManagementAPIError(409, "供应商至少需要一个启用的 key")
-            provider["keys"].pop(key_name)
-            for pool in provider.get("pools", {}).values(): pool["keys"] = [name for name in pool.get("keys", []) if name != key_name]
+            operations.delete_provider_key(data, provider_id, key_name)
         await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
 
     @app.get("/api/providers/{provider_id}/pools", tags=["management"])
@@ -514,15 +490,17 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     @app.post("/api/providers/{provider_id}/pools", status_code=201, tags=["management"])
     async def create_pool(request: Request, provider_id: str, payload: PoolCreate) -> dict[str, Any]:
         def mutation(data: dict[str, Any]) -> None:
-            provider = _require_provider(_providers(data), provider_id); pools = provider.setdefault("pools", {})
-            if payload.name in pools: raise ManagementAPIError(409, f"Pool 已存在: {payload.name}")
-            default_pool = pools.get("default")
-            if isinstance(default_pool, dict):
-                default_pool["keys"] = [key for key in default_pool.get("keys", []) if key not in payload.keys]
-            _validate_pool(provider, payload.keys, exclude=None); pools[payload.name] = {"keys": payload.keys, "models": payload.models}
-            from .config_editor import enable_pool_models
-
-            enable_pool_models(data, provider_id, payload.name, payload.models)
+            provider = operations.require_provider(data, provider_id)
+            if payload.name in operations.provider_pools(provider):
+                raise operations.ConfigOperationError(
+                    f"Pool 已存在: {payload.name}", status_code=409
+                )
+            operations.assign_pool_keys(
+                data, provider_id, payload.name, payload.keys
+            )
+            operations.enable_pool_models(
+                data, provider_id, payload.name, payload.models
+            )
         data = await v3_update(request, payload.config_revision, mutation); pool = _require_provider(_providers(data), provider_id)["pools"][payload.name]
         return _with_revision(data, pool={"name": payload.name, **pool})
 
@@ -535,42 +513,31 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     async def update_pool(request: Request, provider_id: str, pool_name: str, payload: PoolUpdate) -> dict[str, Any]:
         updates = _payload_dict(payload); updates.pop("config_revision")
         def mutation(data: dict[str, Any]) -> None:
-            provider = _require_provider(_providers(data), provider_id); pools = provider.setdefault("pools", {}); pool = _require_pool(provider, pool_name); new_name = updates.get("name", pool_name)
-            if new_name != pool_name and new_name in pools: raise ManagementAPIError(409, f"Pool 已存在: {new_name}")
-            if "keys" in updates: _validate_pool(provider, updates["keys"], exclude=pool_name)
-            pool.update(updates)
-            if new_name != pool_name:
-                pools[new_name] = pools.pop(pool_name)
-                for route in _routes(data).values():
-                    for target in route.get("targets", []):
-                        if target.get("provider") == provider_id and target.get("pool") == pool_name: target["pool"] = new_name
-            if "models" in updates or new_name != pool_name:
-                from .config_editor import enable_pool_models
-
-                enable_pool_models(data, provider_id, new_name, list(pools[new_name].get("models", [])))
+            name = operations.rename_pool(
+                data,
+                provider_id,
+                pool_name,
+                str(updates.get("name") or pool_name),
+            )
+            if "keys" in updates:
+                operations.assign_pool_keys(
+                    data,
+                    provider_id,
+                    name,
+                    list(updates["keys"]),
+                    retain_existing=True,
+                )
+            if "models" in updates:
+                operations.enable_pool_models(
+                    data, provider_id, name, list(updates["models"])
+                )
         data = await v3_update(request, payload.config_revision, mutation); name = updates.get("name", pool_name); pool = _require_pool(_require_provider(_providers(data), provider_id), name)
         return _with_revision(data, pool={"name": name, **pool})
 
     @app.delete("/api/providers/{provider_id}/pools/{pool_name}", status_code=204, response_class=Response, tags=["management"])
     async def delete_pool(request: Request, provider_id: str, pool_name: str, payload: RevisionPayload) -> Response:
         def mutation(data: dict[str, Any]) -> None:
-            provider = _require_provider(_providers(data), provider_id)
-            pool = _require_pool(provider, pool_name)
-            pool_keys = list(pool.get("keys", []))
-            if pool_name == "default" and pool_keys:
-                raise ManagementAPIError(409, "默认模型池仍包含 Key，不能删除")
-            from .config_editor import enable_pool_models
-
-            enable_pool_models(data, provider_id, pool_name, [])
-            provider.setdefault("pools", {}).pop(pool_name)
-            if pool_keys:
-                default_pool = provider.setdefault("pools", {}).setdefault(
-                    "default", {"keys": [], "models": []}
-                )
-                default_pool["keys"] = list(dict.fromkeys([
-                    *default_pool.get("keys", []),
-                    *pool_keys,
-                ]))
+            operations.delete_pool(data, provider_id, pool_name)
         await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
 
     @app.get("/api/routes", tags=["management"])
@@ -582,9 +549,14 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     async def create_route(request: Request, payload: RouteCreate) -> dict[str, Any]:
         route = _payload_dict(payload); route.pop("config_revision")
         def mutation(data: dict[str, Any]) -> None:
-            routes = _routes(data)
-            if payload.id in routes: raise ManagementAPIError(409, f"路由已存在: {payload.id}")
-            _validate_targets(data, route["targets"]); routes[payload.id] = {key: value for key, value in route.items() if key != "id" and value is not None}
+            operations.validate_targets(data, route["targets"])
+            operations.create_model(
+                data,
+                payload.id,
+                aliases=list(route.get("aliases") or []),
+                routing_mode=str(route.get("routing_mode") or "round_robin"),
+                targets=list(route["targets"]),
+            )
         data = await v3_update(request, payload.config_revision, mutation); return _with_revision(data, route={"id": payload.id, **_routes(data)[payload.id]})
 
     @app.get("/api/routes/{route_id}", tags=["management"])
@@ -596,16 +568,20 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     async def update_route(request: Request, route_id: str, payload: RouteUpdate) -> dict[str, Any]:
         updates = _payload_dict(payload); updates.pop("config_revision")
         def mutation(data: dict[str, Any]) -> None:
-            routes = _routes(data); route = _require_route(routes, route_id); new_id = updates.get("id", route_id)
-            if new_id != route_id and new_id in routes: raise ManagementAPIError(409, f"路由已存在: {new_id}")
-            if "targets" in updates: _validate_targets(data, updates["targets"])
-            route.update({key: value for key, value in updates.items() if key != "id"})
-            if new_id != route_id: routes[new_id] = routes.pop(route_id)
+            operations.update_model(
+                data,
+                route_id,
+                new_id=updates.get("id"),
+                aliases=updates.get("aliases"),
+                routing_mode=updates.get("routing_mode"),
+                targets=updates.get("targets"),
+            )
         data = await v3_update(request, payload.config_revision, mutation); name = updates.get("id", route_id); return _with_revision(data, route={"id": name, **_routes(data)[name]})
 
     @app.delete("/api/routes/{route_id}", status_code=204, response_class=Response, tags=["management"])
     async def delete_route(request: Request, route_id: str, payload: RevisionPayload) -> Response:
-        def mutation(data: dict[str, Any]) -> None: _routes(data).pop(route_id) if _require_route(_routes(data), route_id) else None
+        def mutation(data: dict[str, Any]) -> None:
+            operations.delete_model(data, route_id)
         await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
 
     async def start_probe(
@@ -693,27 +669,47 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
     async def export_config(request: Request) -> dict[str, Any]:
         await _authorized_config(request, reload_config)
         data = _management_config_data(request)
-        return _with_revision(data, config=_portable_config(data))
+        from .visitor import visitor_feature_available
+
+        exported = operations.transferable_config(
+            data, include_visitor=visitor_feature_available()
+        )
+        return _with_revision(data, config=exported)
 
     @app.post("/api/config/import", tags=["management"])
     async def import_config(
         request: Request, payload: ConfigImportRequest
     ) -> dict[str, Any]:
-        imported = _portable_config(payload.config)
+        from .visitor import visitor_feature_available
+
+        imported = operations.transferable_config(
+            migrate_config_data(payload.config),
+            include_visitor=visitor_feature_available(),
+        )
+        result: dict[str, int] = {}
 
         def mutation(data: dict[str, Any]) -> None:
-            candidate = dict(data)
-            candidate.update(deepcopy(imported))
-            candidate = migrate_config_data(candidate)
-            RouterConfig.from_dict(candidate)
+            merged, added_models, added_keys, skipped_keys = (
+                operations.merge_transferable_config(data, imported)
+            )
             config_path = Path(str(request.app.state.config_path))
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            save_config_data(config_path.with_name(f"{config_path.name}.{stamp}.bak"), data)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+            save_config_data(
+                config_path.with_name(
+                    f"{config_path.name}.{stamp}.{uuid.uuid4().hex[:8]}.bak"
+                ),
+                data,
+            )
             data.clear()
-            data.update(candidate)
+            data.update(merged)
+            result.update(
+                added_models=added_models,
+                added_keys=added_keys,
+                skipped_keys=skipped_keys,
+            )
 
         data = await v3_update(request, payload.config_revision, mutation)
-        return _with_revision(data, imported=True)
+        return _with_revision(data, imported=True, **result)
 
     @app.post(
         "/api/models",
@@ -725,44 +721,69 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         config_revision = model_data.pop("config_revision", None)
 
         def mutation(data: dict[str, Any]) -> None:
-            models = _raw_models(data)
-            model_id = model_data["id"]
-            if _find_raw_model(models, model_id) is not None:
-                raise ManagementAPIError(409, f"模型已存在: {model_id}")
-            models.append(model_data)
+            operations.create_model_with_keys(
+                data,
+                str(model_data["id"]),
+                aliases=list(model_data.get("aliases") or []),
+                routing_mode=str(model_data.get("routing_mode") or "round_robin"),
+                reasoning_effort=model_data.get("reasoning_effort"),
+                keys=list(model_data.get("keys") or []),
+            )
 
         config = await _update_config(
-            request, reload_config, mutation, config_revision=config_revision
+            request,
+            reload_config,
+            mutation,
+            config_revision=config_revision,
         )
-        return _model_response(_find_model(config, model_data["id"]))
+        data = _management_config_data(request)
+        return {
+            **_model_response(_find_model(config, model_data["id"])),
+            "config_revision": _config_revision(data),
+        }
 
     @app.get("/api/models/{model_id}", tags=["management"])
     async def get_model(request: Request, model_id: str) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
-        return _model_response(_find_model(config, model_id))
+        data = _management_config_data(request)
+        return {
+            **_model_response(_find_model(config, model_id)),
+            "config_revision": _config_revision(data),
+        }
 
     @app.put("/api/models/{model_id}", tags=["management"])
     async def update_model(
         request: Request, model_id: str, payload: ModelUpdate
     ) -> dict[str, Any]:
         updates = _payload_dict(payload)
+        config_revision = updates.pop("config_revision", None)
         if not updates:
             raise HTTPException(status_code=400, detail="至少需要提供一个要更新的字段")
         _normalize_model_updates(updates)
         updated_model_id = str(updates.get("id") or model_id)
 
         def mutation(data: dict[str, Any]) -> None:
-            models = _raw_models(data)
-            model = _require_raw_model(models, model_id)
-            if (
-                updated_model_id != model_id
-                and _find_raw_model(models, updated_model_id) is not None
-            ):
-                raise ManagementAPIError(409, f"模型已存在: {updated_model_id}")
-            model.update(updates)
+            operations.update_model(
+                data,
+                model_id,
+                new_id=updates.get("id"),
+                aliases=updates.get("aliases"),
+                routing_mode=updates.get("routing_mode"),
+                reasoning_effort=updates.get("reasoning_effort"),
+                update_reasoning_effort="reasoning_effort" in updates,
+            )
 
-        config = await _update_config(request, reload_config, mutation)
-        return _model_response(_find_model(config, updated_model_id))
+        config = await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=config_revision,
+        )
+        data = _management_config_data(request)
+        return {
+            **_model_response(_find_model(config, updated_model_id)),
+            "config_revision": _config_revision(data),
+        }
 
     @app.delete(
         "/api/models/{model_id}",
@@ -770,20 +791,28 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         status_code=status.HTTP_204_NO_CONTENT,
         response_class=Response,
     )
-    async def delete_model(request: Request, model_id: str) -> Response:
+    async def delete_model(
+        request: Request, model_id: str, payload: RevisionPayload | None = None
+    ) -> Response:
         def mutation(data: dict[str, Any]) -> None:
-            models = _raw_models(data)
-            model = _require_raw_model(models, model_id)
-            models.remove(model)
+            operations.delete_model(data, model_id)
 
-        await _update_config(request, reload_config, mutation)
+        await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=_payload_revision(payload) if payload else None,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/api/models/{model_id}/keys", tags=["management"])
     async def list_keys(request: Request, model_id: str) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
         model = _find_model(config, model_id)
-        return {"keys": [_key_response(key) for key in model.keys]}
+        data = _management_config_data(request)
+        return _with_revision(
+            data, keys=[_key_response(key) for key in model.keys]
+        )
 
     @app.post(
         "/api/models/{model_id}/keys",
@@ -794,36 +823,43 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         request: Request, model_id: str, payload: KeyCreate
     ) -> dict[str, Any]:
         key_data = _key_create_data(payload)
+        config_revision = key_data.pop("config_revision", None)
         upstream_routes = key_data.pop("upstream_routes", None)
 
         def mutation(data: dict[str, Any]) -> None:
-            model = _require_raw_model(_raw_models(data), model_id)
-            keys = _raw_keys(model)
-            key_name = key_data["name"]
-            if _find_raw_key(keys, model_id, key_name) is not None:
-                raise ManagementAPIError(
-                    409, f"模型 {model_id} 的 key 已存在: {key_name}"
-                )
-            if upstream_routes is not None:
-                _set_upstream_routes_for_base_url(
-                    data,
-                    str(
-                        key_data.get("base_url")
-                        or data.get("default_base_url")
-                        or "https://api.openai.com"
-                    ),
-                    upstream_routes,
-                )
-            keys.append(key_data)
+            operations.create_model_key(
+                data,
+                model_id,
+                str(key_data["name"]),
+                str(key_data["api_key"]),
+                base_url=key_data.get("base_url"),
+                enabled=bool(key_data.get("enabled", True)),
+                allow_visitor=bool(key_data.get("allow_visitor", False)),
+                upstream_routes=upstream_routes,
+                update_upstream_routes=upstream_routes is not None,
+            )
 
-        config = await _update_config(request, reload_config, mutation)
+        config = await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=config_revision,
+        )
         model = _find_model(config, model_id)
-        return _key_response(_find_key(model, key_data["name"]))
+        data = _management_config_data(request)
+        return {
+            **_key_response(_find_key(model, key_data["name"])),
+            "config_revision": _config_revision(data),
+        }
 
     @app.get("/api/models/{model_id}/keys/{key_name}", tags=["management"])
     async def get_key(request: Request, model_id: str, key_name: str) -> dict[str, Any]:
         config = await _authorized_config(request, reload_config)
-        return _key_response(_find_key(_find_model(config, model_id), key_name))
+        data = _management_config_data(request)
+        return {
+            **_key_response(_find_key(_find_model(config, model_id), key_name)),
+            "config_revision": _config_revision(data),
+        }
 
     @app.get("/api/models/{model_id}/keys/{key_name}/stats", tags=["management"])
     async def get_key_stats(request: Request, model_id: str, key_name: str) -> dict[str, Any]:
@@ -842,7 +878,11 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                     hours = float(hours_param)
                 except ValueError:
                     pass
-            return await lease.resources.metrics.key_stats(model_id, key_name, hours=hours)
+            result = await lease.resources.metrics.key_stats(
+                model_id, key_name, hours=hours
+            )
+            data = _management_config_data(request)
+            return {**result, "config_revision": _config_revision(data)}
         finally:
             await lease.release()
 
@@ -851,6 +891,7 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         request: Request, model_id: str, key_name: str, payload: KeyUpdate
     ) -> dict[str, Any]:
         updates = _payload_dict(payload)
+        config_revision = updates.pop("config_revision", None)
         if not updates:
             raise HTTPException(status_code=400, detail="至少需要提供一个要更新的字段")
         _normalize_key_updates(updates)
@@ -858,32 +899,32 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         upstream_routes = updates.pop("upstream_routes", None)
 
         def mutation(data: dict[str, Any]) -> None:
-            model = _require_raw_model(_raw_models(data), model_id)
-            keys = _raw_keys(model)
-            key = _require_raw_key(keys, model_id, key_name)
-            if (
-                updated_key_name != key_name
-                and _find_raw_key(keys, model_id, updated_key_name) is not None
-            ):
-                raise ManagementAPIError(
-                    409, f"模型 {model_id} 的 key 已存在: {updated_key_name}"
-                )
-            if upstream_routes is not None:
-                _set_upstream_routes_for_base_url(
-                    data,
-                    str(
-                        updates.get("base_url")
-                        or key.get("base_url")
-                        or data.get("default_base_url")
-                        or "https://api.openai.com"
-                    ),
-                    upstream_routes,
-                )
-            key.update(updates)
+            operations.update_model_key_local(
+                data,
+                model_id,
+                key_name,
+                new_name=updates.get("name"),
+                api_key=updates.get("api_key"),
+                base_url=updates.get("base_url"),
+                update_base_url="base_url" in updates,
+                enabled=updates.get("enabled"),
+                allow_visitor=updates.get("allow_visitor"),
+                upstream_routes=upstream_routes,
+                update_upstream_routes=upstream_routes is not None,
+            )
 
-        config = await _update_config(request, reload_config, mutation)
+        config = await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=config_revision,
+        )
         model = _find_model(config, model_id)
-        return _key_response(_find_key(model, updated_key_name))
+        data = _management_config_data(request)
+        return {
+            **_key_response(_find_key(model, updated_key_name)),
+            "config_revision": _config_revision(data),
+        }
 
     @app.delete(
         "/api/models/{model_id}/keys/{key_name}",
@@ -891,18 +932,21 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
         status_code=status.HTTP_204_NO_CONTENT,
         response_class=Response,
     )
-    async def delete_key(request: Request, model_id: str, key_name: str) -> Response:
+    async def delete_key(
+        request: Request,
+        model_id: str,
+        key_name: str,
+        payload: RevisionPayload | None = None,
+    ) -> Response:
         def mutation(data: dict[str, Any]) -> None:
-            model = _require_raw_model(_raw_models(data), model_id)
-            keys = _raw_keys(model)
-            key = _require_raw_key(keys, model_id, key_name)
-            if len(keys) == 1:
-                raise ManagementAPIError(
-                    409, f"模型 {model_id} 至少需要一个 key，请直接删除模型"
-                )
-            keys.remove(key)
+            operations.delete_model_key(data, model_id, key_name)
 
-        await _update_config(request, reload_config, mutation)
+        await _update_config(
+            request,
+            reload_config,
+            mutation,
+            config_revision=_payload_revision(payload) if payload else None,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -927,7 +971,6 @@ async def _update_config(
     mutation: Callable[[dict[str, Any]], None],
     *,
     config_revision: str | None = None,
-    v3: bool = False,
 ) -> RouterConfig:
     state = request.app.state
     async with state.config_write_lock:
@@ -947,7 +990,7 @@ async def _update_config(
                     and config_revision != _config_revision(data)
                 ):
                     raise ManagementAPIError(409, "配置版本已变更，请刷新后重试")
-                editable = migrate_config_data(data) if v3 else _management_editable_config_data(data)
+                editable = migrate_config_data(data)
                 mutation(editable)
                 data.clear()
                 data.update(editable)
@@ -957,6 +1000,10 @@ async def _update_config(
             raise HTTPException(
                 status_code=exc.status_code, detail=exc.message
             ) from exc
+        except operations.ConfigOperationError as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=str(exc)
+            ) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"配置校验失败: {exc}") from exc
         except OSError as exc:
@@ -965,6 +1012,11 @@ async def _update_config(
         state.config_mtime = -1.0
         await reload_config(state)
         return change.new_config
+
+
+def _payload_revision(payload: BaseModel) -> str | None:
+    values = _payload_dict(payload)
+    return values.get("config_revision")
 
 
 def _config_revision(data: dict[str, Any]) -> str:
@@ -1089,9 +1141,6 @@ def _settings_response(data: dict[str, Any]) -> dict[str, Any]:
 def _model_create_data(payload: ModelCreate) -> dict[str, Any]:
     data = _payload_dict(payload)
     _normalize_model_updates(data)
-    keys = data.get("keys", [])
-    if not keys:
-        raise HTTPException(status_code=400, detail="新模型至少需要一个 key")
     data["keys"] = [_key_create_data(key) for key in payload.keys]
     return data
 

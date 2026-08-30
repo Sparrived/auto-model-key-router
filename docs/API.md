@@ -422,7 +422,7 @@ status_codes
 
 ## 模型与 Key 管理 API
 
-所有管理接口只接受本地完整权限。写操作会原子更新当前配置文件，并在完成后热重载运行时配置。
+所有管理接口只接受本地完整权限。写操作会原子更新当前配置文件，并在完成后热重载运行时配置。资源读取响应包含 `config_revision`；写请求可携带读取到的 `config_revision`，版本冲突会在 mutation 前返回 `409`，避免覆盖其他端的修改。
 
 查询响应不会返回上游 `api_key` 明文，只返回 SHA-256 前 12 位的 `api_key_fingerprint`。
 
@@ -436,7 +436,7 @@ status_codes
 | `aliases` | string[] | 否 | `[]`；所有模型名称必须全局唯一 |
 | `routing_mode` | string | 否 | `round_robin`；可选 `round_robin`、`priority`、`only_first` |
 | `reasoning_effort` | string/null | 否 | 可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` |
-| `keys` | KeyCreate[] | 是 | 至少一个 |
+| `keys` | KeyCreate[] | 否 | `[]`；可先创建无 Key 的模型，再通过模型路由或 Key 接口补充 |
 
 #### ModelUpdate
 
@@ -516,7 +516,7 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `GET /api/models/{model_id}`
 
-路径参数 `model_id` 为真实模型 ID。成功返回 ModelResponse。
+路径参数 `model_id` 为真实模型 ID。成功返回 ModelResponse，并在顶层附带当前 `config_revision`。
 
 #### `PUT /api/models/{model_id}`
 
@@ -524,7 +524,7 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `DELETE /api/models/{model_id}`
 
-成功返回 `204 No Content`。
+成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。
 
 ### Key 接口
 
@@ -557,7 +557,7 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 #### `DELETE /api/models/{model_id}/keys/{key_name}`
 
-成功返回 `204 No Content`。不能删除模型的最后一个 Key，此时返回 `409`，应删除整个模型。
+成功返回 `204 No Content`。该接口与 TUI 的模型 Key 操作一致：只移除当前模型的 Key/路由；若删除最后一个 Key，则一并移除模型。Provider 级 Key 只有通过 `/api/providers/{provider_id}/keys/{key_name}` 才会全局删除。
 
 ## 状态码与错误格式
 
