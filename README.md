@@ -4,11 +4,12 @@
 
 ## 主要能力
 
-- **多 Key 路由**：同一模型可配置多个 Key，支持 `round_robin`、`priority`、`only_first`。
+- **按模型管理 Key**：Key 属于供应商（`providers.*.keys`），模型通过 `targets[]`（`{provider, key, upstream_model}`）绑定一个或多个 Key；同一 Key 可服务多个模型，支持 `round_robin`、`priority`、`only_first`。
 - **失败切换与冷却**：遇到 `401/403/429/5xx` 等可重试错误时自动重试或切换 Key，并在进程内临时冷却异常 Key。
 - **统一模型名**：客户端固定请求 `unified-model`，真实模型和固定 Key 可在路由器侧随时切换。
+- **供应商级能力探测**：首次给供应商添加 Key 时自动探测一次（模型列表 + 各路由最小请求），结果缓存为供应商能力，可在 TUI 或管理 API 手动刷新。
 - **OpenAI-compatible 代理**：支持 `/v1/chat/completions`、`/v1/models`，并兼容 Claude Code 的 `/v1/messages` 与 Codex 的 `/v1/responses`；可为不同协议模式配置上游额外路径。
-- **Terminal UI 管理**：在 TUI 中配置模型、Key、统一模型、服务注册和客户端接入。
+- **Terminal UI 管理**：在 TUI 中配置供应商与 Key、模型、统一模型、服务注册和客户端接入。
 - **访客 Key**：安装 `visitor` extra 后，可用固定访客 Key 暴露受限公共模型。
 - **统计与日志**：记录本地/访客调用、模型、Key、状态码、token、重试、延迟等指标。
 
@@ -83,14 +84,15 @@ copy router-config.example.json router-config.json
 amkr --config router-config.json
 ```
 
-### 2. 配置模型与 Key
+### 2. 配置供应商、Key 与模型
 
 在 TUI 中进入：
 
-1. **模型 Key**：添加真实模型和上游 API Key，并可在管理 Key 中对当前 Key 或所有 Key 探测 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 可用性。
-2. **统一模型**：把 `unified-model` 指向一个真实模型，必要时固定到某个 Key。
-3. **一键配置 → 路由服务**：启动或注册本地代理服务。
-4. **一键配置 → Claude Code / Codex / Pi Agent**：按需自动写入客户端配置。
+1. **供应商 → 添加供应商**：输入供应商 ID、Base URL 与第一个 Key 的 API Key。添加时自动探测一次供应商能力（可用模型列表 + 各路由可用性）并建好可服务模型；同一供应商的后续 Key 直接绑定到模型即可。
+2. **模型设置**：管理模型别名、路由模式、绑定/解绑 Key（绑定 Key 时可指定上游模型名）。
+3. **统一模型**：把 `unified-model` 指向一个真实模型，必要时固定到某个 Key。
+4. **一键配置 → 路由服务**：启动或注册本地代理服务。
+5. **一键配置 → Claude Code / Codex / Pi Agent**：按需自动写入客户端配置。
 
 ### 3. 调用本地代理
 
@@ -153,7 +155,7 @@ auto-model-key-router --config router-config.json --switch-key auto
 
 ```json
 {
-  "config_version": 3,
+  "config_version": 4,
   "host": "127.0.0.1",
   "port": 8000,
   "request_timeout": 60,
@@ -168,18 +170,21 @@ auto-model-key-router --config router-config.json --switch-key auto
       "base_url": "https://api.openai.com",
       "routes": {
         "openai": "v1/chat/completions",
-        "responses": "v1/responses"
+        "responses": "v1/responses",
+        "images": "v1/images/generations"
       },
       "keys": {
         "main": {"api_key": "sk-your-first-upstream-key"},
-        "backup": {"api_key": "sk-your-second-upstream-key"}
-      },
-      "pools": {
-        "default": {
-          "keys": ["main", "backup"],
-          "available_models": ["gpt-4o-mini"],
-          "models": ["gpt-4o-mini"]
+        "backup": {
+          "api_key": "sk-your-second-upstream-key",
+          "allow_visitor": true
         }
+      },
+      "capabilities": {
+        "models": ["gpt-4o-mini"],
+        "route_status": {"openai": "ok", "responses": "ok", "images": "ok"},
+        "errors": {},
+        "checked_at": "2026-01-01T00:00:00+00:00"
       }
     },
     "tokenplan": {
@@ -187,30 +192,29 @@ auto-model-key-router --config router-config.json --switch-key auto
       "routes": {"anthropic": "anthropic/"},
       "keys": {
         "mimo": {"api_key": "sk-your-third-upstream-key"}
-      },
-      "pools": {
-        "default": {"keys": ["mimo"]}
       }
     }
-  },
-  "unified_model": {
-    "model": "gpt-4o-mini",
-    "key": null
   },
   "models": {
     "gpt-4o-mini": {
       "aliases": ["fast-mini"],
       "routing_mode": "round_robin",
+      "reasoning_effort": "medium",
       "targets": [
-        {"provider": "openai", "pool": "default", "upstream_model": "gpt-4o-mini"},
-        {"provider": "tokenplan", "pool": "default", "upstream_model": "gpt-4o-mini"}
+        {"provider": "openai", "key": "main", "upstream_model": "gpt-4o-mini"},
+        {"provider": "tokenplan", "key": "mimo", "upstream_model": "gpt-4o-mini"}
       ]
+    }
+  },
+  "unified_model": {
+    "default": {
+      "primary": {"model": "gpt-4o-mini", "key": null}
     }
   }
 }
 ```
 
-> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；`providers.*.pools` 表示同一模型能力池，TUI 创建或刷新模型池时会探测可用模型与路由并写入 `available_models` / `routes` 元信息，探测到的模型默认不启用；如果上游不支持 `/v1/models`，TUI 会允许手动填写可用模型并继续探测路由；`providers.*.pools.*.models` 是手动启用后可用于添加本地模型路由的模型清单。旧版 `models[].keys[]` 和 v2 的 `target.key` 会自动迁移为新版语义。
+> `local_api_key` 是客户端访问本地 AMKR 的 Key；`providers.*.keys.*.api_key` 是真实供应商 Key；模型通过 `models.*.targets[]` 按 `{provider, key, upstream_model}` 粒度绑定供应商 Key，`upstream_model` 是发给上游的真实模型名（默认同本地模型 ID）。`providers.*.capabilities` 是供应商级探测缓存：`models` 为探测到的可服务模型清单，`route_status` 为各协议路由的可用性，`errors` / `checked_at` 记录探测错误与时间；首次添加 Key 时自动探测一次，之后可在 TUI「供应商 → 刷新能力探测」或管理 API 手动刷新。旧版 v1/v2/v3 配置会在加载时自动迁移为 v4 并写回，无需手工修改。
 
 流式请求使用分段超时：`stream_first_byte_timeout`（默认 90 秒）覆盖等待上游响应头和第一块响应体的总时间，`stream_idle_timeout`（默认 180 秒）限制首块之后相邻响应块的等待时间，两者都必须大于 0。响应头返回前超时会按现有重试策略切换 Key；下游流建立后超时只结束当前流，不会自动重放请求。可在 TUI 的 **CLI 设置 → 超时配置** 中统一调整普通请求和两个流式超时。
 
@@ -219,7 +223,7 @@ auto-model-key-router --config router-config.json --switch-key auto
 - [完整使用教程](docs/USAGE.md)：从安装、配置、启动、请求到 Claude Code / Codex 接入的完整流程。
 - [CLI 参考](docs/CLI.md)：所有命令行参数与示例。
 - [HTTP API 参考](docs/API.md)：代理、健康检查、统计和管理接口。
-- [更新日志](docs/CHANGELOG.md)：版本变更记录。
+- [更新日志](CHANGELOG.md)：版本变更记录。
 - [配置示例](router-config.example.json)：可复制修改的完整 JSON 示例。
 
 ## 访客 Key 简介

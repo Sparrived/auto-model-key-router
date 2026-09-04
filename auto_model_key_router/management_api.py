@@ -102,12 +102,6 @@ class ProbeKeysRequest(APIModel):
     timeout_seconds: float = Field(default=15, gt=0, le=120)
 
 
-class ProbePoolsRequest(APIModel):
-    provider_id: str = Field(min_length=1)
-    pools: list[str] = Field(default_factory=list)
-    timeout_seconds: float = Field(default=15, gt=0, le=120)
-
-
 class ConfigImportRequest(APIModel):
     config_revision: str = Field(min_length=1)
     config: dict[str, Any]
@@ -140,18 +134,6 @@ class ProviderKeyUpdate(RevisionPayload):
     api_key: str | None = Field(default=None, min_length=1)
     enabled: bool | None = None
     allow_visitor: bool | None = None
-
-
-class PoolCreate(RevisionPayload):
-    name: str = Field(min_length=1)
-    keys: list[str] = Field(default_factory=list)
-    models: list[str] = Field(default_factory=list)
-
-
-class PoolUpdate(RevisionPayload):
-    name: str | None = Field(default=None, min_length=1)
-    keys: list[str] | None = None
-    models: list[str] | None = None
 
 
 class RouteCreate(RevisionPayload):
@@ -482,64 +464,6 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             operations.delete_provider_key(data, provider_id, key_name)
         await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
 
-    @app.get("/api/providers/{provider_id}/pools", tags=["management"])
-    async def list_pools(request: Request, provider_id: str) -> dict[str, Any]:
-        await _authorized_config(request, reload_config); data = _management_config_data(request); provider = _require_provider(_providers(data), provider_id)
-        return _with_revision(data, pools=[{"name": name, **pool} for name, pool in provider.get("pools", {}).items()])
-
-    @app.post("/api/providers/{provider_id}/pools", status_code=201, tags=["management"])
-    async def create_pool(request: Request, provider_id: str, payload: PoolCreate) -> dict[str, Any]:
-        def mutation(data: dict[str, Any]) -> None:
-            provider = operations.require_provider(data, provider_id)
-            if payload.name in operations.provider_pools(provider):
-                raise operations.ConfigOperationError(
-                    f"Pool 已存在: {payload.name}", status_code=409
-                )
-            operations.assign_pool_keys(
-                data, provider_id, payload.name, payload.keys
-            )
-            operations.enable_pool_models(
-                data, provider_id, payload.name, payload.models
-            )
-        data = await v3_update(request, payload.config_revision, mutation); pool = _require_provider(_providers(data), provider_id)["pools"][payload.name]
-        return _with_revision(data, pool={"name": payload.name, **pool})
-
-    @app.get("/api/providers/{provider_id}/pools/{pool_name}", tags=["management"])
-    async def get_pool(request: Request, provider_id: str, pool_name: str) -> dict[str, Any]:
-        await _authorized_config(request, reload_config); data = _management_config_data(request); pool = _require_pool(_require_provider(_providers(data), provider_id), pool_name)
-        return _with_revision(data, pool={"name": pool_name, **pool})
-
-    @app.put("/api/providers/{provider_id}/pools/{pool_name}", tags=["management"])
-    async def update_pool(request: Request, provider_id: str, pool_name: str, payload: PoolUpdate) -> dict[str, Any]:
-        updates = _payload_dict(payload); updates.pop("config_revision")
-        def mutation(data: dict[str, Any]) -> None:
-            name = operations.rename_pool(
-                data,
-                provider_id,
-                pool_name,
-                str(updates.get("name") or pool_name),
-            )
-            if "keys" in updates:
-                operations.assign_pool_keys(
-                    data,
-                    provider_id,
-                    name,
-                    list(updates["keys"]),
-                    retain_existing=True,
-                )
-            if "models" in updates:
-                operations.enable_pool_models(
-                    data, provider_id, name, list(updates["models"])
-                )
-        data = await v3_update(request, payload.config_revision, mutation); name = updates.get("name", pool_name); pool = _require_pool(_require_provider(_providers(data), provider_id), name)
-        return _with_revision(data, pool={"name": name, **pool})
-
-    @app.delete("/api/providers/{provider_id}/pools/{pool_name}", status_code=204, response_class=Response, tags=["management"])
-    async def delete_pool(request: Request, provider_id: str, pool_name: str, payload: RevisionPayload) -> Response:
-        def mutation(data: dict[str, Any]) -> None:
-            operations.delete_pool(data, provider_id, pool_name)
-        await v3_update(request, payload.config_revision, mutation); return Response(status_code=204)
-
     @app.get("/api/routes", tags=["management"])
     async def list_routes(request: Request) -> dict[str, Any]:
         await _authorized_config(request, reload_config); data = _management_config_data(request)
@@ -630,19 +554,31 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             request, payload.provider_id, payload.keys, payload.timeout_seconds
         )
 
-    @app.post("/api/probes/pools", status_code=202, tags=["management"])
-    async def probe_pools(request: Request, payload: ProbePoolsRequest) -> dict[str, Any]:
-        await _authorized_config(request, reload_config)
-        data = _management_config_data(request)
-        provider = _require_provider(_providers(data), payload.provider_id)
-        pools = provider.get("pools", {})
-        names = payload.pools or list(pools)
-        keys: list[str] = []
-        for name in names:
-            pool = _require_pool(provider, name)
-            keys.extend(str(key) for key in pool.get("keys", []))
-        return await start_probe(
-            request, payload.provider_id, list(dict.fromkeys(keys)), payload.timeout_seconds
+    @app.post("/api/providers/{provider_id}/probe", tags=["management"])
+    async def probe_provider(request: Request, provider_id: str, payload: RevisionPayload) -> dict[str, Any]:
+        """Refresh provider-level capabilities: model list + route availability.
+
+        v4 probes once per provider (all keys of a provider share the same
+        routes); the result is stored in providers.<id>.capabilities. The probe
+        runs synchronously inside the config write lock (executed on a worker
+        thread, so the event loop is not blocked).
+        """
+        from .config_editor import probe_provider_capability
+
+        def mutation(data: dict[str, Any]) -> None:
+            provider = operations.require_provider(data, provider_id)
+            keys = operations.provider_keys(provider)
+            if not keys:
+                raise operations.ConfigOperationError(
+                    f"供应商暂无 Key: {provider_id}", status_code=422
+                )
+            provider["capabilities"] = probe_provider_capability(
+                provider, sorted(keys), 15.0
+            )
+        data = await v3_update(request, payload.config_revision, mutation)
+        provider = _require_provider(_providers(data), provider_id)
+        return _with_revision(
+            data, provider=_raw_provider_response(provider_id, provider)
         )
 
     @app.get("/api/probes/{probe_id}", tags=["management"])
@@ -1270,6 +1206,9 @@ def _key_response(key: KeyConfig) -> dict[str, Any]:
 
 
 def _provider_response(provider: Any) -> dict[str, Any]:
+    capabilities = (
+        provider.capabilities if hasattr(provider, "capabilities") else None
+    )
     return {
         "id": provider.id,
         "base_url": provider.base_url,
@@ -1284,11 +1223,8 @@ def _provider_response(provider: Any) -> dict[str, Any]:
             }
             for key in provider.keys
         ],
-        "pools": [
-            {"name": pool.name, "keys": list(pool.keys), "models": list(pool.models)}
-            for pool in provider.pools
-        ],
         "routes": dict(provider.routes),
+        "capabilities": capabilities,
     }
 
 
@@ -1316,12 +1252,6 @@ def _require_key(provider: dict[str, Any], name: str) -> dict[str, Any]:
     return key
 
 
-def _require_pool(provider: dict[str, Any], name: str) -> dict[str, Any]:
-    pool = provider.get("pools", {}).get(name)
-    if not isinstance(pool, dict): raise ManagementAPIError(404, f"Pool 不存在: {name}")
-    return pool
-
-
 def _require_route(routes: dict[str, Any], name: str) -> dict[str, Any]:
     route = routes.get(name)
     if not isinstance(route, dict): raise ManagementAPIError(404, f"路由不存在: {name}")
@@ -1337,19 +1267,12 @@ def _enabled_keys(provider: dict[str, Any]) -> int:
     return sum(bool(key.get("enabled", True)) for key in provider.get("keys", {}).values() if isinstance(key, dict))
 
 
-def _validate_pool(provider: dict[str, Any], keys: list[str], exclude: str | None) -> None:
-    if len(keys) != len(set(keys)): raise ManagementAPIError(422, "Pool keys 不能重复")
-    existing = provider.get("keys", {})
-    if any(name not in existing for name in keys): raise ManagementAPIError(422, "Pool 引用了不存在的 key")
-    for name, pool in provider.get("pools", {}).items():
-        if name != exclude and any(key in pool.get("keys", []) for key in keys): raise ManagementAPIError(422, "同一 Key 只能属于一个模型池；模型 ID 不应作为模型池名称")
-
-
 def _validate_targets(data: dict[str, Any], targets: list[dict[str, str]]) -> None:
     for target in targets:
         if not isinstance(target, dict): raise ManagementAPIError(422, "targets 必须是对象数组")
-        provider = _require_provider(_providers(data), str(target.get("provider") or ""))
-        _require_pool(provider, str(target.get("pool") or ""))
+        provider_id = str(target.get("provider") or "")
+        provider = _require_provider(_providers(data), provider_id)
+        _require_key(provider, str(target.get("key") or ""))
         if not str(target.get("upstream_model") or "").strip(): raise ManagementAPIError(422, "target.upstream_model 不能为空")
 
 
@@ -1358,7 +1281,19 @@ def _raw_key_response(name: str, key: dict[str, Any]) -> dict[str, Any]:
 
 
 def _raw_provider_response(name: str, provider: dict[str, Any]) -> dict[str, Any]:
-    return {"id": name, "base_url": provider.get("base_url"), "keys": [_raw_key_response(key_name, key) for key_name, key in provider.get("keys", {}).items()], "pools": [{"name": pool_name, **pool} for pool_name, pool in provider.get("pools", {}).items()], "routes": dict(provider.get("routes", {}))}
+    capabilities = provider.get("capabilities")
+    return {
+        "id": name,
+        "base_url": provider.get("base_url"),
+        "keys": [
+            _raw_key_response(key_name, key)
+            for key_name, key in provider.get("keys", {}).items()
+        ],
+        "routes": dict(provider.get("routes", {})),
+        "capabilities": (
+            capabilities if isinstance(capabilities, dict) else None
+        ),
+    }
 
 
 def _find_model(config: RouterConfig, model_id: str) -> ModelConfig:

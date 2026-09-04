@@ -134,17 +134,11 @@ def test_show_api_key_returns_failure_when_config_load_fails(tmp_path, monkeypat
     assert "配置加载失败" in capsys.readouterr().out
 
 
-def test_default_cli_repairs_pool_memberships_before_loading_config(tmp_path, monkeypatch) -> None:
+def test_default_cli_loads_config_then_runs_tui(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     events: list[str] = []
     config = object()
     monkeypatch.setattr(sys, "argv", ["amkr", "--config", str(config_path)])
-    monkeypatch.setattr(
-        main_module,
-        "repair_duplicate_pool_memberships_interactively",
-        lambda path: events.append("repair"),
-        raising=False,
-    )
     monkeypatch.setattr(
         main_module.RouterConfig,
         "load",
@@ -158,7 +152,7 @@ def test_default_cli_repairs_pool_memberships_before_loading_config(tmp_path, mo
 
     main_module.main()
 
-    assert events == ["repair", "load", "tui"]
+    assert events == ["load", "tui"]
 
 
 def test_serve_does_not_run_interactive_pool_repair(tmp_path, monkeypatch) -> None:

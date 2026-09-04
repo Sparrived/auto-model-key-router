@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import secrets
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 from .visitor import VISITOR_API_KEY
 
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 
 def default_cache_dir() -> Path:
@@ -221,7 +222,9 @@ def save_config_data(path: Path, data: dict[str, Any]) -> None:
 
 
 def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(raw)
+    # Migrations can restructure deeply nested provider/model blocks; always
+    # operate on a private copy so callers keep their raw payload untouched.
+    normalized = deepcopy(raw)
     unified_model = normalized.get("unified_model")
     if isinstance(unified_model, dict) and "default" not in unified_model:
         model = str(unified_model.get("model") or "").strip()
@@ -244,15 +247,28 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
     ):
         normalized["endpoint_capabilities_path"] = normalized["key_state_path"]
     normalized.pop("key_state_path", None)
-    if int(normalized.get("config_version") or 0) == CONFIG_VERSION and isinstance(
-        normalized.get("models"), dict
-    ):
-        _merge_legacy_model_named_pools(normalized)
+    version = int(normalized.get("config_version") or 0)
+    if version == CONFIG_VERSION:
+        if isinstance(normalized.get("models"), dict):
+            _drop_legacy_pool_remnants(normalized)
         return normalized
+    if version > CONFIG_VERSION:
+        raise ValueError(
+            f"配置文件版本 {version} 高于当前支持的 {CONFIG_VERSION}，请升级软件"
+        )
+    if version == 3:
+        if not isinstance(normalized.get("models"), dict):
+            return normalized
+        migrated = _migrate_v3_to_v4(normalized)
+        migrated.setdefault("config_version", CONFIG_VERSION)
+        migrated["config_version"] = CONFIG_VERSION
+        return migrated
     models = normalized.get("models")
     if not isinstance(models, list):
         return normalized
-
+    if version not in {0, 1, 2}:
+        return normalized
+    # v1/v2 list layout -> v3 first, then flatten pools into key-targets (v4).
     migrated = normalized
     migrated["config_version"] = CONFIG_VERSION
     providers: dict[str, Any] = {}
@@ -286,7 +302,7 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
             provider_id = _legacy_provider_id(base_url)
             provider = providers.setdefault(
                 provider_id,
-                {"base_url": base_url, "keys": {}, "pools": {}},
+                {"base_url": base_url, "keys": {}},
             )
             provider.setdefault("base_url", base_url)
             provider_keys = provider.setdefault("keys", {})
@@ -295,16 +311,7 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
                 "enabled": bool(raw_key.get("enabled", True)),
                 "allow_visitor": bool(raw_key.get("allow_visitor", False)),
             }
-            provider_pools = provider.setdefault("pools", {})
-            pool_name = model_id
-            pool = provider_pools.setdefault(pool_name, {"keys": []})
-            pool_keys = pool.setdefault("keys", [])
-            if key_name not in pool_keys:
-                pool_keys.append(key_name)
             upstream_model = str(raw_key.get("upstream_model") or model_id)
-            pool_models = pool.setdefault("models", [])
-            if upstream_model not in pool_models:
-                pool_models.append(upstream_model)
             merge_upstream_routes_for_url(
                 upstream_routes,
                 base_url,
@@ -313,7 +320,7 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
             targets.append(
                 {
                     "provider": provider_id,
-                    "pool": pool_name,
+                    "key": key_name,
                     "upstream_model": upstream_model,
                 }
             )
@@ -333,56 +340,150 @@ def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
-def _merge_legacy_model_named_pools(data: dict[str, Any]) -> None:
-    """Repair v3 data from clients that created one pool per model."""
+def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
+    """Flatten v3 provider pools into key-level targets (v4).
+
+    v3 kept one pool per provider as the container that grouped keys and held
+    an enabled-model whitelist; model targets referenced ``provider/pool``.
+    v4 drops the pool abstraction entirely: a model target references exactly
+    one provider key, and a key serves whatever models bind it. Migration is
+    idempotent and never fails on probe metadata that is only informational.
+    """
+    migrated = dict(data)
+    migrated["config_version"] = CONFIG_VERSION
+    providers_raw = migrated.get("providers")
+    models_raw = migrated.get("models")
+    if not isinstance(providers_raw, dict) or not isinstance(models_raw, dict):
+        # Leave scalar/list leftovers for from_dict to reject clearly.
+        migrated.pop("pools", None)
+        return migrated
+
+    keys_by_provider: dict[str, dict[str, Any]] = {}
+    for provider in providers_raw.values():
+        if not isinstance(provider, dict):
+            continue
+        raw_keys = provider.get("keys")
+        if isinstance(raw_keys, dict):
+            keys_by_provider.setdefault(str(provider.get("base_url") or ""), {})
+            for key_name, key in raw_keys.items():
+                if isinstance(key, dict):
+                    keys_by_provider[str(provider.get("base_url") or "")].setdefault(
+                        str(key_name), key
+                    )
+        # Provider-level capabilities become the sole probe cache in v4.
+        capabilities = provider.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+        provider["capabilities"] = _merge_pool_probe_metadata(
+            capabilities, provider
+        )
+        provider.pop("available_models", None)
+        provider.pop("key_models", None)
+        provider.pop("routes_by_key", None)
+        provider.pop("_probe_cache", None)
+
+    for model_id, model in models_raw.items():
+        if not isinstance(model, dict):
+            continue
+        targets = model.get("targets")
+        if not isinstance(targets, list):
+            model["targets"] = []
+            continue
+        rewritten: list[dict[str, Any]] = []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            provider_id = str(target.get("provider") or "").strip()
+            pool_name = str(target.get("pool") or "").strip()
+            upstream_model = str(target.get("upstream_model") or model_id)
+            provider = providers_raw.get(provider_id)
+            if not isinstance(provider, dict):
+                # v3 parser would reject referencing an unknown provider; keep
+                # that strictness during migration so nothing silently drops.
+                raise ValueError(
+                    f"模型 {model_id} 引用了未配置的供应商: {provider_id}"
+                )
+            pool_keys = _v3_pool_keys(provider, pool_name)
+            if pool_name and not pool_keys:
+                raise ValueError(
+                    f"模型 {model_id} 引用了供应商 {provider_id} 不存在的 pool: {pool_name}"
+                )
+            pool_models = _v3_pool_enabled_models(provider, pool_name)
+            if pool_models and upstream_model not in pool_models:
+                continue
+            for key_name in pool_keys:
+                rewritten.append(
+                    {
+                        "provider": provider_id,
+                        "key": key_name,
+                        "upstream_model": upstream_model,
+                    }
+                )
+        model["targets"] = rewritten
+
+    for provider in providers_raw.values():
+        if isinstance(provider, dict):
+            provider.pop("pools", None)
+    return migrated
+
+
+def _v3_pool_keys(provider: dict[str, Any], pool_name: str) -> list[str]:
+    pools = provider.get("pools") if isinstance(provider, dict) else None
+    if not isinstance(pools, dict) or not pool_name:
+        return []
+    pool = pools.get(pool_name)
+    keys = pool.get("keys") if isinstance(pool, dict) else None
+    if not isinstance(keys, list):
+        return []
+    return [str(key_name) for key_name in keys]
+
+
+def _v3_pool_enabled_models(provider: dict[str, Any], pool_name: str) -> set[str]:
+    pools = provider.get("pools") if isinstance(provider, dict) else None
+    if not isinstance(pools, dict) or not pool_name:
+        return set()
+    pool = pools.get(pool_name)
+    models = pool.get("models") if isinstance(pool, dict) else None
+    if not isinstance(models, list):
+        return set()
+    return {str(model_id) for model_id in models if str(model_id)}
+
+
+def _merge_pool_probe_metadata(capabilities: dict[str, Any], provider: dict[str, Any]) -> dict[str, Any]:
+    """Best-effort fold of v3 pool probe info into v4 provider capabilities."""
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+    merged_models = {str(model_id) for model_id in capabilities.get("models", []) if str(model_id)}
+    merged_checked = capabilities.get("checked_at")
+    pools = provider.get("pools")
+    if isinstance(pools, dict):
+        for pool in pools.values():
+            if not isinstance(pool, dict):
+                continue
+            for model_id in pool.get("available_models", []) or []:
+                merged_models.add(str(model_id))
+            for model_id in pool.get("all_available_models", []) or []:
+                merged_models.add(str(model_id))
+            for model_id in pool.get("models", []) or []:
+                merged_models.add(str(model_id))
+            checked_at = pool.get("checked_at")
+            if checked_at and not merged_checked:
+                merged_checked = checked_at
+    capabilities = {**capabilities}
+    capabilities["models"] = sorted(merged_models)
+    if merged_checked:
+        capabilities["checked_at"] = merged_checked
+    return capabilities
+
+
+def _drop_legacy_pool_remnants(data: dict[str, Any]) -> None:
+    """Idempotent safety net: never let pools reappear in v4 payloads."""
     providers = data.get("providers")
-    models = data.get("models")
-    if not isinstance(providers, dict) or not isinstance(models, dict):
-        return
-
-    model_ids = {str(model_id) for model_id in models}
-    for provider in providers.values():
-        pools = provider.get("pools") if isinstance(provider, dict) else None
-        if not isinstance(pools, dict):
-            continue
-        legacy_pools = {}
-        for name, pool in pools.items():
-            pool_models = pool.get("models") if isinstance(pool, dict) else None
-            if (
-                str(name) in model_ids
-                and isinstance(pool, dict)
-                and isinstance(pool.get("keys"), list)
-                and isinstance(pool_models, list)
-                and set(map(str, pool_models)) <= {str(name)}
-            ):
-                legacy_pools[str(name)] = pool
-
-        key_to_pool: dict[str, str] = {}
-        merged: dict[str, str] = {}
-        for pool_name, pool in legacy_pools.items():
-            keys = [str(key) for key in pool["keys"]]
-            existing_pool = next((key_to_pool[key] for key in keys if key in key_to_pool), None)
-            if existing_pool is None:
-                for key in keys:
-                    key_to_pool[key] = pool_name
-                continue
-            merged[pool_name] = existing_pool
-            kept = pools[existing_pool]
-            kept["keys"] = list(dict.fromkeys([*kept["keys"], *pool["keys"]]))
-            kept["models"] = list(dict.fromkeys([*kept.get("models", []), *pool.get("models", [])]))
-            for key in keys:
-                key_to_pool[key] = existing_pool
-            pools.pop(pool_name, None)
-
-        if not merged:
-            continue
-        for model in models.values():
-            targets = model.get("targets") if isinstance(model, dict) else None
-            if not isinstance(targets, list):
-                continue
-            for target in targets:
-                if isinstance(target, dict) and target.get("pool") in merged:
-                    target["pool"] = merged[target["pool"]]
+    if isinstance(providers, dict):
+        for provider in providers.values():
+            if isinstance(provider, dict):
+                provider.pop("pools", None)
+                provider.pop("available_models", None)
 
 
 def _legacy_provider_id(base_url: str) -> str:
@@ -457,8 +558,8 @@ class ProviderConfig:
     id: str
     base_url: str
     keys: tuple[ProviderKeyConfig, ...]
-    pools: tuple[ProviderPoolConfig, ...] = ()
     routes: dict[str, str] = field(default_factory=dict)
+    capabilities: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_upstream_base_url(self.base_url))
@@ -584,10 +685,6 @@ class RouterConfig:
         default_routing_mode = str(raw.get("routing_mode") or "round_robin")
         upstream_routes: dict[str, dict[str, str]] = {}
         provider_keys: dict[tuple[str, str], tuple[ProviderConfig, ProviderKeyConfig]] = {}
-        provider_pools: dict[
-            tuple[str, str],
-            tuple[ProviderConfig, tuple[ProviderKeyConfig, ...], frozenset[str]],
-        ] = {}
         raw_providers = raw.get("providers")
         if isinstance(raw_providers, dict):
             for provider_id, provider in raw_providers.items():
@@ -599,6 +696,10 @@ class RouterConfig:
                     raw_keys = {}
                 raw_key_items = raw_keys.items()
                 for key_name, key in raw_key_items:
+                    if not isinstance(key, dict):
+                        raise ValueError(
+                            f"供应商 {provider_id} 的 key {key_name} 必须是对象"
+                        )
                     key_config = ProviderKeyConfig(
                         name=str(key_name),
                         api_key=str(key["api_key"]),
@@ -606,61 +707,17 @@ class RouterConfig:
                         allow_visitor=bool(key.get("allow_visitor", False)),
                     )
                     keys.append(key_config)
-                key_configs_by_name = {key_config.name: key_config for key_config in keys}
-                pools: list[ProviderPoolConfig] = []
-                raw_pools = provider.get("pools")
-                if not isinstance(raw_pools, dict):
-                    raw_pools = {}
-                raw_pool_items = raw_pools.items()
-                key_pool_names: dict[str, str] = {}
-                for pool_name, pool in raw_pool_items:
-                    if isinstance(pool, dict):
-                        pool_keys = pool.get("keys")
-                        pool_models = pool.get("models", [])
-                    else:
-                        pool_keys = pool
-                        pool_models = []
-                    if not isinstance(pool_keys, list):
-                        raise ValueError(f"供应商 {provider_id} 的 pool {pool_name} keys 必须是数组")
-                    if not isinstance(pool_models, list):
-                        raise ValueError(f"供应商 {provider_id} 的 pool {pool_name} models 必须是数组")
-                    pool_key_names = tuple(str(key_name) for key_name in pool_keys)
-                    missing_keys = [key_name for key_name in pool_key_names if key_name not in key_configs_by_name]
-                    if missing_keys:
-                        raise ValueError(
-                            f"供应商 {provider_id} 的 pool {pool_name} 引用了未配置的 key: {', '.join(missing_keys)}"
-                        )
-                    for key_name in pool_key_names:
-                        previous_pool = key_pool_names.get(key_name)
-                        if previous_pool is not None:
-                            raise ValueError(
-                                f"供应商 {provider_id} 的 key {key_name} 同时属于多个模型池: "
-                                f"{previous_pool}, {pool_name}。请运行 amkr 交互修复"
-                            )
-                        key_pool_names[key_name] = str(pool_name)
-                    pools.append(
-                        ProviderPoolConfig(
-                            str(pool_name),
-                            pool_key_names,
-                            tuple(str(model_id) for model_id in pool_models if str(model_id)),
-                        )
-                    )
-                missing_pool_keys = [
-                    key_name
-                    for key_name in key_configs_by_name
-                    if key_name not in key_pool_names
-                ]
-                if missing_pool_keys:
-                    raise ValueError(
-                        f"供应商 {provider_id} 的 key {missing_pool_keys[0]} 未加入模型池。"
-                        "请运行 amkr 交互修复"
-                    )
+                raw_capabilities = provider.get("capabilities")
                 provider_config = ProviderConfig(
                     id=str(provider_id),
                     base_url=str(provider.get("base_url") or raw.get("default_base_url") or "https://api.openai.com"),
                     keys=tuple(keys),
-                    pools=tuple(pools),
                     routes=normalize_upstream_routes(provider.get("routes")),
+                    capabilities=(
+                        raw_capabilities
+                        if isinstance(raw_capabilities, dict)
+                        else None
+                    ),
                 )
                 providers.append(provider_config)
                 for key_config in provider_config.keys:
@@ -668,16 +725,10 @@ class RouterConfig:
                         provider_config,
                         key_config,
                     )
-                for pool_config in provider_config.pools:
-                    provider_pools[(provider_config.id, pool_config.name)] = (
-                        provider_config,
-                        tuple(key_configs_by_name[key_name] for key_name in pool_config.keys),
-                        frozenset(pool_config.models),
-                    )
 
         raw_models = raw.get("models", {})
         if not isinstance(raw_models, dict):
-            raise ValueError("config_version 3 的 models 必须是对象")
+            raise ValueError("config_version 4 的 models 必须是对象")
         raw_model_items = raw_models.items()
         for raw_model_id, model in raw_model_items:
             model_keys: list[KeyConfig] = []
@@ -703,38 +754,28 @@ class RouterConfig:
                     if not isinstance(target, dict):
                         continue
                     provider_id = str(target.get("provider") or "").strip()
-                    pool_name = str(target.get("pool") or "").strip()
                     key_name = str(target.get("key") or "").strip()
                     upstream_model = str(target.get("upstream_model") or raw_model_id)
                     target_enabled = bool(target.get("enabled", True))
-                    if pool_name:
-                        provider_pool = provider_pools.get((provider_id, pool_name))
-                        if provider_pool is None:
-                            raise ValueError(
-                                f"模型 {raw_model_id} 引用了未配置的供应商 pool: {provider_id}/{pool_name}"
-                            )
-                        provider_config, pool_keys, pool_models = provider_pool
-                        if upstream_model not in pool_models:
-                            continue
-                        for key_config in pool_keys:
-                            model_keys.append(
-                                KeyConfig(
-                                    name=model_key_name(
-                                        str(target.get("name") or key_config.name),
-                                        pool_name,
-                                    ),
-                                    api_key=key_config.api_key,
-                                    base_url=provider_config.base_url,
-                                    provider=provider_id,
-                                    upstream_model=upstream_model,
-                                    pool=pool_name,
-                                    enabled=key_config.enabled and target_enabled,
-                                    allow_visitor=key_config.allow_visitor,
-                                )
-                            )
-                        continue
-                    raise ValueError(
-                        f"模型 {raw_model_id} target 必须引用 provider/pool，不再支持 provider/key: {provider_id}/{key_name}"
+                    provider_key = provider_keys.get((provider_id, key_name))
+                    if provider_key is None:
+                        raise ValueError(
+                            f"模型 {raw_model_id} 引用了供应商 {provider_id} 不存在的 key: {key_name}"
+                        )
+                    provider_config, key_config = provider_key
+                    model_keys.append(
+                        KeyConfig(
+                            name=model_key_name(
+                                str(target.get("name") or key_config.name),
+                                provider_id,
+                            ),
+                            api_key=key_config.api_key,
+                            base_url=provider_config.base_url,
+                            provider=provider_id,
+                            upstream_model=upstream_model,
+                            enabled=key_config.enabled and target_enabled,
+                            allow_visitor=key_config.allow_visitor,
+                        )
                     )
             keys = tuple(model_keys)
             aliases = tuple(str(alias) for alias in model.get("aliases", []) if str(alias))

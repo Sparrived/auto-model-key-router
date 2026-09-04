@@ -61,14 +61,13 @@ visitor 模型使用 `amkr-{真实模型ID}` 形式，例如 `amkr-gpt-5.5`。vi
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}` | 仅本地 | 查询、更新或删除 Provider |
 | `GET/POST` | `/api/providers/{provider_id}/keys` | 仅本地 | 查询或创建 Provider Key |
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Provider Key |
-| `GET/POST` | `/api/providers/{provider_id}/pools` | 仅本地 | 查询或创建 Pool |
-| `GET/PUT/DELETE` | `/api/providers/{provider_id}/pools/{pool_name}` | 仅本地 | 查询、更新或删除 Pool |
+| `POST` | `/api/providers/{provider_id}/probe` | 仅本地 | 同步刷新该 Provider 的能力探测（模型列表 + 各路由可用性） |
 | `GET/POST` | `/api/routes` | 仅本地 | 查询或创建模型路由 |
 | `GET/PUT/DELETE` | `/api/routes/{route_id}` | 仅本地 | 查询、更新或删除模型路由 |
 | `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
 | `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
 | `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 PyPI/GitHub 版本检查 |
-| `POST` | `/api/probes/keys`、`/api/probes/pools` | 仅本地 | 异步探测 Key 或 Pool |
+| `POST` | `/api/probes/keys` | 仅本地 | 异步探测指定 Provider 下 Key 的模型列表与各端点可用性（逐 Key 兼容接口） |
 | `GET` | `/api/probes/{probe_id}` | 仅本地 | 查询探测进度和结果 |
 | `POST` | `/api/probes/{probe_id}/cancel` | 仅本地 | 取消探测 |
 | `POST` | `/api/config/export`、`/api/config/import` | 仅本地 | 导出或导入可迁移配置 |
@@ -279,9 +278,9 @@ Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或�
 | `model_requested_models` | 真实模型到请求模型名的嵌套统计 |
 | `keys` | 真实模型到 Key 名称的嵌套统计 |
 | `providers` | 按请求发生时的供应商 ID 拆分 |
-| `provider_pools` | 按请求发生时的供应商和模型池拆分 |
+| `provider_pools` | 按供应商 + 模型池拆分的嵌套统计；v4 已删除模型池概念，该维度只含 v3 及更早写入的历史行（v4 新行无 pool 归因），新部署通常为空 |
 | `upstream_models` | 按实际发送给上游的模型 ID 拆分 |
-| `unattributed` | 缺少供应商、模型池或上游模型任一归因字段的调用汇总 |
+| `unattributed` | 缺少供应商、上游模型归因字段，或只有历史模型池归因的调用汇总 |
 
 每组统计包含：
 
@@ -295,7 +294,7 @@ total_first_token_ms, avg_first_token_ms, min_first_token_ms, max_first_token_ms
 status_codes
 ```
 
-升级前产生的历史行没有供应商归因，统一计入 `unattributed`；三个归因维度聚合只包含字段完整的调用。AMKR 不会根据当前配置反推旧数据，避免配置改名后改变历史含义。供应商、池或模型的实际 ID 即使为 `unknown`，也仍按字面 ID 查询和聚合，不会与未归因数据混淆。
+v4 起新写入的调用只按供应商与上游模型归因（模型池维度已随 v3 移除，pool 归因为空）。v3 及更早写入的历史行可能带有供应商/模型池归因，统一计入 `unattributed`；供应商、池或模型的实际 ID 即使为 `unknown`，也仍按字面 ID 查询和聚合，不会与未归因数据混淆。AMKR 不会根据当前配置反推旧数据，避免配置改名后改变历史含义。
 
 ### `GET /metrics/requests`
 
@@ -311,7 +310,7 @@ status_codes
 | `model_id` | string | 无 | 真实路由模型 ID |
 | `requested_model_id` | string | 无 | 客户端请求中的模型名或别名 |
 | `provider_id` | string | 无 | 请求发生时的供应商 ID |
-| `pool_name` | string | 无 | 请求发生时的模型池名称 |
+| `pool_name` | string | 无 | 请求发生时的模型池名称（v3 历史数据筛选用；v4 新调用该字段为空） |
 | `upstream_model_id` | string | 无 | 实际发送给上游的模型 ID |
 | `key_name` | string | 无 | 路由使用的 Key 名称 |
 | `status_code` | integer | 无 | `100..599` |
@@ -347,7 +346,7 @@ status_codes
       "model_id": "gpt-5.5",
       "requested_model_id": "default",
       "provider_id": "openai",
-      "pool_name": "primary",
+      "pool_name": null,
       "upstream_model_id": "gpt-5.5-2026-05-01",
       "key_name": "main",
       "status_code": 200,
@@ -436,24 +435,26 @@ status_codes
 | `aliases` | string[] | 否 | `[]`；所有模型名称必须全局唯一 |
 | `routing_mode` | string | 否 | `round_robin`；可选 `round_robin`、`priority`、`only_first` |
 | `reasoning_effort` | string/null | 否 | 可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` |
-| `keys` | KeyCreate[] | 否 | `[]`；可先创建无 Key 的模型，再通过模型路由或 Key 接口补充 |
+| `keys` | KeyCreate[] | 否 | `[]`；兼容写法：每个 Key 会在其 `base_url` 对应的供应商下创建（不存在则自动建供应商）并绑定为模型的 target。也可先创建无 Key 的模型，再通过模型 Key 接口或 `/api/routes` 补充绑定 |
 
 #### ModelUpdate
 
-字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`；`reasoning_effort: null` 用于清除模型级覆盖。不能通过该接口更新 `keys`。
+字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`；`reasoning_effort: null` 用于清除模型级覆盖。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。
 
 #### KeyCreate
 
 | 字段 | 类型 | 必填 | 默认值/约束 |
 | --- | --- | --- | --- |
-| `name` | string | 是 | 非空；在同一模型内唯一 |
+| `name` | string | 是 | 非空；同一供应商内唯一（创建时若供应商已存在同名 Key 返回 `409`） |
 | `api_key` | string | 是 | 非空 |
-| `base_url` | string/null | 否 | 使用配置的 `default_base_url`，否则为 `https://api.openai.com` |
+| `base_url` | string/null | 否 | 决定 Key 落在哪个供应商：匹配已存在供应商的 `base_url`，否则自动创建供应商；缺省用配置的 `default_base_url`，否则为 `https://api.openai.com` |
 | `enabled` | boolean | 否 | `true` |
 | `allow_visitor` | boolean | 否 | `false` |
 | `upstream_routes` | object/null | 否 | 兼容字段；会写入该 Key 的 `base_url` 对应的 URL 级路由，而不是保存到 Key 上 |
 
 `base_url` 最终必须以 `http://` 或 `https://` 开头。KeyCreate/KeyUpdate 中的 `upstream_routes` 仅用于兼容旧客户端；值只能是相对路径或路径前缀，例如 `{"anthropic": "anthropic/"}` 会规范化为 URL 级配置 `upstream_routes[base_url].anthropic = "anthropic/v1/messages"`。
+
+> v4 中 Key 存储在 `providers.<id>.keys` 下，模型通过 `targets[]` 引用 `{provider, key, upstream_model}`。本组「模型 Key 接口」与 KeyCreate/KeyUpdate 是面向模型的操作：`POST /api/models/{model_id}/keys` 会在供应商下创建（或定位）Key 并把它绑定为该模型的一个 target；`PUT/DELETE` 只影响当前模型的绑定（详见下文）。如需直接管理供应商 Key（改名、启停、删除、访客权限），使用 `/api/providers/{provider_id}/keys` 系列接口。
 
 #### KeyUpdate
 
@@ -468,9 +469,19 @@ status_codes
   "routing_mode": "round_robin",
   "reasoning_effort": "medium",
   "visitor_available": true,
-  "keys": []
+  "keys": [
+    {
+      "name": "main",
+      "base_url": "https://api.openai.com",
+      "enabled": true,
+      "allow_visitor": true,
+      "api_key_fingerprint": "0123456789ab"
+    }
+  ]
 }
 ```
+
+`keys` 是该模型当前绑定的供应商 Key 展开结果（来自 `models.<id>.targets[]` 与 `providers.*.keys`）。同一供应商 Key 同时被多个模型绑定时，模型内的 `name` 可能与供应商 Key 名不同（自动加 `供应商ID-` 前缀去重），`base_url` 为该 Key 所属供应商的地址。
 
 #### KeyResponse
 
@@ -483,6 +494,55 @@ status_codes
   "api_key_fingerprint": "0123456789ab"
 }
 ```
+
+模型 Key 接口与 `/api/providers/{provider_id}/keys` 系列均返回此结构；provider Key 响应额外在顶层带 `config_revision`。
+
+#### RouteTarget
+
+`/api/routes` 的 target 对象（即磁盘格式 `models.<id>.targets[]` 的元素）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string | 是 | 供应商 ID，必须已存在 |
+| `key` | string | 是 | 该供应商下已声明的 Key 名称 |
+| `upstream_model` | string | 是 | 发送给上游的真实模型名（创建模型 Key 等交互流程默认填本地模型 ID） |
+
+示例：
+
+```json
+[
+  {"provider": "openai", "key": "main", "upstream_model": "gpt-5.5"},
+  {"provider": "openai", "key": "backup", "upstream_model": "gpt-5.5"}
+]
+```
+
+#### ProviderResponse
+
+`GET /api/providers`、`GET/PUT /api/providers/{provider_id}` 等接口返回的 provider 对象：
+
+```json
+{
+  "id": "openai",
+  "base_url": "https://api.openai.com",
+  "keys": [
+    {
+      "name": "main",
+      "enabled": true,
+      "allow_visitor": true,
+      "api_key_fingerprint": "0123456789ab"
+    }
+  ],
+  "routes": {"openai": "v1/chat/completions", "responses": "v1/responses"},
+  "capabilities": {
+    "models": ["gpt-5.5"],
+    "route_status": {"openai": "ok", "responses": "ok"},
+    "errors": {},
+    "checked_at": "2026-09-01T00:00:00+00:00"
+  }
+}
+```
+
+`capabilities` 为供应商级探测缓存，未探测时为 `null`；`models` 是可服务模型清单，`route_status` 是 openai/anthropic/responses/images 等路由的可用性，`errors` / `checked_at` 记录探测错误与时间。v3 的 `pools` 字段已移除。
 
 ### 模型接口
 
@@ -514,6 +574,8 @@ curl -X POST http://127.0.0.1:8000/api/models \
   }'
 ```
 
+上例的 `keys` 会在供应商 `openai`（按 `base_url` 匹配或自动创建）下写入 `main`，并把它绑定为该模型的一个 target。
+
 #### `GET /api/models/{model_id}`
 
 路径参数 `model_id` 为真实模型 ID。成功返回 ModelResponse，并在顶层附带当前 `config_revision`。
@@ -524,9 +586,11 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `DELETE /api/models/{model_id}`
 
-成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。
+成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。只删除模型本身及其绑定关系，被删除模型绑定的供应商 Key 与供应商会保留（供应商 Key 被模型引用不算配置错误）。若引用该模型的 Key 不再被任何模型使用，可另行通过 `/api/providers/{provider_id}/keys/{key_name}` 删除。
 
 ### Key 接口
+
+Key 接口操作的是「模型绑定的 Key」（v4 中即该模型 `targets[]` 对应的供应商 Key）。路径参数 `model_id` 为真实模型 ID；`key_name` 是该模型内的 Key 名称（解析时兼容供应商原始 Key 名与 `供应商ID-Key名` 限定名）。这些操作与 TUI 的模型 Key 管理一致：供应商 Key 被其他模型绑定时，写操作会先把该模型解耦到独立的供应商 Key 克隆，再应用修改，避免影响其他模型。
 
 #### `GET /api/models/{model_id}/keys`
 
@@ -538,7 +602,7 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `POST /api/models/{model_id}/keys`
 
-请求体为 KeyCreate，成功返回 `201` 和 KeyResponse。
+请求体为 KeyCreate，成功返回 `201` 和 KeyResponse。该 Key 会写入对应供应商（`base_url` 匹配或自动创建），并为当前模型追加一条 `target` 绑定。
 
 #### `GET /api/models/{model_id}/keys/{key_name}`
 
@@ -546,7 +610,7 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `PUT /api/models/{model_id}/keys/{key_name}`
 
-请求体为 KeyUpdate，成功返回更新后的 KeyResponse。
+请求体为 KeyUpdate，成功返回更新后的 KeyResponse。该 Key 同时被其他模型绑定时，会先为当前模型克隆一个独立的供应商 Key 再应用修改，因此不会影响其他模型对该供应商 Key 的使用。
 
 ```bash
 curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
@@ -557,7 +621,77 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 #### `DELETE /api/models/{model_id}/keys/{key_name}`
 
-成功返回 `204 No Content`。该接口与 TUI 的模型 Key 操作一致：只移除当前模型的 Key/路由；若删除最后一个 Key，则一并移除模型。Provider 级 Key 只有通过 `/api/providers/{provider_id}/keys/{key_name}` 才会全局删除。
+成功返回 `204 No Content`。该接口与 TUI 的模型 Key 操作一致：解绑当前模型的这条 Key 绑定。若该 Key 不再被任何模型绑定，会连带删除供应商下的这个 Key；供应商随后没有 Key 时也会一并删除。若这是模型的最后一条绑定，模型会被自动删除。
+
+### 供应商接口与能力探测
+
+v4 中 Key 与探测都以供应商为单元：`providers.<id>` 保存 `base_url`、各协议 `routes`、`keys`（Key 集合）与 `capabilities`（探测缓存）。删除供应商或其 Key 时会清理所有引用它们的模型绑定。
+
+#### `GET /api/providers`
+
+返回：
+
+```json
+{"providers": [ProviderResponse]}
+```
+
+#### `POST /api/providers`
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 供应商 ID，非空且不能与已有 ID 重复 |
+| `base_url` | string | 是 | `http://` 或 `https://` 开头的上游地址 |
+| `config_revision` | string | 是 | 并发校验版本号 |
+
+成功返回 `201` 和 ProviderResponse。新供应商没有 Key，添加 Key 请用 `/api/providers/{provider_id}/keys` 或模型 Key 接口（按 `base_url` 自动归并）。
+
+#### `GET/PUT/DELETE /api/providers/{provider_id}`
+
+查询、更新（`id`、`base_url`、`routes`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes` 可省略）+ `config_revision`。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。
+
+#### `GET/POST /api/providers/{provider_id}/keys`
+
+列出该供应商的 Key（`{"keys": [KeyResponse]}`）或创建新 Key。创建请求体为 ProviderKeyCreate（`name`、`api_key`、`enabled`、`allow_visitor`、`config_revision`），成功返回 `201` 和 KeyResponse。新 Key 默认不绑定任何模型；需要按模型绑定请使用模型 Key 接口或 `/api/routes`。
+
+#### `GET/PUT/DELETE /api/providers/{provider_id}/keys/{key_name}`
+
+查询、更新或删除单个供应商 Key。删除会从所有模型的 `targets[]` 中移除对该 Key 的引用，因而失去全部 target 的模型会被自动删除；若这是供应商最后一个 Key，供应商也会被删除。被模型 Key 接口解绑到只剩本模型时，同样会走到这里（删除模型 Key 的最后引用）。
+
+#### `POST /api/providers/{provider_id}/probe`
+
+同步刷新该供应商的能力探测：`GET /v1/models` 拉取可服务模型清单，并对该供应商 `routes` 中配置的每个路由模式（openai/anthropic/responses/images 等）做一次最小请求，结果写入 `providers.<id>.capabilities` 后随响应返回。请求体只需携带 `config_revision`。供应商尚无 Key 时返回 `422`。该探测以供应商为单位执行一次，不逐 Key 探测；首次给供应商添加 Key（TUI 添加供应商 Key 流程）且 capabilities 缺失或为空时会自动执行一次。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/providers/openai/probe \
+  -H "Authorization: Bearer your-local-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"config_revision": "..."}'
+```
+
+#### `POST /api/probes/keys`（兼容接口）
+
+按 Key 粒度的异步探测，返回 `202` 与 `probe_id`。请求体为 `ProbeKeysRequest`（`provider_id`、`keys`、`timeout_seconds`），随后的 `GET /api/probes/{probe_id}` 轮询结果、`POST /api/probes/{probe_id}/cancel` 取消。v4 常规探测请优先使用上面的供应商级 `probe` 接口。
+
+### 路由接口
+
+`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/routes \
+  -H "Authorization: Bearer your-local-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "gpt-5.5",
+    "aliases": ["gpt"],
+    "routing_mode": "round_robin",
+    "targets": [
+      {"provider": "openai", "key": "main", "upstream_model": "gpt-5.5"},
+      {"provider": "tokenplan", "key": "mimo", "upstream_model": "gpt-5.5"}
+    ]
+  }'
+```
 
 ## 状态码与错误格式
 
@@ -565,13 +699,15 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 | 状态码 | 场景 |
 | --- | --- |
-| `204` | 探针成功或删除成功 |
+| `200/201` | 管理接口读写成功（创建类返回 `201`，同步探测 `POST /api/providers/{id}/probe` 返回 `200`） |
+| `202` | 异步探测任务已接受（`/api/probes/keys`） |
+| `204` | 删除成功 |
 | `400` | 缺少 `model`、更新体为空或配置校验失败 |
 | `401` | 本地 API key 验证失败 |
 | `403` | visitor 无权访问模型或 Key |
-| `404` | 模型或 Key 不存在 |
+| `404` | 模型、Key、供应商或探测不存在 |
 | `409` | 名称冲突、删除最后一个 Key、无法持久化嵌入式配置 |
-| `422` | 管理 API 请求字段类型错误、缺少必填字段或包含未知字段 |
+| `422` | 管理 API 请求字段类型错误、缺少必填字段或包含未知字段；供应商暂无 Key 时探测 |
 | `500` | 配置保存失败 |
 | `502` | 上游连接或响应转换失败 |
 | `503` | 没有可用 Key |

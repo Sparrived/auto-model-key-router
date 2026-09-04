@@ -30,10 +30,10 @@ def render_plain(renderable) -> str:
     return buffer.getvalue()
 
 
-
-def v3_config(models: dict[str, list[dict[str, object]]], **extra: object) -> dict[str, object]:
-    providers = {}
-    model_data = {}
+def v4_config(models: dict[str, list[dict[str, object]]], **extra: object) -> dict[str, object]:
+    """Build a v4 config: no pools; model targets bind provider keys directly."""
+    providers: dict[str, object] = {}
+    model_data: dict[str, object] = {}
     for model_id, keys in models.items():
         targets = []
         aliases = []
@@ -41,29 +41,44 @@ def v3_config(models: dict[str, list[dict[str, object]]], **extra: object) -> di
             key_name = str(key.get("name") or f"{model_id}-key-{index + 1}")
             provider_id = str(key.get("provider") or f"{model_id}-{key_name}")
             upstream_model = str(key.get("upstream_model") or model_id)
-            providers[provider_id] = {
-                "base_url": str(key.get("base_url") or "https://example.test"),
-                "keys": {
-                    key_name: {
-                        name: value
-                        for name, value in {
-                            "api_key": key.get("api_key"),
-                            "enabled": key.get("enabled", True),
-                            "allow_visitor": key.get("allow_visitor"),
-                        }.items()
-                        if value is not None
-                    }
+            provider = providers.setdefault(
+                provider_id,
+                {
+                    "base_url": str(key.get("base_url") or "https://example.test"),
+                    "keys": {},
                 },
-                "pools": {key_name: {"keys": [key_name], "models": [upstream_model]}},
+            )
+            provider.setdefault("keys", {})[key_name] = {
+                name: value
+                for name, value in {
+                    "api_key": key.get("api_key"),
+                    "enabled": key.get("enabled", True),
+                    "allow_visitor": key.get("allow_visitor"),
+                }.items()
+                if value is not None
             }
-            targets.append({"provider": provider_id, "pool": key_name, "upstream_model": upstream_model})
+            targets.append(
+                {
+                    "provider": provider_id,
+                    "key": key_name,
+                    "upstream_model": upstream_model,
+                }
+            )
             aliases.extend(str(alias) for alias in key.get("aliases", []) if str(alias))
         model_data[model_id] = {"targets": targets}
         if aliases:
             model_data[model_id]["aliases"] = aliases
-    data: dict[str, object] = {"config_version": 3, "providers": providers, "models": model_data}
+    data: dict[str, object] = {
+        "config_version": 4,
+        "providers": providers,
+        "models": model_data,
+    }
     data.update(extra)
     return data
+
+
+v3_config = v4_config
+
 
 def test_request_stats_renderable_shows_current_rpm_and_tpm(tmp_path: Path, monkeypatch) -> None:
     database_path = tmp_path / "metrics.db"
@@ -161,36 +176,6 @@ def test_mouse_wheel_mode_is_enabled_by_default(monkeypatch) -> None:
         pass
 
     assert output.getvalue() == f"{tui.MOUSE_MODE_ENABLE}{tui.MOUSE_MODE_DISABLE}"
-
-
-def test_enable_pool_models_adds_matching_model_routes() -> None:
-    data = {
-        "config_version": 3,
-        "providers": {
-            "vendor": {
-                "base_url": "https://example.test",
-                "keys": {"main": {"api_key": "sk-main"}},
-                "pools": {
-                    "default": {
-                        "keys": ["main"],
-                        "available_models": ["model-a", "model-b"],
-                    }
-                },
-            }
-        },
-        "models": {},
-    }
-
-    config_editor.enable_pool_models(data, "vendor", "default", ["model-a", "model-b"])
-
-    assert data["providers"]["vendor"]["pools"]["default"]["models"] == [
-        "model-a",
-        "model-b",
-    ]
-    assert data["models"] == {
-        "model-a": {"targets": [{"provider": "vendor", "pool": "default", "upstream_model": "model-a"}]},
-        "model-b": {"targets": [{"provider": "vendor", "pool": "default", "upstream_model": "model-b"}]},
-    }
 
 
 def test_mouse_wheel_mode_is_disabled_on_linux(monkeypatch) -> None:
@@ -983,7 +968,7 @@ def test_dashboard_routes_provider_and_model_settings_separately(
 ) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "providers": {}, "models": {}}),
         encoding="utf-8",
     )
     config = dashboard.RouterConfig.load(config_path)
@@ -1004,17 +989,6 @@ def test_dashboard_routes_provider_and_model_settings_separately(
         "manage_v2_model_settings_interactively",
         lambda path: opened.append("models"),
         raising=False,
-    )
-    monkeypatch.setattr(
-        dashboard,
-        "manage_model_keys_interactively",
-        lambda path: opened.append("legacy-provider-models"),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        dashboard,
-        "manage_unified_model_interactively",
-        lambda path: opened.append("legacy-unified"),
     )
 
     dashboard.run_terminal_ui(config_path, config)
@@ -1080,7 +1054,7 @@ def test_set_timeouts_interactively_rejects_invalid_values(
 def test_dashboard_model_table_focuses_on_model_mapping() -> None:
     config = dashboard.RouterConfig.from_dict(
         {
-            "config_version": 3,
+            "config_version": 4,
             "models": {
                 "local-model": {
                     "aliases": ["alias-model"],
@@ -1089,7 +1063,7 @@ def test_dashboard_model_table_focuses_on_model_mapping() -> None:
                     "targets": [
                         {
                             "provider": "gateway",
-                            "pool": "default",
+                            "key": "main",
                             "upstream_model": "upstream-model",
                         }
                     ],
@@ -1099,7 +1073,6 @@ def test_dashboard_model_table_focuses_on_model_mapping() -> None:
                 "gateway": {
                     "base_url": "https://gateway.example.test",
                     "keys": {"main": {"api_key": "sk-main"}},
-                    "pools": {"default": {"keys": ["main"]}},
                 }
             },
         }
@@ -1190,7 +1163,7 @@ def test_tui_can_restore_unified_model_auto_routing(tmp_path, monkeypatch) -> No
 
 def test_terminal_ui_exits_immediately_after_windows_update_handoff(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
-    config = dashboard.RouterConfig.from_dict({"config_version": 3, "providers": {}, "models": {}})
+    config = dashboard.RouterConfig.from_dict({"config_version": 4, "providers": {}, "models": {}})
     shown: list[object] = []
     monkeypatch.setattr(dashboard, "check_latest_version", lambda timeout: None)
     monkeypatch.setattr(dashboard, "select_menu_option", lambda *args: ("6", 0))
@@ -1241,7 +1214,7 @@ def test_agent_config_menu_dispatches_selected_mode(
 ) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "providers": {}, "models": {}}),
         encoding="utf-8",
     )
     choices = iter([choice, "0"])
@@ -1282,7 +1255,7 @@ def test_agent_config_menu_dispatches_selected_mode(
 def test_pi_agent_config_menu_exposes_only_unified_model_mode(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "providers": {}, "models": {}}),
         encoding="utf-8",
     )
     choices = iter(["1", "0"])
@@ -1358,7 +1331,7 @@ def test_agent_config_status_panel_shows_managed_mode_label(
     monkeypatch, status, expected_label
 ) -> None:
     config = dashboard.RouterConfig.from_dict(
-        {"config_version": 3, "providers": {}, "models": {}}
+        {"config_version": 4, "providers": {}, "models": {}}
     )
     monkeypatch.setattr(dashboard, "get_agent_config_status", lambda agent: status)
 
@@ -1372,7 +1345,7 @@ def test_native_agent_config_success_explains_model_is_user_configured(
 ) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "local_api_key": "local-key", "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "local_api_key": "local-key", "providers": {}, "models": {}}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -1396,7 +1369,7 @@ def test_native_agent_config_success_explains_model_is_user_configured(
 
 def test_model_service_menu_moves_autostart_into_single_entry(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
-    config_path.write_text(json.dumps({"config_version": 3, "providers": {}, "models": {}}, ensure_ascii=False), encoding="utf-8")
+    config_path.write_text(json.dumps({"config_version": 4, "providers": {}, "models": {}}, ensure_ascii=False), encoding="utf-8")
     menus: list[list[tuple[str, str]]] = []
 
     def choose(title, options, selected=0, content=None, *, on_key=None):
@@ -1457,70 +1430,17 @@ def test_autostart_menu_shows_uninstall_when_registered(tmp_path, monkeypatch) -
     assert actions == ["uninstall"]
 
 
-def test_copy_api_key_interactively_returns_copyable_result(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(json.dumps({"models": [{"id": "test-model", "keys": [{"name": "main", "api_key": "sk-secret", "base_url": "https://example.com/v1"}]}]}, ensure_ascii=False), encoding="utf-8")
-    choices = iter(["1", "1"])
-    monkeypatch.setattr(config_editor, "select_option", lambda title, options: next(choices))
-
-    result = config_editor.copy_api_key_interactively(config_path)
-
-    assert isinstance(result, tui.ResultPage)
-    assert result.copy_text == "sk-secret"
-    output = render_plain(result.content)
-    assert "test-model" in output
-    assert "main" in output
-    assert "sk-secret" not in output
-
-
-def test_select_api_key_highlights_visitor_enabled_key(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "models": [
-                    {
-                        "id": "test-model",
-                        "keys": [
-                            {"name": "local", "api_key": "sk-local"},
-                            {"name": "guest", "api_key": "sk-guest", "allow_visitor": True},
-                        ],
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    choices = iter(["1", "2"])
-    menus: list[list[tuple[str, str]]] = []
-
-    def choose(title, options, selected=0, content=None):
-        menus.append(options)
-        return next(choices)
-
-    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: True)
-    monkeypatch.setattr(config_editor, "select_option", choose)
-
-    _, _, key_index = config_editor.select_api_key(config_path, "选择 Key")
-
-    assert key_index == 1
-    assert "[bold bright_magenta]guest[/]" in menus[1][1][1]
-    assert "[bold bright_magenta]local[/]" not in menus[1][0][1]
-
-
 def test_v2_summary_hides_visitor_column_when_feature_missing(monkeypatch) -> None:
     monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
 
     output = render_plain(
         config_editor.v2_summary_panel(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "gateway": {
                         "base_url": "https://gateway.example.test",
                         "keys": {"main": {"api_key": "sk-main", "allow_visitor": True}},
-                        "pools": {},
                     }
                 },
                 "models": {},
@@ -1536,12 +1456,11 @@ def test_provider_key_menu_hides_visitor_when_feature_missing(tmp_path, monkeypa
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "gateway": {
                         "base_url": "https://gateway.example.test",
                         "keys": {"main": {"api_key": "sk-main", "allow_visitor": True}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {},
@@ -1563,8 +1482,14 @@ def test_provider_key_menu_hides_visitor_when_feature_missing(tmp_path, monkeypa
 
     config_editor.manage_provider_keys_interactively(config_path)
 
-    assert all("访客" not in label for _, label in menus[-1])
-    assert "访客" not in contents[-1]
+    assert menus[2] == [
+        ("1", "开关"),
+        ("2", "重命名"),
+        ("4", "删除"),
+        ("0", "返回"),
+    ]
+    assert all("访客" not in label for _, label in menus[2])
+    assert "访客" not in contents[2]
 
 
 def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_path, monkeypatch) -> None:
@@ -1572,7 +1497,7 @@ def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "host": "0.0.0.0",
                 "port": 9000,
                 "local_api_key": "local-secret",
@@ -1580,16 +1505,17 @@ def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_
                     "default": {
                         "base_url": "https://default.example.com",
                         "keys": {"main": {"api_key": "sk-secret", "allow_visitor": True}},
-                        "pools": {"main": {"keys": ["main"]}},
                     }
                 },
                 "models": {
                     "test-model": {
                         "routing_mode": "priority",
-                        "targets": [{"provider": "default", "pool": "main", "upstream_model": "test-model"}],
+                        "targets": [{"provider": "default", "key": "main", "upstream_model": "test-model"}],
                     }
                 },
-                "unified_model": {"model": "test-model", "key": "main"},
+                "unified_model": {
+                    "default": {"primary": {"model": "test-model", "key": "main"}}
+                },
             },
             ensure_ascii=False,
         ),
@@ -1602,18 +1528,17 @@ def test_export_config_interactively_only_copies_key_config_without_visitor(tmp_
     assert isinstance(result, tui.ResultPage)
     assert "\n" not in (result.copy_text or "")
     assert json.loads(result.copy_text or "") == {
-        "config_version": 3,
+        "config_version": 4,
         "providers": {
             "default": {
                 "base_url": "https://default.example.com",
                 "keys": {"main": {"api_key": "sk-secret"}},
-                "pools": {"main": {"keys": ["main"]}},
             }
         },
         "models": {
             "test-model": {
                 "routing_mode": "priority",
-                "targets": [{"provider": "default", "pool": "main", "upstream_model": "test-model"}],
+                "targets": [{"provider": "default", "key": "main", "upstream_model": "test-model"}],
             }
         },
     }
@@ -1630,17 +1555,16 @@ def test_export_config_interactively_includes_visitor_access_when_installed(tmp_
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "default": {
                         "base_url": "https://example.com/v1",
                         "keys": {"main": {"api_key": "sk-secret", "allow_visitor": True}},
-                        "pools": {"main": {"keys": ["main"]}},
                     }
                 },
                 "models": {
                     "test-model": {
-                        "targets": [{"provider": "default", "pool": "main", "upstream_model": "test-model"}],
+                        "targets": [{"provider": "default", "key": "main", "upstream_model": "test-model"}],
                     }
                 },
             },
@@ -1654,13 +1578,14 @@ def test_export_config_interactively_includes_visitor_access_when_installed(tmp_
 
     copied = json.loads(result.copy_text or "")
     assert copied["providers"]["default"]["keys"]["main"]["allow_visitor"] is True
+    assert copied["providers"]["default"]["keys"]["main"]["api_key"] == "sk-secret"
     assert "包含访客访问权限" in render_plain(result.content)
 
 
 def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     old_data = {
-        "config_version": 3,
+        "config_version": 4,
         "host": "127.0.0.1",
         "port": 8123,
         "request_timeout": 45,
@@ -1669,17 +1594,16 @@ def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatc
             "old": {
                 "base_url": "https://old.example.com",
                 "keys": {"old": {"api_key": "sk-old"}},
-                "pools": {"old": {"keys": ["old"]}},
             }
         },
         "models": {
             "old-model": {
-                "targets": [{"provider": "old", "pool": "old", "upstream_model": "old-model"}],
+                "targets": [{"provider": "old", "key": "old", "upstream_model": "old-model"}],
             }
         },
     }
     new_data = {
-        "config_version": 3,
+        "config_version": 4,
         "host": "0.0.0.0",
         "port": 9000,
         "request_timeout": 120,
@@ -1688,12 +1612,11 @@ def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatc
             "new": {
                 "base_url": "https://new.example.com",
                 "keys": {"new": {"api_key": "sk-new", "allow_visitor": True}},
-                "pools": {"new": {"keys": ["new"], "models": ["new-model"]}},
             }
         },
         "models": {
             "new-model": {
-                "targets": [{"provider": "new", "pool": "new", "upstream_model": "new-model"}],
+                "targets": [{"provider": "new", "key": "new", "upstream_model": "new-model"}],
             }
         },
     }
@@ -1710,10 +1633,10 @@ def test_paste_config_interactively_appends_only_key_config(tmp_path, monkeypatc
     assert saved["port"] == 8123
     assert saved["request_timeout"] == 45
     assert saved["local_api_key"] == "old-local"
+    assert "pools" not in saved["providers"]["new"]
     assert saved["providers"]["new"]["keys"] == {"new": {"api_key": "sk-new"}}
-    assert saved["providers"]["new"]["pools"]["new"]["models"] == ["new-model"]
     assert saved["models"]["new-model"]["targets"] == [
-        {"provider": "new", "pool": "new", "upstream_model": "new-model"}
+        {"provider": "new", "key": "new", "upstream_model": "new-model"}
     ]
     output = render_plain(result)
     assert "new-model" not in output
@@ -1728,35 +1651,30 @@ def test_paste_config_interactively_appends_keys_without_overwriting_model_setti
 ) -> None:
     config_path = tmp_path / "router-config.json"
     old_data = {
-        "config_version": 3,
+        "config_version": 4,
         "local_api_key": "old-local",
         "providers": {
             "old": {
                 "base_url": "https://old.example.com",
                 "keys": {"main": {"api_key": "sk-old"}},
-                "pools": {"main": {"keys": ["main"]}},
             }
         },
         "models": {
             "shared-model": {
                 "aliases": ["local-alias"],
                 "routing_mode": "priority",
-                "targets": [{"provider": "old", "pool": "main", "upstream_model": "shared-model"}],
+                "targets": [{"provider": "old", "key": "main", "upstream_model": "shared-model"}],
             }
         },
     }
     pasted_data = {
-        "config_version": 3,
+        "config_version": 4,
         "providers": {
             "old": {
                 "base_url": "https://old.example.com",
                 "keys": {
                     "duplicate": {"api_key": "sk-old"},
-                    "main": {"api_key": "sk-new"},
-                },
-                "pools": {
-                    "duplicate": {"keys": ["duplicate"]},
-                    "main": {"keys": ["main"]},
+                    "second": {"api_key": "sk-new"},
                 },
             }
         },
@@ -1765,8 +1683,7 @@ def test_paste_config_interactively_appends_keys_without_overwriting_model_setti
                 "aliases": ["remote-alias"],
                 "routing_mode": "only_first",
                 "targets": [
-                    {"provider": "old", "pool": "duplicate", "upstream_model": "shared-model"},
-                    {"provider": "old", "pool": "main", "upstream_model": "shared-model"},
+                    {"provider": "old", "key": "second", "upstream_model": "shared-model"},
                 ],
             }
         },
@@ -1792,17 +1709,13 @@ def test_paste_config_interactively_appends_keys_without_overwriting_model_setti
     assert saved["models"]["shared-model"]["routing_mode"] == "priority"
     assert saved["providers"]["old"]["keys"] == {
         "main": {"api_key": "sk-old"},
-        "main-2": {"api_key": "sk-new"},
+        "second": {"api_key": "sk-new"},
     }
-    assert saved["providers"]["old"]["pools"]["main-2"] == {
-        "keys": ["main-2"],
-        "models": [],
-    }
-    assert saved["models"]["shared-model"]["targets"][-1] == {
-        "provider": "old",
-        "pool": "main-2",
-        "upstream_model": "shared-model",
-    }
+    assert "pools" not in saved["providers"]["old"]
+    assert saved["models"]["shared-model"]["targets"] == [
+        {"provider": "old", "key": "main", "upstream_model": "shared-model"},
+        {"provider": "old", "key": "second", "upstream_model": "shared-model"},
+    ]
     output = render_plain(result)
     assert "新增模型: 0" in output
     assert "新增 Key: 1" in output
@@ -1833,125 +1746,16 @@ def test_paste_config_interactively_rejects_empty_input(tmp_path, monkeypatch) -
     assert "未输入配置内容" in render_plain(result)
 
 
-def test_add_config_interactively_only_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "default": {
-                        "base_url": "https://upstream.example.com",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"main": {"keys": ["main"]}},
-                    }
-                },
-                "models": {
-                    "existing-model": {
-                        "aliases": ["Existing"],
-                        "routing_mode": "priority",
-                        "reasoning_effort": "high",
-                        "targets": [{"provider": "default", "pool": "main", "upstream_model": "existing-model"}],
-                    }
-                },
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    prompts: list[str] = []
-    answers = iter(["sk-extra", "extra"])
-    menus: list[tuple[str, list[tuple[str, str]]]] = []
-
-    def ask(title: str, prompt: str, **kwargs):
-        prompts.append(prompt)
-        return next(answers)
-
-    def choose(title, options, selected=0, content=None):
-        menus.append((title, options))
-        return "1"
-
-    monkeypatch.setattr(config_editor, "prompt_text", ask)
-    monkeypatch.setattr(config_editor, "select_option", choose)
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
-    monkeypatch.setattr(config_editor, "_select_model_with_discovery", lambda models, base_url, api_key: ("existing-model", []))
-
-    config_editor.add_config_interactively(config_path, ask_continue=False)
-
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-    model = data["models"]["existing-model"]
-    provider = data["providers"]["default"]
-    assert prompts == ["API key", "Key 名称"]
-    assert menus[0][0] == "选择上游 URL"
-    assert menus[0][1][0][1] == "upstream.example.com"
-    assert model["aliases"] == ["Existing"]
-    assert model["routing_mode"] == "priority"
-    assert model["reasoning_effort"] == "high"
-    assert provider["keys"]["extra"] == {"api_key": "sk-extra", "enabled": True}
-    assert provider["pools"]["extra"] == {"keys": ["extra"]}
-    assert model["targets"][-1] == {"provider": "default", "pool": "extra", "upstream_model": "existing-model"}
-
-
-def test_add_config_interactively_prompts_model_options_for_new_model(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "default": {
-                        "base_url": "https://upstream.example.com",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"main": {"keys": ["main"]}},
-                    }
-                },
-                "models": {
-                    "existing-model": {
-                        "targets": [{"provider": "default", "pool": "main", "upstream_model": "existing-model"}],
-                    }
-                },
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    prompts: list[str] = []
-    answers = iter(["https://primary.example.com", "sk-primary", "New Alias", "only_first", "max", "primary"])
-
-    def ask(title: str, prompt: str, **kwargs):
-        prompts.append(prompt)
-        return next(answers)
-
-    monkeypatch.setattr(config_editor, "prompt_text", ask)
-    monkeypatch.setattr(config_editor, "select_option", lambda title, options, selected=0, content=None: "n")
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
-    monkeypatch.setattr(config_editor, "_select_model_with_discovery", lambda models, base_url, api_key: ("new-model", []))
-
-    config_editor.add_config_interactively(config_path, ask_continue=False)
-
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-    model = data["models"]["new-model"]
-    provider = data["providers"]["default"]
-    assert prompts == ["新的上游 base_url", "API key", "显示名称/别名，多个用逗号分隔", "路由模式", "推理强度", "Key 名称"]
-    assert model["aliases"] == ["New Alias"]
-    assert model["routing_mode"] == "only_first"
-    assert model["reasoning_effort"] == "max"
-    assert provider["keys"]["primary"] == {"api_key": "sk-primary", "enabled": True}
-    assert provider["pools"]["primary"] == {"keys": ["primary"]}
-    assert model["targets"] == [{"provider": "default", "pool": "primary", "upstream_model": "new-model"}]
-
-
 def test_provider_menu_uses_provider_context_without_reselection(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {},
@@ -1959,7 +1763,7 @@ def test_provider_menu_uses_provider_context_without_reselection(tmp_path, monke
         ),
         encoding="utf-8",
     )
-    choices = iter(["1", "1", "2", "3", "4", "0", "0"])
+    choices = iter(["1", "1", "2", "3", "4", "5", "0", "0"])
     menus: list[tuple[str, list[tuple[str, str]]]] = []
     opened: list[tuple[str, str]] = []
 
@@ -1981,13 +1785,18 @@ def test_provider_menu_uses_provider_context_without_reselection(tmp_path, monke
     )
     monkeypatch.setattr(
         config_editor,
-        "manage_provider_pools_interactively",
-        lambda path, provider_id=None: opened.append(("pools", provider_id)),
+        "refresh_provider_capability_interactively",
+        lambda path, provider_id=None: opened.append(("refresh", provider_id)),
     )
     monkeypatch.setattr(
         config_editor,
         "manage_provider_routes_interactively",
         lambda path, provider_id=None: opened.append(("routes", provider_id)),
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "delete_provider_interactively",
+        lambda path, provider_id=None: opened.append(("delete", provider_id)),
     )
 
     config_editor.manage_providers_interactively(config_path)
@@ -1995,7 +1804,7 @@ def test_provider_menu_uses_provider_context_without_reselection(tmp_path, monke
     assert menus[1][1] == [
         ("1", "添加 Key"),
         ("2", "管理 Key"),
-        ("3", "模型池"),
+        ("3", "刷新能力探测"),
         ("4", "Base URL / 路由设置"),
         ("5", "删除供应商"),
         ("0", "返回"),
@@ -2003,8 +1812,9 @@ def test_provider_menu_uses_provider_context_without_reselection(tmp_path, monke
     assert opened == [
         ("add", "vendor"),
         ("keys", "vendor"),
-        ("pools", "vendor"),
+        ("refresh", "vendor"),
         ("routes", "vendor"),
+        ("delete", "vendor"),
     ]
 
 
@@ -2013,7 +1823,7 @@ def test_add_provider_menu_enters_creation_without_second_provider_selection(
 ) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "providers": {}, "models": {}}),
         encoding="utf-8",
     )
     choices = iter(["n", "0"])
@@ -2038,17 +1848,16 @@ def test_add_provider_menu_enters_creation_without_second_provider_selection(
     assert calls == [(None, True)]
 
 
-def test_provider_key_and_pool_menus_remove_old_actions(tmp_path, monkeypatch) -> None:
+def test_provider_key_menu_removes_legacy_actions_and_provider_menu_has_no_pools(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {},
@@ -2080,20 +1889,25 @@ def test_provider_key_and_pool_menus_remove_old_actions(tmp_path, monkeypatch) -
     ]
     assert all("替换 API key" not in label for menu in key_menus for _, label in menu)
 
-    pool_menus: list[list[tuple[str, str]]] = []
+    provider_menus: list[tuple[str, list[tuple[str, str]]]] = []
+    choices = iter(["1", "0", "0"])
     monkeypatch.setattr(
         config_editor,
         "select_option",
-        lambda title, options, selected=0, content=None, **kwargs: pool_menus.append(options)
-        or "0",
+        lambda title, options, selected=0, content=None, **kwargs: provider_menus.append((title, options))
+        or next(choices),
     )
-    config_editor.manage_provider_pools_interactively(config_path, "vendor")
+    monkeypatch.setattr(
+        config_editor,
+        "manage_provider_keys_interactively",
+        lambda path, provider_id=None: None,
+    )
+    config_editor.manage_providers_interactively(config_path)
 
-    assert pool_menus[0] == [
-        ("1", "新增/编辑模型池"),
-        ("2", "手动设置可用模型"),
-        ("0", "返回"),
-    ]
+    provider_action_menu = provider_menus[1][1]
+    assert [option for option in provider_action_menu if option[0] == "0"] == [("0", "返回")]
+    assert all("模型池" not in label for _, label in provider_action_menu)
+    assert ("3", "刷新能力探测") in provider_action_menu
 
 
 def test_provider_key_menu_keeps_stable_visitor_action_number(tmp_path, monkeypatch) -> None:
@@ -2101,12 +1915,11 @@ def test_provider_key_menu_keeps_stable_visitor_action_number(tmp_path, monkeypa
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {},
@@ -2143,12 +1956,11 @@ def test_provider_routes_use_context_without_reselecting_provider(
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {},
-                        "pools": {},
                     }
                 },
                 "models": {},
@@ -2181,27 +1993,25 @@ def test_delete_provider_cleans_targets_models_and_unified_fallback(
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "remove": {
                         "base_url": "https://remove.test",
                         "keys": {"main": {"api_key": "sk-remove"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     },
                     "keep": {
                         "base_url": "https://keep.test",
                         "keys": {"main": {"api_key": "sk-keep"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     },
                 },
                 "models": {
                     "remove-only": {
-                        "targets": [{"provider": "remove", "pool": "default"}]
+                        "targets": [{"provider": "remove", "key": "main", "upstream_model": "remove-only"}]
                     },
                     "shared": {
                         "targets": [
-                            {"provider": "remove", "pool": "default"},
-                            {"provider": "keep", "pool": "default"},
+                            {"provider": "remove", "key": "main", "upstream_model": "shared"},
+                            {"provider": "keep", "key": "main", "upstream_model": "shared"},
                         ]
                     },
                 },
@@ -2223,7 +2033,7 @@ def test_delete_provider_cleans_targets_models_and_unified_fallback(
     assert set(saved["providers"]) == {"keep"}
     assert set(saved["models"]) == {"shared"}
     assert saved["models"]["shared"]["targets"] == [
-        {"provider": "keep", "pool": "default"}
+        {"provider": "keep", "key": "main", "upstream_model": "shared"}
     ]
     assert saved["unified_model"] == {
         "default": {"primary": {"model": "shared", "key": None}}
@@ -2237,30 +2047,24 @@ def test_delete_provider_falls_back_when_unified_model_uses_removed_alias(
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "remove": {
                         "base_url": "https://remove.test",
                         "keys": {"main": {"api_key": "sk-remove"}},
-                        "pools": {
-                            "default": {"keys": ["main"], "models": ["remove-only"]}
-                        },
                     },
                     "keep": {
                         "base_url": "https://keep.test",
                         "keys": {"main": {"api_key": "sk-keep"}},
-                        "pools": {
-                            "default": {"keys": ["main"], "models": ["shared"]}
-                        },
                     },
                 },
                 "models": {
                     "remove-only": {
                         "aliases": ["removed-alias"],
-                        "targets": [{"provider": "remove", "pool": "default"}],
+                        "targets": [{"provider": "remove", "key": "main", "upstream_model": "remove-only"}],
                     },
                     "shared": {
-                        "targets": [{"provider": "keep", "pool": "default"}]
+                        "targets": [{"provider": "keep", "key": "main", "upstream_model": "shared"}]
                     },
                 },
                 "unified_model": {"model": "removed-alias"},
@@ -2278,6 +2082,7 @@ def test_delete_provider_falls_back_when_unified_model_uses_removed_alias(
     config_editor.delete_provider_interactively(config_path, "remove")
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "remove-only" not in saved["models"]
     assert saved["unified_model"] == {
         "default": {"primary": {"model": "shared", "key": None}}
     }
@@ -2290,28 +2095,22 @@ def test_delete_provider_clears_removed_unified_model_key(
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "remove": {
                         "base_url": "https://remove.test",
                         "keys": {"main": {"api_key": "sk-remove"}},
-                        "pools": {
-                            "default": {"keys": ["main"], "models": ["shared"]}
-                        },
                     },
                     "keep": {
                         "base_url": "https://keep.test",
                         "keys": {"main": {"api_key": "sk-keep"}},
-                        "pools": {
-                            "default": {"keys": ["main"], "models": ["shared"]}
-                        },
                     },
                 },
                 "models": {
                     "shared": {
                         "targets": [
-                            {"provider": "remove", "pool": "default"},
-                            {"provider": "keep", "pool": "default"},
+                            {"provider": "remove", "key": "main", "upstream_model": "shared"},
+                            {"provider": "keep", "key": "main", "upstream_model": "shared"},
                         ]
                     }
                 },
@@ -2335,17 +2134,16 @@ def test_delete_provider_clears_removed_unified_model_key(
     }
 
 
-def test_model_settings_menu_includes_route_controls(tmp_path, monkeypatch) -> None:
+def test_model_settings_menu_includes_key_binding_controls(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"], "models": ["backup-model"]}},
                     }
                 },
                 "models": {
@@ -2353,7 +2151,7 @@ def test_model_settings_menu_includes_route_controls(tmp_path, monkeypatch) -> N
                         "aliases": [],
                         "routing_mode": "round_robin",
                         "targets": [
-                            {"provider": "vendor", "pool": "default", "upstream_model": "upstream-model"}
+                            {"provider": "vendor", "key": "main", "upstream_model": "upstream-model"}
                         ],
                     }
                 },
@@ -2376,8 +2174,8 @@ def test_model_settings_menu_includes_route_controls(tmp_path, monkeypatch) -> N
     assert menus[0] == [
         ("1", "别名"),
         ("2", "路由模式"),
-        ("3", "路由目标"),
-        ("4", "添加路由目标"),
+        ("3", "管理 Key"),
+        ("4", "绑定 Key"),
         ("5", "删除模型"),
         ("0", "返回"),
     ]
@@ -2388,17 +2186,16 @@ def test_selected_model_routes_return_to_model_settings(tmp_path, monkeypatch) -
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {
                     "local-model": {
-                        "targets": [{"provider": "vendor", "pool": "default"}]
+                        "targets": [{"provider": "vendor", "key": "main", "upstream_model": "local-model"}]
                     }
                 },
             }
@@ -2415,18 +2212,23 @@ def test_add_model_route_to_selected_model_skips_local_model_prompt(tmp_path, mo
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"], "models": ["backup-model"]}},
+                        "capabilities": {
+                            "models": ["backup-model"],
+                            "route_status": {"openai": "ok"},
+                            "errors": {},
+                            "checked_at": "2026-09-01T00:00:00+00:00",
+                        },
                     }
                 },
                 "models": {
                     "local-model": {
                         "targets": [
-                            {"provider": "vendor", "pool": "default", "upstream_model": "primary-model"}
+                            {"provider": "vendor", "key": "main", "upstream_model": "primary-model"}
                         ]
                     }
                 },
@@ -2434,21 +2236,23 @@ def test_add_model_route_to_selected_model_skips_local_model_prompt(tmp_path, mo
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(config_editor, "select_provider_pool", lambda data, title: ("vendor", "default"))
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
+    monkeypatch.setattr(config_editor, "select_provider", lambda data, title: "vendor")
+    monkeypatch.setattr(config_editor, "select_option", lambda title, options, **kwargs: options[0][0])
     monkeypatch.setattr(
         config_editor,
         "select_or_enter_model_id",
         lambda *args, **kwargs: pytest.fail("不应再次选择本地模型"),
     )
+    prompts = []
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: prompts.append(args) or "backup-model")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: None)
 
     config_editor.add_model_route_interactively(config_path, "local-model")
 
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert saved["models"]["local-model"]["targets"] == [
-        {"provider": "vendor", "pool": "default", "upstream_model": "primary-model"},
-        {"provider": "vendor", "pool": "default", "upstream_model": "backup-model"},
+        {"provider": "vendor", "key": "main", "upstream_model": "primary-model"},
+        {"provider": "vendor", "key": "main", "upstream_model": "backup-model"},
     ]
 
 
@@ -2457,17 +2261,16 @@ def test_delete_model_updates_unified_model_fallback(tmp_path, monkeypatch) -> N
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {
-                    "delete-me": {"targets": [{"provider": "vendor", "pool": "default"}]},
-                    "keep-me": {"targets": [{"provider": "vendor", "pool": "default"}]},
+                    "delete-me": {"targets": [{"provider": "vendor", "key": "main", "upstream_model": "delete-me"}]},
+                    "keep-me": {"targets": [{"provider": "vendor", "key": "main", "upstream_model": "keep-me"}]},
                 },
                 "unified_model": {"model": "delete-me"},
             }
@@ -2490,12 +2293,11 @@ def test_v2_summary_model_section_focuses_on_mapping() -> None:
     output = render_plain(
         config_editor.v2_summary_panel(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "gateway": {
                         "base_url": "https://gateway.example.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"]}},
                     }
                 },
                 "models": {
@@ -2505,7 +2307,7 @@ def test_v2_summary_model_section_focuses_on_mapping() -> None:
                         "targets": [
                             {
                                 "provider": "gateway",
-                                "pool": "default",
+                                "key": "main",
                                 "upstream_model": "upstream-model",
                             }
                         ],
@@ -2519,87 +2321,82 @@ def test_v2_summary_model_section_focuses_on_mapping() -> None:
     assert "模型路由" not in output
     assert "别名" in output
     assert "路由模式" in output
+    assert "Keys" in output
     assert "上游" not in output
-    assert "gateway/default" not in output
+    assert "gateway/main" not in output
     assert "upstream-model" not in output
 
 
-def test_v2_tui_adds_provider_key_and_model_route(tmp_path, monkeypatch) -> None:
+def test_v2_tui_adds_provider_key_and_creates_bound_model(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "local_api_key": "local-key", "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "local_api_key": "local-key", "providers": {}, "models": {}}),
         encoding="utf-8",
     )
-    prompts = iter(["openai", "https://api.openai.com", "main", "sk-main", "default"])
+    prompts = iter(["openai", "https://api.openai.com", "main", "sk-main"])
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "n")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+    probe_result = {
+        "models": ["upstream-model"],
+        "route_status": {"openai": "ok", "anthropic": "skip", "responses": "ok", "images": "unknown"},
+        "errors": {},
+        "checked_at": "2026-09-01T00:00:00+00:00",
+    }
     monkeypatch.setattr(
         config_editor,
-        "probe_provider_key_capabilities",
-        lambda provider, key_names, **kwargs: {
-            "models": ["upstream-model"],
-            "all_models": ["upstream-model"],
-            "key_models": {key_names[0]: ["upstream-model"]},
-            "errors": {},
-        },
+        "probe_provider_capability",
+        lambda provider, key_names, timeout=15.0: probe_result,
     )
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: ["upstream-model"])
+    selected_models = []
+    monkeypatch.setattr(
+        config_editor,
+        "select_models_to_serve",
+        lambda provider_id, key_name, models: selected_models.append((provider_id, key_name, models))
+        or ["upstream-model"],
+    )
 
     result = config_editor.add_provider_key_interactively(config_path)
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert "添加完成" in render_plain(result)
-    assert data["config_version"] == 3
+    assert data["config_version"] == 4
     assert data["providers"]["openai"]["keys"]["main"]["api_key"] == "sk-main"
-    assert data["providers"]["openai"]["pools"]["default"]["keys"] == ["main"]
-    data["providers"]["openai"]["pools"]["default"]["models"] = ["upstream-model"]
-    config_path.write_text(json.dumps(data), encoding="utf-8")
-
-    prompts = iter(["local-model"])
-    choices = iter(["1", "1", "1", "__custom__"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
-
-    result = config_editor.add_model_route_interactively(config_path)
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-
-    assert "添加完成" in render_plain(result)
-    assert data["models"]["local-model"]["targets"] == [
-        {"provider": "openai", "pool": "default", "upstream_model": "upstream-model"}
+    assert data["providers"]["openai"]["capabilities"] == probe_result
+    assert data["models"]["upstream-model"]["targets"] == [
+        {"provider": "openai", "key": "main", "upstream_model": "upstream-model"}
     ]
+    assert selected_models == [("openai", "main", ["upstream-model"])]
+    assert "已绑定模型: 1" in render_plain(result)
 
 
-def test_add_provider_key_with_provider_context_uses_unique_latest_match(
-    tmp_path, monkeypatch
-) -> None:
+def test_add_provider_key_with_provider_context_skips_provider_selection(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "local_api_key": "local-key",
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"old": {"api_key": "sk-old"}},
-                        "pools": {
-                            "existing": {
-                                "keys": ["old"],
-                                "models": [],
-                                "available_models": ["stale"],
-                            }
+                        "capabilities": {
+                            "models": ["gpt-a"],
+                            "route_status": {"openai": "ok"},
+                            "errors": {},
+                            "checked_at": "2026-01-01T00:00:00+00:00",
                         },
                     }
                 },
-                "models": {},
+                "models": {"gpt-a": {"targets": [{"provider": "vendor", "key": "old", "upstream_model": "gpt-a"}]}},
             }
         ),
         encoding="utf-8",
     )
     prompts = iter(["main", "sk-main"])
     probed: list[list[str]] = []
-    checked: list[set[str]] = []
+    selected: list[tuple[str, str, list[str]]] = []
     monkeypatch.setattr(
         config_editor,
         "select_option",
@@ -2607,51 +2404,95 @@ def test_add_provider_key_with_provider_context_uses_unique_latest_match(
     )
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
 
-    def probe(provider, key_names, **kwargs):
+    def probe(provider, key_names, timeout=15.0):
         probed.append(key_names)
         return {
-            "models": ["gpt-a"],
-            "all_models": ["gpt-a"],
-            "key_models": {name: ["gpt-a"] for name in key_names},
+            "models": ["gpt-b"],
+            "route_status": {"openai": "ok"},
             "errors": {},
+            "checked_at": "2026-02-01T00:00:00+00:00",
         }
 
+    monkeypatch.setattr(config_editor, "probe_provider_capability", probe)
     monkeypatch.setattr(
         config_editor,
-        "probe_provider_key_capabilities",
-        probe,
-    )
-    monkeypatch.setattr(
-        config_editor,
-        "select_multiple",
-        lambda *args, checked_values=None, **kwargs: checked.append(checked_values) or [],
+        "select_models_to_serve",
+        lambda provider_id, key_name, models: selected.append((provider_id, key_name, models)) or ["gpt-b"],
     )
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
 
     config_editor.add_provider_key_interactively(config_path, "vendor")
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
-    pools = data["providers"]["vendor"]["pools"]
-    assert pools["existing"]["keys"] == ["old", "main"]
-    assert pools["existing"]["available_models"] == ["gpt-a"]
-    assert probed == [["main"], ["old"]]
-    assert checked == [set()]
+    provider = data["providers"]["vendor"]
+    assert sorted(provider["keys"]) == ["main", "old"]
+    assert provider["capabilities"]["models"] == ["gpt-b"]
+    assert probed == [["main"]]
+    assert selected == [("vendor", "main", ["gpt-b"])]
+    assert data["models"]["gpt-b"]["targets"] == [
+        {"provider": "vendor", "key": "main", "upstream_model": "gpt-b"}
+    ]
+
+
+def test_add_provider_key_probe_failure_still_saves_key_without_binding_models(
+    tmp_path, monkeypatch
+) -> None:
+    # When the first probe of a brand-new provider finds no models at all and
+    # reports errors, add_provider_key_interactively still commits the new key
+    # to disk (no model bindings), so it survives a later manual refresh.
+    config_path = tmp_path / "router-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "config_version": 4,
+                "providers": {
+                    "vendor": {
+                        "base_url": "https://vendor.test",
+                        "keys": {"old": {"api_key": "sk-old"}},
+                    }
+                },
+                "models": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    prompts = iter(["main", "sk-main"])
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "0")
+    monkeypatch.setattr(config_editor, "show_result_page", lambda *args, **kwargs: None)
+    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
+    monkeypatch.setattr(
+        config_editor,
+        "probe_provider_capability",
+        lambda provider, key_names, timeout=15.0: {
+            "models": [],
+            "route_status": {"openai": "fail"},
+            "errors": {key_names[0]: "HTTP 401"},
+            "checked_at": "2026-03-01T00:00:00+00:00",
+        },
+    )
+
+    result = config_editor.add_provider_key_interactively(config_path, "vendor")
+
+    assert "添加完成" in render_plain(result)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["providers"]["vendor"]["keys"]["main"]["api_key"] == "sk-main"
+    assert data["providers"]["vendor"]["capabilities"]["errors"] == {"main": "HTTP 401"}
     assert data["models"] == {}
 
 
-def test_add_provider_key_creates_next_pool_when_no_latest_match(
+def test_add_provider_key_with_probe_errors_still_binds_selected_models(
     tmp_path, monkeypatch
 ) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
                         "keys": {"old": {"api_key": "sk-old"}},
-                        "pools": {"default": {"keys": ["old"], "models": []}},
                     }
                 },
                 "models": {},
@@ -2660,396 +2501,36 @@ def test_add_provider_key_creates_next_pool_when_no_latest_match(
         encoding="utf-8",
     )
     prompts = iter(["main", "sk-main"])
+    selected: list[tuple[str, str, list[str]]] = []
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
     monkeypatch.setattr(
         config_editor,
-        "probe_provider_key_capabilities",
-        lambda provider, key_names, **kwargs: {
-            "models": ["gpt-new"] if key_names == ["main"] else ["gpt-old"],
-            "all_models": ["gpt-new"] if key_names == ["main"] else ["gpt-old"],
-            "key_models": {key_names[0]: ["gpt-new" if key_names == ["main"] else "gpt-old"]},
-            "errors": {},
+        "select_models_to_serve",
+        lambda provider_id, key_name, models: selected.append((provider_id, key_name, models))
+        or ["gpt-a"],
+    )
+    monkeypatch.setattr(
+        config_editor,
+        "probe_provider_capability",
+        lambda provider, key_names, timeout=15.0: {
+            "models": ["gpt-a"],
+            "route_status": {"openai": "ok"},
+            "errors": {key_names[0]: "HTTP 401"},
+            "checked_at": "2026-03-01T00:00:00+00:00",
         },
     )
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
 
-    config_editor.add_provider_key_interactively(config_path, "vendor")
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert pools["pool-2"]["keys"] == ["main"]
-    assert pools["pool-2"]["available_models"] == ["gpt-new"]
-    assert pools["default"]["keys"] == ["old"]
-
-
-@pytest.mark.parametrize(
-    ("manual_flags", "expected_manual"),
-    [((True, True), True), ((True, False), False), ((True, None), False)],
-)
-def test_add_provider_key_merges_duplicate_matches_and_rewrites_targets(
-    tmp_path, monkeypatch, manual_flags, expected_manual
-) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {
-                            "first-key": {"api_key": "sk-first"},
-                            "second-key": {"api_key": "sk-second"},
-                        },
-                        "pools": {
-                            "first": {"keys": ["first-key"], "models": ["gpt-a"]},
-                            "duplicate": {
-                                "keys": ["second-key"],
-                                "models": ["gpt-a"],
-                                "routes": {"second-key": {"openai": True}},
-                            },
-                        },
-                    }
-                },
-                "models": {
-                    "local": {
-                        "targets": [
-                            {"provider": "vendor", "pool": "duplicate", "upstream_model": "gpt-a"}
-                        ]
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["main", "sk-main"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-    def probe(provider, key_names, **kwargs):
-        result = {
-            "models": ["gpt-a"],
-            "all_models": ["gpt-a"],
-            "key_models": {name: ["gpt-a"] for name in key_names},
-            "errors": {},
-        }
-        if key_names != ["second-key"]:
-            result["routes"] = {name: {"openai": True} for name in key_names}
-        if key_names == ["first-key"]:
-            result["manual_models"] = manual_flags[0]
-        elif key_names == ["second-key"] and manual_flags[1] is not None:
-            result["manual_models"] = manual_flags[1]
-        return result
-
-    monkeypatch.setattr(config_editor, "probe_provider_key_capabilities", probe)
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: pool["models"])
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.add_provider_key_interactively(config_path, "vendor")
+    result = config_editor.add_provider_key_interactively(config_path, "vendor")
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
-    assert list(data["providers"]["vendor"]["pools"]) == ["first"]
-    assert data["providers"]["vendor"]["pools"]["first"]["keys"] == [
-        "first-key",
-        "second-key",
-        "main",
+    assert "添加完成" in render_plain(result)
+    assert data["providers"]["vendor"]["keys"]["main"]["api_key"] == "sk-main"
+    assert data["providers"]["vendor"]["capabilities"]["errors"] == {"main": "HTTP 401"}
+    assert selected == [("vendor", "main", ["gpt-a"])]
+    assert data["models"]["gpt-a"]["targets"] == [
+        {"provider": "vendor", "key": "main", "upstream_model": "gpt-a"}
     ]
-    assert set(data["providers"]["vendor"]["pools"]["first"]["key_models"]) == {
-        "first-key",
-        "second-key",
-        "main",
-    }
-    assert set(data["providers"]["vendor"]["pools"]["first"]["routes"]) == {
-        "first-key",
-        "second-key",
-        "main",
-    }
-    assert data["providers"]["vendor"]["pools"]["first"]["manual_models"] is expected_manual
-    assert data["models"]["local"]["targets"][0]["pool"] == "first"
-
-
-@pytest.mark.parametrize(
-    ("manual_choice", "target_pool"), [("1", "existing"), ("n", "manual-pool")]
-)
-def test_add_provider_key_probe_failure_uses_status_marked_manual_assignment(
-    tmp_path, monkeypatch, manual_choice: str, target_pool: str
-) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"old": {"api_key": "sk-old"}},
-                        "pools": {
-                            "existing": {
-                                "keys": ["old"],
-                                "models": [],
-                                "available_models": ["stale"],
-                            }
-                        },
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["main", "sk-main", "manual-pool"])
-    menus = []
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-
-    def choose(title, options, **kwargs):
-        menus.append((title, options))
-        return manual_choice
-
-    monkeypatch.setattr(config_editor, "select_option", choose)
-    monkeypatch.setattr(
-        config_editor,
-        "probe_provider_key_capabilities",
-        lambda provider, key_names, **kwargs: {
-            "models": ["gpt-a"] if key_names == ["main"] else [],
-            "all_models": ["gpt-a"] if key_names == ["main"] else [],
-            "key_models": {key_names[0]: ["gpt-a"] if key_names == ["main"] else []},
-            "errors": {} if key_names == ["main"] else {"old": "HTTP 401"},
-        },
-    )
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.add_provider_key_interactively(config_path, "vendor")
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert "main" in pools[target_pool]["keys"]
-    assert pools["existing"]["available_models"] == (
-        [] if target_pool == "existing" else ["stale"]
-    )
-    labels = dict(menus[0][1])
-    assert "探测失败" in labels["1"]
-    assert "新建" in labels["n"]
-
-
-@pytest.mark.parametrize(
-    ("new_models", "new_error"),
-    [(["gpt-new"], None), ([], "HTTP 403")],
-)
-def test_add_provider_key_selected_failed_pool_synchronizes_diagnostics(
-    tmp_path, monkeypatch, new_models, new_error
-) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"old": {"api_key": "sk-old"}},
-                        "pools": {
-                            "existing": {
-                                "keys": ["old"],
-                                "models": [],
-                                "available_models": ["stale-common"],
-                                "all_available_models": ["stale-all"],
-                                "key_models": {"old": ["stale-all"]},
-                                "routes": {"old": {"openai": True}},
-                            }
-                        },
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["main", "sk-main"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
-
-    def probe(provider, key_names, **kwargs):
-        if key_names == ["main"]:
-            return {
-                "models": new_models,
-                "all_models": new_models,
-                "key_models": {"main": new_models},
-                "errors": {"main": new_error} if new_error else {},
-            }
-        return {
-            "models": [],
-            "all_models": [],
-            "key_models": {"old": []},
-            "errors": {"old": "HTTP 401"},
-        }
-
-    monkeypatch.setattr(config_editor, "probe_provider_key_capabilities", probe)
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.add_provider_key_interactively(config_path, "vendor")
-    pool = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]["existing"]
-
-    assert pool["available_models"] == []
-    assert pool["all_available_models"] == sorted(["stale-all", *new_models])
-    assert pool["key_models"] == {"old": ["stale-all"], "main": new_models}
-    assert pool["routes"] == {"old": {"openai": True}}
-    assert pool["errors"] == {
-        "old": "HTTP 401",
-        **({"main": new_error} if new_error else {}),
-    }
-
-
-def test_add_provider_key_selected_failed_pool_fills_missing_historical_key_models(
-    tmp_path, monkeypatch
-) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"old": {"api_key": "sk-old"}},
-                        "pools": {"existing": {"keys": ["old"], "models": []}},
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["main", "sk-main"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "1")
-    monkeypatch.setattr(
-        config_editor,
-        "probe_provider_key_capabilities",
-        lambda provider, key_names, **kwargs: {
-            "models": ["gpt-new"] if key_names == ["main"] else [],
-            "all_models": ["gpt-new"] if key_names == ["main"] else [],
-            "key_models": {
-                key_names[0]: ["gpt-new"] if key_names == ["main"] else []
-            },
-            "errors": {} if key_names == ["main"] else {"old": "HTTP 401"},
-        },
-    )
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.add_provider_key_interactively(config_path, "vendor")
-    pool = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]["existing"]
-
-    assert pool["key_models"] == {"old": [], "main": ["gpt-new"]}
-
-
-@pytest.mark.parametrize("empty_probe", ["new-key", "existing-pool"])
-def test_add_provider_key_empty_successful_probe_uses_manual_assignment(
-    tmp_path, monkeypatch, empty_probe: str
-) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"old": {"api_key": "sk-old"}},
-                        "pools": {"existing": {"keys": ["old"], "models": []}},
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["main", "sk-main"])
-    menu_text = []
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-
-    def choose(title, options, content=None, **kwargs):
-        menu_text.append(" ".join(label for _, label in options) + render_plain(content))
-        return "1"
-
-    monkeypatch.setattr(config_editor, "select_option", choose)
-
-    def probe(provider, key_names, **kwargs):
-        is_empty = (key_names == ["main"]) == (empty_probe == "new-key")
-        models = [] if is_empty else ["gpt-a"]
-        return {
-            "models": models,
-            "all_models": models,
-            "key_models": {name: models for name in key_names},
-            "errors": {},
-        }
-
-    monkeypatch.setattr(config_editor, "probe_provider_key_capabilities", probe)
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.add_provider_key_interactively(config_path, "vendor")
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert pools["existing"]["keys"] == ["old", "main"]
-    assert pools["existing"]["available_models"] == []
-    assert pools["existing"]["all_available_models"] == ["gpt-a"]
-    assert pools["existing"]["key_models"] == {
-        "main": [] if empty_probe == "new-key" else ["gpt-a"],
-        "old": ["gpt-a"] if empty_probe == "new-key" else [],
-    }
-    assert "未发现模型" in menu_text[0]
-    assert "探测失败" not in menu_text[0]
-
-
-@pytest.mark.parametrize(("choice", "pool_name"), [("1", "0"), ("2", "__new__")])
-def test_add_provider_key_manual_pool_controls_do_not_collide_with_pool_names(
-    tmp_path, monkeypatch, choice: str, pool_name: str
-) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {
-                            "zero": {"api_key": "sk-zero"},
-                            "new": {"api_key": "sk-new"},
-                        },
-                        "pools": {
-                            "0": {"keys": ["zero"], "models": []},
-                            "__new__": {"keys": ["new"], "models": []},
-                        },
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["main", "sk-main"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: choice)
-    monkeypatch.setattr(
-        config_editor,
-        "probe_provider_key_capabilities",
-        lambda provider, key_names, **kwargs: {
-            "models": ["gpt-a"],
-            "all_models": ["gpt-a"],
-            "key_models": {name: ["gpt-a"] for name in key_names},
-            "errors": {"main": "HTTP 401"} if key_names == ["main"] else {},
-        },
-    )
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.add_provider_key_interactively(config_path, "vendor")
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert "main" in pools[pool_name]["keys"]
-    assert pools[pool_name]["available_models"] == []
-    assert pools[pool_name]["errors"] == {"main": "HTTP 401"}
 
 
 def test_add_provider_key_manual_cancel_leaves_file_bytes_unchanged(
@@ -3058,12 +2539,11 @@ def test_add_provider_key_manual_cancel_leaves_file_bytes_unchanged(
     config_path = tmp_path / "router-config.json"
     original = json.dumps(
         {
-            "config_version": 3,
+            "config_version": 4,
             "providers": {
                 "vendor": {
                     "base_url": "https://vendor.test",
                     "keys": {"old": {"api_key": "sk-old"}},
-                    "pools": {"existing": {"keys": ["old"], "models": []}},
                 }
             },
             "models": {},
@@ -3071,207 +2551,25 @@ def test_add_provider_key_manual_cancel_leaves_file_bytes_unchanged(
         indent=2,
     ).encode()
     config_path.write_bytes(original)
-    prompts = iter(["main", "sk-main"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
+    prompts = iter(["main"])
+
+    def ask(*args, **kwargs):
+        try:
+            return next(prompts)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(config_editor, "prompt_text", ask)
     monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "0")
-    monkeypatch.setattr(
-        config_editor,
-        "probe_provider_key_capabilities",
-        lambda provider, key_names, **kwargs: {
-            "models": [],
-            "all_models": [],
-            "key_models": {key_names[0]: []},
-            "errors": {key_names[0]: "HTTP 401"},
-        },
-    )
 
-    result = config_editor.add_provider_key_interactively(config_path, "vendor")
+    cancelled = False
+    try:
+        config_editor.add_provider_key_interactively(config_path, "vendor")
+    except KeyboardInterrupt:
+        cancelled = True
 
-    assert "配置未变化" in render_plain(result)
+    assert cancelled
     assert config_path.read_bytes() == original
-
-
-def test_editing_pool_moves_selected_key_from_previous_pool(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {
-                            "move-me": {"api_key": "sk-move"},
-                            "stay": {"api_key": "sk-stay"},
-                        },
-                        "pools": {
-                            "old": {"keys": ["move-me"], "models": []},
-                            "current": {"keys": ["stay"], "models": []},
-                        },
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "current")
-    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["move-me"])
-    monkeypatch.setattr(config_editor, "prompt_pool_enabled_models", lambda pool: [])
-    monkeypatch.setattr(
-        config_editor,
-        "apply_pool_probe",
-        lambda provider, pool_name, **kwargs: {"models": [], "all_models": [], "routes": {}},
-    )
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    config_editor.update_provider_pool_interactively(config_path, "vendor", "1")
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert pools["current"]["keys"] == ["stay", "move-me"]
-    assert pools["old"]["keys"] == []
-
-
-def test_duplicate_pool_memberships_are_repaired_interactively(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {
-                            "pool-a": {"keys": ["main"], "models": ["gpt-a"]},
-                            "pool-b": {"keys": ["main"], "models": ["gpt-b"]},
-                        },
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    choices: list[tuple[list[str], str]] = []
-
-    def choose(pools, *, default):
-        choices.append((sorted(pools), default))
-        return "new-pool"
-
-    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", choose)
-
-    repaired = config_editor.repair_duplicate_pool_memberships_interactively(config_path)
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert repaired is True
-    assert choices == [(["pool-a", "pool-b"], "pool-a")]
-    assert pools["pool-a"]["keys"] == []
-    assert pools["pool-b"]["keys"] == []
-    assert pools["new-pool"] == {"keys": ["main"], "models": []}
-
-
-def test_valid_pool_memberships_do_not_prompt_or_rewrite(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    original = {
-        "config_version": 3,
-        "providers": {
-            "vendor": {
-                "base_url": "https://vendor.test",
-                "keys": {"main": {"api_key": "sk-main"}},
-                "pools": {"only": {"keys": ["main"], "models": []}},
-            }
-        },
-        "models": {},
-    }
-    config_path.write_text(json.dumps(original), encoding="utf-8")
-    monkeypatch.setattr(
-        config_editor,
-        "select_or_enter_pool_name",
-        lambda *args, **kwargs: pytest.fail("valid config must not prompt"),
-    )
-
-    repaired = config_editor.repair_duplicate_pool_memberships_interactively(config_path)
-
-    assert repaired is False
-    assert json.loads(config_path.read_text(encoding="utf-8")) == original
-
-
-def test_unassigned_key_is_repaired_interactively(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {},
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "new-pool")
-
-    assert config_editor.repair_duplicate_pool_memberships_interactively(config_path) is True
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert pools == {"new-pool": {"keys": ["main"], "models": []}}
-
-
-def test_legacy_list_pool_memberships_are_repaired_interactively(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"legacy": ["main"], "other": {"keys": ["main"], "models": []}},
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "legacy")
-
-    assert config_editor.repair_duplicate_pool_memberships_interactively(config_path) is True
-    pools = json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
-
-    assert pools["legacy"] == {"keys": ["main"], "models": []}
-    assert pools["other"]["keys"] == []
-
-
-def test_explicit_pool_delete_action_is_removed(tmp_path) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "vendor": {
-                        "base_url": "https://vendor.test",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"only": {"keys": ["main"], "models": []}},
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    result = config_editor.update_provider_pool_interactively(config_path, "vendor", "4")
-
-    assert result is None
-    assert "only" in json.loads(config_path.read_text(encoding="utf-8"))["providers"]["vendor"]["pools"]
 
 
 def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> None:
@@ -3279,18 +2577,23 @@ def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> 
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "openai": {
                         "base_url": "https://api.openai.com",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"], "models": ["gpt-4o-mini"]}},
+                        "capabilities": {
+                            "models": ["gpt-4o-mini"],
+                            "route_status": {"openai": "ok"},
+                            "errors": {},
+                            "checked_at": "2026-09-01T00:00:00+00:00",
+                        },
                     }
                 },
                 "models": {
                     "local-existing": {
                         "targets": [
-                            {"provider": "openai", "pool": "default", "upstream_model": "old-model"}
+                            {"provider": "openai", "key": "main", "upstream_model": "old-model"}
                         ]
                     }
                 },
@@ -3298,13 +2601,16 @@ def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> 
         ),
         encoding="utf-8",
     )
-    choices = iter(["1", "1", "1", "local-existing"])
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
-    monkeypatch.setattr(
-        config_editor,
-        "prompt_text",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("existing model should be selected")),
-    )
+    choices = iter(["1", "1", "1"])
+
+    def choose(title, options, selected=0, content=None, **kwargs):
+        value = next(choices)
+        if value in {"0", "__custom__", "n"}:
+            return value
+        return options[int(value) - 1][0]
+
+    monkeypatch.setattr(config_editor, "select_option", choose)
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "gpt-4o-mini")
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
 
     result = config_editor.add_model_route_interactively(config_path)
@@ -3313,28 +2619,27 @@ def test_add_model_route_selects_existing_local_model(tmp_path, monkeypatch) -> 
     assert "添加完成" in render_plain(result)
     assert data["models"]["local-existing"]["targets"][-1] == {
         "provider": "openai",
-        "pool": "default",
+        "key": "main",
         "upstream_model": "gpt-4o-mini",
     }
 
 
-def test_update_model_target_selects_pool_model(tmp_path, monkeypatch) -> None:
+def test_update_model_target_upstream_uses_prompt(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "providers": {
                     "openai": {
                         "base_url": "https://api.openai.com",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"], "models": ["gpt-4o-mini", "gpt-4o"]}},
                     }
                 },
                 "models": {
                     "local": {
                         "targets": [
-                            {"provider": "openai", "pool": "default", "upstream_model": "gpt-4o-mini"}
+                            {"provider": "openai", "key": "main", "upstream_model": "gpt-4o-mini"}
                         ]
                     }
                 },
@@ -3342,15 +2647,12 @@ def test_update_model_target_selects_pool_model(tmp_path, monkeypatch) -> None:
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: "gpt-4o")
-    monkeypatch.setattr(
-        config_editor,
-        "prompt_text",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upstream model should be selected")),
-    )
+    choices = iter(["1", "gpt-4o"])
+    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
+    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(choices))
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
 
-    result = config_editor.update_model_target_interactively(config_path, "local", 0, "1")
+    result = config_editor.update_model_target_upstream_interactively(config_path, "local")
     data = json.loads(config_path.read_text(encoding="utf-8"))
 
     assert "gpt-4o-mini → gpt-4o" in render_plain(result)
@@ -3360,7 +2662,7 @@ def test_update_model_target_selects_pool_model(tmp_path, monkeypatch) -> None:
 def test_add_provider_key_keeps_in_memory_draft_on_cancel(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
-        json.dumps({"config_version": 3, "local_api_key": "local-key", "providers": {}, "models": {}}),
+        json.dumps({"config_version": 4, "local_api_key": "local-key", "providers": {}, "models": {}}),
         encoding="utf-8",
     )
     config_editor.FORM_DRAFTS.clear()
@@ -3386,24 +2688,23 @@ def test_add_provider_key_keeps_in_memory_draft_on_cancel(tmp_path, monkeypatch)
     assert config_editor.FORM_DRAFTS["add_provider_key"]["base_url"] == "https://api.openai.com"
 
 
-def test_deleting_last_provider_key_removes_empty_pool_and_model(tmp_path, monkeypatch) -> None:
+def test_deleting_last_provider_key_removes_orphaned_model(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "router-config.json"
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "local_api_key": "local-key",
                 "providers": {
                     "gateway": {
                         "base_url": "https://gateway.example.test",
                         "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"default": {"keys": ["main"], "models": ["gpt-a"]}},
                     }
                 },
                 "models": {
                     "local-model": {
                         "targets": [
-                            {"provider": "gateway", "pool": "default", "upstream_model": "gpt-a"}
+                            {"provider": "gateway", "key": "main", "upstream_model": "gpt-a"}
                         ]
                     }
                 },
@@ -3429,7 +2730,7 @@ def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkey
     config_path.write_text(
         json.dumps(
             {
-                "config_version": 3,
+                "config_version": 4,
                 "local_api_key": "local-key",
                 "providers": {
                     "gateway": {
@@ -3438,21 +2739,17 @@ def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkey
                             "main": {"api_key": "sk-main"},
                             "backup": {"api_key": "sk-backup"},
                         },
-                        "pools": {
-                            "main-pool": {"keys": ["main"], "models": ["gpt-a"]},
-                            "backup-pool": {"keys": ["backup"], "models": ["gpt-b"]},
-                        },
                     }
                 },
                 "models": {
                     "local-model": {
                         "targets": [
-                            {"provider": "gateway", "pool": "main-pool", "upstream_model": "gpt-a"}
+                            {"provider": "gateway", "key": "main", "upstream_model": "gpt-a"}
                         ]
                     },
                     "backup-model": {
                         "targets": [
-                            {"provider": "gateway", "pool": "backup-pool", "upstream_model": "gpt-b"}
+                            {"provider": "gateway", "key": "backup", "upstream_model": "gpt-b"}
                         ]
                     },
                 },
@@ -3471,368 +2768,6 @@ def test_deleting_unified_model_key_switches_to_available_model(tmp_path, monkey
     assert data["unified_model"] == {
         "default": {"primary": {"model": "backup-model", "key": None}}
     }
-
-
-def test_v2_tui_adds_provider_pool(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "gateway": {
-                        "base_url": "https://gateway.example.test",
-                        "keys": {
-                            "cheap-1": {"api_key": "sk-1"},
-                            "cheap-2": {"api_key": "sk-2"},
-                            "pro-1": {"api_key": "sk-3"},
-                        },
-                        "pools": {
-                            "unassigned": {
-                                "keys": ["cheap-1", "cheap-2", "pro-1"],
-                                "models": [],
-                            }
-                        },
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    choices = iter(["1"])
-    monkeypatch.setattr(config_editor, "select_option", lambda *args, **kwargs: next(choices))
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "cheap")
-    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "cheap")
-    selections = iter([["cheap-1", "cheap-2"], ["gpt-a"]])
-    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: next(selections))
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: provider["pools"][pool_name].update({"available_models": ["gpt-a"], "all_available_models": ["gpt-a", "gpt-b"], "routes": {}}) or {"models": ["gpt-a"], "all_models": ["gpt-a", "gpt-b"], "routes": {}})
-
-    result = config_editor.update_provider_pool_interactively(config_path, "gateway", "1")
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-
-    assert "模型池" in render_plain(result)
-    assert data["providers"]["gateway"]["pools"]["cheap"] == {
-        "keys": ["cheap-1", "cheap-2"],
-        "models": ["gpt-a"],
-        "available_models": ["gpt-a"],
-        "all_available_models": ["gpt-a", "gpt-b"],
-        "routes": {},
-    }
-
-
-def test_pool_probe_models_records_common_models_and_routes(monkeypatch) -> None:
-    def fake_discover(base_url, api_key, existing_model_ids, timeout=15.0):
-        return {
-            "sk-1": ["gpt-a", "gpt-b"],
-            "sk-2": ["gpt-a", "gpt-c"],
-        }[api_key]
-
-    def fake_probe(data, model_id, key, timeout=15.0):
-        return [
-            config_editor.KeyProbeResult(
-                model_id=model_id,
-                key_name=str(key["name"]),
-                mode="openai",
-                label="OpenAI Chat",
-                path="v1/chat/completions",
-                url="https://gateway.example.test/v1/chat/completions",
-                available=True,
-                status_code=200,
-                duration_ms=1,
-                error="",
-            )
-        ]
-
-    monkeypatch.setattr(config_editor, "discover_upstream_models", fake_discover)
-    monkeypatch.setattr(config_editor, "probe_key_availability", fake_probe)
-
-    result = config_editor.pool_probe_models(
-        {
-            "base_url": "https://gateway.example.test",
-            "keys": {"k1": {"api_key": "sk-1"}, "k2": {"api_key": "sk-2"}},
-        },
-        ["k1", "k2"],
-    )
-
-    assert result["models"] == ["gpt-a"]
-    assert result["all_models"] == ["gpt-a", "gpt-b", "gpt-c"]
-    assert result["key_models"] == {"k1": ["gpt-a", "gpt-b"], "k2": ["gpt-a", "gpt-c"]}
-    assert result["routes"] == {"k1": {"openai": True}, "k2": {"openai": True}}
-    assert result["checked_at"]
-
-
-def test_apply_pool_probe_preserves_enabled_models(monkeypatch) -> None:
-    monkeypatch.setattr(
-        config_editor,
-        "pool_probe_models",
-        lambda *args, **kwargs: {
-            "models": ["gpt-a", "gpt-b"],
-            "all_models": ["gpt-a", "gpt-b"],
-            "key_models": {"k1": ["gpt-a", "gpt-b"]},
-            "routes": {},
-            "manual_models": False,
-            "checked_at": "2026-01-01T00:00:00+00:00",
-        },
-    )
-    provider = {
-        "base_url": "https://gateway.example.test",
-        "keys": {"k1": {"api_key": "sk-1"}},
-        "pools": {"default": {"keys": ["k1"], "models": ["gpt-old"]}},
-    }
-
-    config_editor.apply_pool_probe(provider, "default")
-
-    assert provider["pools"]["default"]["available_models"] == ["gpt-a", "gpt-b"]
-    assert provider["pools"]["default"]["models"] == ["gpt-old"]
-
-
-def test_pool_model_selector_shows_all_models_and_current_checked_state(monkeypatch) -> None:
-    pool = {
-        "keys": ["k1"],
-        "models": ["gpt-a", "gpt-old"],
-        "available_models": ["gpt-a"],
-        "all_available_models": ["gpt-a", "gpt-new"],
-    }
-    calls: list[tuple[list[tuple[str, str]], set[str]]] = []
-
-    def select(title, options, content=None, *, checked_values=None):
-        calls.append((options, checked_values))
-        return ["gpt-a", "gpt-old"]
-
-    monkeypatch.setattr(config_editor, "select_multiple", select)
-
-    selected = config_editor.prompt_pool_enabled_models(pool)
-
-    assert selected == ["gpt-a", "gpt-old"]
-    assert calls[0][1] == {"gpt-a", "gpt-old"}
-    assert [value for value, _ in calls[0][0]] == [
-        "gpt-a",
-        "gpt-new",
-        "gpt-old",
-        "__custom__",
-    ]
-    labels = dict(calls[0][0])
-    assert "[yellow]" not in labels["gpt-a"]
-    assert "[yellow]" in labels["gpt-new"]
-    assert "[yellow]" in labels["gpt-old"]
-
-
-def test_enabled_pool_models_are_usable_by_unified_model(monkeypatch) -> None:
-    monkeypatch.setattr(
-        config_editor,
-        "pool_probe_models",
-        lambda *args, **kwargs: {
-            "models": ["gpt-a"],
-            "all_models": ["gpt-a", "gpt-b"],
-            "key_models": {"k1": ["gpt-a", "gpt-b"]},
-            "routes": {},
-            "manual_models": False,
-            "checked_at": "2026-01-01T00:00:00+00:00",
-        },
-    )
-    data = {
-        "config_version": 3,
-        "providers": {
-            "gateway": {
-                "base_url": "https://gateway.example.test",
-                "keys": {"k1": {"api_key": "sk-1"}},
-                "pools": {"default": {"keys": ["k1"]}},
-            }
-        },
-        "models": {},
-    }
-
-    config_editor.apply_pool_probe(data["providers"]["gateway"], "default")
-    config_editor.enable_pool_models(data, "gateway", "default", ["gpt-a"])
-    data["unified_model"] = {"model": "gpt-a"}
-
-    config = config_editor.RouterConfig.from_dict(data)
-
-    assert config.configured_model_id("gpt-a") == "gpt-a"
-    assert config.unified_model is not None
-    assert config.models[0].keys[0].upstream_model == "gpt-a"
-
-
-def test_pool_probe_models_accepts_manual_models_when_discovery_empty(monkeypatch) -> None:
-    monkeypatch.setattr(config_editor, "discover_upstream_models", lambda *args, **kwargs: [])
-    monkeypatch.setattr(config_editor, "probe_key_availability", lambda *args, **kwargs: [])
-
-    result = config_editor.pool_probe_models(
-        {
-            "base_url": "https://gateway.example.test",
-            "keys": {"k1": {"api_key": "sk-1"}, "k2": {"api_key": "sk-2"}},
-        },
-        ["k1", "k2"],
-        manual_models=["gpt-manual"],
-    )
-
-    assert result["models"] == ["gpt-manual"]
-    assert result["all_models"] == ["gpt-manual"]
-    assert result["key_models"] == {"k1": ["gpt-manual"], "k2": ["gpt-manual"]}
-    assert result["manual_models"] is True
-
-
-def test_pool_update_prompts_manual_models_when_discovery_empty(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {
-                    "gateway": {
-                        "base_url": "https://gateway.example.test",
-                        "keys": {"k1": {"api_key": "sk-1"}},
-                        "pools": {"unassigned": {"keys": ["k1"], "models": []}},
-                    }
-                },
-                "models": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    prompts = iter(["gpt-manual,gpt-extra"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
-    monkeypatch.setattr(config_editor, "select_or_enter_pool_name", lambda *args, **kwargs: "manual-pool")
-    monkeypatch.setattr(config_editor, "select_multiple", lambda *args, **kwargs: ["k1"])
-    monkeypatch.setattr(config_editor, "apply_pool_probe", lambda provider, pool_name, **kwargs: {"models": [], "all_models": [], "routes": {}} if "manual_models" not in kwargs else provider["pools"][pool_name].update({"models": kwargs["manual_models"], "all_models": kwargs["manual_models"], "key_models": {"k1": kwargs["manual_models"]}, "routes": {}, "manual_models": True}) or {"models": kwargs["manual_models"], "all_models": kwargs["manual_models"], "routes": {}})
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
-
-    result = config_editor.update_provider_pool_interactively(config_path, "gateway", "1")
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-
-    assert "已启用模型" in render_plain(result)
-    assert data["providers"]["gateway"]["pools"]["manual-pool"]["models"] == [
-        "gpt-manual",
-        "gpt-extra",
-    ]
-
-
-def test_upstream_routes_panel_shows_three_mode_support(monkeypatch) -> None:
-    data = {
-        "upstream_routes": {
-            "https://upstream.example.com": {
-                "anthropic": "anthropic/v1/messages",
-            }
-        },
-        "models": [
-            {
-                "id": "test-model",
-                "keys": [
-                    {
-                        "name": "main",
-                        "api_key": "sk-main",
-                        "base_url": "https://upstream.example.com",
-                    }
-                ],
-            }
-        ]
-    }
-    model = data["models"][0]
-    monkeypatch.setattr(
-        config_editor,
-        "fetch_native_endpoint_states",
-        lambda data: {
-            "https://upstream.example.com|v1/responses": {
-                "supported": False,
-                "reason": "unsupported",
-                "expires_in_seconds": 42,
-            }
-        },
-    )
-
-    output = render_plain(config_editor.upstream_routes_panel(data, model, 0))
-
-    assert "OpenAI Chat" in output
-    assert "Anthropic Messages" in output
-    assert "OpenAI Responses" in output
-    assert "anthropic/v1/messages" in output
-    assert "探测: 回退缓存" in output
-    assert "42s 后重试" in output
-
-
-def test_model_aliases_panel_lists_current_aliases() -> None:
-    panel = config_editor.model_aliases_panel({"id": "model-one", "aliases": ["first", "second"]})
-
-    text = render_plain(panel)
-    assert "model-one" in text
-    assert "1. first" in text
-    assert "2. second" in text
-
-
-def test_model_alias_crud_updates_config_and_preserves_unified_model(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "local_api_key": "local-key",
-                "providers": {
-                    "gateway": {
-                        "base_url": "https://upstream.example.com",
-                        "keys": {"main": {"api_key": "sk-main"}},
-                        "pools": {"main": {"keys": ["main"]}},
-                    }
-                },
-                "models": {
-                    "model-one": {
-                        "aliases": ["old-alias"],
-                        "targets": [{"provider": "gateway", "pool": "main", "upstream_model": "model-one"}],
-                    }
-                },
-                "unified_model": {
-                    "default": {"primary": {"model": "old-alias"}}
-                },
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    answers = iter(["new-alias", "renamed-alias"])
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(answers))
-    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: True)
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
-
-    data = config_editor.load_config_data(config_path)
-    model = data["models"]["model-one"]
-    model["id"] = "model-one"
-    config_editor.add_model_alias_interactively(config_path, data, model)
-
-    data = config_editor.load_config_data(config_path)
-    model = data["models"]["model-one"]
-    model["id"] = "model-one"
-    config_editor.edit_model_alias_interactively(config_path, data, model, 0)
-
-    data = config_editor.load_config_data(config_path)
-    model = data["models"]["model-one"]
-    model["id"] = "model-one"
-    config_editor.delete_model_alias_interactively(config_path, data, model, 1)
-
-    saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert saved["models"]["model-one"]["aliases"] == ["renamed-alias"]
-    assert saved["unified_model"] == {
-        "default": {"primary": {"model": "model-one"}}
-    }
-
-
-def test_add_model_alias_rejects_name_collision_without_saving(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    original = v3_config(
-        {
-            "model-one": [{"name": "one", "api_key": "sk-one", "base_url": "https://one.example.com"}],
-            "model-two": [{"name": "two", "api_key": "sk-two", "base_url": "https://two.example.com"}],
-        },
-        local_api_key="local-key",
-    )
-    config_path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: "model-two")
-
-    data = config_editor.load_config_data(config_path)
-    result = config_editor.add_model_alias_interactively(config_path, data, data["models"]["model-one"])
-
-    assert json.loads(config_path.read_text(encoding="utf-8")) == original
-    assert "模型名称重复: model-two" in render_plain(result)
 
 
 def test_windows_user_service_registration_is_user_limited() -> None:
@@ -3989,114 +2924,6 @@ def test_systemd_service_registration_quotes_console_script_paths(tmp_path, monk
 
     unit = (tmp_path / ".config" / "systemd" / "user" / "auto-model-key-router.service").read_text(encoding="utf-8")
     assert "ExecStart='/opt/amkr tools/auto-model-key-router' --config '/root/config dir/router-config.json' --serve-foreground" in unit
-
-
-def test_toggle_visitor_access_interactively_updates_selected_key(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    data = v3_config(
-        {"test-model": [{"name": "shared", "api_key": "sk-shared", "base_url": "https://example.test"}]},
-        local_api_key="local-key",
-    )
-    config_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: True)
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old, new: Text("reloaded"))
-
-    result = config_editor.toggle_visitor_access_interactively(
-        config_path,
-        data,
-        {"id": "test-model", "keys": [{"name": "shared", "api_key": "sk-shared", "base_url": "https://example.test"}]},
-        0,
-    )
-
-    assert "允许" in render_plain(result)
-
-
-def test_toggle_visitor_access_requires_optional_feature(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    data = {
-        "local_api_key": "local-key",
-        "models": [
-            {
-                "id": "test-model",
-                "keys": [{"name": "shared", "api_key": "sk-shared", "base_url": "https://example.test"}],
-            }
-        ],
-    }
-    config_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
-
-    result = config_editor.toggle_visitor_access_interactively(
-        config_path,
-        data,
-        data["models"][0],
-        0,
-    )
-
-    saved = json.loads(config_path.read_text(encoding="utf-8"))
-    assert "allow_visitor" not in saved["models"][0]["keys"][0]
-    assert "未安装" in render_plain(result)
-
-
-def test_discover_upstream_models_success(monkeypatch) -> None:
-    class FakeResponse:
-        status_code = 200
-
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {
-                "object": "list",
-                "data": [
-                    {"id": "gpt-4o", "object": "model"},
-                    {"id": "gpt-3.5-turbo", "object": "model"},
-                    {"id": "existing-model", "object": "model"},
-                ],
-            }
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def get(self, url, headers=None):
-            return FakeResponse()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-    monkeypatch.setattr(config_editor.httpx, "Client", FakeClient)
-
-    result = config_editor.discover_upstream_models(
-        "https://api.example.com", "sk-test", {"existing-model"}
-    )
-
-    assert result == ["existing-model", "gpt-3.5-turbo", "gpt-4o"]
-
-
-def test_discover_upstream_models_failure(monkeypatch) -> None:
-    class FailingClient:
-        def __init__(self, **kwargs):
-            pass
-
-        def get(self, url, headers=None):
-            raise config_editor.httpx.ConnectError("connection refused")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-    monkeypatch.setattr(config_editor.httpx, "Client", FailingClient)
-
-    result = config_editor.discover_upstream_models(
-        "https://api.example.com", "sk-test", set()
-    )
-
-    assert result == []
 
 
 def test_discover_upstream_models_result_distinguishes_empty_success(monkeypatch) -> None:
@@ -4294,260 +3121,6 @@ def test_probe_provider_key_capabilities_records_models_and_errors(monkeypatch) 
     }
 
 
-def test_next_pool_name_uses_default_then_first_free_number() -> None:
-    assert config_editor.next_pool_name({}) == "default"
-    assert config_editor.next_pool_name({"custom": {}}) == "pool-2"
-    assert config_editor.next_pool_name(
-        {"default": {}, "pool-2": {}, "pool-4": {}}
-    ) == "pool-3"
-
-
-def test_matching_pool_names_uses_only_latest_successful_model_sets() -> None:
-    pools = {
-        "first": {"available_models": ["gpt-b", "gpt-a"]},
-        "enabled-only": {"models": ["gpt-a", "gpt-b"]},
-        "extra": {"available_models": ["gpt-a", "gpt-b", "gpt-c"]},
-    }
-
-    assert config_editor.matching_pool_names(pools, ["gpt-a", "gpt-b"]) == [
-        "first"
-    ]
-    assert config_editor.matching_pool_names(
-        pools,
-        ["gpt-a", "gpt-b"],
-        {
-            "first": {"models": ["gpt-a", "gpt-b"], "errors": {"k1": "HTTP 401"}},
-            "enabled-only": {"models": ["gpt-b", "gpt-a"], "errors": {}},
-        },
-    ) == ["enabled-only"]
-
-
-def test_merge_provider_pools_preserves_order_and_applies_latest_probe() -> None:
-    data = {
-        "providers": {
-            "vendor": {
-                "keys": {},
-                "pools": {
-                    "first": {
-                        "keys": ["k2", "k1"],
-                        "models": ["gpt-a"],
-                        "available_models": ["stale"],
-                        "errors": {"k1": "stale"},
-                    },
-                    "other": {"keys": ["k4"], "models": ["gpt-c"]},
-                    "duplicate": {
-                        "keys": ["k1", "k3"],
-                        "models": ["gpt-b", "gpt-a"],
-                    },
-                },
-            }
-        },
-        "models": {
-            "local": {
-                "targets": [
-                    {"provider": "vendor", "pool": "duplicate", "upstream_model": "gpt-a"},
-                    {"provider": "vendor", "pool": "first", "upstream_model": "gpt-a"},
-                    {"provider": "other", "pool": "duplicate", "upstream_model": "gpt-a"},
-                ]
-            }
-        },
-    }
-    probe = {
-        "models": ["gpt-a", "gpt-b"],
-        "all_models": ["gpt-a", "gpt-b", "gpt-new"],
-        "key_models": {"k1": ["gpt-a"], "k2": ["gpt-a", "gpt-b"]},
-        "routes": {"k1": {"openai": True}},
-        "errors": {},
-        "checked_at": "2026-07-11T01:02:03+00:00",
-    }
-
-    kept = config_editor.merge_provider_pools(
-        data, "vendor", ["duplicate", "first"], probe
-    )
-
-    assert kept == "first"
-    assert list(data["providers"]["vendor"]["pools"]) == ["first", "other"]
-    assert data["providers"]["vendor"]["pools"]["first"] == {
-        "keys": ["k2", "k1", "k3"],
-        "models": ["gpt-a", "gpt-b"],
-        "available_models": ["gpt-a", "gpt-b"],
-        "all_available_models": ["gpt-a", "gpt-b", "gpt-new"],
-        "key_models": {"k1": ["gpt-a"], "k2": ["gpt-a", "gpt-b"]},
-        "routes": {"k1": {"openai": True}},
-        "errors": {},
-        "checked_at": "2026-07-11T01:02:03+00:00",
-    }
-    assert data["models"]["local"]["targets"] == [
-        {"provider": "vendor", "pool": "first", "upstream_model": "gpt-a"},
-        {"provider": "other", "pool": "duplicate", "upstream_model": "gpt-a"},
-    ]
-
-
-def test_cleanup_empty_pools_removes_targets_models_and_updates_unified_model() -> None:
-    data = {
-        "providers": {
-            "vendor": {
-                "keys": {"live": {"api_key": "sk-live"}},
-                "pools": {
-                    "empty": {"keys": [], "models": ["gpt-old"]},
-                    "live": {"keys": ["live"], "models": ["gpt-live"]},
-                },
-            }
-        },
-        "models": {
-            "remove": {
-                "targets": [
-                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-old"}
-                ]
-            },
-            "keep": {
-                "targets": [
-                    {"provider": "vendor", "pool": "live", "upstream_model": "gpt-live"}
-                ]
-            },
-            "already-empty": {"targets": [], "aliases": ["legacy"]},
-        },
-        "unified_model": {"model": "remove", "key": "old"},
-    }
-
-    removed = config_editor.cleanup_empty_pools_and_models(data, "vendor")
-
-    assert removed == {"remove", "already-empty"}
-    assert list(data["providers"]["vendor"]["pools"]) == ["live"]
-    assert list(data["models"]) == ["keep"]
-    assert data["unified_model"] == {"model": "keep"}
-
-
-def test_cleanup_empty_pools_preserves_valid_unified_model_alias() -> None:
-    data = {
-        "providers": {
-            "vendor": {
-                "keys": {"live": {"api_key": "sk-live"}},
-                "pools": {
-                    "empty": {"keys": [], "models": ["gpt-old"]},
-                    "live": {"keys": ["live"], "models": ["gpt-live"]},
-                },
-            }
-        },
-        "models": {
-            "local": {
-                "aliases": ["friendly"],
-                "targets": [
-                    {"provider": "vendor", "pool": "live", "upstream_model": "gpt-live"}
-                ],
-            }
-        },
-        "unified_model": {"model": "friendly", "key": "live"},
-    }
-
-    config_editor.cleanup_empty_pools_and_models(data, "vendor")
-
-    assert data["unified_model"] == {"model": "friendly", "key": "live"}
-
-
-def test_cleanup_empty_pools_clears_removed_image_model_and_key() -> None:
-    data = {
-        "providers": {
-            "vendor": {
-                "keys": {"main": {"api_key": "sk-main"}},
-                "pools": {
-                    "main": {"keys": ["main"], "models": ["gpt-main"]},
-                    "empty": {"keys": [], "models": ["gpt-image"]},
-                },
-            }
-        },
-        "models": {
-            "main": {
-                "targets": [
-                    {"provider": "vendor", "pool": "main", "upstream_model": "gpt-main"}
-                ]
-            },
-            "image": {
-                "targets": [
-                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-image"}
-                ]
-            },
-        },
-        "unified_model": {
-            "model": "main",
-            "key": "main",
-            "image_model": "image",
-            "image_key": "removed",
-        },
-    }
-
-    config_editor.cleanup_empty_pools_and_models(data, "vendor")
-
-    assert data["unified_model"] == {"model": "main", "key": "main"}
-
-
-def test_cleanup_empty_pools_clears_invalid_unified_key() -> None:
-    data = {
-        "providers": {
-            "vendor": {
-                "keys": {"live": {"api_key": "sk-live"}},
-                "pools": {
-                    "empty": {"keys": [], "models": ["gpt-main"]},
-                    "live": {"keys": ["live"], "models": ["gpt-main"]},
-                },
-            }
-        },
-        "models": {
-            "main": {
-                "targets": [
-                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-main"},
-                    {"provider": "vendor", "pool": "live", "upstream_model": "gpt-main"},
-                ]
-            }
-        },
-        "unified_model": {"model": "main", "key": "removed"},
-    }
-
-    config_editor.cleanup_empty_pools_and_models(data, "vendor")
-
-    assert data["unified_model"] == {"model": "main"}
-
-
-def test_cleanup_empty_pools_clears_invalid_image_key() -> None:
-    data = {
-        "providers": {
-            "vendor": {
-                "keys": {
-                    "main": {"api_key": "sk-main"},
-                    "image-live": {"api_key": "sk-image-live"},
-                },
-                "pools": {
-                    "main": {"keys": ["main"], "models": ["gpt-main"]},
-                    "empty": {"keys": [], "models": ["gpt-image"]},
-                    "image": {"keys": ["image-live"], "models": ["gpt-image"]},
-                },
-            }
-        },
-        "models": {
-            "main": {
-                "targets": [
-                    {"provider": "vendor", "pool": "main", "upstream_model": "gpt-main"}
-                ]
-            },
-            "image": {
-                "targets": [
-                    {"provider": "vendor", "pool": "empty", "upstream_model": "gpt-image"},
-                    {"provider": "vendor", "pool": "image", "upstream_model": "gpt-image"},
-                ]
-            },
-        },
-        "unified_model": {
-            "model": "main",
-            "image_model": "image",
-            "image_key": "removed",
-        },
-    }
-
-    config_editor.cleanup_empty_pools_and_models(data, "vendor")
-
-    assert data["unified_model"] == {"model": "main", "image_model": "image"}
-
-
 def test_probe_key_availability_posts_all_text_routes(monkeypatch) -> None:
     requests = []
 
@@ -4598,156 +3171,4 @@ def test_probe_key_availability_posts_all_text_routes(monkeypatch) -> None:
     assert requests[2][2]["max_output_tokens"] == 1
     assert all(result.available for result in results)
 
-
-def test_probe_all_key_availability_checks_every_configured_key(monkeypatch) -> None:
-    calls = []
-
-    def fake_probe(data, model_id, key, timeout=15.0):
-        calls.append((model_id, key["name"]))
-        return [
-            config_editor.KeyProbeResult(
-                model_id=model_id,
-                key_name=key["name"],
-                mode="openai",
-                label="OpenAI Chat",
-                path="v1/chat/completions",
-                url="https://api.example.com/v1/chat/completions",
-                available=True,
-                status_code=200,
-                duration_ms=1,
-                error="",
-            )
-        ]
-
-    monkeypatch.setattr(config_editor, "probe_key_availability", fake_probe)
-
-    results = config_editor.probe_all_key_availability(
-        {
-            "models": [
-                {"id": "model-a", "keys": [{"name": "a1"}, {"name": "a2"}]},
-                {"id": "model-b", "keys": [{"name": "b1", "enabled": False}]},
-            ]
-        }
-    )
-
-    assert calls == [("model-a", "a1"), ("model-a", "a2"), ("model-b", "b1")]
-    assert [result.key_name for result in results] == ["a1", "a2", "b1"]
-
-
-def test_manage_key_menu_includes_all_probe(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "models": [
-                    {
-                        "id": "model-a",
-                        "keys": [
-                            {"name": "main", "api_key": "sk-main", "base_url": "https://api.example.com"}
-                        ],
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    choices = iter(["2", "0"])
-    menus = []
-    shown = []
-
-    def choose(title, options, selected=0, content=None, *, on_key=None):
-        menus.append((title, options))
-        return next(choices)
-
-    monkeypatch.setattr(config_editor, "select_option", choose)
-    monkeypatch.setattr(config_editor, "visitor_feature_available", lambda: False)
-    monkeypatch.setattr(config_editor, "clear_terminal_history", lambda: None)
-    monkeypatch.setattr(config_editor, "probe_all_keys_interactively", lambda path: Text("all probe"))
-    monkeypatch.setattr(config_editor, "show_result_page", lambda title, content: shown.append((title, render_plain(content))))
-
-    config_editor.manage_selected_key_interactively(config_path)
-
-    assert menus[0] == (
-        "管理 Key",
-        [("1", "管理单个 Key"), ("2", "探测所有 Key"), ("0", "返回")],
-    )
-    assert shown == [("探测所有 Key", "all probe\n")]
-
-
-def test_select_api_key_shows_config_enabled_state(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "models": [
-                    {
-                        "id": "model-a",
-                        "keys": [
-                            {"name": "main", "api_key": "sk-main", "base_url": "https://api.example.com"}
-                        ],
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    choices = iter(["1", "0"])
-    menus = []
-
-    def choose(title, options, selected=0, content=None, *, on_key=None):
-        menus.append((title, options))
-        return next(choices)
-
-    monkeypatch.setattr(config_editor, "select_option", choose)
-    assert config_editor.select_api_key(config_path, "选择 Key") is None
-
-    assert any("启用" in option for _, options in menus for _, option in options)
-    assert all("冷却" not in option for _, options in menus for _, option in options)
-
-
-def test_add_config_with_discovery_adds_selected_models(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "router-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "config_version": 3,
-                "providers": {},
-                "models": {},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    answers = iter(["https://api.example.com", "sk-test-key", "gpt-4o", "", "round_robin", "downstream", "gpt-4o-custom-key"])
-    choices = iter(["n", "n"])
-
-    def ask(title: str, prompt: str, **kwargs):
-        return next(answers)
-
-    def choose(title, options, selected=0, content=None):
-        return next(choices)
-
-    monkeypatch.setattr(config_editor, "prompt_text", ask)
-    monkeypatch.setattr(config_editor, "select_option", choose)
-    monkeypatch.setattr(config_editor, "confirm_choice", lambda *args, **kwargs: False)
-    monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda path, old_config, new_config: Text("reloaded"))
-    monkeypatch.setattr(config_editor, "discover_upstream_models", lambda base_url, api_key, existing_ids, timeout=15.0: ["gpt-4o", "gpt-4o-mini"])
-    monkeypatch.setattr(config_editor, "select_multiple", lambda title, options, content=None: ["gpt-4o-mini"])
-
-    config_editor.add_config_interactively(config_path, ask_continue=False)
-
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert "gpt-4o" in data["models"]
-    assert "gpt-4o-mini" in data["models"]
-
-    gpt4o_model = data["models"]["gpt-4o"]
-    assert gpt4o_model["routing_mode"] == "round_robin"
-    assert data["providers"]["default"]["keys"]["gpt-4o-custom-key"]["api_key"] == "sk-test-key"
-    assert data["providers"]["default"]["base_url"] == "https://api.example.com"
-
-    gpt4o_mini_model = data["models"]["gpt-4o-mini"]
-    assert gpt4o_mini_model["routing_mode"] == "round_robin"
-    assert data["providers"]["default"]["keys"]["gpt-4o-mini-key-1"]["api_key"] == "sk-test-key"
 

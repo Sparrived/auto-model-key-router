@@ -5,33 +5,26 @@ from auto_model_key_router.config import RouterConfig
 
 
 def test_provider_operations_allow_an_empty_provider() -> None:
-    data = {"config_version": 3, "providers": {}, "models": {}}
+    data = {"config_version": 4, "providers": {}, "models": {}}
 
     operations.create_provider(data, "empty", "https://empty.example.test")
 
     assert data["providers"]["empty"] == {
         "base_url": "https://empty.example.test",
         "keys": {},
-        "pools": {},
     }
     RouterConfig.from_dict(data)
 
 
-def test_model_key_deletion_is_local_when_a_pool_is_shared() -> None:
+def test_delete_model_key_is_local_when_a_key_is_shared() -> None:
     data = {
-        "config_version": 3,
+        "config_version": 4,
         "providers": {
             "gateway": {
                 "base_url": "https://gateway.example.test",
                 "keys": {
                     "main": {"api_key": "sk-main"},
                     "backup": {"api_key": "sk-backup"},
-                },
-                "pools": {
-                    "shared": {
-                        "keys": ["main", "backup"],
-                        "models": ["upstream"],
-                    }
                 },
             }
         },
@@ -40,16 +33,21 @@ def test_model_key_deletion_is_local_when_a_pool_is_shared() -> None:
                 "targets": [
                     {
                         "provider": "gateway",
-                        "pool": "shared",
+                        "key": "main",
                         "upstream_model": "upstream",
-                    }
+                    },
+                    {
+                        "provider": "gateway",
+                        "key": "backup",
+                        "upstream_model": "upstream",
+                    },
                 ]
             },
             "second": {
                 "targets": [
                     {
                         "provider": "gateway",
-                        "pool": "shared",
+                        "key": "main",
                         "upstream_model": "upstream",
                     }
                 ]
@@ -57,23 +55,30 @@ def test_model_key_deletion_is_local_when_a_pool_is_shared() -> None:
         },
     }
 
-    operations.delete_model_key(data, "first", "shared-main")
+    # Removing the binding from "first" must not delete the shared provider key.
+    operations.delete_model_key(data, "first", "gateway-main")
 
     assert set(data["providers"]["gateway"]["keys"]) == {"main", "backup"}
     assert data["models"]["second"]["targets"][0]["provider"] == "gateway"
+    assert data["models"]["second"]["targets"][0]["key"] == "main"
+    # "first" still routes through its remaining backup key.
+    assert data["models"]["first"]["targets"] == [
+        {
+            "provider": "gateway",
+            "key": "backup",
+            "upstream_model": "upstream",
+        }
+    ]
     RouterConfig.from_dict(data)
 
 
-def test_clearing_pool_models_removes_models_even_when_they_have_aliases() -> None:
+def test_clearing_all_model_keys_removes_model_even_when_it_has_aliases() -> None:
     data = {
-        "config_version": 3,
+        "config_version": 4,
         "providers": {
             "gateway": {
                 "base_url": "https://gateway.example.test",
                 "keys": {"main": {"api_key": "sk-main"}},
-                "pools": {
-                    "default": {"keys": ["main"], "models": ["upstream"]}
-                },
             }
         },
         "models": {
@@ -82,7 +87,7 @@ def test_clearing_pool_models_removes_models_even_when_they_have_aliases() -> No
                 "targets": [
                     {
                         "provider": "gateway",
-                        "pool": "default",
+                        "key": "main",
                         "upstream_model": "upstream",
                     }
                 ],
@@ -90,21 +95,19 @@ def test_clearing_pool_models_removes_models_even_when_they_have_aliases() -> No
         },
     }
 
-    operations.enable_pool_models(data, "gateway", "default", [])
+    operations.delete_model_key_local(data, "local", "main")
 
     assert data["models"] == {}
+    assert data["providers"] == {}
 
 
-def test_disabling_a_pinned_model_key_clears_the_unified_key() -> None:
+def test_deleting_last_key_referencing_provider_key_removes_provider_key() -> None:
     data = {
-        "config_version": 3,
+        "config_version": 4,
         "providers": {
             "gateway": {
                 "base_url": "https://gateway.example.test",
                 "keys": {"main": {"api_key": "sk-main"}},
-                "pools": {
-                    "default": {"keys": ["main"], "models": ["upstream"]}
-                },
             }
         },
         "models": {
@@ -112,7 +115,35 @@ def test_disabling_a_pinned_model_key_clears_the_unified_key() -> None:
                 "targets": [
                     {
                         "provider": "gateway",
-                        "pool": "default",
+                        "key": "main",
+                        "upstream_model": "upstream",
+                    }
+                ]
+            }
+        },
+    }
+
+    operations.delete_model_key(data, "local", "main")
+
+    assert data["models"] == {}
+    assert data["providers"] == {}
+
+
+def test_disabling_a_pinned_model_key_clears_the_unified_key() -> None:
+    data = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {"main": {"api_key": "sk-main"}},
+            }
+        },
+        "models": {
+            "local": {
+                "targets": [
+                    {
+                        "provider": "gateway",
+                        "key": "main",
                         "upstream_model": "upstream",
                     }
                 ]
@@ -127,3 +158,117 @@ def test_disabling_a_pinned_model_key_clears_the_unified_key() -> None:
 
     assert data["unified_model"]["default"]["primary"]["key"] is None
     RouterConfig.from_dict(data)
+
+
+def test_merge_transferable_config_skips_targets_bound_to_duplicate_secret_keys() -> None:
+    current = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {"existing": {"api_key": "sk-shared"}},
+            }
+        },
+        "models": {
+            "local": {
+                "targets": [
+                    {
+                        "provider": "gateway",
+                        "key": "existing",
+                        "upstream_model": "upstream",
+                    }
+                ]
+            }
+        },
+    }
+    transfer = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {
+                    # 与现有 key secret 重复 → 跳过不导入。
+                    "existing": {"api_key": "sk-shared"},
+                    "fresh": {"api_key": "sk-fresh"},
+                },
+            }
+        },
+        "models": {
+            "remote-a": {
+                "targets": [
+                    {
+                        "provider": "gateway",
+                        "key": "existing",
+                        "upstream_model": "remote-a",
+                    },
+                    {
+                        "provider": "gateway",
+                        "key": "fresh",
+                        "upstream_model": "remote-a",
+                    },
+                ]
+            }
+        },
+    }
+
+    merged, added_models, added_keys, skipped_keys = operations.merge_transferable_config(
+        current, transfer
+    )
+
+    assert added_models == 1
+    assert added_keys == 1
+    assert skipped_keys == 1
+    # 绑定到被跳过 key 的 target 一并过滤，避免引用不存在的 key。
+    assert merged["models"]["remote-a"]["targets"] == [
+        {"provider": "gateway", "key": "fresh", "upstream_model": "remote-a"}
+    ]
+    RouterConfig.from_dict(merged)
+
+
+def test_merge_transferable_config_renames_target_key_when_source_key_is_renamed() -> None:
+    current = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {"main": {"api_key": "sk-main"}},
+            }
+        },
+        "models": {},
+    }
+    transfer = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {
+                    # 重名但 secret 不同 → 追加为 main-2。
+                    "main": {"api_key": "sk-other"},
+                },
+            }
+        },
+        "models": {
+            "remote-a": {
+                "targets": [
+                    {
+                        "provider": "gateway",
+                        "key": "main",
+                        "upstream_model": "remote-a",
+                    }
+                ]
+            }
+        },
+    }
+
+    merged, added_models, added_keys, skipped_keys = operations.merge_transferable_config(
+        current, transfer
+    )
+
+    assert added_models == 1
+    assert added_keys == 1
+    assert skipped_keys == 0
+    assert merged["providers"]["gateway"]["keys"]["main-2"]["api_key"] == "sk-other"
+    assert merged["models"]["remote-a"]["targets"] == [
+        {"provider": "gateway", "key": "main-2", "upstream_model": "remote-a"}
+    ]
+    RouterConfig.from_dict(merged)

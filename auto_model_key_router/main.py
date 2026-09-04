@@ -7,7 +7,6 @@ from pathlib import Path
 
 from . import __version__
 from .config import DEFAULT_CONFIG_PATH, UNIFIED_MODEL_ID, RouterConfig
-from .config_editor import repair_duplicate_pool_memberships_interactively
 from .dashboard import render_config, run_terminal_ui
 from .logs_tui import render_logs
 from .service import background_status_panel, manage_system_service, service_status_panel, start_service_background, start_service_foreground, stop_background_service
@@ -88,8 +87,6 @@ def main() -> None:
                 args.service is not None,
             )
         )
-        if interactive_tui:
-            repair_duplicate_pool_memberships_interactively(config_path)
         try:
             config = RouterConfig.load(config_path)
         except Exception as exc:

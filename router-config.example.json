@@ -1,5 +1,5 @@
 {
-  "config_version": 3,
+  "config_version": 4,
   "host": "127.0.0.1",
   "port": 8000,
   "request_timeout": 60,
@@ -29,20 +29,17 @@
           "allow_visitor": true
         }
       },
-      "pools": {
-        "default": {
-          "keys": ["main", "backup"],
-          "available_models": ["gpt-4o-mini"],
-          "models": ["gpt-4o-mini"]
-        }
+      "capabilities": {
+        "models": ["gpt-4o-mini"],
+        "route_status": {
+          "openai": "ok",
+          "anthropic": "ok",
+          "responses": "ok"
+        },
+        "errors": {},
+        "checked_at": "2026-01-01T00:00:00+00:00"
       }
     }
-  },
-  "unified_model": {
-    "model": "gpt-4o-mini",
-    "key": null,
-    "image_model": null,
-    "image_key": null
   },
   "models": {
     "gpt-4o-mini": {
@@ -52,10 +49,18 @@
       "targets": [
         {
           "provider": "openai",
-          "pool": "default",
+          "key": "main",
           "upstream_model": "gpt-4o-mini"
         }
       ]
+    }
+  },
+  "unified_model": {
+    "default": {
+      "primary": {
+        "model": "gpt-4o-mini",
+        "key": null
+      }
     }
   }
 }

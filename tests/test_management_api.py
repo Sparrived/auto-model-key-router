@@ -265,8 +265,8 @@ def test_list_providers_redacts_keys_and_returns_migrated_config_revision(
                     "api_key_fingerprint": "65bbff9a6cb9",
                 }
             ],
-            "pools": [{"name": "model-a", "keys": ["key-a"], "models": ["model-a"]}],
             "routes": {},
+            "capabilities": None,
         }
     ]
     assert '"api_key":' not in response.text
@@ -287,11 +287,10 @@ def test_provider_read_uses_one_raw_config_snapshot(tmp_path: Path) -> None:
     data["providers"]["b.example.test"] = {
         "base_url": "https://b.example.test",
         "keys": {"key-b": {"api_key": "sk-secret-b"}},
-        "pools": {"model-b": {"keys": ["key-b"], "models": ["model-b"]}},
     }
     data["models"]["model-b"] = {
         "targets": [
-            {"provider": "b.example.test", "pool": "model-b", "upstream_model": "model-b"}
+            {"provider": "b.example.test", "key": "key-b", "upstream_model": "model-b"}
         ]
     }
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -313,7 +312,7 @@ def test_provider_read_uses_one_raw_config_snapshot(tmp_path: Path) -> None:
     ).hexdigest()
 
 
-def test_api_provider_can_be_created_without_keys_and_pool_keys_can_be_cleared(
+def test_api_provider_can_be_created_without_keys_and_key_can_be_deleted(
     tmp_path: Path,
 ) -> None:
     app, path = create_file_backed_app(tmp_path)
@@ -344,22 +343,21 @@ def test_api_provider_can_be_created_without_keys_and_pool_keys_can_be_cleared(
         revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
             "config_revision"
         ]
-        pool = await client.put(
-            "/api/providers/empty-provider/pools/default",
+        deleted = await client.request(
+            "DELETE",
+            "/api/providers/empty-provider/keys/main",
             headers=AUTH_HEADERS,
-            json={"config_revision": revision, "keys": []},
+            json={"config_revision": revision},
         )
-        return created, key, pool
+        return created, key, deleted
 
-    created, key, pool = run_client(app, requests)
+    created, key, deleted = run_client(app, requests)
 
     assert created.status_code == 201
     assert key.status_code == 201
-    assert pool.status_code == 200
+    assert deleted.status_code == 204
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["providers"]["empty-provider"]["pools"]["default"]["keys"] == [
-        "main"
-    ]
+    assert "empty-provider" not in saved["providers"]
 
 
 def test_provider_routes_are_normalized_updated_and_cleared(tmp_path: Path) -> None:
@@ -433,12 +431,21 @@ def test_model_write_rejects_stale_revision_before_persisting(tmp_path: Path) ->
     assert path.read_text(encoding="utf-8") == original
 
 
-def test_provider_key_pool_and_route_crud_uses_v3_config(tmp_path: Path) -> None:
+def test_provider_key_and_route_crud_uses_v4_config(tmp_path: Path) -> None:
     app, path = create_file_backed_app(tmp_path)
 
     responses = run_client(app, lambda client: _provider_crud_requests(client))
 
-    created_provider, duplicate, created_key, created_pool, created_route, disabled, created_backup, deleted_key, deleted_route, deleted_pool, deleted_provider = responses
+    (
+        created_provider,
+        duplicate,
+        created_key,
+        created_route,
+        disabled,
+        created_backup,
+        deleted_key,
+        deleted_provider,
+    ) = responses
     assert created_provider.status_code == 201
     assert duplicate.status_code == 409
     assert created_key.status_code == 201
@@ -446,23 +453,20 @@ def test_provider_key_pool_and_route_crud_uses_v3_config(tmp_path: Path) -> None
         b"sk-secret-b"
     ).hexdigest()[:12]
     assert "sk-secret-b" not in created_key.text
-    assert created_pool.status_code == 201
-    assert created_route.status_code == 200
+    assert created_route.status_code == 201
     assert disabled.status_code == 200
     assert created_backup.status_code == 201
     assert deleted_key.status_code == 204
-    # 与 TUI 相同：删除最后一个池成员会级联清理空 Pool 和空模型路由。
-    assert deleted_pool.status_code == 404
-    assert deleted_route.status_code == 404
+    # 删除 provider key 会移除引用它的 target；空模型与空 provider 级联清理。
     assert deleted_provider.status_code == 204
 
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["config_version"] == 3
+    assert saved["config_version"] == 4
     assert "b.example.test" not in saved["providers"]
     assert "upstream-b" not in saved["models"]
 
 
-def test_pool_crud_synchronizes_model_routes(tmp_path: Path) -> None:
+def test_route_crud_synchronizes_model_key_targets(tmp_path: Path) -> None:
     app, path = create_file_backed_app(tmp_path)
 
     async def requests(client: httpx.AsyncClient):
@@ -489,19 +493,28 @@ def test_pool_crud_synchronizes_model_routes(tmp_path: Path) -> None:
         )
         created = await write(
             "post",
-            "/api/providers/b.example.test/pools",
-            {"name": "pool-b", "keys": ["key-b"], "models": ["upstream-b"]},
+            "/api/routes",
+            {
+                "id": "upstream-b",
+                "targets": [
+                    {
+                        "provider": "b.example.test",
+                        "key": "key-b",
+                        "upstream_model": "upstream-b",
+                    }
+                ],
+            },
         )
         after_create = await client.get("/api/routes", headers=AUTH_HEADERS)
         renamed = await write(
             "put",
-            "/api/providers/b.example.test/pools/pool-b",
-            {"name": "pool-c", "models": ["upstream-c"]},
+            "/api/routes/upstream-b",
+            {"id": "upstream-c", "targets": [{"provider": "b.example.test", "key": "key-b", "upstream_model": "upstream-c"}]},
         )
         after_update = await client.get("/api/routes", headers=AUTH_HEADERS)
         deleted = await write(
             "delete",
-            "/api/providers/b.example.test/pools/pool-c",
+            "/api/routes/upstream-c",
             {},
         )
         after_delete = await client.get("/api/routes", headers=AUTH_HEADERS)
@@ -518,7 +531,7 @@ def test_pool_crud_synchronizes_model_routes(tmp_path: Path) -> None:
     assert created_route["targets"] == [
         {
             "provider": "b.example.test",
-            "pool": "pool-b",
+            "key": "key-b",
             "upstream_model": "upstream-b",
         }
     ]
@@ -529,19 +542,58 @@ def test_pool_crud_synchronizes_model_routes(tmp_path: Path) -> None:
     assert updated_routes["upstream-c"]["targets"] == [
         {
             "provider": "b.example.test",
-            "pool": "pool-c",
+            "key": "key-b",
             "upstream_model": "upstream-c",
         }
     ]
     assert all(route["id"] != "upstream-c" for route in after_delete.json()["routes"])
 
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert "pool-c" not in saved["providers"]["b.example.test"]["pools"]
-    assert saved["providers"]["b.example.test"]["pools"]["default"]["keys"] == [
-        "key-b"
-    ]
+    assert saved["providers"]["b.example.test"]["keys"]["key-b"]["api_key"] == "sk-secret-b"
     assert "upstream-b" not in saved["models"]
     assert "upstream-c" not in saved["models"]
+
+
+def test_provider_probe_refreshes_capabilities_and_persists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    monkeypatch.setattr(
+        "auto_model_key_router.config_editor.probe_provider_capability",
+        lambda provider, key_names, timeout=15.0: {
+            "models": ["model-a", "model-b"],
+            "route_status": {"openai": "ok"},
+            "errors": {},
+            "checked_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+
+    async def requests(client: httpx.AsyncClient):
+        current = await client.get("/api/providers", headers=AUTH_HEADERS)
+        denied = await client.post(
+            "/api/providers/a.example.test/probe",
+            headers={"Authorization": f"Bearer {VISITOR_API_KEY}"},
+            json={"config_revision": current.json()["config_revision"]},
+        )
+        refreshed = await client.post(
+            "/api/providers/a.example.test/probe",
+            headers=AUTH_HEADERS,
+            json={"config_revision": current.json()["config_revision"]},
+        )
+        return denied, refreshed
+
+    denied, refreshed = run_client(app, requests)
+
+    assert denied.status_code == 401
+    assert refreshed.status_code == 200
+    body = refreshed.json()
+    assert body["provider"]["capabilities"]["models"] == ["model-a", "model-b"]
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["providers"]["a.example.test"]["capabilities"]["models"] == [
+        "model-a",
+        "model-b",
+    ]
 
 
 def test_key_probe_is_async_redacted_and_requires_full_access(
@@ -611,13 +663,12 @@ def test_config_transfer_matches_tui_append_semantics_and_keeps_machine_settings
         exported_config["providers"]["new"] = {
             "base_url": "https://new.example.test",
             "keys": {"new": {"api_key": "sk-new"}},
-            "pools": {"new": {"keys": ["new"], "models": ["model-new"]}},
         }
         exported_config["models"]["model-new"] = {
             "targets": [
                 {
                     "provider": "new",
-                    "pool": "new",
+                    "key": "new",
                     "upstream_model": "model-new",
                 }
             ]
@@ -682,10 +733,18 @@ async def _provider_crud_requests(client: httpx.AsyncClient) -> list[httpx.Respo
         ),
         await write(
             "post",
-            "/api/providers/b.example.test/pools",
-            {"name": "pool-b", "keys": ["key-b"], "models": ["upstream-b"]},
+            "/api/routes",
+            {
+                "id": "upstream-b",
+                "targets": [
+                    {
+                        "provider": "b.example.test",
+                        "key": "key-b",
+                        "upstream_model": "upstream-b",
+                    }
+                ],
+            },
         ),
-        await client.get("/api/routes", headers=AUTH_HEADERS),
         await write(
             "put",
             "/api/providers/b.example.test/keys/key-b",
@@ -699,12 +758,6 @@ async def _provider_crud_requests(client: httpx.AsyncClient) -> list[httpx.Respo
         await write(
             "delete",
             "/api/providers/b.example.test/keys/key-b",
-            {},
-        ),
-        await write("delete", "/api/routes/upstream-b", {}),
-        await write(
-            "delete",
-            "/api/providers/b.example.test/pools/pool-b",
             {},
         ),
         await write("delete", "/api/providers/b.example.test", {}),
@@ -999,7 +1052,7 @@ def test_model_reads_and_writes_share_config_revision_and_model_key_is_local(
             "targets": [
                 {
                     "provider": "a.example.test",
-                    "pool": "model-a",
+                    "key": "key-a",
                     "upstream_model": "model-a",
                 }
             ]
@@ -1187,20 +1240,16 @@ def test_unified_model_accepts_nested_api_payload(tmp_path: Path) -> None:
     assert response.json()["unified_model"]["default"]["primary"]["model"] == "model-a"
 
 
-def test_unified_model_update_preserves_shared_v3_provider_pool(tmp_path: Path) -> None:
+def test_unified_model_update_preserves_shared_provider_key_targets(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "router-config.json"
     data = config_data(tmp_path)
-    data["config_version"] = 3
+    data["config_version"] = 4
     data["providers"] = {
         "otokapi.com": {
             "base_url": "https://otokapi.com",
             "keys": {"Discount": {"api_key": "sk-discount"}},
-            "pools": {
-                "Discount": {
-                    "keys": ["Discount"],
-                    "models": ["gpt-5.5", "gpt-5.4-mini"],
-                }
-            },
         }
     }
     data["models"] = {
@@ -1208,7 +1257,7 @@ def test_unified_model_update_preserves_shared_v3_provider_pool(tmp_path: Path) 
             "targets": [
                 {
                     "provider": "otokapi.com",
-                    "pool": "Discount",
+                    "key": "Discount",
                     "upstream_model": "gpt-5.5",
                 }
             ]
@@ -1217,7 +1266,7 @@ def test_unified_model_update_preserves_shared_v3_provider_pool(tmp_path: Path) 
             "targets": [
                 {
                     "provider": "otokapi.com",
-                    "pool": "Discount",
+                    "key": "Discount",
                     "upstream_model": "gpt-5.4-mini",
                 }
             ]
@@ -1242,12 +1291,11 @@ def test_unified_model_update_preserves_shared_v3_provider_pool(tmp_path: Path) 
         "key": None,
     }
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["providers"]["otokapi.com"]["pools"]["Discount"] == {
-        "keys": ["Discount"],
-        "models": ["gpt-5.5", "gpt-5.4-mini"],
+    assert saved["providers"]["otokapi.com"]["keys"]["Discount"] == {
+        "api_key": "sk-discount"
     }
-    assert saved["models"]["gpt-5.5"]["targets"][0]["pool"] == "Discount"
-    assert saved["models"]["gpt-5.4-mini"]["targets"][0]["pool"] == "Discount"
+    assert saved["models"]["gpt-5.5"]["targets"][0]["key"] == "Discount"
+    assert saved["models"]["gpt-5.4-mini"]["targets"][0]["key"] == "Discount"
 
 
 def test_unified_model_rejects_unknown_model(tmp_path: Path) -> None:

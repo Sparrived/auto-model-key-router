@@ -103,16 +103,16 @@ cp router-config.example.json router-config.json
 
 - `host` / `port`：本地监听地址和端口。
 - `local_api_key`：客户端访问本地代理时使用的鉴权 Key；留空表示不启用本地鉴权，不推荐暴露到非可信网络。
-- `models`：真实模型列表。
-- 每个模型至少一个 `keys[]`。
+- `providers`：供应商（含 `base_url`）及至少一个 `keys`（供应商级 API Key）。
+- `models`：真实模型列表；每个模型至少有一个 `targets[]`，通过 `{provider, key, upstream_model}` 绑定一个供应商 Key。
 
 示例：
 
 ```json
 {
+  "config_version": 4,
   "host": "127.0.0.1",
   "port": 8000,
-  "default_base_url": "https://api.openai.com",
   "request_timeout": 60,
   "stream_first_byte_timeout": 90,
   "stream_idle_timeout": 180,
@@ -120,33 +120,35 @@ cp router-config.example.json router-config.json
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
   "local_api_key": "amkr_your-local-api-key",
-  "unified_model": {
-    "model": "gpt-4o-mini",
-    "key": null
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com",
+      "keys": {
+        "main": {"api_key": "sk-your-first-upstream-key"},
+        "backup": {"api_key": "sk-your-second-upstream-key"}
+      }
+    }
   },
-  "models": [
-    {
-      "id": "gpt-4o-mini",
+  "models": {
+    "gpt-4o-mini": {
       "aliases": ["fast-mini"],
       "routing_mode": "round_robin",
       "reasoning_effort": "medium",
-      "keys": [
-        {
-          "name": "openai-main",
-          "api_key": "sk-your-first-upstream-key"
-        },
-        {
-          "name": "openai-backup",
-          "api_key": "sk-your-second-upstream-key",
-          "base_url": "https://api.openai.com"
-        }
+      "targets": [
+        {"provider": "openai", "key": "main", "upstream_model": "gpt-4o-mini"},
+        {"provider": "openai", "key": "backup", "upstream_model": "gpt-4o-mini"}
       ]
     }
-  ]
+  },
+  "unified_model": {
+    "default": {
+      "primary": {"model": "gpt-4o-mini", "key": null}
+    }
+  }
 }
 ```
 
-> 注意：`local_api_key` 是调用 AMKR 本地服务的 Key；`keys[].api_key` 是 AMKR 转发到上游时使用的真实模型供应商 Key。
+> 注意：`local_api_key` 是调用 AMKR 本地服务的 Key；`providers.*.keys.*.api_key` 是 AMKR 转发到上游时使用的真实供应商 Key；`targets[]` 的 `key` 引用同供应商下已声明的 Key，`upstream_model` 是发送给上游的模型名（不写则默认为本地模型 ID）。v1/v2/v3 的旧格式配置会在加载时自动迁移到 v4 并写回。
 
 ### 3.4 请求与流式超时
 
@@ -173,14 +175,15 @@ TUI 里最常用的入口：
 | 菜单 | 主要用途 |
 | --- | --- |
 | 一键配置 | 注册路由服务，或自动配置 Claude Code / Codex / Pi Agent 使用 AMKR |
-| 模型 Key | 新增、编辑、删除、排序模型和上游 Key，设置路由模式、推理强度、访客权限 |
+| 供应商 | 添加供应商与 Key、管理 Key、刷新供应商能力探测、设置 Base URL / 路由 |
+| 模型设置 | 管理模型别名、路由模式，把供应商 Key 绑定/解绑到模型、修改上游模型名 |
 | 统一模型 | 设置 `unified-model` 当前指向的真实模型，并选择自动路由或固定 Key |
 | CLI 设置 | 管理监听地址、端口、本地鉴权、请求超时、配置迁移、版本更新等 |
 
 推荐的新手流程：
 
-1. 进入 **模型 Key**，添加一个真实模型，例如 `gpt-4o-mini`。
-2. 给该模型添加一个或多个上游 Key。
+1. 进入 **供应商 → 添加供应商**，输入供应商 ID、Base URL 和第一个 API Key；AMKR 会自动探测一次该供应商可服务的模型并建立本地模型，选中即可完成首个 Key 的绑定。
+2. 给同一模型继续添加 Key，或给模型绑定其他供应商的 Key：进入 **模型设置** 选择模型，用「管理 Key / 绑定 Key」调整。
 3. 进入 **统一模型**，把 `unified-model` 指向该模型。
 4. 进入 **一键配置 → 路由服务**，启动或注册本地路由服务。
 5. 用客户端请求 `http://127.0.0.1:8000/v1/...`，模型名可以写真实模型、别名或 `unified-model`。
@@ -301,7 +304,9 @@ AMKR 会在转发给上游前把请求体里的模型名改写为真实模型 ID
 {
   "id": "claude-3-opus",
   "native_first": true,
-  "keys": [...]
+  "targets": [
+    {"provider": "anthropic", "key": "main", "upstream_model": "claude-3-opus"}
+  ]
 }
 ```
 
@@ -397,10 +402,10 @@ unified-model[key name]
 这次请求会：
 
 1. 先把 `fast-mini` 解析到真实模型 `gpt-4o-mini`。
-2. 在该模型的 `keys[]` 中找到 `name` 为 `openai-backup` 的 Key。
-3. 转发给上游时仍使用真实模型 ID `gpt-4o-mini`。
+2. 在该模型绑定的 Key（`targets[]` 展开后的 Key）中找到 `name` 为 `openai-backup` 的那个，并转发给对应的供应商。
+3. 转发给上游时仍使用真实模型 ID `gpt-4o-mini`（`upstream_model` 与本地模型 ID 不同时使用前者）。
 
-同一模型下 `keys[].name` 必须非空且唯一。
+同一模型下 Key 名称必须非空且唯一；Key 由供应商管理，多个模型可以共用同一个供应商 Key（解析后可能显示为 `供应商ID-Key名` 的限定名称）。
 
 ---
 
@@ -493,10 +498,10 @@ curl "http://127.0.0.1:8000/metrics/requests?hours=24&limit=50" \
 - 总耗时、平均耗时、首 token 耗时。
 - 状态码分布。
 - 按真实模型、请求模型名、Key、本地调用和访客调用拆分的聚合。
-- 按供应商、模型池和上游模型拆分的历史归因。
+- 按供应商、上游模型和 Key 拆分的调用明细与聚合。
 - 补零的服务端时间桶，以及带稳定游标的逐次上游调用明细。
 
-升级前缺少供应商归因的历史调用会单独汇总到 `unattributed`，不会根据当前配置反推。调用明细和时间桶支持 `attributed=true|false` 筛选。
+升级前（v3 及更早）写入的历史统计行可能带有模型池（pool）归因，v4 不再产生该字段；这类历史数据会与无归因数据一起按 `unattributed` 汇总，不会根据当前配置反推，也不会参与当前配置的模型池概念。调用明细和时间桶支持 `attributed=true|false` 筛选。
 
 ---
 
@@ -516,13 +521,21 @@ amkr-visitor
 
 它不能在配置里修改，也不能作为 `local_api_key` 使用。
 
-给某个上游 Key 开放访客权限：
+给某个上游 Key 开放访客权限（在 `providers.*.keys` 中给对应 Key 加 `allow_visitor: true`，例如供应商 `openai` 的 Key `openai-backup`）：
 
 ```json
 {
-  "name": "openai-backup",
-  "api_key": "sk-your-second-upstream-key",
-  "allow_visitor": true
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com",
+      "keys": {
+        "openai-backup": {
+          "api_key": "sk-your-second-upstream-key",
+          "allow_visitor": true
+        }
+      }
+    }
+  }
 }
 ```
 
@@ -696,7 +709,7 @@ AMKR 的代理入口是 `/v1/{path}`，主要兼容：
 检查两层 Key：
 
 1. 请求 AMKR 时传的本地 Key 是否等于 `local_api_key`。
-2. 配置里的上游 `keys[].api_key` 是否有效。
+2. 配置里模型绑定的供应商 Key（`providers.*.keys.*.api_key`）是否有效。
 
 ### 请求返回 404 模型不存在
 

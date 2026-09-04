@@ -172,13 +172,12 @@ def test_models_requires_valid_api_key(tmp_path: Path) -> None:
 def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> None:
     config = RouterConfig.from_dict(
         {
-            "config_version": 3,
+            "config_version": 4,
             "local_api_key": "local-key",
             "providers": {
                 "vendor": {
                     "base_url": "https://upstream.test",
                     "keys": {"main": {"api_key": "sk-main"}},
-                    "pools": {"premium": {"keys": ["main"], "models": ["vendor-model"]}},
                 }
             },
             "models": {
@@ -186,7 +185,7 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
                     "targets": [
                         {
                             "provider": "vendor",
-                            "pool": "premium",
+                            "key": "main",
                             "upstream_model": "vendor-model",
                         }
                     ]
@@ -223,7 +222,8 @@ def test_provider_target_uses_upstream_model_in_request_body(tmp_path: Path) -> 
         attribution = connection.execute(
             "SELECT provider_id, pool_name, upstream_model_id FROM request_metrics"
         ).fetchone()
-    assert attribution == ("vendor", "premium", "vendor-model")
+    # v4 无 Pool：pool 归因列为空，provider/upstream 仍记录。
+    assert attribution == ("vendor", None, "vendor-model")
 
 
 def test_models_are_filtered_for_visitor_and_unified_model_is_rejected(

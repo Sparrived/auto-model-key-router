@@ -81,11 +81,6 @@ class KeyProbeResult:
     error: str
 
 
-def key_display_name(key: dict[str, Any], fallback: str, width: int = 28) -> str:
-    name = str(key.get("name") or fallback)
-    if visitor_feature_available() and key.get("allow_visitor", False):
-        return f"[{VISITOR_KEY_STYLE}]{short_text(name, width)}[/]"
-    return short_text(name, width)
 
 
 def service_management_base_url(data: dict[str, Any]) -> str:
@@ -97,11 +92,6 @@ def service_management_base_url(data: dict[str, Any]) -> str:
     return f"http://{connect_host}:{port}"
 
 
-def management_headers(data: dict[str, Any]) -> dict[str, str] | None:
-    local_api_key = str(data.get("local_api_key") or "").strip()
-    if not local_api_key:
-        return None
-    return {"Authorization": f"Bearer {local_api_key}"}
 
 
 def load_native_endpoint_states_from_file(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -196,46 +186,8 @@ def upstream_routes_for_base_url(data: dict[str, Any], base_url: str) -> dict[st
     return routes
 
 
-def set_upstream_routes_for_base_url(
-    data: dict[str, Any], base_url: str, routes: dict[str, str]
-) -> None:
-    operations.set_upstream_routes_for_base_url(data, base_url, routes)
-    # Retain cleanup for legacy documents until their next migration.
-    for model in data.get("models", []):
-        if not isinstance(model, dict):
-            continue
-        for key in model.get("keys", []):
-            if not isinstance(key, dict):
-                continue
-            key_base_url = normalize_upstream_base_url(
-                key.get("base_url")
-                or data.get("default_base_url")
-                or "https://api.openai.com"
-            )
-            if key_base_url == normalize_upstream_base_url(base_url):
-                key.pop("upstream_routes", None)
 
 
-def upstream_route_support_text(
-    routes: dict[str, str],
-    mode: str,
-    *,
-    native_first: bool = True,
-    native_state: dict[str, Any] | None = None,
-) -> str:
-    path = upstream_route_path(routes, mode)
-    status = native_endpoint_support_text(native_state)
-    if mode in routes:
-        return f"[green]自定义原生[/green] {path}{status}"
-    if mode == "openai":
-        return f"[green]原生[/green] {path}"
-    if mode == "anthropic" and native_first:
-        return f"[cyan]自动探测[/cyan] {path}{status}"
-    if mode == "responses":
-        return f"[cyan]自动探测[/cyan] {path}{status}"
-    return (
-        f"[yellow]转换[/yellow] {UPSTREAM_ROUTE_DEFAULT_PATHS['openai']}"
-    )
 
 
 def native_endpoint_support_text(state: dict[str, Any] | None) -> str:
@@ -249,72 +201,6 @@ def native_endpoint_support_text(state: dict[str, Any] | None) -> str:
     return f"\n[yellow]探测: 回退缓存[/yellow] [dim]{reason}{retry}[/dim]"
 
 
-def upstream_routes_panel(
-    data: dict[str, Any],
-    model_or_base_url: dict[str, Any] | str,
-    key_index: int | None = None,
-) -> Any:
-    if isinstance(model_or_base_url, dict):
-        model = model_or_base_url
-        if key_index is None:
-            key_index = 0
-        key = model["keys"][key_index]
-        base_url = str(
-            key.get("base_url")
-            or data.get("default_base_url")
-            or "https://api.openai.com"
-        )
-        key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    else:
-        base_url = model_or_base_url
-        model = {"id": "upstream"}
-        key = {"name": str(base_url)}
-        key_name = str(base_url)
-    normalized_base_url = normalize_upstream_base_url(base_url)
-    routes = upstream_routes_for_base_url(data, normalized_base_url)
-    native_states = fetch_native_endpoint_states(data)
-    native_first = any(
-        bool(model.get("native_first", True))
-        for model in data.get("models", [])
-        for key in model.get("keys", [])
-        if normalize_upstream_base_url(
-            key.get("base_url")
-            or data.get("default_base_url")
-            or "https://api.openai.com"
-        )
-        == normalized_base_url
-    )
-    table = Table(show_header=True, box=None, expand=True)
-    table.add_column("模式", style="cyan", ratio=1)
-    table.add_column("原生支持/上游路径", ratio=3)
-    for mode in UPSTREAM_ROUTE_MODES:
-        table.add_row(
-            UPSTREAM_ROUTE_LABELS[mode],
-            upstream_route_support_text(
-                routes,
-                mode,
-                native_first=native_first,
-                native_state=native_states.get(
-                    f"{normalized_base_url}|{upstream_route_path(routes, mode).strip('/')}"
-                ),
-            ),
-        )
-    base_url = compact_url(normalized_base_url or "-", 56)
-    return Group(
-        section_panel(
-            f"模型: [bold]{short_text(model['id'], 48)}[/bold]\n"
-            f"Key: {key_display_name(key, key_name, 48)}\n"
-            f"上游: [bold]{base_url}[/bold]",
-            "Key 信息",
-            "cyan",
-        ),
-        section_panel(
-            table,
-            "三种模式原生支持",
-            "magenta",
-            "[dim]自定义值可填路径前缀，如 anthropic/，或完整路径 anthropic/v1/messages[/dim]",
-        ),
-    )
 
 
 def _open_config_on_key(path: Path, key: str) -> str | None:
@@ -339,245 +225,24 @@ def provider_keys(provider: dict[str, Any]) -> dict[str, Any]:
     return operations.provider_keys(provider)
 
 
-def provider_pools(provider: dict[str, Any]) -> dict[str, Any]:
-    return operations.provider_pools(provider)
 
 
-def pool_key_names(pool: Any) -> list[str]:
-    return operations.pool_key_names(pool)
 
 
-def pool_available_models(pool: Any) -> list[str]:
-    if not isinstance(pool, dict):
-        return []
-    models = pool.get("available_models", pool.get("models", []))
-    return [str(model_id) for model_id in models if str(model_id)] if isinstance(models, list) else []
 
 
-def pool_enabled_models(pool: Any) -> list[str]:
-    return operations.pool_models(pool)
 
 
-def next_pool_name(pools: dict[str, Any]) -> str:
-    if not pools:
-        return "default"
-    index = 2
-    while f"pool-{index}" in pools:
-        index += 1
-    return f"pool-{index}"
 
 
-def matching_pool_names(
-    pools: dict[str, Any],
-    models: list[str],
-    probes: dict[str, Any] | None = None,
-) -> list[str]:
-    expected = set(models)
-    matches: list[str] = []
-    for pool_name, pool in pools.items():
-        source = probes.get(pool_name) if probes is not None else pool
-        if not isinstance(source, dict) or source.get("errors"):
-            continue
-        available = source.get("models") if probes is not None else source.get("available_models")
-        if isinstance(available, list) and set(map(str, available)) == expected:
-            matches.append(str(pool_name))
-    return matches
 
 
-def merge_provider_pools(
-    data: dict[str, Any],
-    provider_id: str,
-    pool_names: list[str],
-    probe: dict[str, Any],
-) -> str:
-    pools = provider_pools(raw_providers(data)[provider_id])
-    selected = set(pool_names)
-    ordered_names = [str(name) for name in pools if name in selected]
-    if not ordered_names:
-        raise ValueError("没有可合并的模型池")
-    selected = set(ordered_names)
-    kept_name = ordered_names[0]
-    kept_pool = pools[kept_name]
-    if not isinstance(kept_pool, dict):
-        kept_pool = {"keys": pool_key_names(kept_pool), "models": []}
-        pools[kept_name] = kept_pool
-
-    kept_pool["keys"] = list(
-        dict.fromkeys(
-            key_name
-            for pool_name in ordered_names
-            for key_name in pool_key_names(pools[pool_name])
-        )
-    )
-    kept_pool["models"] = list(
-        dict.fromkeys(
-            model_id
-            for pool_name in ordered_names
-            for model_id in pool_enabled_models(pools[pool_name])
-        )
-    )
-
-    metadata_names = {
-        "available_models",
-        "all_available_models",
-        "key_models",
-        "routes",
-        "errors",
-        "checked_at",
-        "manual_models",
-    }
-    for name in metadata_names:
-        kept_pool.pop(name, None)
-    if "models" in probe:
-        kept_pool["available_models"] = deepcopy(probe["models"])
-    if "all_models" in probe:
-        kept_pool["all_available_models"] = deepcopy(probe["all_models"])
-    for name, value in probe.items():
-        if name not in {"models", "all_models"}:
-            kept_pool[name] = deepcopy(value)
-
-    for model in raw_v2_models(data).values():
-        rewritten: list[dict[str, Any]] = []
-        for target in model_targets(model):
-            if target.get("provider") == provider_id and target.get("pool") in selected:
-                target["pool"] = kept_name
-            if target not in rewritten:
-                rewritten.append(target)
-        model["targets"] = rewritten
-    for pool_name in ordered_names[1:]:
-        pools.pop(pool_name)
-    return kept_name
 
 
-def cleanup_empty_pools_and_models(
-    data: dict[str, Any], provider_id: str
-) -> set[str]:
-    pools = provider_pools(raw_providers(data)[provider_id])
-    empty_pool_names = {
-        str(pool_name) for pool_name, pool in pools.items() if not pool_key_names(pool)
-    }
-    for pool_name in empty_pool_names:
-        pools.pop(pool_name)
-
-    models = raw_v2_models(data)
-    removed_models: set[str] = set()
-    for model_id, model in list(models.items()):
-        targets = model_targets(model)
-        targets[:] = [
-            target
-            for target in targets
-            if not (
-                target.get("provider") == provider_id
-                and target.get("pool") in empty_pool_names
-            )
-        ]
-        if not targets:
-            models.pop(model_id)
-            removed_models.add(str(model_id))
-
-    unified = data.get("unified_model")
-    if not isinstance(unified, dict):
-        return removed_models
-
-    config_data = deepcopy(data)
-    config_data.pop("unified_model", None)
-    config_data.setdefault("config_version", CONFIG_VERSION)
-    config = RouterConfig.from_dict(config_data)
-    configured_models = {model.id: model for model in config.models}
-    unified_model_id = config.configured_model_id(str(unified.get("model") or ""))
-    if unified_model_id is None:
-        fallback_model = fallback_unified_model(models)
-        if fallback_model is None:
-            data.pop("unified_model", None)
-        else:
-            data["unified_model"] = {"model": fallback_model}
-        return removed_models
-
-    unified_key = unified.get("key")
-    if unified_key and not any(
-        key.name == unified_key and key.enabled
-        for key in configured_models[unified_model_id].keys
-    ):
-        unified.pop("key", None)
-
-    image_model = unified.get("image_model")
-    image_model_id = config.configured_model_id(str(image_model or ""))
-    if image_model_id is None:
-        unified.pop("image_model", None)
-        unified.pop("image_key", None)
-    elif unified.get("image_key") and not any(
-        key.name == unified["image_key"] and key.enabled
-        for key in configured_models[image_model_id].keys
-    ):
-        unified.pop("image_key", None)
-    return removed_models
 
 
-def ensure_default_pool(provider: dict[str, Any]) -> None:
-    keys = provider_keys(provider)
-    pools = provider_pools(provider)
-    if keys and "default" not in pools:
-        pools["default"] = {"keys": list(keys)}
 
 
-def pool_probe_models(
-    provider: dict[str, Any],
-    key_names: list[str],
-    timeout: float = 15.0,
-    manual_models: list[str] | None = None,
-) -> dict[str, Any]:
-    base_url = str(provider.get("base_url") or "").strip()
-    keys = provider_keys(provider)
-    routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
-    key_models: dict[str, list[str]] = {}
-    model_counts: dict[str, int] = {}
-    route_results: dict[str, dict[str, bool]] = {}
-    for key_name in key_names:
-        key = keys.get(key_name)
-        if not isinstance(key, dict):
-            continue
-        api_key = str(key.get("api_key") or "")
-        if not base_url or not api_key:
-            key_models[key_name] = []
-            continue
-        discovered = discover_upstream_models(base_url, api_key, set(), timeout=timeout)
-        key_models[key_name] = discovered
-        for model_id in discovered:
-            model_counts[model_id] = model_counts.get(model_id, 0) + 1
-    common_models = sorted(
-        model_id for model_id, count in model_counts.items() if count == len(key_names)
-    )
-    manual_models = sorted(dict.fromkeys(manual_models or []))
-    if not model_counts and manual_models:
-        common_models = manual_models
-        model_counts = {model_id: len(key_names) for model_id in manual_models}
-        for key_name in key_names:
-            key_models[key_name] = manual_models
-    candidate_models = common_models or sorted(model_counts)
-    probe_model = candidate_models[0] if candidate_models else None
-    if probe_model:
-        probe_data = {"upstream_routes": {base_url: routes} if routes else {}}
-        for key_name in key_names:
-            key = keys.get(key_name)
-            if not isinstance(key, dict):
-                continue
-            probe_key = dict(key)
-            probe_key["name"] = key_name
-            probe_key["base_url"] = base_url
-            route_results[key_name] = {
-                result.mode: result.available
-                for result in probe_key_availability(
-                    probe_data, probe_model, probe_key, timeout=timeout
-                )
-            }
-    return {
-        "models": common_models,
-        "all_models": sorted(model_counts),
-        "key_models": key_models,
-        "routes": route_results,
-        "manual_models": bool(manual_models and common_models == manual_models),
-        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
 
 
 def probe_provider_key_capabilities(
@@ -616,162 +281,8 @@ def probe_provider_key_capabilities(
     }
 
 
-def apply_pool_probe(
-    provider: dict[str, Any],
-    pool_name: str,
-    timeout: float = 15.0,
-    manual_models: list[str] | None = None,
-) -> dict[str, Any]:
-    pool = provider_pools(provider).setdefault(pool_name, {"keys": []})
-    key_names = pool_key_names(pool)
-    probe = pool_probe_models(
-        provider, key_names, timeout=timeout, manual_models=manual_models
-    )
-    if isinstance(pool, dict):
-        available_models = probe["models"]
-        pool["available_models"] = available_models
-        pool["all_available_models"] = probe["all_models"]
-        pool["key_models"] = probe["key_models"]
-        pool["routes"] = probe["routes"]
-        pool["manual_models"] = probe["manual_models"]
-        pool["checked_at"] = probe["checked_at"]
-    return probe
-
-
-def parse_model_id_list(value: str) -> list[str]:
-    return [model_id.strip() for model_id in value.split(",") if model_id.strip()]
-
-
-def prompt_pool_enabled_models(pool: dict[str, Any]) -> list[str]:
-    enabled = set(pool_enabled_models(pool))
-    raw_available = pool.get("available_models")
-    available = (
-        {str(model_id) for model_id in raw_available if str(model_id)}
-        if isinstance(raw_available, list)
-        else set(enabled)
-    )
-    raw_all_available = pool.get("all_available_models")
-    all_available = (
-        {str(model_id) for model_id in raw_all_available if str(model_id)}
-        if isinstance(raw_all_available, list)
-        else set(available)
-    )
-    model_ids = sorted(all_available | enabled)
-    if model_ids:
-        custom = "__custom__"
-        options = []
-        for model_id in model_ids:
-            if model_id in available:
-                label = model_id
-            elif model_id in all_available:
-                label = f"[yellow]{model_id} · 仅部分 Key 可用[/yellow]"
-            else:
-                label = f"[yellow]{model_id} · 本次未探测到[/yellow]"
-            options.append((model_id, label))
-        selected = select_multiple(
-            "模型池",
-            options + [(custom, "自定义输入")],
-            content=section_panel(
-                "选择该模型池启用的模型。探测状态仅供参考，不会自动取消已有选择。",
-                "启用模型",
-                "cyan",
-            ),
-            checked_values=enabled,
-        )
-        if custom not in selected:
-            return selected
-    text = prompt_text(
-        "模型池",
-        "手动可用模型，多个用逗号分隔",
-        default=", ".join(sorted(enabled)),
-    ).strip()
-    return parse_model_id_list(text)
-
-
-def pools_containing_key(provider: dict[str, Any], key_name: str) -> set[str]:
-    return {
-        str(pool_name)
-        for pool_name, pool in provider_pools(provider).items()
-        if key_name in pool_key_names(pool)
-    }
-
-
-def duplicate_pool_memberships(
-    data: dict[str, Any],
-) -> list[tuple[str, str, list[str]]]:
-    duplicates: list[tuple[str, str, list[str]]] = []
-    for provider_id, provider in sorted(raw_providers(data).items()):
-        memberships: dict[str, list[str]] = {}
-        for pool_name, pool in sorted(provider_pools(provider).items()):
-            for key_name in pool_key_names(pool):
-                memberships.setdefault(key_name, []).append(str(pool_name))
-        duplicates.extend(
-            (str(provider_id), key_name, memberships.get(key_name, []))
-            for key_name in sorted(provider_keys(provider))
-            if len(memberships.get(key_name, [])) != 1
-        )
-    return duplicates
-
-
-def repair_duplicate_pool_memberships_interactively(path: Path) -> bool:
-    data = load_config_data(path)
-    duplicates = duplicate_pool_memberships(data)
-    if not duplicates:
-        return False
-    providers = raw_providers(data)
-    for provider_id, key_name, pool_names in duplicates:
-        provider = providers[provider_id]
-        pools = provider_pools(provider)
-        for pool_name, pool in list(pools.items()):
-            if not isinstance(pool, dict):
-                pools[pool_name] = {
-                    "keys": pool_key_names(pool),
-                    "models": [],
-                }
-        console.print(
-            section_panel(
-                f"供应商: [bold]{provider_id}[/bold]\n"
-                f"Key: [bold]{key_name}[/bold]\n"
-                f"当前模型池: [yellow]{', '.join(pool_names) or '未分配'}[/yellow]\n"
-                "请选择唯一保留的模型池，或新建模型池。",
-                "修复重复模型池归属",
-                "yellow",
-            )
-        )
-        selected_pool = select_or_enter_pool_name(
-            pools,
-            default=pool_names[0] if pool_names else "default",
-        )
-        if not selected_pool:
-            return False
-        for pool in pools.values():
-            if isinstance(pool, dict):
-                pool["keys"] = [
-                    current_key
-                    for current_key in pool_key_names(pool)
-                    if current_key != key_name
-                ]
-        target_pool = pools.setdefault(selected_pool, {"keys": [], "models": []})
-        target_pool.setdefault("keys", []).append(key_name)
-    save_config_data(path, data)
-    return True
-
-
-def fallback_unified_model(models: dict[str, Any]) -> str | None:
-    for model_id, model in sorted(models.items()):
-        if model_targets(model):
-            return str(model_id)
-    return None
-
-
 def model_targets(model: dict[str, Any]) -> list[dict[str, Any]]:
     return operations.model_targets(model)
-
-
-def enable_pool_models(
-    data: dict[str, Any], provider_id: str, pool_name: str, enabled_models: list[str]
-) -> None:
-    operations.enable_pool_models(data, provider_id, pool_name, enabled_models)
 
 
 def v2_summary_panel(data: dict[str, Any]) -> Any:
@@ -783,13 +294,11 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
     provider_table.add_column("供应商", ratio=1)
     provider_table.add_column("Base URL", ratio=2)
     provider_table.add_column("Keys", justify="right")
-    provider_table.add_column("Pools", justify="right")
     if visitor_installed:
         provider_table.add_column("访客", justify="right")
     provider_table.add_column("路由", ratio=2)
     for provider_id, provider in sorted(providers.items()):
         keys = provider_keys(provider)
-        pools = provider_pools(provider)
         visitor_keys = sum(1 for key in keys.values() if key.get("allow_visitor"))
         routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
         route_text = ", ".join(sorted(routes)) if routes else "默认"
@@ -797,16 +306,15 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
             short_text(str(provider_id), 18),
             compact_url(str(provider.get("base_url") or "-"), 42),
             str(len(keys)),
-            str(len(pools)),
             short_text(route_text, 28),
         ]
         if visitor_installed:
-            row.insert(4, format_visitor_status_text(visitor_keys > 0, visitor_installed))
+            row.insert(3, format_visitor_status_text(visitor_keys > 0, visitor_installed))
         provider_table.add_row(*row)
     if not provider_table.rows:
-        empty_row = ["-", "[yellow]暂无供应商[/yellow]", "0", "0", "-"]
+        empty_row = ["-", "[yellow]暂无供应商[/yellow]", "0", "-"]
         if visitor_installed:
-            empty_row.insert(4, "-")
+            empty_row.insert(3, "-")
         provider_table.add_row(*empty_row)
 
     model_table = Table(show_header=True, header_style="bold cyan", expand=True)
@@ -816,19 +324,11 @@ def v2_summary_panel(data: dict[str, Any]) -> Any:
     model_table.add_column("Keys", justify="right")
     for model_id, model in sorted(models.items()):
         aliases = ", ".join(str(alias) for alias in model.get("aliases", []) if str(alias))
-        key_count = 0
-        for target in model_targets(model):
-            provider = providers.get(str(target.get("provider") or ""), {})
-            if target.get("pool"):
-                pool = provider_pools(provider).get(str(target.get("pool") or ""), {})
-                key_count += len(pool_key_names(pool))
-            elif target.get("key"):
-                key_count += 1
         model_table.add_row(
             short_text(str(model_id), 28),
             short_text(aliases or "-", 36),
             str(model.get("routing_mode") or "round_robin"),
-            str(key_count),
+            str(len(model_targets(model))),
         )
     if not model_table.rows:
         model_table.add_row("-", "-", "-", "0")
@@ -883,26 +383,6 @@ def select_provider_key(
     return provider_id, sorted(keys)[int(choice) - 1]
 
 
-def select_provider_pool(data: dict[str, Any], title: str) -> tuple[str, str] | None:
-    provider_id = select_provider(data, "选择供应商")
-    if provider_id is None:
-        return None
-    provider = raw_providers(data)[provider_id]
-    ensure_default_pool(provider)
-    pools = provider_pools(provider)
-    if not pools:
-        return None
-    options = [
-        (
-            str(index + 1),
-            f"{short_text(pool_name, 26)} · {len(pool_key_names(pool))} Key",
-        )
-        for index, (pool_name, pool) in enumerate(sorted(pools.items()))
-    ] + [("0", "返回")]
-    choice = select_option(title, options)
-    if choice == "0":
-        return None
-    return provider_id, sorted(pools)[int(choice) - 1]
 
 
 def select_v2_model(data: dict[str, Any], title: str) -> str | None:
@@ -943,155 +423,141 @@ def select_or_enter_model_id(
     return choice
 
 
-def select_pool_model_id(
-    title: str,
-    prompt: str,
+
+
+
+
+
+
+
+
+
+
+def probe_provider_capability(
     provider: dict[str, Any],
-    pool_name: str,
-    *,
-    default: str,
-) -> str:
-    pool = provider_pools(provider).get(pool_name, {})
-    model_ids = sorted(dict.fromkeys(pool_enabled_models(pool) or pool_available_models(pool)))
-    if not model_ids:
-        return prompt_text(title, prompt, default=default).strip()
-    options = [(model_id, short_text(model_id, 48)) for model_id in model_ids]
-    options.extend([("__custom__", "自定义输入"), ("0", "返回")])
-    selected = model_ids.index(default) if default in model_ids else 0
-    choice = select_option(title, options, selected=selected)
-    if choice == "0":
-        return ""
-    if choice == "__custom__":
-        return prompt_text(title, prompt, default=default).strip()
-    return choice
+    key_names: list[str],
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Probe a provider once and fold results into its capabilities block.
 
-
-def select_or_enter_pool_name(
-    pools: dict[str, Any],
-    *,
-    default: str,
-) -> str:
-    pool_names = sorted(pools)
-    if not pool_names:
-        return prompt_text("模型池", "Pool 名称", default=default).strip()
-    options = [(pool_name, pool_name) for pool_name in pool_names]
-    options.extend([("__custom__", "新建/自定义 Pool 名称"), ("0", "返回")])
-    selected = pool_names.index(default) if default in pool_names else 0
-    choice = select_option("模型池", options, selected=selected)
-    if choice == "0":
-        return ""
-    if choice == "__custom__":
-        return prompt_text("模型池", "Pool 名称", default=default).strip()
-    return choice
-
-
-def _combined_capability_probe(*probes: dict[str, Any]) -> dict[str, Any]:
-    key_models = {
-        str(key_name): list(models)
-        for probe in probes
-        for key_name, models in probe.get("key_models", {}).items()
-    }
-    model_sets = [set(map(str, models)) for models in key_models.values()]
-    errors = {
-        str(key_name): str(error)
-        for probe in probes
-        for key_name, error in probe.get("errors", {}).items()
-    }
-    combined = {
-        "models": sorted(set.intersection(*model_sets)) if model_sets else [],
-        "all_models": sorted(
-            {
-                str(model_id)
-                for probe in probes
-                for model_id in probe.get("all_models", [])
-            }
-        ),
-        "key_models": key_models,
+    v4 probes at provider level: the /v1/models discovery plus one minimal
+    call per configured upstream route mode. The first usable key is used for
+    the discovery; route availability is tested per endpoint mode with that
+    key (provider routes are identical for every key of the provider).
+    """
+    base_url = str(provider.get("base_url") or "").strip()
+    keys = provider_keys(provider)
+    usable = [
+        key_name
+        for key_name in key_names
+        if isinstance(keys.get(key_name), dict) and keys[key_name].get("api_key")
+    ]
+    errors: dict[str, str] = {}
+    discovered: list[str] = []
+    if not base_url:
+        errors["provider"] = "缺少 Base URL"
+    elif not usable:
+        errors["provider"] = "没有可用的 API Key"
+    else:
+        probe_key_name = usable[0]
+        models, error = discover_upstream_models_result(
+            base_url, str(keys[probe_key_name].get("api_key") or ""), set(),
+            timeout=timeout,
+        )
+        if error:
+            errors[probe_key_name] = error
+        else:
+            discovered = models
+    route_status: dict[str, str] = {}
+    probe_routes = (
+        provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
+    )
+    if usable and not errors:
+        probe_key_name = usable[0]
+        probe_key = dict(keys[probe_key_name])
+        probe_key["name"] = probe_key_name
+        probe_key["base_url"] = base_url
+        probe_data = {"upstream_routes": {base_url: probe_routes}}
+        for result in probe_key_availability(
+            probe_data,
+            (discovered or ["probe-model"])[0],
+            probe_key,
+            timeout=timeout,
+        ):
+            route_status[result.mode] = (
+                "ok" if result.available else f"failed: {result.error or result.status_code}"
+            )
+    capabilities = {
+        "models": discovered,
+        "route_status": route_status,
         "errors": errors,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    routes = {
-        str(key_name): deepcopy(route_results)
-        for probe in probes
-        for key_name, route_results in probe.get("routes", {}).items()
-    }
-    if routes:
-        combined["routes"] = routes
-    manual_values = [
-        bool(probe["manual_models"])
-        for probe in probes
-        if "manual_models" in probe
-    ]
-    if manual_values:
-        combined["manual_models"] = all(manual_values)
-    return combined
+    return capabilities
 
 
-def _update_pool_capability_probe(
-    pool: dict[str, Any],
-    probe: dict[str, Any],
-    *,
-    record_errors: bool = False,
-) -> None:
-    errors = probe.get("errors", {})
-    if errors and not record_errors:
-        return
-    pool["available_models"] = [] if errors else deepcopy(probe.get("models", []))
-    pool["all_available_models"] = deepcopy(probe.get("all_models", []))
-    pool["key_models"] = deepcopy(probe.get("key_models", {}))
-    pool["errors"] = deepcopy(errors)
-    pool["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    for field in ("routes", "manual_models"):
-        if field in probe:
-            pool[field] = deepcopy(probe[field])
-
-
-def _select_pool_after_probe_failure(
-    pools: dict[str, Any],
-    pool_probes: dict[str, dict[str, Any]],
-    key_name: str,
-    key_probe: dict[str, Any],
-) -> str:
-    pool_names = list(pools)
-    options = []
-    for index, (pool_name, pool) in enumerate(pools.items(), 1):
-        probe = pool_probes[pool_name]
-        errors = probe.get("errors", {})
-        if errors:
-            summary = "; ".join(f"{name}: {error}" for name, error in errors.items())
-            status = f"[red]探测失败，信息可能过期 · {short_text(summary, 48)}[/red]"
-        elif not probe.get("models"):
-            status = "[yellow]未发现模型[/yellow]"
-        else:
-            status = f"[green]探测成功 · {len(probe.get('models', []))} 个共同模型[/green]"
-        options.append((str(index), f"{pool_name} · {len(pool_key_names(pool))} Key · {status}"))
-    options.extend([("n", "新建模型池"), ("0", "返回")])
-    key_errors = key_probe.get("errors", {})
-    if key_errors:
-        key_status = "[red]探测失败[/red] " + "; ".join(
-            f"{name}: {error}" for name, error in key_errors.items()
-        )
-    elif not key_probe.get("models"):
-        key_status = "[yellow]未发现模型[/yellow]"
-    else:
-        key_status = f"[green]探测成功[/green] · {len(key_probe.get('models', []))} 个模型"
-    choice = select_option(
-        "选择模型池",
-        options,
-        content=section_panel(
-            f"新 Key: [bold]{key_name}[/bold] · {key_status}\n"
-            "自动分组已停止，请根据本次探测状态选择现有池或新建池。",
-            "人工分组",
+def provider_capabilities_panel(provider: dict[str, Any]) -> Any:
+    capabilities = provider.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return section_panel(
+            "[yellow]尚未探测。添加第一个 Key 时自动探测，或手动刷新。[/yellow]",
+            "供应商能力",
             "yellow",
+        )
+    models = capabilities.get("models") or []
+    route_status = capabilities.get("route_status") or {}
+    checked_at = capabilities.get("checked_at") or "-"
+    errors = capabilities.get("errors") or {}
+    lines = [f"探测时间: [bold]{checked_at}[/bold]"]
+    if errors:
+        lines.append("[red]探测错误: " + "; ".join(str(v) for v in errors.values()) + "[/red]")
+    if route_status:
+        lines.append(
+            "路由: "
+            + " · ".join(
+                f"{UPSTREAM_ROUTE_LABELS.get(mode, mode)}: [{'green' if str(status) == 'ok' else 'red'}]{status}[/{'green' if str(status) == 'ok' else 'red'}]"
+                for mode, status in sorted(route_status.items())
+            )
+        )
+    model_text = "\n".join(f"{index}. [bold]{short_text(str(model_id), 64)}[/bold]" for index, model_id in enumerate(models, 1))
+    if not model_text:
+        model_text = "[dim]未发现模型[/dim]"
+    return Group(
+        section_panel("\n".join(lines), "探测状态", "cyan"),
+        section_panel(model_text, f"可用模型（{len(models)}）", "blue"),
+    )
+
+
+def select_models_to_serve(
+    provider_id: str,
+    key_name: str,
+    models: list[str],
+    *,
+    extra_title: str = "该 Key 服务哪些模型",
+) -> list[str] | None:
+    """Multi-select which models a key should serve; returns [] to skip."""
+    all_ids = sorted({str(model_id) for model_id in models if str(model_id)})
+    if not all_ids:
+        manual = prompt_text(
+            extra_title,
+            "上游未发现模型，请手动填写可用模型（逗号分隔）",
+        ).strip()
+        if not manual:
+            return None
+        return [item.strip() for item in manual.split(",") if item.strip()]
+    selected = select_multiple(
+        extra_title,
+        [(model_id, model_id) for model_id in all_ids],
+        content=section_panel(
+            "选择后这些模型会创建/更新为本地模型，并把该 Key 绑定到它们。\n"
+            "取消勾选表示该 Key 不服务该模型。",
+            "说明",
+            "cyan",
         ),
     )
-    if choice == "0":
-        return ""
-    if choice == "n":
-        return prompt_text(
-            "模型池", "Pool 名称", default=next_pool_name(pools)
-        ).strip()
-    return pool_names[int(choice) - 1]
+    if selected is None:
+        return None
+    return selected
 
 
 def add_provider_key_interactively(
@@ -1157,116 +623,91 @@ def add_provider_key_interactively(
         key_name,
         api_key,
         enabled=True,
-        pool_name=None,
     )
-    pools = provider_pools(provider)
-    pool_names = list(pools)
-    with console.status(
-        "[cyan]正在探测新 Key 和现有模型池...[/cyan]", spinner="dots"
-    ):
-        key_probe = probe_provider_key_capabilities(provider, [key_name])
-        pool_probes = {
-            pool_name: probe_provider_key_capabilities(
-                provider, pool_key_names(pools[pool_name])
-            )
-            for pool_name in pool_names
-        }
-    for pool_name, probe in pool_probes.items():
-        pool = pools[pool_name]
-        if isinstance(pool, dict):
-            if "routes" not in probe and isinstance(pool.get("routes"), dict):
-                probe["routes"] = deepcopy(pool["routes"])
-            probe.setdefault("manual_models", bool(pool.get("manual_models", False)))
-            _update_pool_capability_probe(pool, probe)
-
-    all_probes_succeeded = bool(key_probe.get("models")) and not key_probe.get(
-        "errors"
-    ) and all(
-        probe.get("models") and not probe.get("errors")
-        for probe in pool_probes.values()
+    existing_capabilities = provider.get("capabilities")
+    probe: dict[str, Any] | None = None
+    needs_probe = not (
+        isinstance(existing_capabilities, dict)
+        and existing_capabilities.get("models")
+        and not existing_capabilities.get("errors")
     )
-    assignment_probe: dict[str, Any] | None = None
-    if all_probes_succeeded:
-        matches = matching_pool_names(pools, key_probe.get("models", []), pool_probes)
-        if len(matches) > 1:
-            assignment_probe = _combined_capability_probe(
-                key_probe, *(pool_probes[name] for name in matches)
-            )
-            pool_name = merge_provider_pools(
-                data, provider_id, matches, assignment_probe
-            )
-        elif matches:
-            pool_name = matches[0]
-            assignment_probe = _combined_capability_probe(
-                key_probe, pool_probes[pool_name]
-            )
-        else:
-            pool_name = next_pool_name(pools)
-            assignment_probe = _combined_capability_probe(key_probe)
+    if needs_probe:
+        with console.status(
+            f"[cyan]正在探测供应商 {provider_id} 的可用能力...[/cyan]",
+            spinner="dots",
+        ):
+            probe = probe_provider_capability(provider, [key_name])
+        provider["capabilities"] = probe
     else:
-        pool_name = _select_pool_after_probe_failure(
-            pools, pool_probes, key_name, key_probe
-        )
-        if not pool_name:
-            return section_panel("[yellow]配置未变化。[/yellow]", "添加 Key", "yellow")
-    draft["pool_name"] = pool_name
-    pool = operations.assign_pool_keys(
-        data,
-        provider_id,
-        pool_name,
-        [key_name],
-        retain_existing=True,
-    )
-    selected_probe = pool_probes.get(pool_name)
-    if selected_probe is None or not selected_probe.get("errors"):
-        _update_pool_capability_probe(
-            pool,
-            assignment_probe
-            or _combined_capability_probe(
-                key_probe,
-                *([selected_probe] if selected_probe is not None else []),
+        probe = None
+    capabilities = probe or existing_capabilities or {}
+    # Verify the newly added key can discover models; fall back to provider cache.
+    models = capabilities.get("models") or []
+    errors = capabilities.get("errors") or {}
+    if not needs_probe:
+        with console.status(
+            f"[cyan]正在用新 Key 探测供应商 {provider_id}...[/cyan]", spinner="dots"
+        ):
+            probe = probe_provider_capability(provider, [key_name])
+        if probe.get("models") or probe.get("errors"):
+            provider["capabilities"] = probe
+            capabilities = probe
+            models = probe.get("models") or []
+            errors = probe.get("errors") or {}
+    if not models and errors:
+        show_result_page(
+            "添加 Key",
+            section_panel(
+                "探测失败，仍将保存该 Key；可稍后在供应商菜单手动刷新探测。\n错误: "
+                + "; ".join(str(v) for v in errors.values()),
+                "探测失败",
+                "yellow",
             ),
-            record_errors=True,
         )
-    else:
-        historical_all = pool.get(
-            "all_available_models", pool.get("available_models", [])
+    probe_failed = not models and bool(errors)
+    selected_models = select_models_to_serve(
+        provider_id, key_name, models or []
+    ) if not probe_failed else []
+    if selected_models is None:
+        # 用户在模型多选界面取消：保存 Key（不绑定模型）后返回。
+        RouterConfig.from_dict(data)
+        restart = commit_v2_config(path, data, old_config)
+        FORM_DRAFTS.pop("add_provider_key", None)
+        return Group(
+            section_panel(
+                f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n"
+                "已保存 Key，未绑定任何模型。可在模型设置中绑定。",
+                "Key 已保存",
+                "green",
+            ),
+            restart,
         )
-        pool["available_models"] = []
-        pool["all_available_models"] = sorted(
-            set(map(str, historical_all))
-            | set(map(str, key_probe.get("all_models", [])))
-        )
-        historical_key_models = pool.get("key_models", {})
-        merged_key_models = (
-            deepcopy(historical_key_models)
-            if isinstance(historical_key_models, dict)
-            else {}
-        )
-        for failed_key_name, failed_models in selected_probe.get(
-            "key_models", {}
-        ).items():
-            merged_key_models.setdefault(failed_key_name, deepcopy(failed_models))
-        merged_key_models.update(deepcopy(key_probe.get("key_models", {})))
-        pool["key_models"] = merged_key_models
-        pool["errors"] = {
-            **deepcopy(selected_probe.get("errors", {})),
-            **deepcopy(key_probe.get("errors", {})),
-        }
-        pool["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if key_probe.get("routes"):
-            pool["routes"] = {
-                **deepcopy(pool.get("routes", {})),
-                **deepcopy(key_probe["routes"]),
-            }
-    enabled_models = prompt_pool_enabled_models(pool)
-    enable_pool_models(data, provider_id, pool_name, enabled_models)
+    bound = 0
+    for upstream_model in selected_models:
+        local_models = raw_v2_models(data)
+        if upstream_model not in local_models:
+            operations.create_model(data, upstream_model)
+        try:
+            operations.add_model_target(
+                data,
+                upstream_model,
+                {
+                    "provider": provider_id,
+                    "key": key_name,
+                    "upstream_model": upstream_model,
+                },
+            )
+            bound += 1
+        except operations.ConfigOperationError:
+            continue
     RouterConfig.from_dict(data)
     restart = commit_v2_config(path, data, old_config)
     FORM_DRAFTS.pop("add_provider_key", None)
     return Group(
         section_panel(
-            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n模型池: [bold]{pool_name}[/bold]\n已启用模型: [bold]{len(enabled_models)}[/bold]\n共同可用模型: [bold]{len(pool_available_models(pool))}[/bold]",
+            f"供应商: [bold]{provider_id}[/bold]\nKey: [bold]{key_name}[/bold]\n"
+            f"上游: [bold]{compact_url(str(provider.get('base_url') or '-'), 56)}[/bold]\n"
+            f"已绑定模型: [bold]{bound}[/bold]",
             "添加完成",
             "green",
         ),
@@ -1295,10 +736,17 @@ def manage_provider_keys_interactively(
         if visitor_installed:
             options.append(("3", "访客访问"))
         options.extend([("4", "删除"), ("0", "返回")])
+        bound_models = [
+            model_id
+            for model_id, model in raw_v2_models(data).items()
+            for target in model_targets(model)
+            if target.get("provider") == provider_id and target.get("key") == key_name
+        ]
         lines = [
             f"供应商: [bold]{provider_id}[/bold]",
             f"Key: [bold]{key_name}[/bold]",
             f"状态: [bold]{'启用' if key.get('enabled', True) else '禁用'}[/bold]",
+            f"服务模型: [bold]{', '.join(bound_models) or '未绑定模型'}[/bold]",
         ]
         if visitor_installed:
             lines.append(
@@ -1353,16 +801,14 @@ def update_provider_key_interactively(
         )
         message = f"已{'允许' if allowed else '禁止'}访客访问 {provider_id}/{key_name}。"
     elif choice == "4":
-        key_pools = pools_containing_key(provider, key_name)
         used_by = [
             model_id
             for model_id, model in raw_v2_models(data).items()
             for target in model_targets(model)
-            if target.get("provider") == provider_id
-            and (target.get("key") == key_name or target.get("pool") in key_pools)
+            if target.get("provider") == provider_id and target.get("key") == key_name
         ]
         if used_by and not confirm_choice(
-            f"该 Key 被 {len(used_by)} 个模型路由使用，删除会一并移除这些 target。继续？",
+            f"该 Key 被 {len(used_by)} 个模型使用，删除会一并移除这些绑定。继续？",
             default=False,
         ):
             return section_panel("[yellow]配置未变化。[/yellow]", "删除 Key", "yellow")
@@ -1375,184 +821,92 @@ def update_provider_key_interactively(
     return Group(section_panel(message, "供应商 Key", "green"), restart)
 
 
-def manage_provider_pools_interactively(
-    path: Path, provider_id: str | None = None
-) -> None:
-    while True:
-        data = load_v2_config_data(path)
-        if provider_id is None:
-            selected_provider_id = select_provider(data, "选择供应商模型池")
-            if selected_provider_id is None:
-                return
-        else:
-            selected_provider_id = provider_id
-            if selected_provider_id not in raw_providers(data):
-                return
-        provider = raw_providers(data)[selected_provider_id]
-        ensure_default_pool(provider)
-        pools = provider_pools(provider)
-        rows = "\n".join(
-            f"[bold]{pool_name}[/bold]: {', '.join(pool_key_names(pool)) or '空'}"
-            f" · 启用 {len(pool_enabled_models(pool))}"
-            f" / 可用 {len(pool_available_models(pool))}"
-            f" · {pool.get('checked_at') or '未探测' if isinstance(pool, dict) else '未探测'}"
-            for pool_name, pool in sorted(pools.items())
-        ) or "[yellow]暂无模型池[/yellow]"
-        choice = select_option(
-            f"模型池 · {selected_provider_id}",
-            [
-                ("1", "新增/编辑模型池"),
-                ("2", "手动设置可用模型"),
-                ("0", "返回"),
-            ],
-            content=section_panel(rows, "模型池", "cyan"),
+def model_key_targets_panel(data: dict[str, Any], model_id: str) -> Any:
+    model = raw_v2_models(data).get(model_id)
+    targets = model_targets(model) if model else []
+    rows = []
+    for index, target in enumerate(targets):
+        provider_id = str(target.get("provider") or "")
+        key_name = str(target.get("key") or "")
+        upstream = str(target.get("upstream_model") or model_id)
+        provider = raw_providers(data).get(provider_id, {})
+        key = provider_keys(provider).get(key_name) if isinstance(provider, dict) else None
+        status = "启用" if isinstance(key, dict) and key.get("enabled", True) else "禁用"
+        rows.append(
+            f"{index + 1}. [bold]{provider_id}[/bold]/{key_name} → [bold]{upstream}[/bold] ({status})"
         )
-        if choice == "0":
-            if provider_id is not None:
-                return
-            continue
-        clear_terminal_history()
-        result = update_provider_pool_interactively(path, selected_provider_id, choice)
-        if result is not None:
-            show_result_page("模型池", result)
-
-
-def update_provider_pool_interactively(path: Path, provider_id: str, choice: str) -> Any:
-    draft = form_draft(f"provider_pool:{provider_id}")
-    data = load_v2_config_data(path)
-    old_config = RouterConfig.from_dict(data)
-    provider = raw_providers(data)[provider_id]
-    keys = provider_keys(provider)
-    pools = provider_pools(provider)
-    if choice == "1":
-        pool_name = select_or_enter_pool_name(
-            pools,
-            default=draft.get("pool_name", "default"),
-        )
-        draft["pool_name"] = pool_name
-        if not pool_name:
-            return section_panel("[red]Pool 名称不能为空[/red]", "模型池", "red")
-        if not keys:
-            return section_panel("[yellow]该供应商暂无 Key。[/yellow]", "模型池", "yellow")
-        selected_keys = select_multiple(
-            "选择 Pool Keys",
-            [(key_name, key_name) for key_name in sorted(keys)],
-            content=section_panel(
-                "选择这个模型池可用的 Key。池代表同一批模型能力，而不是单个凭证。",
-                "模型池",
-                "cyan",
-            ),
-        )
-        if not selected_keys:
-            return section_panel("[yellow]配置未变化。[/yellow]", "模型池", "yellow")
-        pool = operations.assign_pool_keys(
-            data,
-            provider_id,
-            pool_name,
-            selected_keys,
-            retain_existing=True,
-        )
-        selected_keys = pool_key_names(pool)
-        with console.status("[cyan]正在探测模型池可用模型和路由...[/cyan]", spinner="dots"):
-            probe = apply_pool_probe(provider, pool_name)
-        enabled_models = prompt_pool_enabled_models(pool)
-        enable_pool_models(data, provider_id, pool_name, enabled_models)
-        model_count = len(enabled_models)
-        all_model_count = len(probe.get("all_models") or [])
-        route_count = sum(
-            1
-            for route_map in (probe.get("routes") or {}).values()
-            for available in route_map.values()
-            if available
-        )
-        message = (
-            f"已保存模型池 {provider_id}/{pool_name}，包含 {len(selected_keys)} 个 Key。\n"
-            f"已启用模型: [bold]{model_count}[/bold]\n"
-            f"任一 Key 可用模型: [bold]{all_model_count}[/bold]\n"
-            f"可用路由探测: [bold]{route_count}[/bold]"
-        )
-    elif choice == "2":
-        if not pools:
-            return section_panel("[yellow]暂无模型池。[/yellow]", "模型池", "yellow")
-        pool_choice = select_option(
-            "手动设置模型",
-            [(str(index + 1), pool_name) for index, pool_name in enumerate(sorted(pools))]
-            + [("0", "返回")],
-        )
-        if pool_choice == "0":
-            return None
-        pool_name = sorted(pools)[int(pool_choice) - 1]
-        pool = pools[pool_name]
-        enabled_models = prompt_pool_enabled_models(pool)
-        enable_pool_models(data, provider_id, pool_name, enabled_models)
-        message = (
-            f"已设置模型池 {provider_id}/{pool_name} 的启用模型。\n"
-            f"已启用模型: [bold]{len(enabled_models)}[/bold]"
-        )
-    else:
-        return None
-    restart = commit_v2_config(path, data, old_config)
-    if choice in {"1", "2"}:
-        FORM_DRAFTS.pop(f"provider_pool:{provider_id}", None)
-    return Group(section_panel(message, "模型池", "green"), restart)
+    if not rows:
+        rows.append("[yellow]该模型尚未绑定任何 Key[/yellow]")
+    return section_panel("\n".join(rows), f"模型 Key · {short_text(model_id, 32)}", "cyan")
 
 
 def add_model_route_interactively(path: Path, model_id: str | None = None) -> Any:
+    """Bind an existing provider Key to a model (add a target)."""
     draft = form_draft("add_model_route")
     data = load_v2_config_data(path)
     if not raw_providers(data):
-        return section_panel("[yellow]请先添加供应商 Key。[/yellow]", "添加模型路由", "yellow")
+        return section_panel("[yellow]请先添加供应商 Key。[/yellow]", "添加模型 Key", "yellow")
     old_config = RouterConfig.from_dict(data)
     models = raw_v2_models(data)
-    selected = select_provider_pool(data, "选择模型池")
-    if selected is None:
-        return None
-    provider_id, pool_name = selected
-    pool = provider_pools(raw_providers(data)[provider_id]).get(pool_name, {})
-    enabled_models = pool_enabled_models(pool)
-    if not enabled_models:
-        return section_panel(
-            "[yellow]该模型池没有启用模型。请先刷新模型池或手动设置可用模型。[/yellow]",
-            "添加模型路由",
-            "yellow",
-        )
-    upstream_choice = select_option(
-        "选择启用模型",
-        [(str(index + 1), available_model) for index, available_model in enumerate(enabled_models)]
-        + [("0", "返回")],
-    )
-    if upstream_choice == "0":
-        return None
-    upstream_model = enabled_models[int(upstream_choice) - 1]
     if model_id is None:
         model_id = select_or_enter_model_id(
-            "添加模型路由",
+            "添加模型 Key",
             "本地模型 ID",
             models,
-            default=draft.get("model_id", upstream_model),
+            default=draft.get("model_id", ""),
         )
         draft["model_id"] = model_id
     if not model_id:
-        return section_panel("[red]模型 ID 不能为空[/red]", "添加模型路由", "red")
+        return section_panel("[red]模型 ID 不能为空[/red]", "添加模型 Key", "red")
     if model_id not in models:
         operations.create_model(data, model_id)
+    provider_id = select_provider(data, "选择供应商")
+    if provider_id is None:
+        return None
+    provider = raw_providers(data)[provider_id]
+    keys = provider_keys(provider)
+    if not keys:
+        return section_panel("[yellow]该供应商暂无 Key。[/yellow]", "添加模型 Key", "yellow")
+    key_options = [
+        (key_name, f"{key_name} · {key_fingerprint(str(key.get('api_key') or ''))}")
+        for key_name, key in sorted(keys.items())
+    ]
+    key_choice = select_option(
+        "选择 Key",
+        [(name, label) for name, label in key_options] + [("0", "返回")],
+    )
+    if key_choice == "0":
+        return None
+    key_name = key_choice
+    default_upstream = str(
+        draft.get("upstream_model", "")
+        or provider.get("capabilities", {}).get("models")[0]
+        if isinstance(provider.get("capabilities"), dict)
+        and provider["capabilities"].get("models")
+        else model_id
+    )
+    upstream_model = prompt_text(
+        "添加模型 Key",
+        "上游模型 ID（默认同本地模型）",
+        default=default_upstream if default_upstream != model_id else "",
+    ).strip() or model_id
     try:
         operations.add_model_target(
             data,
             model_id,
             {
                 "provider": provider_id,
-                "pool": pool_name,
+                "key": key_name,
                 "upstream_model": upstream_model,
             },
         )
     except operations.ConfigOperationError as exc:
-        return section_panel(f"[yellow]{exc}[/yellow]", "添加模型路由", "yellow")
+        return section_panel(f"[yellow]{exc}[/yellow]", "添加模型 Key", "yellow")
     restart = commit_v2_config(path, data, old_config)
     FORM_DRAFTS.pop("add_model_route", None)
     return Group(
         section_panel(
-            f"本地模型: [bold]{model_id}[/bold]\n模型池: [bold]{provider_id}/{pool_name}[/bold]\n上游模型: [bold]{upstream_model}[/bold]",
+            f"本地模型: [bold]{model_id}[/bold]\n供应商 Key: [bold]{provider_id}/{key_name}[/bold]\n上游模型: [bold]{upstream_model}[/bold]",
             "添加完成",
             "green",
         ),
@@ -1561,82 +915,108 @@ def add_model_route_interactively(path: Path, model_id: str | None = None) -> An
 
 
 def manage_model_routes_interactively(path: Path, selected_model_id: str | None = None) -> None:
+    """Manage which provider Keys are bound to a model."""
     while True:
         data = load_v2_config_data(path)
-        model_id = selected_model_id or select_v2_model(data, "选择模型路由")
+        model_id = selected_model_id or select_v2_model(data, "选择模型 Key")
         if model_id is None:
             return
         model = raw_v2_models(data)[model_id]
         targets = model_targets(model)
-        if not targets:
-            show_result_page(
-                "模型路由",
-                section_panel("[yellow]该模型暂无 target。[/yellow]", "模型路由", "yellow"),
-            )
-            if selected_model_id is not None:
-                return
-            continue
-        options = [
-            (
-                str(index + 1),
-                f"{target.get('provider')}/{target.get('pool') or target.get('key')} → {target.get('upstream_model') or model_id}",
-            )
-            for index, target in enumerate(targets)
-        ] + [("0", "返回")]
-        target_choice = select_option(f"Target · {short_text(model_id, 28)}", options)
-        if target_choice == "0":
-            if selected_model_id is not None:
-                return
-            continue
-        target_index = int(target_choice) - 1
-        action = select_option(
-            "管理 Target",
-            [("1", "改上游模型"), ("2", "删除 Target"), ("0", "返回")],
+        options = [("a", "绑定 Key"), ("d", "解绑 Key")]
+        if targets:
+            options.append(("u", "改上游模型"))
+        options.append(("0", "返回"))
+        choice = select_option(
+            f"模型 Key · {short_text(model_id, 28)}",
+            options,
+            content=model_key_targets_panel(data, model_id),
         )
-        if action == "0":
+        if choice == "0":
+            if selected_model_id is not None:
+                return
             continue
         clear_terminal_history()
-        result = update_model_target_interactively(path, model_id, target_index, action)
-        if result is not None:
-            show_result_page("模型路由", result)
+        if choice == "a":
+            result = add_model_route_interactively(path, model_id)
+            if result is not None:
+                show_result_page("模型 Key", result)
+        elif choice == "u" and targets:
+            result = update_model_target_upstream_interactively(path, model_id)
+            if result is not None:
+                show_result_page("模型 Key", result)
+        elif choice == "d":
+            result = delete_model_key_binding_interactively(path, model_id)
+            if result is not None:
+                show_result_page("模型 Key", result)
 
 
-def update_model_target_interactively(
-    path: Path, model_id: str, target_index: int, action: str
-) -> Any:
+def update_model_target_upstream_interactively(path: Path, model_id: str) -> Any:
     data = load_v2_config_data(path)
     old_config = RouterConfig.from_dict(data)
     model = raw_v2_models(data)[model_id]
     targets = model_targets(model)
-    target = targets[target_index]
-    if action == "1":
-        current = str(target.get("upstream_model") or model_id)
-        provider_id = str(target.get("provider") or "")
-        pool_name = str(target.get("pool") or "")
-        upstream_model = select_pool_model_id(
-            "改上游模型",
-            "上游模型 ID",
-            raw_providers(data).get(provider_id, {}),
-            pool_name,
-            default=current,
+    options = [
+        (
+            str(index + 1),
+            f"{target.get('provider')}/{target.get('key')} → {target.get('upstream_model') or model_id}",
         )
-        if not upstream_model or upstream_model == current:
-            return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
-        operations.update_model_target(
-            data, model_id, target_index, upstream_model
-        )
-        message = f"已更新 {model_id} 的上游模型: {current} → {upstream_model}。"
-    elif action == "2":
-        if len(targets) == 1 and not confirm_choice(
-            "这是该模型最后一个 target，删除后模型将不可用。继续？", default=False
-        ):
-            return section_panel("[yellow]配置未变化。[/yellow]", "模型路由", "yellow")
-        removed = operations.delete_model_target(data, model_id, target_index)
-        message = f"已删除 target: {removed.get('provider')}/{removed.get('pool') or removed.get('key')}。"
-    else:
+        for index, target in enumerate(targets)
+    ] + [("0", "返回")]
+    choice = select_option(f"选择 Key · {short_text(model_id, 28)}", options)
+    if choice == "0":
         return None
+    target_index = int(choice) - 1
+    target = targets[target_index]
+    current = str(target.get("upstream_model") or model_id)
+    upstream_model = prompt_text(
+        "改上游模型", "上游模型 ID", default=current
+    ).strip()
+    if not upstream_model or upstream_model == current:
+        return section_panel("[yellow]配置未变化。[/yellow]", "模型 Key", "yellow")
+    operations.update_model_target(data, model_id, target_index, upstream_model)
     restart = commit_v2_config(path, data, old_config)
-    return Group(section_panel(message, "模型路由", "green"), restart)
+    return Group(
+        section_panel(
+            f"已更新 {model_id} 的上游模型: {current} → {upstream_model}。",
+            "模型 Key",
+            "green",
+        ),
+        restart,
+    )
+
+
+def delete_model_key_binding_interactively(path: Path, model_id: str) -> Any:
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    model = raw_v2_models(data)[model_id]
+    targets = model_targets(model)
+    options = [
+        (
+            str(index + 1),
+            f"{target.get('provider')}/{target.get('key')} → {target.get('upstream_model') or model_id}",
+        )
+        for index, target in enumerate(targets)
+    ] + [("0", "返回")]
+    choice = select_option(f"解绑 Key · {short_text(model_id, 28)}", options)
+    if choice == "0":
+        return None
+    target_index = int(choice) - 1
+    target = targets[target_index]
+    if len(targets) == 1 and not confirm_choice(
+        "这是该模型最后一个 Key，解绑后模型将不可用。继续？", default=False
+    ):
+        return section_panel("[yellow]配置未变化。[/yellow]", "模型 Key", "yellow")
+    removed = operations.delete_model_target(data, model_id, target_index)
+    restart = commit_v2_config(path, data, old_config)
+    return Group(
+        section_panel(
+            f"已解绑 Key: {removed.get('provider')}/{removed.get('key')}。",
+            "模型 Key",
+            "green",
+        ),
+        restart,
+    )
 
 
 def manage_v2_model_settings_interactively(path: Path) -> None:
@@ -1651,16 +1031,12 @@ def manage_v2_model_settings_interactively(path: Path) -> None:
             [
                 ("1", "别名"),
                 ("2", "路由模式"),
-                ("3", "路由目标"),
-                ("4", "添加路由目标"),
+                ("3", "管理 Key"),
+                ("4", "绑定 Key"),
                 ("5", "删除模型"),
                 ("0", "返回"),
             ],
-            content=section_panel(
-                f"别名: [bold]{', '.join(model.get('aliases') or []) or '无'}[/bold]\n路由模式: [bold]{model.get('routing_mode') or 'round_robin'}[/bold]",
-                "模型设置",
-                "cyan",
-            ),
+            content=model_key_targets_panel(data, model_id),
         )
         if choice == "0":
             continue
@@ -1816,6 +1192,43 @@ def delete_provider_interactively(path: Path, provider_id: str) -> Any:
     )
 
 
+def refresh_provider_capability_interactively(path: Path, provider_id: str) -> Any:
+    """Manually re-probe a provider: model list + route availability."""
+    data = load_v2_config_data(path)
+    old_config = RouterConfig.from_dict(data)
+    provider = raw_providers(data)[provider_id]
+    keys = provider_keys(provider)
+    if not keys:
+        return section_panel("[yellow]该供应商暂无 Key，无法探测。[/yellow]", "刷新能力", "yellow")
+    with console.status(
+        f"[cyan]正在探测供应商 {provider_id} 的能力...[/cyan]", spinner="dots"
+    ):
+        probe = probe_provider_capability(provider, sorted(keys))
+    provider["capabilities"] = probe
+    restart = commit_v2_config(path, data, old_config)
+    models = probe.get("models") or []
+    errors = probe.get("errors") or {}
+    route_status = probe.get("route_status") or {}
+    message_lines = [
+        f"探测时间: [bold]{probe.get('checked_at') or '-'}[/bold]",
+        f"可用模型: [bold]{len(models)}[/bold]",
+    ]
+    if route_status:
+        message_lines.append(
+            "路由: "
+            + " · ".join(
+                f"{UPSTREAM_ROUTE_LABELS.get(mode, mode)}: [{'green' if str(status) == 'ok' else 'red'}]{status}[/{'green' if str(status) == 'ok' else 'red'}]"
+                for mode, status in sorted(route_status.items())
+            )
+        )
+    if errors:
+        message_lines.append("[red]错误: " + "; ".join(str(v) for v in errors.values()) + "[/red]")
+    return Group(
+        section_panel("\n".join(message_lines), "刷新完成", "green"),
+        restart,
+    )
+
+
 def manage_providers_interactively(path: Path) -> None:
     while True:
         data = load_v2_config_data(path)
@@ -1851,11 +1264,14 @@ def manage_providers_interactively(path: Path) -> None:
                 [
                     ("1", "添加 Key"),
                     ("2", "管理 Key"),
-                    ("3", "模型池"),
+                    ("3", "刷新能力探测"),
                     ("4", "Base URL / 路由设置"),
                     ("5", "删除供应商"),
                     ("0", "返回"),
                 ],
+                content=provider_capabilities_panel(
+                    raw_providers(load_v2_config_data(path))[provider_id]
+                ),
             )
             if choice == "0":
                 break
@@ -1870,9 +1286,9 @@ def manage_providers_interactively(path: Path) -> None:
                     lambda: manage_provider_keys_interactively(path, provider_id)
                 )
             elif choice == "3":
-                run_submodule(
-                    lambda: manage_provider_pools_interactively(path, provider_id)
-                )
+                result = refresh_provider_capability_interactively(path, provider_id)
+                if result is not None:
+                    show_result_page("刷新能力", result)
             elif choice == "4":
                 run_submodule(
                     lambda: manage_provider_routes_interactively(path, provider_id)
@@ -1884,719 +1300,40 @@ def manage_providers_interactively(path: Path) -> None:
                 break
 
 
-def manage_model_keys_interactively(path: Path) -> None:
-    manage_providers_interactively(path)
 
 
-def manage_model_aliases_interactively(path: Path) -> None:
-    def on_key(key: str) -> str | None:
-        return _open_config_on_key(path, key)
-    while True:
-        data = load_config_data(path)
-        models = data.get("models", [])
-        if not models:
-            show_result_page(
-                "模型别称",
-                section_panel(
-                    "[yellow]暂无可设置别称的模型。[/yellow]", "模型别称", "yellow"
-                ),
-            )
-            return
-
-        options = []
-        for index, model in enumerate(models):
-            aliases = model.get("aliases", [])
-            alias_summary = (
-                short_text(", ".join(str(alias) for alias in aliases), 28)
-                if aliases
-                else "无别称"
-            )
-            options.append(
-                (
-                    str(index + 1),
-                    f"{short_text(model.get('id') or '-', 28)} · {alias_summary}",
-                )
-            )
-        options.append(("0", "返回"))
-        choice = select_option("选择要设置别称的模型", options, on_key=on_key)
-        if choice == "0":
-            return
-        model_id = str(models[int(choice) - 1].get("id") or "")
-        run_submodule(
-            lambda: manage_selected_model_aliases_interactively(path, model_id)
-        )
 
 
-def manage_selected_model_aliases_interactively(path: Path, model_id: str) -> None:
-    def on_key(key: str) -> str | None:
-        return _open_config_on_key(path, key)
-    while True:
-        data = load_config_data(path)
-        model = find_model(data.get("models", []), model_id)
-        if model is None:
-            show_result_page(
-                "模型别称",
-                section_panel(f"[red]模型不存在: {model_id}[/red]", "模型别称", "red"),
-            )
-            return
-        aliases = model.setdefault("aliases", [])
-        options = [("1", "添加别称")]
-        if aliases:
-            options.extend([("2", "编辑别称"), ("3", "删除别称")])
-        options.append(("0", "返回"))
-        choice = select_option(
-            f"模型别称 · {short_text(model_id, 28)}",
-            options,
-            content=model_aliases_panel(model),
-            on_key=on_key,
-        )
-        if choice == "0":
-            return
-
-        clear_terminal_history()
-        if choice == "1":
-            result = add_model_alias_interactively(path, data, model)
-            title = "添加别称"
-        else:
-            alias_index = select_model_alias(
-                model, "选择要编辑的别称" if choice == "2" else "选择要删除的别称"
-            )
-            if alias_index is None:
-                continue
-            if choice == "2":
-                result = edit_model_alias_interactively(path, data, model, alias_index)
-                title = "编辑别称"
-            else:
-                result = delete_model_alias_interactively(
-                    path, data, model, alias_index
-                )
-                title = "删除别称"
-        if result is not None:
-            show_result_page(title, result)
 
 
-def model_aliases_panel(model: dict[str, Any]) -> Any:
-    aliases = model.get("aliases", [])
-    aliases_text = "\n".join(
-        f"{index}. [bold]{short_text(str(alias), 64)}[/bold]"
-        for index, alias in enumerate(aliases, 1)
-    )
-    if not aliases_text:
-        aliases_text = "[dim]暂无别称[/dim]"
-    return section_panel(
-        f"模型 ID: [bold cyan]{short_text(model.get('id') or '-', 48)}[/bold cyan]\n\n{aliases_text}",
-        "当前别称",
-        "cyan",
-    )
 
 
-def select_model_alias(model: dict[str, Any], title: str) -> int | None:
-    aliases = model.get("aliases", [])
-    options = [
-        (str(index + 1), short_text(str(alias), 48))
-        for index, alias in enumerate(aliases)
-    ]
-    options.append(("0", "返回"))
-    choice = select_option(title, options, content=model_aliases_panel(model))
-    if choice == "0":
-        return None
-    return int(choice) - 1
 
 
-def _raw_model_id(data: dict[str, Any], model: dict[str, Any]) -> str:
-    explicit = str(model.get("id") or "").strip()
-    if explicit:
-        return explicit
-    for model_id, candidate in raw_v2_models(data).items():
-        if candidate is model:
-            return str(model_id)
-    return ""
 
 
-def add_model_alias_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any]
-) -> Any:
-    alias = prompt_text("添加别称", "新别称").strip()
-    if not alias:
-        return section_panel("[red]模型别称不能为空。[/red]", "添加失败", "red")
-    old_config = RouterConfig.from_dict(data)
-    try:
-        if isinstance(data.get("models"), dict):
-            operations.update_model(
-                data,
-                _raw_model_id(data, model),
-                aliases=[*model.get("aliases", []), alias],
-            )
-        else:
-            model.setdefault("aliases", []).append(alias)
-    except operations.ConfigOperationError as exc:
-        return section_panel(f"[red]{exc}[/red]", "添加失败", "red")
-    return save_model_alias_change(
-        path, data, old_config, model, f"已添加别称: [bold]{alias}[/bold]", "添加完成"
-    )
 
 
-def edit_model_alias_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], alias_index: int
-) -> Any:
-    aliases = model.setdefault("aliases", [])
-    old_alias = str(aliases[alias_index])
-    alias = prompt_text("编辑别称", "模型别称", default=old_alias).strip()
-    if not alias:
-        return section_panel("[red]模型别称不能为空。[/red]", "编辑失败", "red")
-    if alias == old_alias:
-        return section_panel("[yellow]别称未变化。[/yellow]", "编辑别称", "yellow")
-    old_config = RouterConfig.from_dict(data)
-    updated_aliases = list(aliases)
-    updated_aliases[alias_index] = alias
-    try:
-        if isinstance(data.get("models"), dict):
-            operations.update_model(
-                data, _raw_model_id(data, model), aliases=updated_aliases
-            )
-        else:
-            aliases[alias_index] = alias
-    except operations.ConfigOperationError as exc:
-        return section_panel(f"[red]{exc}[/red]", "编辑失败", "red")
-    operations.replace_unified_model_name(
-        data, old_alias, _raw_model_id(data, model)
-    )
-    return save_model_alias_change(
-        path,
-        data,
-        old_config,
-        model,
-        f"原别称: [bold]{old_alias}[/bold]\n新别称: [bold]{alias}[/bold]",
-        "编辑完成",
-    )
 
 
-def delete_model_alias_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], alias_index: int
-) -> Any:
-    aliases = model.setdefault("aliases", [])
-    alias = str(aliases[alias_index])
-    if not confirm_choice(
-        f"确认删除模型 {model['id']} 的别称 {alias}？", default=False
-    ):
-        return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
-    old_config = RouterConfig.from_dict(data)
-    updated_aliases = list(aliases)
-    del updated_aliases[alias_index]
-    try:
-        if isinstance(data.get("models"), dict):
-            operations.update_model(
-                data, _raw_model_id(data, model), aliases=updated_aliases
-            )
-        else:
-            del aliases[alias_index]
-    except operations.ConfigOperationError as exc:
-        return section_panel(f"[red]{exc}[/red]", "删除失败", "red")
-    operations.replace_unified_model_name(
-        data, alias, _raw_model_id(data, model)
-    )
-    return save_model_alias_change(
-        path, data, old_config, model, f"已删除别称: [bold]{alias}[/bold]", "删除完成"
-    )
 
 
-def replace_unified_model_alias(
-    data: dict[str, Any], model: dict[str, Any], alias: str
-) -> None:
-    operations.replace_unified_model_name(
-        data, alias, _raw_model_id(data, model)
-    )
 
 
-def save_model_alias_change(
-    path: Path,
-    data: dict[str, Any],
-    old_config: RouterConfig,
-    model: dict[str, Any],
-    message: str,
-    title: str,
-) -> Any:
-    try:
-        new_config = commit_config_data(path, data, old_config).new_config
-    except ValueError as exc:
-        return section_panel(f"[red]{exc}[/red]", "别称设置失败", "red")
-    return Group(
-        section_panel(
-            f"{message}\n模型: [bold]{model['id']}[/bold]\n配置文件: [bold]{path}[/bold]",
-            title,
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def manage_selected_key_interactively(path: Path) -> None:
-    def on_key(key: str) -> str | None:
-        return _open_config_on_key(path, key)
-    while True:
-        data = load_config_data(path)
-        manage_choice = select_option(
-            "管理 Key",
-            [
-                ("1", "管理单个 Key"),
-                ("2", "探测所有 Key"),
-                ("0", "返回"),
-            ],
-            on_key=on_key,
-        )
-        if manage_choice == "0":
-            return
-        if manage_choice == "2":
-            clear_terminal_history()
-            result = probe_all_keys_interactively(path)
-            show_result_page("探测所有 Key", result)
-            continue
-        if manage_choice != "1":
-            continue
-
-        selection = select_api_key(path, "选择要管理的 Key")
-        if selection is None:
-            continue
-        data, model, key_index = selection
-        key = model["keys"][key_index]
-        key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-        enabled = key.get("enabled", True)
-        status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-        visitor_allowed = bool(key.get("allow_visitor", False))
-        visitor_installed = visitor_feature_available()
-        visitor_status_text = format_visitor_status_text(
-            visitor_allowed, visitor_installed
-        )
-
-        while True:
-            options = [
-                ("1", "编辑"),
-                ("2", "删除"),
-                ("3", "复制 API key"),
-                ("4", "禁用" if enabled else "启用"),
-                ("5", "统计"),
-            ]
-            if visitor_installed:
-                options.append(
-                    ("6", "禁止访客访问" if visitor_allowed else "允许访客访问")
-                )
-                probe_choice = "7"
-            else:
-                probe_choice = "6"
-            options.append((probe_choice, "可用性探测"))
-            options.append(("0", "返回"))
-            key_info_lines = [
-                f"模型: [bold]{short_text(model['id'], 32)}[/bold]",
-                f"Key: {key_display_name(key, key_name, 32)}",
-                f"上游: [bold]{compact_url(key.get('base_url') or '-', 48)}[/bold]",
-                f"配置状态: {status_text}",
-            ]
-            if visitor_installed:
-                key_info_lines.append(f"访客访问: {visitor_status_text}")
-            choice = select_option(
-                f"管理 Key · {short_text(key_name, 24)}",
-                options,
-                content=section_panel("\n".join(key_info_lines), "Key 信息", "cyan"),
-                on_key=on_key,
-            )
-            if choice == "0":
-                break
-            if choice == "5":
-                from .logs_tui import watch_key_stats
-                config_data = load_config_data(path)
-                db_path = str(config_data.get("metrics_db_path") or default_metrics_db_path())
-                run_submodule(lambda: watch_key_stats(db_path, model["id"], key_name))
-                continue
-            clear_terminal_history()
-            if choice == "1":
-                result = edit_selected_key_interactively(path, data, model, key_index)
-            elif choice == "2":
-                result = delete_selected_key_interactively(path, data, model, key_index)
-                if result is not None:
-                    show_result_page("删除 API key", result)
-                    return  # key已删除，返回选择列表
-                continue
-            elif choice == "3":
-                result = copy_selected_key_interactively(data, model, key_index)
-            elif choice == "4":
-                result = toggle_selected_key_interactively(path, data, model, key_index)
-            elif visitor_installed and choice == "6":
-                result = toggle_visitor_access_interactively(
-                    path, data, model, key_index
-                )
-            elif choice == probe_choice:
-                result = probe_selected_key_interactively(path, data, model, key_index)
-            else:
-                continue
-            if result is not None:
-                result_title = {
-                    "1": "编辑",
-                    "3": "复制 API key",
-                    "4": "Key 开关",
-                    "6": "访客访问",
-                    probe_choice: "可用性探测",
-                }.get(choice, "Key 管理")
-                show_result_page(result_title, result)
-            if choice in ("1", "4", "6"):
-                # 编辑或切换状态后刷新数据
-                data = load_config_data(path)
-                model = find_model(data.get("models", []), model["id"])
-                if model is None or key_index >= len(model.get("keys", [])):
-                    return
-                key = model["keys"][key_index]
-                key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-                enabled = key.get("enabled", True)
-                status_text = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-                visitor_allowed = bool(key.get("allow_visitor", False))
-                visitor_installed = visitor_feature_available()
-                visitor_status_text = format_visitor_status_text(
-                    visitor_allowed, visitor_installed
-                )
 
 
-def manage_upstream_routes_interactively(path: Path) -> None:
-    data = load_config_data(path)
-    base_urls = configured_base_urls(data, {})
-    if not base_urls:
-        show_result_page(
-            "上游路由",
-            section_panel("[yellow]未配置上游 URL[/yellow]", "上游", "yellow"),
-        )
-        return
-    base_url_choice = select_option(
-        "上游路由",
-        [
-            (str(index + 1), compact_url(base_url, 56))
-            for index, base_url in enumerate(base_urls)
-        ]
-        + [("0", "返回")],
-    )
-    if base_url_choice == "0":
-        return
-    try:
-        base_url = base_urls[int(base_url_choice) - 1]
-    except (IndexError, ValueError):
-        return
-
-    while True:
-        routes = upstream_routes_for_base_url(data, base_url)
-        options = [
-            (
-                str(index + 1),
-                f"{UPSTREAM_ROUTE_LABELS[mode]} - {short_text(upstream_route_path(routes, mode), 36)}",
-            )
-            for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
-        ]
-        options.extend([("c", "清空自定义路由"), ("0", "返回")])
-        choice = select_option(
-            f"上游路由 · {short_text(base_url, 32)}",
-            options,
-            content=upstream_routes_panel(data, base_url),
-        )
-        if choice == "0":
-            return
-
-        old_config = RouterConfig.from_dict(data)
-        try:
-            if choice == "c":
-                routes = {}
-                message = "已清空自定义上游路由。"
-            else:
-                mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
-                current_path = routes.get(mode, "")
-                raw_path = prompt_text(
-                    "上游路由",
-                    f"{UPSTREAM_ROUTE_LABELS[mode]} 路径/前缀（留空恢复默认）",
-                    default=current_path,
-                ).strip()
-                if raw_path:
-                    routes[mode] = normalize_upstream_route_path(mode, raw_path)
-                    message = (
-                        f"已设置 {UPSTREAM_ROUTE_LABELS[mode]}: "
-                        f"[bold]{routes[mode]}[/bold]"
-                    )
-                else:
-                    routes.pop(mode, None)
-                    message = f"已恢复 {UPSTREAM_ROUTE_LABELS[mode]} 默认路径。"
-        except (IndexError, ValueError) as exc:
-            show_result_page(
-                "上游路由",
-                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
-            )
-            continue
-
-        set_upstream_routes_for_base_url(data, base_url, routes)
-        try:
-            new_config = commit_config_data(path, data, old_config).new_config
-        except (KeyError, TypeError, ValueError) as exc:
-            show_result_page(
-                "上游路由",
-                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
-            )
-            continue
-        show_result_page(
-            "上游路由",
-            Group(
-                section_panel(
-                    f"已更新配置文件: [bold]{path}[/bold]\n"
-                    f"上游 URL: [bold]{base_url}[/bold]\n{message}",
-                    "配置完成",
-                    "green",
-                ),
-                restart_service_after_config_change(path, old_config, new_config),
-            ),
-        )
-        data = load_config_data(path)
-
-    return
-
-    selection = select_api_key(path, "选择要配置上游路由的 Key")
-    if selection is None:
-        return
-    data, model, key_index = selection
-    while True:
-        key = model["keys"][key_index]
-        key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-        options = [
-            (
-                str(index + 1),
-                f"{UPSTREAM_ROUTE_LABELS[mode]} · {short_text(upstream_route_path(upstream_routes_for_base_url(data, key.get('base_url') or data.get('default_base_url') or 'https://api.openai.com'), mode), 36)}",
-            )
-            for index, mode in enumerate(UPSTREAM_ROUTE_MODES)
-        ]
-        options.extend([("c", "清空自定义路由"), ("0", "返回")])
-        choice = select_option(
-            f"上游路由 · {short_text(key_name, 24)}",
-            options,
-            content=upstream_routes_panel(data, model, key_index),
-        )
-        if choice == "0":
-            return
-
-        old_config = RouterConfig.from_dict(data)
-        routes = upstream_routes_for_base_url(
-            data,
-            key.get("base_url") or data.get("default_base_url") or "https://api.openai.com",
-        )
-        try:
-            if choice == "c":
-                routes = {}
-                message = "已清空自定义上游路由，恢复默认路径。"
-            else:
-                mode = UPSTREAM_ROUTE_MODES[int(choice) - 1]
-                current_path = routes.get(mode, "")
-                raw_path = prompt_text(
-                    "上游路由",
-                    f"{UPSTREAM_ROUTE_LABELS[mode]} 路径/前缀（留空恢复默认）",
-                    default=current_path,
-                ).strip()
-                if raw_path:
-                    routes[mode] = normalize_upstream_route_path(mode, raw_path)
-                    message = (
-                        f"已设置 {UPSTREAM_ROUTE_LABELS[mode]}: "
-                        f"[bold]{routes[mode]}[/bold]"
-                    )
-                else:
-                    routes.pop(mode, None)
-                    message = f"已恢复 {UPSTREAM_ROUTE_LABELS[mode]} 默认路径。"
-        except (IndexError, ValueError) as exc:
-            show_result_page(
-                "上游路由",
-                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
-            )
-            continue
-
-        set_upstream_routes_for_base_url(
-            data,
-            key.get("base_url") or data.get("default_base_url") or "https://api.openai.com",
-            routes,
-        )
-        try:
-            new_config = commit_config_data(path, data, old_config).new_config
-        except (KeyError, TypeError, ValueError) as exc:
-            show_result_page(
-                "上游路由",
-                section_panel(f"[red]{exc}[/red]", "配置失败", "red"),
-            )
-            continue
-        show_result_page(
-            "上游路由",
-            Group(
-                section_panel(
-                    f"已更新配置文件: [bold]{path}[/bold]\n"
-                    f"模型: [bold]{model['id']}[/bold]\n"
-                    f"Key: [bold]{key_name}[/bold]\n{message}",
-                    "配置完成",
-                    "green",
-                ),
-                restart_service_after_config_change(path, old_config, new_config),
-            ),
-        )
-        data = load_config_data(path)
-        model = find_model(data.get("models", []), model["id"])
-        if model is None or key_index >= len(model.get("keys", [])):
-            return
 
 
-def edit_selected_key_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
-) -> Any:
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    old_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    key_name = prompt_text("编辑 Key", "Key 名称", default=old_name).strip() or old_name
-    base_url = prompt_text(
-        "编辑 Key",
-        "上游 base_url",
-        default=str(
-            key.get("base_url")
-            or data.get("default_base_url")
-            or "https://api.openai.com"
-        ),
-    ).strip()
-    api_key = prompt_text(
-        "编辑 Key", "新 API key（留空则不修改）", default="", password=True
-    ).strip()
-    try:
-        if isinstance(data.get("models"), dict) and "targets" in model:
-            operations.update_model_key_local(
-                data,
-                str(model["id"]),
-                old_name,
-                new_name=key_name,
-                api_key=api_key or None,
-                base_url=base_url,
-                update_base_url=True,
-            )
-        else:
-            key["name"] = key_name
-            key["base_url"] = base_url
-            if api_key:
-                key["api_key"] = api_key
-    except operations.ConfigOperationError as exc:
-        return section_panel(f"[red]{exc}[/red]", "编辑失败", "red")
-    new_config = commit_config_data(path, data, old_config).new_config
-    return Group(
-        section_panel(
-            f"已更新配置文件: [bold]{path}[/bold]\n模型: [bold]{model['id']}[/bold]\nKey: [bold]{key_name}[/bold]",
-            "编辑完成",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def delete_selected_key_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
-) -> Any:
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    if not confirm_choice(
-        f"确认删除模型 {model['id']} 的 Key {key_name}？", default=False
-    ):
-        return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
-    if isinstance(data.get("models"), dict) and "targets" in model:
-        try:
-            operations.delete_model_key_local(data, str(model["id"]), key_name)
-        except operations.ConfigOperationError as exc:
-            return section_panel(f"[red]{exc}[/red]", "删除失败", "red")
-        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
-    else:
-        del model["keys"][key_index]
-        if not model["keys"]:
-            data["models"].remove(model)
-            message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
-        else:
-            message = (
-                f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
-            )
-    new_config = commit_config_data(path, data, old_config).new_config
-    return Group(
-        section_panel(message, "删除完成", "green"),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def copy_selected_key_interactively(
-    data: dict[str, Any], model: dict[str, Any], key_index: int
-) -> ResultPage:
-    key = model["keys"][key_index]
-    api_key = str(key.get("api_key") or "")
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    base_url = compact_url(
-        key.get("base_url") or data.get("default_base_url") or "-", 48
-    )
-    content = section_panel(
-        f"模型: [bold]{short_text(model['id'], 48)}[/bold]\nKey: {key_display_name(key, key_name, 48)}\n上游: [bold]{base_url}[/bold]\n指纹: [bold]{key_fingerprint(api_key)}[/bold]\n\n选择“复制 API key”即可写入剪贴板。",
-        "复制 API key",
-        "green",
-    )
-    return ResultPage(content, copy_text=api_key, copy_label="复制 API key")
 
 
-def toggle_selected_key_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
-) -> Any:
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    current_enabled = key.get("enabled", True)
-    new_enabled = not current_enabled
-    if isinstance(data.get("models"), dict) and "targets" in model:
-        try:
-            operations.update_model_key_local(
-                data, str(model["id"]), key_name, enabled=new_enabled
-            )
-        except operations.ConfigOperationError as exc:
-            return section_panel(f"[red]{exc}[/red]", "Key 开关失败", "red")
-    else:
-        key["enabled"] = new_enabled
-    new_config = commit_config_data(path, data, old_config).new_config
-    old_status = "启用" if current_enabled else "禁用"
-    new_status = "启用" if new_enabled else "禁用"
-    return Group(
-        section_panel(
-            f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: {key_display_name(key, key_name, 32)}\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]",
-            "Key 开关",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def toggle_visitor_access_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
-) -> Any:
-    if not visitor_feature_available():
-        return section_panel(
-            "访客功能未安装。请使用 auto-model-key-router[visitor] 重新安装或升级。",
-            "访客访问",
-            "yellow",
-        )
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    visitor_allowed = not bool(key.get("allow_visitor", False))
-    if isinstance(data.get("models"), dict) and "targets" in model:
-        try:
-            operations.update_model_key_local(
-                data, str(model["id"]), key_name, allow_visitor=visitor_allowed
-            )
-        except operations.ConfigOperationError as exc:
-            return section_panel(f"[red]{exc}[/red]", "访客访问失败", "red")
-    else:
-        key["allow_visitor"] = visitor_allowed
-    new_config = commit_config_data(path, data, old_config).new_config
-    return Group(
-        section_panel(
-            f"已更新访客访问权限。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\n"
-            f"Key: {key_display_name(key, key_name, 32)}\n访客访问: {format_visitor_status_text(visitor_allowed, True)}",
-            "访客访问",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
 def manage_config_transfer_interactively(path: Path) -> None:
@@ -2700,61 +1437,10 @@ def paste_config_interactively(path: Path) -> Any:
     )
 
 
-def select_model_id_for_new_key(models: dict[str, Any]) -> str | None:
-    if not models:
-        return prompt_text("添加 Key", "新模型 ID").strip()
-
-    model_ids = sorted(models)
-    options = [
-        (
-            str(index + 1),
-            f"{short_text(model_id, 32)} · {len(model_targets(models[model_id]))} Target",
-        )
-        for index, model_id in enumerate(model_ids)
-    ]
-    options.extend([("n", "自定义添加新的模型 ID"), ("0", "返回")])
-    choice = select_option("选择模型", options)
-    if choice == "0":
-        return None
-    if choice == "n":
-        return prompt_text("添加 Key", "新模型 ID").strip()
-    return model_ids[int(choice) - 1]
 
 
-def configured_base_urls(data: dict[str, Any], selected_model: dict[str, Any]) -> list[str]:
-    base_urls: list[str] = []
-
-    def append(value: Any) -> None:
-        base_url = str(value or "").strip()
-        if base_url and base_url not in base_urls:
-            base_urls.append(base_url)
-
-    append(selected_model.get("base_url"))
-    for provider in raw_providers(data).values():
-        if isinstance(provider, dict):
-            append(provider.get("base_url"))
-    append("https://api.openai.com")
-    return base_urls
 
 
-def select_base_url_for_new_key(
-    data: dict[str, Any], selected_model: dict[str, Any]
-) -> str | None:
-    base_urls = configured_base_urls(data, selected_model)
-    options = [
-        (str(index + 1), compact_url(base_url, 48))
-        for index, base_url in enumerate(base_urls)
-    ]
-    options.extend([("n", "自定义添加新的上游 URL"), ("0", "返回")])
-    choice = select_option("选择上游 URL", options)
-    if choice == "0":
-        return None
-    if choice == "n":
-        default_base_url = str(data.get("default_base_url") or "https://api.openai.com")
-        return prompt_text(
-            "添加 Key", "新的上游 base_url", default=default_base_url
-        ).strip()
-    return base_urls[int(choice) - 1]
 
 
 def discover_upstream_models_result(
@@ -2794,15 +1480,6 @@ def discover_upstream_models_result(
     return sorted(model_ids), None
 
 
-def discover_upstream_models(
-    base_url: str,
-    api_key: str,
-    existing_model_ids: set[str],
-    timeout: float = 15.0,
-) -> list[str]:
-    return discover_upstream_models_result(
-        base_url, api_key, existing_model_ids, timeout=timeout
-    )[0]
 
 
 def probe_payload_for_mode(mode: str, model_id: str) -> dict[str, Any]:
@@ -2905,709 +1582,48 @@ def probe_key_availability(
     return results
 
 
-def probe_all_key_availability(
-    data: dict[str, Any], timeout: float = 15.0
-) -> list[KeyProbeResult]:
-    results: list[KeyProbeResult] = []
-    for model in data.get("models", []):
-        model_id = str(model.get("id") or "")
-        for key in model.get("keys", []):
-            results.extend(probe_key_availability(data, model_id, key, timeout=timeout))
-    return results
 
 
-def key_probe_results_panel(results: list[KeyProbeResult], title: str = "Key 可用性探测") -> Any:
-    if not results:
-        return section_panel("[yellow]没有可探测的 Key。[/yellow]", title, "yellow")
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("模型", overflow="fold")
-    table.add_column("Key", overflow="fold")
-    table.add_column("路径", overflow="fold")
-    table.add_column("状态")
-    table.add_column("HTTP")
-    table.add_column("耗时")
-    table.add_column("错误", overflow="fold")
-    for result in results:
-        status = "[green]可用[/green]" if result.available else "[red]不可用[/red]"
-        table.add_row(
-            short_text(result.model_id, 24),
-            short_text(result.key_name, 24),
-            result.path,
-            status,
-            str(result.status_code) if result.status_code is not None else "-",
-            f"{result.duration_ms}ms",
-            result.error or "-",
-        )
-    available_count = sum(1 for result in results if result.available)
-    summary = f"可用路径: [bold]{available_count}/{len(results)}[/bold]"
-    return Group(section_panel(summary, title, "cyan"), section_panel(table, "探测结果", "cyan"))
 
 
-def probe_selected_key_interactively(
-    path: Path, data: dict[str, Any], model: dict[str, Any], key_index: int
-) -> Any:
-    key = model["keys"][key_index]
-    with console.status("[cyan]正在探测当前 Key...[/cyan]", spinner="dots"):
-        results = probe_key_availability(data, str(model["id"]), key)
-    return key_probe_results_panel(results, "当前 Key 可用性")
 
 
-def probe_all_keys_interactively(path: Path) -> Any:
-    data = load_config_data(path)
-    with console.status("[cyan]正在探测所有 Key...[/cyan]", spinner="dots"):
-        results = probe_all_key_availability(data)
-    return key_probe_results_panel(results, "所有 Key 可用性")
 
 
-def _select_model_with_discovery(
-    models: dict[str, Any],
-    base_url: str,
-    api_key: str,
-) -> tuple[str | None, list[str]]:
-    existing_ids = {str(model_id) for model_id in models}
-    with console.status("[cyan]正在探测上游可用模型...[/cyan]", spinner="dots"):
-        discovered = discover_upstream_models(base_url, api_key, existing_ids)
-    available = [mid for mid in discovered if mid in models]
-    new_models = [mid for mid in discovered if mid not in existing_ids]
-    manual_entry = ("n", "自定义添加新的模型 ID")
-    return_entry = ("0", "返回")
-
-    if available or new_models:
-        options: list[tuple[str, str]] = []
-        for mid in available:
-            options.append((mid, f"{short_text(mid, 32)} · 已有 · {len(model_targets(models[mid]))} Target"))
-        for mid in new_models:
-            options.append((mid, f"{short_text(mid, 32)} · 新模型"))
-        options.extend([manual_entry, return_entry])
-        content = section_panel(
-            f"已探测到 [bold]{len(discovered)}[/bold] 个上游模型，直接选择即可为已有模型添加路由，或选择新模型。",
-            "发现上游模型",
-            "cyan",
-        )
-        choice = select_option("选择模型", options, content=content)
-    else:
-        return select_model_id_for_new_key(models), []
-
-    if choice == "0":
-        return None, []
-    if choice == "n":
-        return prompt_text("添加 Key", "新模型 ID").strip(), new_models
-    return choice, new_models
 
 
-def add_config_interactively(path: Path, ask_continue: bool = True) -> Any:
-    data = load_config_data(path)
-    old_config = RouterConfig.from_dict(data)
-    providers = raw_providers(data)
-    models = raw_v2_models(data)
-
-    base_url = select_base_url_for_new_key(data, {})
-    if base_url is None:
-        return None
-    if not base_url:
-        return section_panel("[red]上游 base_url 不能为空[/red]", "添加失败", "red")
-    api_key = prompt_text("添加 Key", "API key", password=True).strip()
-    if not api_key:
-        return section_panel("[red]API key 不能为空[/red]", "添加失败", "red")
-
-    model_id, discovered_new_models = _select_model_with_discovery(models, base_url, api_key)
-    if model_id is None:
-        return None
-    if not model_id:
-        return section_panel("[red]模型 ID 不能为空[/red]", "添加失败", "red")
-
-    model = models.get(model_id)
-    is_new_model = model is None
-    if model is None:
-        model = {"aliases": [], "routing_mode": "round_robin", "targets": []}
-        models[model_id] = model
-
-    if is_new_model:
-        aliases_text = prompt_text(
-            "添加 Key",
-            "显示名称/别名，多个用逗号分隔",
-            default=",".join(model.get("aliases", [])),
-        ).strip()
-        model["aliases"] = (
-            [alias.strip() for alias in aliases_text.split(",") if alias.strip()]
-            if aliases_text
-            else []
-        )
-        model["routing_mode"] = prompt_text(
-            "添加 Key",
-            "路由模式",
-            choices=["priority", "round_robin", "only_first"],
-            default=str(model.get("routing_mode") or "round_robin"),
-        ).strip()
-        reasoning_effort = prompt_text(
-            "添加 Key",
-            "推理强度",
-            choices=["downstream", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
-            default=normalize_reasoning_effort_choice(model.get("reasoning_effort")),
-        ).strip()
-        if reasoning_effort == "downstream":
-            model.pop("reasoning_effort", None)
-        else:
-            model["reasoning_effort"] = reasoning_effort
-
-    provider_id = "default"
-    provider = providers.setdefault(provider_id, {"base_url": base_url, "keys": {}, "pools": {}})
-    provider["base_url"] = base_url
-    keys = provider_keys(provider)
-    default_key_name = f"{model_id}-key-{len(keys) + 1}"
-    key_name = (
-        prompt_text("添加 Key", "Key 名称", default=default_key_name).strip()
-        or default_key_name
-    )
-    keys[key_name] = {"api_key": api_key, "enabled": True}
-    pool_name = key_name
-    provider_pools(provider)[pool_name] = {"keys": [key_name]}
-    model_targets(model).append(
-        {"provider": provider_id, "pool": pool_name, "upstream_model": model_id}
-    )
-    new_config = commit_config_data(path, data, old_config).new_config
-
-    added_by_discovery = 0
-    if discovered_new_models:
-        skip_marker = "__skip__"
-        multi_options = [(mid, mid) for mid in discovered_new_models]
-        multi_options.append((skip_marker, "跳过，不批量添加"))
-        selected_multi = select_multiple(
-            "快速添加其他模型",
-            multi_options,
-            content=section_panel(
-                f"探测到 [bold]{len(discovered_new_models)}[/bold] 个其他模型，选择要一同添加的模型。",
-                "批量添加",
-                "cyan",
-            ),
-        )
-        selected_multi = [mid for mid in selected_multi if mid != skip_marker]
-        if selected_multi:
-            added_by_discovery = _add_discovered_models(path, selected_multi, api_key, base_url)
-            if added_by_discovery > 0:
-                new_config = RouterConfig.load(path)
-
-    discovery_note = ""
-    if added_by_discovery > 0:
-        discovery_note = f"\n上游自动发现并添加: [bold]{added_by_discovery}[/bold] 个模型"
-    result = Group(
-        section_panel(
-            f"已写入配置文件: [bold]{path}[/bold]\n模型: [bold]{model_id}[/bold]\nKey: [bold]{key_name}[/bold]{discovery_note}",
-            "添加完成",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
-    if ask_continue and not confirm_choice("继续启动服务？", default=False):
-        raise SystemExit(0)
-    return result
 
 
-def _add_discovered_models(path: Path, model_ids: list[str], api_key: str, base_url: str) -> int:
-    added = 0
-    for mid in model_ids:
-        data = load_config_data(path)
-        old_config = RouterConfig.from_dict(data)
-        models = raw_v2_models(data)
-        if mid in models:
-            continue
-        provider = raw_providers(data).setdefault("default", {"base_url": base_url, "keys": {}, "pools": {}})
-        provider["base_url"] = base_url
-        key_name = f"{mid}-key-1"
-        provider_keys(provider)[key_name] = {"api_key": api_key, "enabled": True}
-        provider_pools(provider)[key_name] = {"keys": [key_name]}
-        models[mid] = {
-            "aliases": [],
-            "routing_mode": "round_robin",
-            "targets": [{"provider": "default", "pool": key_name, "upstream_model": mid}],
-        }
-        try:
-            commit_config_data(path, data, old_config)
-            added += 1
-        except (KeyError, TypeError, ValueError):
-            continue
-    return added
 
 
-def edit_api_key_interactively(path: Path) -> Any:
-    selection = select_api_key(path, "选择要编辑的 API key")
-    if selection is None:
-        return None
-    data, model, key_index = selection
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    old_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    key_name = prompt_text("编辑 Key", "Key 名称", default=old_name).strip() or old_name
-    key["name"] = key_name
-    key["base_url"] = prompt_text(
-        "编辑 Key",
-        "上游 base_url",
-        default=str(
-            key.get("base_url")
-            or data.get("default_base_url")
-            or "https://api.openai.com"
-        ),
-    ).strip()
-    api_key = prompt_text(
-        "编辑 Key", "新 API key（留空则不修改）", default="", password=True
-    ).strip()
-    if api_key:
-        key["api_key"] = api_key
-    new_config = commit_config_data(path, data, old_config).new_config
-    return Group(
-        section_panel(
-            f"已更新配置文件: [bold]{path}[/bold]\n模型: [bold]{model['id']}[/bold]\nKey: [bold]{key_name}[/bold]",
-            "编辑完成",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def delete_api_key_interactively(path: Path) -> Any:
-    selection = select_api_key(path, "选择要删除的 API key")
-    if selection is None:
-        return None
-    data, model, key_index = selection
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    if not confirm_choice(
-        f"确认删除模型 {model['id']} 的 Key {key_name}？", default=False
-    ):
-        return section_panel("[yellow]配置未变化。[/yellow]", "删除取消", "yellow")
-    if isinstance(data.get("models"), dict) and "targets" in model:
-        try:
-            operations.delete_model_key_local(data, str(model["id"]), key_name)
-        except operations.ConfigOperationError as exc:
-            return section_panel(f"[red]{exc}[/red]", "删除失败", "red")
-        message = f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
-    else:
-        del model["keys"][key_index]
-        if not model["keys"]:
-            data["models"].remove(model)
-            message = f"已删除 Key: [bold]{key_name}[/bold]\n模型 [bold]{model['id']}[/bold] 已无 API key，已一并移除。"
-        else:
-            message = (
-                f"已删除 Key: [bold]{key_name}[/bold]\n模型: [bold]{model['id']}[/bold]"
-            )
-    new_config = commit_config_data(path, data, old_config).new_config
-    return Group(
-        section_panel(message, "删除完成", "green"),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def copy_api_key_interactively(path: Path) -> Any:
-    selection = select_api_key(path, "选择要复制的 API key")
-    if selection is None:
-        return None
-    data, model, key_index = selection
-    key = model["keys"][key_index]
-    api_key = str(key.get("api_key") or "")
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    base_url = compact_url(
-        key.get("base_url") or data.get("default_base_url") or "-", 48
-    )
-    content = section_panel(
-        f"模型: [bold]{short_text(model['id'], 48)}[/bold]\nKey: [bold]{short_text(key_name, 48)}[/bold]\n上游: [bold]{base_url}[/bold]\n指纹: [bold]{key_fingerprint(api_key)}[/bold]\n\n选择“复制 API key”即可写入剪贴板。",
-        "复制 API key",
-        "green",
-    )
-    return ResultPage(content, copy_text=api_key, copy_label="复制 API key")
 
 
-def reorder_api_keys_interactively(path: Path) -> Any:
-    data = load_config_data(path)
-    selectable_models = [
-        model for model in data.get("models", []) if len(model.get("keys", [])) > 1
-    ]
-    if not selectable_models:
-        return section_panel(
-            "[yellow]暂无可排序模型，需至少 2 个 Key。[/yellow]", "Key 排序", "yellow"
-        )
-    model_options = [
-        (
-            str(index + 1),
-            f"{short_text(model['id'], 28)} · {len(model.get('keys', []))} Key",
-        )
-        for index, model in enumerate(selectable_models)
-    ] + [("0", "返回")]
-    model_choice = select_option("选择模型", model_options)
-    if model_choice == "0":
-        return None
-    model = selectable_models[int(model_choice) - 1]
-    old_config = RouterConfig.from_dict(data)
-    keys = model.get("keys", [])
-    selected = 0
-    while True:
-        action, selected = select_reorder_key_action(model, selected)
-        if action == "cancel":
-            return section_panel("[yellow]配置未变化。[/yellow]", "Key 排序", "yellow")
-        if action == "save":
-            new_config = commit_config_data(path, data, old_config).new_config
-            return Group(
-                section_panel(key_order_text(model), "顺序已保存", "green"),
-                restart_service_after_config_change(path, old_config, new_config),
-            )
-        if action == "up" and selected > 0:
-            keys[selected - 1], keys[selected] = keys[selected], keys[selected - 1]
-            selected -= 1
-        if action == "down" and selected < len(keys) - 1:
-            keys[selected + 1], keys[selected] = keys[selected], keys[selected + 1]
-            selected += 1
 
 
-def toggle_key_enabled_interactively(path: Path) -> Any:
-    selection = select_api_key(path, "选择要切换状态的 Key")
-    if selection is None:
-        return None
-    data, model, key_index = selection
-    old_config = RouterConfig.from_dict(data)
-    key = model["keys"][key_index]
-    key_name = str(key.get("name") or f"{model['id']}-{key_index + 1}")
-    current_enabled = key.get("enabled", True)
-    new_enabled = not current_enabled
-    if isinstance(data.get("models"), dict) and "targets" in model:
-        try:
-            operations.update_model_key_local(
-                data, str(model["id"]), key_name, enabled=new_enabled
-            )
-        except operations.ConfigOperationError as exc:
-            return section_panel(f"[red]{exc}[/red]", "Key 开关失败", "red")
-    else:
-        key["enabled"] = new_enabled
-    new_config = commit_config_data(path, data, old_config).new_config
-    old_status = "启用" if current_enabled else "禁用"
-    new_status = "启用" if new_enabled else "禁用"
-    return Group(
-        section_panel(
-            f"已切换 Key 状态。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\nKey: [bold]{key_name}[/bold]\n原状态: [bold]{old_status}[/bold]\n新状态: [bold]{new_status}[/bold]",
-            "Key 开关",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def select_reorder_key_action(
-    model: dict[str, Any], selected: int = 0
-) -> tuple[str, int]:
-    frame_offset = 0
-    frame_state = render_key_order_menu_state(model, selected, frame_offset)
-    last_wheel_key: str | None = None
-    last_wheel_at = 0.0
-
-    def refresh(*, ensure_selected_visible: bool) -> None:
-        nonlocal frame_offset, frame_state
-        frame_state = render_key_order_menu_state(
-            model,
-            selected,
-            frame_offset,
-            ensure_selected_visible=ensure_selected_visible,
-        )
-        frame_offset = frame_state.offset
-        live.update(frame_state.renderable, refresh=True)
-
-    with (
-        posix_input_mode(),
-        mouse_wheel_mode(),
-        Live(
-            frame_state.renderable, console=console, screen=True, auto_refresh=False
-        ) as live,
-    ):
-        while True:
-            key = read_key_responsive(lambda: refresh(ensure_selected_visible=True))
-            if key == "cancel":
-                return "cancel", selected
-            if key in {"scroll_up", "scroll_down"}:
-                handle_wheel, last_wheel_key, last_wheel_at = should_handle_wheel(
-                    key, last_wheel_key, last_wheel_at
-                )
-                if not handle_wheel:
-                    continue
-            if (
-                key in {"page_up", "page_down", "home", "end"}
-                and frame_state.max_offset
-            ):
-                frame_offset = content_scroll_offset(
-                    key,
-                    frame_offset,
-                    frame_state.max_offset,
-                    frame_state.viewport_height,
-                )
-                refresh(ensure_selected_visible=False)
-                continue
-            if key in {"up", "scroll_up"}:
-                selected = max(0, selected - 1)
-                refresh(ensure_selected_visible=True)
-                continue
-            if key in {"down", "scroll_down"}:
-                selected = min(len(model.get("keys", [])) - 1, selected + 1)
-                refresh(ensure_selected_visible=True)
-                continue
-            if key in {"w", "W"}:
-                return "up", selected
-            if key in {"s", "S"}:
-                return "down", selected
-            if key == "enter":
-                return "save", selected
 
 
-def render_key_order_menu_state(
-    model: dict[str, Any],
-    selected: int,
-    frame_offset: int = 0,
-    *,
-    ensure_selected_visible: bool = True,
-) -> Any:
-    table = Table(show_header=False, box=None, padding=(0, 1), expand=True)
-    table.add_column("指示", justify="center", width=3)
-    table.add_column("顺序", justify="center", width=5)
-    table.add_column("Key", ratio=1)
-    table.add_column("上游", ratio=1)
-    for index, key in enumerate(model.get("keys", [])):
-        name = key_display_name(key, f"{model['id']}-{index + 1}")
-        base_url = compact_url(key.get("base_url") or "-", 28)
-        if index == selected:
-            selected_name = (
-                name
-                if key.get("allow_visitor", False)
-                else f"[bold cyan]{name}[/bold cyan]"
-            )
-            table.add_row(
-                "[bold cyan]▶[/bold cyan]",
-                f"[bold black on cyan] {index + 1} [/bold black on cyan]",
-                selected_name,
-                f"[bold cyan]{base_url}[/bold cyan]",
-            )
-        else:
-            table.add_row("", f"[dim]{index + 1}[/dim]", name, base_url)
-    shortcuts = (
-        "↑/↓ 选择  ·  W/S 移动  ·  PgUp/PgDn 翻阅  ·  Enter 保存  ·  Ctrl+C 取消"
-    )
-    if sys.platform == "win32":
-        shortcuts = "↑/↓/滚轮 选择  ·  W/S 移动  ·  PgUp/PgDn 翻阅  ·  Enter 保存  ·  Ctrl+C 取消"
-    return terminal_frame_state(
-        [
-            page_title("Key 排序", f"模型 · {short_text(model['id'], 24)}"),
-            section_panel(
-                table, "Key 顺序", "cyan", "[dim]选择 Key 后用 W/S 调整优先级[/dim]"
-            ),
-        ],
-        shortcut_text(shortcuts),
-        offset=frame_offset,
-        focus_text="▶" if ensure_selected_visible else None,
-    )
 
 
-def render_key_order_menu(model: dict[str, Any], selected: int) -> Any:
-    return render_key_order_menu_state(model, selected).renderable
 
 
-def key_order_text(model: dict[str, Any]) -> str:
-    lines = [f"模型: [bold]{short_text(model['id'], 32)}[/bold]", "当前顺序:"]
-    for index, key in enumerate(model.get("keys", [])):
-        name = key_display_name(key, f"{model['id']}-{index + 1}", 32)
-        base_url = compact_url(key.get("base_url") or "-", 32)
-        lines.append(f"{index + 1}. {name} · {base_url}")
-    return "\n".join(lines)
 
 
-def set_model_routing_mode_interactively(path: Path) -> Any:
-    data = load_config_data(path)
-    models = data.get("models", [])
-    if not models:
-        return section_panel("[yellow]还没有模型配置。[/yellow]", "路由模式", "yellow")
-    model_options = []
-    for index, model in enumerate(models):
-        routing_mode = str(
-            model.get("routing_mode") or data.get("routing_mode") or "round_robin"
-        )
-        routing_mode_text = routing_mode_display_text(routing_mode)
-        model_options.append(
-            (str(index + 1), f"{short_text(model['id'], 28)} · {routing_mode_text}")
-        )
-    model_options.append(("0", "返回"))
-    model_choice = select_option("选择模型", model_options)
-    if model_choice == "0":
-        return None
-    old_config = RouterConfig.from_dict(data)
-    model = models[int(model_choice) - 1]
-    current_mode = str(
-        model.get("routing_mode") or data.get("routing_mode") or "round_robin"
-    )
-    mode_choice = select_option(
-        "选择路由模式",
-        [
-            ("1", "分流：轮询"),
-            ("2", "优先级：按顺序"),
-            ("3", "仅首个：只重试第一个 Key"),
-            ("0", "返回"),
-        ],
-        selected={"round_robin": 0, "priority": 1, "only_first": 2}.get(
-            current_mode, 0
-        ),
-    )
-    if mode_choice == "0":
-        return section_panel("[yellow]配置未变化。[/yellow]", "路由模式", "yellow")
-    new_mode = {"1": "round_robin", "2": "priority", "3": "only_first"}[mode_choice]
-    if new_mode == current_mode:
-        mode_text = routing_mode_display_text(new_mode)
-        return section_panel(
-            f"模型 [bold]{short_text(model['id'], 32)}[/bold] 已是 [bold]{mode_text}[/bold]。",
-            "路由模式",
-            "yellow",
-        )
-    model["routing_mode"] = new_mode
-    new_config = commit_config_data(path, data, old_config).new_config
-    old_mode_text = routing_mode_display_text(current_mode)
-    new_mode_text = routing_mode_display_text(new_mode)
-    return Group(
-        section_panel(
-            f"已更新路由模式。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\n原模式: [bold]{old_mode_text}[/bold]\n新模式: [bold]{new_mode_text}[/bold]",
-            "路由模式",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def routing_mode_display_text(value: str | None) -> str:
-    return {"round_robin": "分流", "priority": "优先级", "only_first": "仅首个"}.get(
-        str(value or "round_robin"), "分流"
-    )
 
 
-def set_model_reasoning_effort_interactively(path: Path) -> Any:
-    data = load_config_data(path)
-    models = data.get("models", [])
-    if not models:
-        return section_panel("[yellow]还没有模型配置。[/yellow]", "推理强度", "yellow")
-    model_options = []
-    for index, model in enumerate(models):
-        effort = normalize_reasoning_effort_choice(model.get("reasoning_effort"))
-        model_options.append(
-            (
-                str(index + 1),
-                f"{short_text(model['id'], 28)} · {reasoning_effort_text(effort)}",
-            )
-        )
-    model_options.append(("0", "返回"))
-    model_choice = select_option("选择模型", model_options)
-    if model_choice == "0":
-        return None
-    old_config = RouterConfig.from_dict(data)
-    model = models[int(model_choice) - 1]
-    current_effort = normalize_reasoning_effort_choice(model.get("reasoning_effort"))
-    effort_choice = select_option(
-        "选择推理强度",
-        [
-            ("1", "由下游决定"),
-            ("2", "关闭 reasoning"),
-            ("3", "minimal"),
-            ("4", "low"),
-            ("5", "medium"),
-            ("6", "high"),
-            ("7", "xhigh"),
-            ("8", "max"),
-            ("0", "返回"),
-        ],
-        selected={
-            "downstream": 0,
-            "none": 1,
-            "minimal": 2,
-            "low": 3,
-            "medium": 4,
-            "high": 5,
-            "xhigh": 6,
-            "max": 7,
-        }.get(current_effort, 0),
-    )
-    if effort_choice == "0":
-        return section_panel("[yellow]配置未变化。[/yellow]", "推理强度", "yellow")
-    new_effort = {
-        "1": "downstream",
-        "2": "none",
-        "3": "minimal",
-        "4": "low",
-        "5": "medium",
-        "6": "high",
-        "7": "xhigh",
-        "8": "max",
-    }[effort_choice]
-    if new_effort == current_effort:
-        return section_panel(
-            f"模型 [bold]{short_text(model['id'], 32)}[/bold] 已是 [bold]{reasoning_effort_text(new_effort)}[/bold]。",
-            "推理强度",
-            "yellow",
-        )
-    if new_effort == "downstream":
-        model.pop("reasoning_effort", None)
-    else:
-        model["reasoning_effort"] = new_effort
-    new_config = commit_config_data(path, data, old_config).new_config
-    return Group(
-        section_panel(
-            f"已更新推理强度。\n模型: [bold]{short_text(model['id'], 32)}[/bold]\n原强度: [bold]{reasoning_effort_text(current_effort)}[/bold]\n新强度: [bold]{reasoning_effort_text(new_effort)}[/bold]",
-            "推理强度",
-            "green",
-        ),
-        restart_service_after_config_change(path, old_config, new_config),
-    )
 
 
-def reasoning_effort_text(value: str | None) -> str:
-    effort = normalize_reasoning_effort_choice(value)
-    return {
-        "downstream": "由下游决定",
-        "none": "关闭 reasoning",
-        "minimal": "minimal",
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-        "xhigh": "xhigh",
-        "max": "max",
-    }.get(effort, effort)
 
 
-def normalize_reasoning_effort_choice(value: Any) -> str:
-    effort = str(value or "").strip()
-    return "downstream" if effort in {"", "default", "downstream"} else effort
 
 
-def select_api_key(
-    path: Path, title: str
-) -> tuple[dict[str, Any], dict[str, Any], int] | None:
-    data = load_config_data(path)
-    selectable_models = [model for model in data.get("models", []) if model.get("keys")]
-    if not selectable_models:
-        return None
-    model_options = [
-        (
-            str(index + 1),
-            f"{short_text(model['id'], 28)} · {len(model.get('keys', []))} Key",
-        )
-        for index, model in enumerate(selectable_models)
-    ] + [("0", "返回")]
-    model_choice = select_option("选择模型", model_options)
-    if model_choice == "0":
-        return None
-    model = selectable_models[int(model_choice) - 1]
-    key_options = []
-    for index, key in enumerate(model.get("keys", [])):
-        name = key_display_name(key, f"{model['id']}-{index + 1}")
-        base_url = compact_url(
-            key.get("base_url") or data.get("default_base_url") or "-", 28
-        )
-        enabled = key.get("enabled", True)
-        status = "[green]启用[/green]" if enabled else "[red]禁用[/red]"
-        key_options.append((str(index + 1), f"{name} · {base_url} · {status}"))
-    key_options.append(("0", "返回"))
-    key_choice = select_option(title, key_options)
-    if key_choice == "0":
-        return None
-    return data, model, int(key_choice) - 1
 
 
 def set_local_api_key_interactively(path: Path) -> Any:
@@ -3728,11 +1744,6 @@ def set_listen_interactively(path: Path) -> Any:
     )
 
 
-def find_model(models: list[dict[str, Any]], model_id: str) -> dict[str, Any] | None:
-    for model in models:
-        if model.get("id") == model_id:
-            return model
-    return None
 
 
 
