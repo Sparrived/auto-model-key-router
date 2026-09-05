@@ -429,9 +429,14 @@ def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError(
                     f"模型 {model_id} 引用了供应商 {provider_id} 不存在的 pool: {pool_name}"
                 )
-            pool_models = _v3_pool_enabled_models(provider, pool_name)
-            if pool_models and upstream_model not in pool_models:
-                continue
+            # v3 解析器按池白名单过滤 target（upstream_model 必须在
+            # pool.models 里，空数组 = 未启用任何模型、同样过滤）。迁移必须
+            # 复刻该语义：白名单键存在即过滤（含空），键缺失才不设限。
+            # 不这样做会让 v3 中被静默丢弃的死引用在升级后意外复活。
+            if _v3_pool_has_whitelist(provider, pool_name):
+                pool_models = _v3_pool_enabled_models(provider, pool_name)
+                if upstream_model not in pool_models:
+                    continue
             for key_name in pool_keys:
                 rewritten.append(
                     {
@@ -457,6 +462,19 @@ def _v3_pool_keys(provider: dict[str, Any], pool_name: str) -> list[str]:
     if not isinstance(keys, list):
         return []
     return [str(key_name) for key_name in keys]
+
+
+def _v3_pool_has_whitelist(provider: dict[str, Any], pool_name: str) -> bool:
+    """True when the v3 pool carries an explicit ``models`` whitelist key.
+
+    An explicit whitelist -- even an empty one -- means the pool only serves
+    the listed upstream models; v3 dropped every other target reference.
+    """
+    pools = provider.get("pools") if isinstance(provider, dict) else None
+    if not isinstance(pools, dict) or not pool_name:
+        return False
+    pool = pools.get(pool_name)
+    return isinstance(pool, dict) and isinstance(pool.get("models"), list)
 
 
 def _v3_pool_enabled_models(provider: dict[str, Any], pool_name: str) -> set[str]:

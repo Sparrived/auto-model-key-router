@@ -483,6 +483,67 @@ def test_v3_pool_whitelist_filters_models_on_migration(tmp_path: Path) -> None:
     ]
 
 
+def test_v3_empty_pool_whitelist_filters_like_v3_parser(tmp_path: Path) -> None:
+    """v3 解析器把 pool.models 的空数组也当作「未启用任何模型」过滤引用；
+    迁移必须复刻，否则 v3 中被静默丢弃的死引用会在 v4 意外复活。"""
+    v3 = {
+        "config_version": 3,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {"main": {"api_key": "sk-main"}},
+                "pools": {"empty": {"keys": ["main"], "models": []}},
+            }
+        },
+        "models": {
+            "gpt-a": {
+                "targets": [
+                    {"provider": "gateway", "pool": "empty", "upstream_model": "gpt-a"}
+                ]
+            },
+        },
+    }
+    path = tmp_path / "router-config.json"
+    path.write_text(json.dumps(v3), encoding="utf-8")
+
+    config = RouterConfig.load(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    assert saved["models"]["gpt-a"]["targets"] == []
+    assert config.models[0].keys == ()
+
+
+def test_v3_pool_without_models_key_keeps_target_refs(tmp_path: Path) -> None:
+    """没有 models 白名单键的 v3 池不设限：引用保留并展开到池内每个 Key。"""
+    v3 = {
+        "config_version": 3,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {"main": {"api_key": "sk-main"}},
+                "pools": {"open": {"keys": ["main"]}},
+            }
+        },
+        "models": {
+            "gpt-a": {
+                "targets": [
+                    {"provider": "gateway", "pool": "open", "upstream_model": "gpt-a"}
+                ]
+            },
+        },
+    }
+    path = tmp_path / "router-config.json"
+    path.write_text(json.dumps(v3), encoding="utf-8")
+
+    config = RouterConfig.load(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    assert saved["models"]["gpt-a"]["targets"] == [
+        {"provider": "gateway", "key": "main", "upstream_model": "gpt-a"}
+    ]
+    assert [key.name for key in config.models[0].keys] == ["main"]
+
+
 def test_early_v4_provider_capabilities_promote_onto_keys(tmp_path: Path) -> None:
     """Provider-level capabilities (written by early v4 builds) are promoted
     to per-key capabilities on load and removed from the provider."""
