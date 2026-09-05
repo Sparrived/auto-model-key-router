@@ -425,7 +425,11 @@ def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
                     f"模型 {model_id} 引用了未配置的供应商: {provider_id}"
                 )
             pool_keys = _v3_pool_keys(provider, pool_name)
-            if pool_name and not pool_keys:
+            # An existing v3 pool may intentionally have no keys (for example
+            # after a key was removed).  It is a valid empty target and must be
+            # filtered out by the whitelist semantics below; only a genuinely
+            # missing pool is an invalid reference.
+            if pool_name and not _v3_pool_exists(provider, pool_name):
                 raise ValueError(
                     f"模型 {model_id} 引用了供应商 {provider_id} 不存在的 pool: {pool_name}"
                 )
@@ -451,6 +455,11 @@ def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(provider, dict):
             provider.pop("pools", None)
     return migrated
+
+
+def _v3_pool_exists(provider: dict[str, Any], pool_name: str) -> bool:
+    pools = provider.get("pools") if isinstance(provider, dict) else None
+    return isinstance(pools, dict) and bool(pool_name) and pool_name in pools
 
 
 def _v3_pool_keys(provider: dict[str, Any], pool_name: str) -> list[str]:
