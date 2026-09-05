@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.0.2] - 2026-09-05
+
+### Added
+
+- 管理 API 新增按 Key 设置服务模型集：`GET/PUT /api/providers/{provider_id}/keys/{key_name}/models`。PUT 原子同步该 Key 在所有模型上的绑定：按需创建模型并绑定（upstream_model = 模型 ID），取消绑定的模型会移除引用该 Key 的全部 target，空模型级联删除。桌面端可据此复用旧的「勾选模型卡片」交互。
+
 ## [4.0.1] - 2026-09-05
 
 ### Fixed

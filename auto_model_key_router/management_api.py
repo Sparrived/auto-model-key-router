@@ -140,6 +140,10 @@ class ProviderKeyProbeRequest(RevisionPayload):
     modes: list[str] | None = None
 
 
+class ProviderKeyModelsRequest(RevisionPayload):
+    models: list[str] = Field(default_factory=list)
+
+
 class RouteCreate(RevisionPayload):
     id: str = Field(min_length=1)
     targets: list[dict[str, str]] = Field(min_length=1)
@@ -620,6 +624,53 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
             data,
             provider=_raw_provider_response(provider_id, provider),
             key=_raw_key_response(key_name, _require_key(provider, key_name)),
+        )
+
+    @app.get("/api/providers/{provider_id}/keys/{key_name}/models", tags=["management"])
+    async def get_provider_key_models(
+        request: Request, provider_id: str, key_name: str
+    ) -> dict[str, Any]:
+        await _authorized_config(request, reload_config)
+        data = _management_config_data(request)
+        operations.require_key(
+            operations.require_provider(data, provider_id), key_name
+        )
+        return _with_revision(
+            data,
+            provider_id=provider_id,
+            key=key_name,
+            models=sorted(
+                operations.key_service_models(data, provider_id, key_name)
+            ),
+        )
+
+    @app.put("/api/providers/{provider_id}/keys/{key_name}/models", tags=["management"])
+    async def set_provider_key_models(
+        request: Request,
+        provider_id: str,
+        key_name: str,
+        payload: ProviderKeyModelsRequest,
+    ) -> dict[str, Any]:
+        """Set the models a provider key serves (key-centric binding).
+
+        Every requested model is created when missing and bound to this key;
+        models that previously bound this key but were not requested lose their
+        targets for this key (empty models are removed, same as deleting a key).
+        """
+
+        def mutation(data: dict[str, Any]) -> None:
+            operations.set_key_service_models(
+                data, provider_id, key_name, list(payload.models)
+            )
+
+        data = await v3_update(request, payload.config_revision, mutation)
+        return _with_revision(
+            data,
+            provider_id=provider_id,
+            key=key_name,
+            models=sorted(
+                operations.key_service_models(data, provider_id, key_name)
+            ),
         )
 
     @app.get("/api/probes/{probe_id}", tags=["management"])

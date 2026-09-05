@@ -431,6 +431,104 @@ def test_model_write_rejects_stale_revision_before_persisting(tmp_path: Path) ->
     assert path.read_text(encoding="utf-8") == original
 
 
+def test_set_provider_key_models_binds_and_unbinds_models_atomically(
+    tmp_path: Path,
+) -> None:
+    app, path = create_file_backed_app(tmp_path)
+
+    async def requests(client: httpx.AsyncClient):
+        revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+            "config_revision"
+        ]
+        await client.post(
+            "/api/providers",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": revision,
+                "id": "b.example.test",
+                "base_url": "https://b.example.test",
+            },
+        )
+        revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+            "config_revision"
+        ]
+        await client.post(
+            "/api/providers/b.example.test/keys",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": revision,
+                "name": "key-b",
+                "api_key": "sk-secret-b",
+            },
+        )
+        revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+            "config_revision"
+        ]
+        await client.put(
+            "/api/routes/model-a",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": revision,
+                "targets": [
+                    {
+                        "provider": "b.example.test",
+                        "key": "key-b",
+                        "upstream_model": "model-a",
+                    }
+                ],
+            },
+        )
+        revision = (await client.get("/api/providers", headers=AUTH_HEADERS)).json()[
+            "config_revision"
+        ]
+        initial = await client.get(
+            "/api/providers/b.example.test/keys/key-b/models",
+            headers=AUTH_HEADERS,
+        )
+        revision = initial.json()["config_revision"]
+        extended = await client.put(
+            "/api/providers/b.example.test/keys/key-b/models",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": revision,
+                "models": ["model-a", "model-b", "model-c"],
+            },
+        )
+        revision = extended.json()["config_revision"]
+        narrowed = await client.put(
+            "/api/providers/b.example.test/keys/key-b/models",
+            headers=AUTH_HEADERS,
+            json={"config_revision": revision, "models": ["model-b"]},
+        )
+        after_narrowed = await client.get(
+            "/api/providers/b.example.test/keys/key-b/models",
+            headers=AUTH_HEADERS,
+        )
+        return initial, extended, narrowed, after_narrowed
+
+    initial, extended, narrowed, after_narrowed = run_client(app, requests)
+
+    assert initial.status_code == 200
+    assert initial.json()["models"] == ["model-a"]
+    assert extended.status_code == 200, extended.text
+    assert extended.json()["models"] == ["model-a", "model-b", "model-c"]
+    assert narrowed.status_code == 200, narrowed.text
+    assert narrowed.json()["models"] == ["model-b"]
+    assert after_narrowed.json()["models"] == ["model-b"]
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["models"]["model-b"]["targets"] == [
+        {
+            "provider": "b.example.test",
+            "key": "key-b",
+            "upstream_model": "model-b",
+        }
+    ]
+    # 解绑后空模型级联删除：model-a 只剩 key-b 一个 target。
+    assert "model-a" not in saved["models"]
+    assert "model-c" not in saved["models"]
+
+
 def test_provider_key_and_route_crud_uses_v4_config(tmp_path: Path) -> None:
     app, path = create_file_backed_app(tmp_path)
 

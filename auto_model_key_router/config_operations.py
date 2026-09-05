@@ -350,6 +350,108 @@ def repair_unified_model(data: dict[str, Any]) -> None:
     data["unified_model"] = unified
 
 
+def key_service_models(
+    data: dict[str, Any], provider_id: str, key_name: str
+) -> set[str]:
+    """Model ids whose targets currently bind this provider key."""
+    provider = require_provider(data, provider_id)
+    require_key(provider, key_name)
+    result: set[str] = set()
+    for model_id, model in models(data).items():
+        if not isinstance(model, dict):
+            continue
+        for target in model_targets(model):
+            if (
+                target.get("provider") == provider_id
+                and target.get("key") == key_name
+            ):
+                result.add(str(model_id))
+    return result
+
+
+def set_key_service_models(
+    data: dict[str, Any],
+    provider_id: str,
+    key_name: str,
+    model_ids: list[str] | None,
+) -> dict[str, Any]:
+    """Atomically set which models a provider key serves (v4, key-centric).
+
+    Mirrors the TUI model multi-select: every requested model is created when
+    missing and gets a target binding this key (upstream_model = model id);
+    models that previously bound this key but are no longer requested lose
+    every target that uses this key, and models left without targets are
+    removed (same empty-model semantics as deleting the provider key).
+    Binding state is tracked per model container (any target using this key
+    counts), so an unchecked model is fully detached from this key even when
+    its target used a custom upstream model name.
+
+    Returns {"added": [...], "removed": [...], "models_removed": [...]}.
+    """
+    provider = require_provider(data, provider_id)
+    require_key(provider, key_name)
+    desired = {_non_empty(str(item), "模型 ID") for item in (model_ids or [])}
+    bound_by_model: dict[str, list[dict[str, Any]]] = {}
+    for current_id, model in models(data).items():
+        if not isinstance(model, dict):
+            continue
+        current_id = str(current_id)
+        hits = [
+            target
+            for target in model_targets(model)
+            if target.get("provider") == provider_id and target.get("key") == key_name
+        ]
+        if hits:
+            bound_by_model[current_id] = hits
+    added: list[str] = []
+    removed: list[str] = []
+    removed_models: list[str] = []
+    all_models = models(data)
+    for model_id in desired:
+        model = all_models.get(model_id)
+        if model is None:
+            create_model(data, model_id)
+        model = require_model(data, model_id)
+        exists = any(
+            target.get("provider") == provider_id
+            and target.get("key") == key_name
+            for target in model_targets(model)
+        )
+        if not exists:
+            add_model_target(
+                data,
+                model_id,
+                {"provider": provider_id, "key": key_name, "upstream_model": model_id},
+            )
+            added.append(model_id)
+    for model_id, hits in bound_by_model.items():
+        if model_id in desired:
+            continue
+        model = all_models.get(model_id)
+        if not isinstance(model, dict):
+            continue
+        targets = model_targets(model)
+        targets[:] = [
+            target
+            for target in targets
+            if not (
+                target.get("provider") == provider_id
+                and target.get("key") == key_name
+            )
+        ]
+        removed.append(model_id)
+        if not targets:
+            all_models.pop(model_id, None)
+            removed_models.append(model_id)
+    if removed:
+        repair_unified_model(data)
+    return {
+        "added": sorted(added),
+        "removed": sorted(removed),
+        "models_removed": sorted(removed_models),
+    }
+
+
 def delete_provider_key(data: dict[str, Any], provider_id: str, key_name: str) -> set[str]:
     provider = require_provider(data, provider_id)
     keys = provider_keys(provider)
