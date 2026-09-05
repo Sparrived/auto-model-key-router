@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import secrets
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -213,12 +214,27 @@ def save_config_data(path: Path, data: dict[str, Any]) -> None:
     temporary_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     try:
         temporary_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        temporary_path.replace(path)
+        _replace_with_retry(temporary_path, path)
     finally:
         try:
             temporary_path.unlink()
         except OSError:
             pass
+
+
+def _replace_with_retry(source: Path, target: Path, attempts: int = 4) -> None:
+    """os.replace 偶发被 Windows 短暂占用（杀软扫描/句柄未释放）拒绝，
+    属平台噪声：小退避重试后仍失败才向上抛。"""
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            source.replace(target)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def migrate_config_data(raw: dict[str, Any]) -> dict[str, Any]:
@@ -370,13 +386,18 @@ def _migrate_v3_to_v4(data: dict[str, Any]) -> dict[str, Any]:
                     keys_by_provider[str(provider.get("base_url") or "")].setdefault(
                         str(key_name), key
                     )
-        # Provider-level capabilities become the sole probe cache in v4.
-        capabilities = provider.get("capabilities")
-        if not isinstance(capabilities, dict):
-            capabilities = {}
-        provider["capabilities"] = _merge_pool_probe_metadata(
-            capabilities, provider
-        )
+        # v3 probe metadata is per pool (a group of keys sharing a whitelist).
+        # v4 caches probes per key; fold the legacy pool models into every key
+        # of the pool conservatively so the TUI can offer bindings immediately.
+        # A later per-key refresh replaces these with key-specific results.
+        legacy = _legacy_probe_capabilities(provider)
+        if legacy:
+            for key in raw_keys.values():
+                if isinstance(key, dict) and not isinstance(
+                    key.get("capabilities"), dict
+                ):
+                    key["capabilities"] = legacy
+        provider.pop("capabilities", None)
         provider.pop("available_models", None)
         provider.pop("key_models", None)
         provider.pop("routes_by_key", None)
@@ -449,12 +470,21 @@ def _v3_pool_enabled_models(provider: dict[str, Any], pool_name: str) -> set[str
     return {str(model_id) for model_id in models if str(model_id)}
 
 
-def _merge_pool_probe_metadata(capabilities: dict[str, Any], provider: dict[str, Any]) -> dict[str, Any]:
-    """Best-effort fold of v3 pool probe info into v4 provider capabilities."""
-    if not isinstance(capabilities, dict):
-        capabilities = {}
-    merged_models = {str(model_id) for model_id in capabilities.get("models", []) if str(model_id)}
-    merged_checked = capabilities.get("checked_at")
+def _legacy_probe_capabilities(provider: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract legacy (v3 pool / early v4 provider-level) probe metadata.
+
+    v3 kept probe info per pool; early v4 wrote it at provider level. Both are
+    folded into a single conservative {models, checked_at} block that gets
+    copied onto every key of the provider during migration. Returns None when
+    there is nothing to preserve.
+    """
+    merged_models: set[str] = set()
+    merged_checked: Any = None
+    capabilities = provider.get("capabilities")
+    if isinstance(capabilities, dict):
+        for model_id in capabilities.get("models", []) or []:
+            merged_models.add(str(model_id))
+        merged_checked = capabilities.get("checked_at")
     pools = provider.get("pools")
     if isinstance(pools, dict):
         for pool in pools.values():
@@ -469,21 +499,45 @@ def _merge_pool_probe_metadata(capabilities: dict[str, Any], provider: dict[str,
             checked_at = pool.get("checked_at")
             if checked_at and not merged_checked:
                 merged_checked = checked_at
-    capabilities = {**capabilities}
-    capabilities["models"] = sorted(merged_models)
+    if not merged_models:
+        return None
+    result: dict[str, Any] = {"models": sorted(merged_models)}
     if merged_checked:
-        capabilities["checked_at"] = merged_checked
-    return capabilities
+        result["checked_at"] = merged_checked
+    return result
 
 
 def _drop_legacy_pool_remnants(data: dict[str, Any]) -> None:
-    """Idempotent safety net: never let pools reappear in v4 payloads."""
+    """Idempotent safety net: never let pools reappear in v4 payloads.
+
+    Also promotes any leftover provider-level capabilities block (written by
+    early v4 builds) onto every key that has no per-key probe cache yet, then
+    drops the provider-level field so the disk layout stays key-scoped.
+    """
     providers = data.get("providers")
-    if isinstance(providers, dict):
-        for provider in providers.values():
-            if isinstance(provider, dict):
-                provider.pop("pools", None)
-                provider.pop("available_models", None)
+    if not isinstance(providers, dict):
+        return
+    for provider in providers.values():
+        if not isinstance(provider, dict):
+            continue
+        provider.pop("pools", None)
+        provider.pop("available_models", None)
+        capabilities = provider.pop("capabilities", None)
+        if not isinstance(capabilities, dict) or not capabilities.get("models"):
+            continue
+        raw_keys = provider.get("keys")
+        if not isinstance(raw_keys, dict):
+            continue
+        folded: dict[str, Any] = {"models": capabilities.get("models")}
+        if capabilities.get("checked_at"):
+            folded["checked_at"] = capabilities["checked_at"]
+        if capabilities.get("errors"):
+            folded["errors"] = capabilities["errors"]
+        if capabilities.get("route_status"):
+            folded["route_status"] = capabilities["route_status"]
+        for key in raw_keys.values():
+            if isinstance(key, dict) and not isinstance(key.get("capabilities"), dict):
+                key["capabilities"] = dict(folded)
 
 
 def _legacy_provider_id(base_url: str) -> str:
@@ -544,6 +598,7 @@ class ProviderKeyConfig:
     api_key: str
     enabled: bool = True
     allow_visitor: bool = False
+    capabilities: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -700,11 +755,17 @@ class RouterConfig:
                         raise ValueError(
                             f"供应商 {provider_id} 的 key {key_name} 必须是对象"
                         )
+                    raw_key_capabilities = key.get("capabilities")
                     key_config = ProviderKeyConfig(
                         name=str(key_name),
                         api_key=str(key["api_key"]),
                         enabled=bool(key.get("enabled", True)),
                         allow_visitor=bool(key.get("allow_visitor", False)),
+                        capabilities=(
+                            raw_key_capabilities
+                            if isinstance(raw_key_capabilities, dict)
+                            else None
+                        ),
                     )
                     keys.append(key_config)
                 raw_capabilities = provider.get("capabilities")

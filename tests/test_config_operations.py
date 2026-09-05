@@ -272,3 +272,40 @@ def test_merge_transferable_config_renames_target_key_when_source_key_is_renamed
         {"provider": "gateway", "key": "main-2", "upstream_model": "remote-a"}
     ]
     RouterConfig.from_dict(merged)
+
+
+def test_updating_provider_key_api_key_drops_stale_capabilities() -> None:
+    data = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {
+                    "main": {
+                        "api_key": "sk-old",
+                        "capabilities": {
+                            "models": ["gpt-a"],
+                            "route_status": {"openai": "ok"},
+                            "errors": {},
+                            "checked_at": "2026-09-01T00:00:00+00:00",
+                        },
+                    }
+                },
+            }
+        },
+        "models": {},
+    }
+
+    # 换 API Key：探测缓存属于旧凭据，必须失效。
+    operations.update_provider_key(data, "gateway", "main", api_key="sk-new")
+    assert data["providers"]["gateway"]["keys"]["main"]["api_key"] == "sk-new"
+    assert "capabilities" not in data["providers"]["gateway"]["keys"]["main"]
+
+    # 重新探测后，改名/禁用不应丢新缓存。
+    key = data["providers"]["gateway"]["keys"]["main"]
+    key["capabilities"] = {"models": ["gpt-b"], "checked_at": "2026-09-02T00:00:00+00:00"}
+    operations.update_provider_key(data, "gateway", "main", new_name="renamed", enabled=False)
+    renamed = data["providers"]["gateway"]["keys"]["renamed"]
+    assert renamed["capabilities"]["models"] == ["gpt-b"]
+    assert renamed["enabled"] is False
+    RouterConfig.from_dict(data)

@@ -15,11 +15,14 @@ v3 中「模型池(pool)」是每个供应商 Key 的归属容器，模型路由
   一个模型可以挂多个 Key，每个 Key 相互独立；Key 通过 `providers.*.keys`
   声明并经 target 引用，不再存在 pools 层级。
 - 每个供应商的 base URL、三个协议路由路径（openai/anthropic/responses/images）
-  对所有 Key 相同：可用性与端点探测提升为「供应商级」能力，只在供应商首个 Key
-  添加时自动探测并缓存，之后可手动刷新（提供接口/菜单动作）。
-- 添加 Key 流程：输入 API key -> 供应商级自动探测（仅当该供应商尚未探测）
-  -> 展示可服务模型清单 -> 自动把这些模型建为本地模型（模型 ID 取上游模型名）
-  并将该 Key 绑定到这些模型；用户可反选或手动输入补充。
+  对所有 Key 相同；能力探测提升为「每个 Key 独立」：探测结果按 Key 缓存
+  （`providers.*.keys.<key>.capabilities`），只在添加该 Key 时自动探测一次，
+  之后可手动刷新（提供接口/菜单动作）。
+- 添加 Key 流程：输入 API key -> 自动探测这个新 Key（无论是否该供应商第一个
+  Key，都只探测它）-> 展示该 Key 可服务的模型清单 -> 自动把这些模型建为本地
+  模型（模型 ID 取上游模型名）并将该 Key 绑定到这些模型；用户可反选或手动
+  输入补充。同一供应商的不同 Key 可见模型可能不同，因此每次添加只探测新 Key，
+  结果不复用、不折叠。
 - 同一供应商下多个 Key 可各自服务不同模型集；允许多个模型共用同一 Key
   （Key 会出现在这些模型的 keys 中，各自独立），不再有「Key 必须且只能属于
   一个池」的唯一性约束与重复归属修复流程。
@@ -36,14 +39,18 @@ v3 中「模型池(pool)」是每个供应商 Key 的归属容器，模型路由
     "openai": {
       "base_url": "https://api.openai.com",
       "routes": {"openai": "v1/chat/completions"},
-      "capabilities": {
-        "models": ["gpt-5.5", "gpt-5.5-1"],
-        "route_status": {"openai": "ok", "anthropic": "skip", "responses": "ok", "images": "unknown"},
-        "checked_at": "2026-09-01T00:00:00+00:00",
-        "errors": {}
-      },
       "keys": {
-        "main": {"api_key": "sk-...", "enabled": true, "allow_visitor": false}
+        "main": {
+          "api_key": "sk-...",
+          "enabled": true,
+          "allow_visitor": false,
+          "capabilities": {
+            "models": ["gpt-5.5", "gpt-5.5-1"],
+            "route_status": {"openai": "ok", "anthropic": "skip", "responses": "ok"},
+            "checked_at": "2026-09-01T00:00:00+00:00",
+            "errors": {}
+          }
+        }
       }
     }
   },
@@ -64,7 +71,8 @@ v3 中「模型池(pool)」是每个供应商 Key 的归属容器，模型路由
 
 要点：
 
-- `providers.*.pools` 删除；新增 `providers.*.capabilities`（供应商级探测缓存）。
+- `providers.*.pools` 删除；探测缓存按 Key 存放：新增 `providers.*.keys.<key>.capabilities`
+  （每个 Key 独立的探测缓存，同一供应商不同 Key 可见模型可能不同）。
 - `models.*.targets[]` 每个元素：
   - `provider` 必填（引用已有供应商）
   - `key` 必填（供应商内 Key 名，取代 v3 的 `pool` 引用）
@@ -77,8 +85,11 @@ v3 中「模型池(pool)」是每个供应商 Key 的归属容器，模型路由
     models 生成 `target: {provider, key, upstream_model}`；
   - 保留所有 providers、keys、aliases、routing_mode、reasoning_effort、
     native_first、unified_model、upstream_routes；
-  - 旧的池级探测元信息（available_models 等）合并进供应商 capabilities
-    （仅作为参考快照，不参与路由判定）；
+  - 旧的池级探测元信息（available_models 等）折进该供应商每个 Key 的
+    capabilities（仅作为参考快照，不参与路由判定）；迁移期保守处理：同一池的
+    Key 共享同一份 {models, checked_at}（不含 route_status/errors），随后逐 Key
+    手动刷新会各自更新；早期 v4 写在 provider 级的 capabilities 也按同样方式
+    折入各 Key（加载时自动，写回后 provider 不再保留该字段）；
   - 迁移必须幂等：新结构再次加载不产生文件变化。
 - v2 -> v3 -> v4 的旧迁移链继续工作（v2 models[]/keys[] 语义已在 v3 迁移中
   展开为 pool，v3 再迁移到 v4）。
@@ -104,9 +115,16 @@ v4 对齐 TUI 语义，模型池端点下线（保留兼容还是删除？见下
   `/api/routes`（模型路由）保持，但 route 里 target 使用 `{provider,key,upstream_model}`。
 - pools 系列端点删除；`/api/providers/{id}/pools/*` 404。
 - probes：`/api/probes/keys`（逐 Key 探测模型列表）语义保留；
-  新增 `POST /api/providers/{provider_id}/probe`（供应商级同步刷新：
-  携带 `config_revision`，探测 models + route_status 后写回并返回新 provider）。
-  探测结果写入 `providers.*.capabilities`。
+  新增同步刷新端点，探测结果写入各 Key 的 `providers.*.keys.<key>.capabilities`：
+  - `POST /api/providers/{provider_id}/probe`：刷新该供应商全部启用 Key
+    （携带 `config_revision`，每个 Key 分别探测 models + route_status 后写回，
+    响应返回新 provider）；
+  - `POST /api/providers/{provider_id}/keys/{key_name}/probe`：刷新单个 Key，
+    请求体 `{config_revision, modes?}`，`modes` 限定路由检查范围
+    （如 `["openai","responses"]`，省略 = 全部模式），模型清单探测总是执行；
+    响应除 provider 外还含 `key` 对象。
+  - provider 响应对象不再含顶层 `capabilities`；其 `keys[]` 各项携带
+    `capabilities`（可能为 `null`）。
 - 迁移期：旧 payload 兼容策略 = 由于 pools 与 routes 的删除是破坏性的，本版本
   直接删除 pools 相关端点并在文档说明（不承诺向后兼容 pools payload）；
   只保留 v2/v3 磁盘结构读取迁移，不做 pools HTTP payload 兼容。
@@ -114,8 +132,13 @@ v4 对齐 TUI 语义，模型池端点下线（保留兼容还是删除？见下
 ## TUI / CLI / 交互
 
 主菜单「供应商」「模型设置」保留；删除「模型池」入口：
-- 供应商菜单：添加 Key / 管理 Key / Base URL 与路由 / 刷新供应商能力 / 删除供应商。
-- 添加 Key：自动供应商级探测（首次）后多选「该 Key 服务的模型」，自动建模型。
+- 供应商菜单：添加 Key / 管理 Key / Base URL 与路由 / 刷新能力探测 / 删除供应商。
+  刷新能力探测进入子菜单：「1 刷新全部 Key / 2 指定 Key / 0 返回」；选「2 指定 Key」
+  后再选 Key，并可再选端点范围：「1 全部路由模式 / 2 仅 Chat (openai) /
+  3 仅 Messages (anthropic) / 4 仅 Responses」。
+- 添加 Key：无论是否该供应商第一个 Key，都自动探测这个新 Key（GET /v1/models
+  得到该 Key 的模型清单 + 该 Key 对 openai/anthropic/responses 各做一次最小
+  请求），随后多选「该 Key 服务的模型」（清单来自该 Key 自己的探测），自动建模型。
 - 模型设置：模型列表 -> 模型 Keys（添加/移除该模型的 Key）、别名、路由模式、
   reasoning_effort、删除模型。
 - unified-model / 一键配置 / 调用日志等不变。
@@ -130,13 +153,19 @@ provider_pools 嵌套或保留空表以兼容已有读取端（倾向保留空�
 
 ## 探测
 
-- 供应商级能力探测函数（config_editor / management_api 共享）：
-  - GET /v1/models 得到模型清单；
-  - 对 openai/anthropic/responses/images 四个默认（或自定义 routes）路径
-    各做一次最小请求（1 token 或 1 像素），记录 route_status；
-  - 首次添加该供应商 Key 时若 capabilities 缺失/为空则自动探测；
-  - 提供手动刷新入口与 HTTP 接口。
-- 由于供应商探测以供应商为单位，不再为每个 Key 单独探测模型。
+- 每个 Key 独立的能力探测函数（config_editor / management_api 共享，按
+  Key 执行，结果互不复用）：
+  - 用该 Key 调 GET /v1/models 得到该 Key 的模型清单；
+  - 用该 Key 对 openai/anthropic/responses 三个路由模式各做一次最小请求
+    （1 token 或 1 像素），记录 route_status；手动刷新单个 Key 时可限定只检查
+    其中某个模式；
+  - 添加 Key（无论是否该供应商第一个 Key）时自动探测该 Key；探测结果写入
+    `providers.*.keys.<key>.capabilities`（models / route_status / errors /
+    checked_at）；
+  - 提供手动刷新入口（TUI 子菜单与 HTTP 接口，见上）。
+- 由于同一供应商的不同 Key 能访问的模型集可能不同（如免费/付费额度、不同
+  订阅、各自授权范围），探测以 Key 为单位，不再做供应商级合并探测；模型
+  多选「该 Key 服务哪些模型」的清单来自该 Key 自己的探测。
 
 ## 兼容周期
 

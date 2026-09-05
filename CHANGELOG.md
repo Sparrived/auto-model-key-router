@@ -5,9 +5,9 @@
 ### v4（config_version=4，下一版）
 
 - 彻底移除「模型池 (Pool)」抽象：Key 归 `providers.<id>.keys` 管理，模型 `targets[]` 改为 `{provider, key, upstream_model}` 直接绑定供应商 Key（同一 Key 可被多个模型引用，一个模型可绑定多个 Key）。
-- 磁盘格式升级到 v4，`unified_model` 改为嵌套结构（`default` / 可选 `image`，各含 `primary` 与可选 `fallback`）；v3/v2/v1 配置在加载时自动、幂等迁移到 v4 并写回。
-- 探测改为供应商级：添加供应商第一个 Key 时自动探测一次（`GET /v1/models` 模型清单 + 各路由最小请求），结果缓存于 `providers.<id>.capabilities`，不再逐 Key 探测；可经 TUI「供应商 → 刷新能力探测」或 `POST /api/providers/{provider_id}/probe` 手动刷新。
-- 管理 API：删除 pools 系列端点（`/api/providers/{id}/pools/*`）与 `/api/probes/pools`；新增同步的 `POST /api/providers/{provider_id}/probe`；provider 响应新增 `capabilities` 字段、移除 `pools`。
+- 磁盘格式升级到 v4，`unified_model` 改为嵌套结构（`default` / 可选 `image`，各含 `primary` 与可选 `fallback`）；v3/v2/v1 配置在加载时自动、幂等迁移到 v4 并写回；v3 池级探测元数据与旧 v4 供应商级 `capabilities` 会折进该供应商每个 Key 的 `capabilities`（迁移期保守共享同一份探测快照，随后逐 Key 刷新会各自更新）。
+- 探测改为每个 Key 独立进行并缓存：添加 Key（无论是否该供应商第一个 Key）都会只探测这个新 Key（`GET /v1/models` 模型清单 + 对 openai/anthropic/responses 路由模式各做一次最小请求），结果写入 `providers.<id>.keys.<key>.capabilities`，同一供应商的不同 Key 可见模型可能不同，探测结果互不复用；手动刷新可在 TUI「供应商 → 刷新能力探测」选择全部 Key 或指定 Key（指定 Key 还可限定端点范围），或调用 `POST /api/providers/{provider_id}/probe` 刷新全部启用 Key。
+- 管理 API：删除 pools 系列端点（`/api/providers/{id}/pools/*`）与 `/api/probes/pools`；新增同步的 `POST /api/providers/{provider_id}/probe` 与单 Key 的 `POST /api/providers/{provider_id}/keys/{key_name}/probe`（请求体可带 `modes` 限定路由检查）；provider 响应不再含顶层 `capabilities`，探测缓存移至其 `keys[]` 各项的 `capabilities`（可为 `null`），单 Key probe 响应额外返回 `key` 对象。
 - 删除语义：删除 Key 只清理引用它的模型绑定（模型无 target 自动删除；供应商无 Key 自动删除）。
 - TUI 改版：供应商菜单（添加 Key / 管理 Key / 刷新能力探测 / Base URL 与路由 / 删除供应商）与模型设置菜单（别名 / 路由模式 / 管理 Key / 绑定 Key / 删除模型）取代「模型池」入口。
 - 统计：v4 新调用不再写入模型池归因（`pool_name` 为空），历史池归因仅作为 v3 及更早数据保留。

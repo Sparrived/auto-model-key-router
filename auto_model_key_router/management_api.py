@@ -136,6 +136,10 @@ class ProviderKeyUpdate(RevisionPayload):
     allow_visitor: bool | None = None
 
 
+class ProviderKeyProbeRequest(RevisionPayload):
+    modes: list[str] | None = None
+
+
 class RouteCreate(RevisionPayload):
     id: str = Field(min_length=1)
     targets: list[dict[str, str]] = Field(min_length=1)
@@ -556,14 +560,15 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
 
     @app.post("/api/providers/{provider_id}/probe", tags=["management"])
     async def probe_provider(request: Request, provider_id: str, payload: RevisionPayload) -> dict[str, Any]:
-        """Refresh provider-level capabilities: model list + route availability.
+        """Refresh capabilities for every key of a provider.
 
-        v4 probes once per provider (all keys of a provider share the same
-        routes); the result is stored in providers.<id>.capabilities. The probe
-        runs synchronously inside the config write lock (executed on a worker
-        thread, so the event loop is not blocked).
+        Each key is probed separately (different keys of one provider often
+        see different model lists), and each probe result is stored in
+        providers.<id>.keys.<key>.capabilities. The probe runs synchronously
+        inside the config write lock (executed on a worker thread, so the
+        event loop is not blocked).
         """
-        from .config_editor import probe_provider_capability
+        from .config_editor import probe_key_capability
 
         def mutation(data: dict[str, Any]) -> None:
             provider = operations.require_provider(data, provider_id)
@@ -572,13 +577,49 @@ def register_management_api(app: FastAPI, reload_config: ReloadConfig) -> None:
                 raise operations.ConfigOperationError(
                     f"供应商暂无 Key: {provider_id}", status_code=422
                 )
-            provider["capabilities"] = probe_provider_capability(
-                provider, sorted(keys), 15.0
-            )
+            for key_name in sorted(keys):
+                key = keys[key_name]
+                if isinstance(key, dict) and key.get("enabled", True):
+                    key["capabilities"] = probe_key_capability(
+                        provider, key_name, timeout=15.0
+                    )
         data = await v3_update(request, payload.config_revision, mutation)
         provider = _require_provider(_providers(data), provider_id)
         return _with_revision(
             data, provider=_raw_provider_response(provider_id, provider)
+        )
+
+    @app.post(
+        "/api/providers/{provider_id}/keys/{key_name}/probe",
+        tags=["management"],
+    )
+    async def probe_provider_key(
+        request: Request,
+        provider_id: str,
+        key_name: str,
+        payload: ProviderKeyProbeRequest,
+    ) -> dict[str, Any]:
+        """Refresh the capabilities of a single key.
+
+        ``modes`` optionally limits the route check to specific upstream
+        endpoint modes (e.g. ["openai", "responses"]); discovery of the model
+        list always runs.
+        """
+        from .config_editor import probe_key_capability
+
+        def mutation(data: dict[str, Any]) -> None:
+            provider = operations.require_provider(data, provider_id)
+            key = operations.require_key(provider, key_name)
+            key["capabilities"] = probe_key_capability(
+                provider, key_name, modes=payload.modes, timeout=15.0
+            )
+
+        data = await v3_update(request, payload.config_revision, mutation)
+        provider = _require_provider(_providers(data), provider_id)
+        return _with_revision(
+            data,
+            provider=_raw_provider_response(provider_id, provider),
+            key=_raw_key_response(key_name, _require_key(provider, key_name)),
         )
 
     @app.get("/api/probes/{probe_id}", tags=["management"])
@@ -1206,9 +1247,6 @@ def _key_response(key: KeyConfig) -> dict[str, Any]:
 
 
 def _provider_response(provider: Any) -> dict[str, Any]:
-    capabilities = (
-        provider.capabilities if hasattr(provider, "capabilities") else None
-    )
     return {
         "id": provider.id,
         "base_url": provider.base_url,
@@ -1220,11 +1258,11 @@ def _provider_response(provider: Any) -> dict[str, Any]:
                 "api_key_fingerprint": hashlib.sha256(
                     key.api_key.encode("utf-8")
                 ).hexdigest()[:12],
+                "capabilities": _key_capabilities_field(key.capabilities),
             }
             for key in provider.keys
         ],
         "routes": dict(provider.routes),
-        "capabilities": capabilities,
     }
 
 
@@ -1277,11 +1315,21 @@ def _validate_targets(data: dict[str, Any], targets: list[dict[str, str]]) -> No
 
 
 def _raw_key_response(name: str, key: dict[str, Any]) -> dict[str, Any]:
-    return {"name": name, "enabled": bool(key.get("enabled", True)), "allow_visitor": bool(key.get("allow_visitor", False)), "api_key_fingerprint": hashlib.sha256(str(key.get("api_key", "")).encode()).hexdigest()[:12]}
+    capabilities = key.get("capabilities")
+    return {
+        "name": name,
+        "enabled": bool(key.get("enabled", True)),
+        "allow_visitor": bool(key.get("allow_visitor", False)),
+        "api_key_fingerprint": hashlib.sha256(str(key.get("api_key", "")).encode()).hexdigest()[:12],
+        "capabilities": capabilities if isinstance(capabilities, dict) else None,
+    }
+
+
+def _key_capabilities_field(capabilities: dict[str, Any] | None) -> dict[str, Any] | None:
+    return dict(capabilities) if isinstance(capabilities, dict) else None
 
 
 def _raw_provider_response(name: str, provider: dict[str, Any]) -> dict[str, Any]:
-    capabilities = provider.get("capabilities")
     return {
         "id": name,
         "base_url": provider.get("base_url"),
@@ -1290,9 +1338,6 @@ def _raw_provider_response(name: str, provider: dict[str, Any]) -> dict[str, Any
             for key_name, key in provider.get("keys", {}).items()
         ],
         "routes": dict(provider.get("routes", {})),
-        "capabilities": (
-            capabilities if isinstance(capabilities, dict) else None
-        ),
     }
 
 

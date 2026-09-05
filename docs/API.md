@@ -61,7 +61,8 @@ visitor 模型使用 `amkr-{真实模型ID}` 形式，例如 `amkr-gpt-5.5`。vi
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}` | 仅本地 | 查询、更新或删除 Provider |
 | `GET/POST` | `/api/providers/{provider_id}/keys` | 仅本地 | 查询或创建 Provider Key |
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Provider Key |
-| `POST` | `/api/providers/{provider_id}/probe` | 仅本地 | 同步刷新该 Provider 的能力探测（模型列表 + 各路由可用性） |
+| `POST` | `/api/providers/{provider_id}/probe` | 仅本地 | 同步刷新该 Provider 全部启用 Key 的能力探测（各 Key 的模型列表 + 路由可用性） |
+| `POST` | `/api/providers/{provider_id}/keys/{key_name}/probe` | 仅本地 | 同步刷新指定 Key 的能力探测，可用 `modes` 限定路由检查范围 |
 | `GET/POST` | `/api/routes` | 仅本地 | 查询或创建模型路由 |
 | `GET/PUT/DELETE` | `/api/routes/{route_id}` | 仅本地 | 查询、更新或删除模型路由 |
 | `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
@@ -529,20 +530,20 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
       "name": "main",
       "enabled": true,
       "allow_visitor": true,
-      "api_key_fingerprint": "0123456789ab"
+      "api_key_fingerprint": "0123456789ab",
+      "capabilities": {
+        "models": ["gpt-5.5"],
+        "route_status": {"openai": "ok", "anthropic": "ok", "responses": "ok"},
+        "errors": {},
+        "checked_at": "2026-09-01T00:00:00+00:00"
+      }
     }
   ],
-  "routes": {"openai": "v1/chat/completions", "responses": "v1/responses"},
-  "capabilities": {
-    "models": ["gpt-5.5"],
-    "route_status": {"openai": "ok", "responses": "ok"},
-    "errors": {},
-    "checked_at": "2026-09-01T00:00:00+00:00"
-  }
+  "routes": {"openai": "v1/chat/completions", "responses": "v1/responses"}
 }
 ```
 
-`capabilities` 为供应商级探测缓存，未探测时为 `null`；`models` 是可服务模型清单，`route_status` 是 openai/anthropic/responses/images 等路由的可用性，`errors` / `checked_at` 记录探测错误与时间。v3 的 `pools` 字段已移除。
+provider 对象不再含顶层 `capabilities`；探测缓存按 Key 存于 `keys[]` 中每个元素的 `capabilities`（该 Key 通过 `GET /v1/models` 看到的可服务模型清单与 openai/anthropic/responses 路由的可用性，`errors` / `checked_at` 记录探测错误与时间），未探测时为 `null`。同一供应商的不同 Key 能访问的模型集可能不同（如免费/付费额度、不同订阅），因此各 Key 独立探测、独立缓存，互不复用。v3 的 `pools` 字段已移除。
 
 ### 模型接口
 
@@ -625,7 +626,7 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 ### 供应商接口与能力探测
 
-v4 中 Key 与探测都以供应商为单元：`providers.<id>` 保存 `base_url`、各协议 `routes`、`keys`（Key 集合）与 `capabilities`（探测缓存）。删除供应商或其 Key 时会清理所有引用它们的模型绑定。
+v4 中 Key 与探测都以 Key 为单元：`providers.<id>` 保存 `base_url`、各协议 `routes` 与 `keys`（Key 集合），探测缓存按 Key 存放在 `providers.<id>.keys.<key>.capabilities`。同一供应商的不同 Key 能访问的模型集可能不同，因此每个 Key 独立探测、独立缓存，互不复用。删除供应商或其 Key 时会清理所有引用它们的模型绑定。
 
 #### `GET /api/providers`
 
@@ -661,7 +662,7 @@ v4 中 Key 与探测都以供应商为单元：`providers.<id>` 保存 `base_url
 
 #### `POST /api/providers/{provider_id}/probe`
 
-同步刷新该供应商的能力探测：`GET /v1/models` 拉取可服务模型清单，并对该供应商 `routes` 中配置的每个路由模式（openai/anthropic/responses/images 等）做一次最小请求，结果写入 `providers.<id>.capabilities` 后随响应返回。请求体只需携带 `config_revision`。供应商尚无 Key 时返回 `422`。该探测以供应商为单位执行一次，不逐 Key 探测；首次给供应商添加 Key（TUI 添加供应商 Key 流程）且 capabilities 缺失或为空时会自动执行一次。
+同步刷新该供应商**全部启用 Key** 的能力探测：每个 Key 分别执行 `GET /v1/models` 拉取该 Key 的可服务模型清单，并对该 Key 在 `openai` / `anthropic` / `responses` 三个路由模式下各做一次最小请求，结果分别写入 `providers.<id>.keys.<key>.capabilities` 后随响应返回。请求体只需携带 `config_revision`。供应商尚无 Key 时返回 `422`。探测结果按 Key 缓存，不跨 Key 共享或折叠。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/providers/openai/probe \
@@ -670,9 +671,29 @@ curl -X POST http://127.0.0.1:8000/api/providers/openai/probe \
   -d '{"config_revision": "..."}'
 ```
 
+#### `POST /api/providers/{provider_id}/keys/{key_name}/probe`
+
+同步刷新**指定单个 Key** 的能力探测：同样先执行 `GET /v1/models` 拉取该 Key 的可服务模型清单，再按 `modes` 做路由最小请求，结果写入 `providers.<id>.keys.<key>.capabilities` 后随响应返回。请求体为：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `config_revision` | string | 是 | 并发校验版本号 |
+| `modes` | string[] | 否 | 限定做最小请求的路由模式，可选 `openai`、`anthropic`、`responses`；省略时检查全部路由模式。模型清单探测总是执行 |
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/providers/openai/keys/main/probe \
+  -H "Authorization: Bearer your-local-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"config_revision": "...", "modes": ["openai", "responses"]}'
+```
+
+响应额外包含 `key` 对象（含 `capabilities`，未探测时为 `null`）。
+
+> 说明：探测缓存是机器本地信息（不同机器、不同 Key 权限看到的模型可能不同），只由以上手动刷新入口更新；TUI「供应商 → 刷新能力探测」的语义与此一致（刷新全部 Key，或指定 Key 并可限定端点范围）。管理 API 的 Key 创建、模型绑定等写操作不会自动发起探测。
+
 #### `POST /api/probes/keys`（兼容接口）
 
-按 Key 粒度的异步探测，返回 `202` 与 `probe_id`。请求体为 `ProbeKeysRequest`（`provider_id`、`keys`、`timeout_seconds`），随后的 `GET /api/probes/{probe_id}` 轮询结果、`POST /api/probes/{probe_id}/cancel` 取消。v4 常规探测请优先使用上面的供应商级 `probe` 接口。
+按 Key 粒度的异步探测，返回 `202` 与 `probe_id`。请求体为 `ProbeKeysRequest`（`provider_id`、`keys`、`timeout_seconds`），随后的 `GET /api/probes/{probe_id}` 轮询结果、`POST /api/probes/{probe_id}/cancel` 取消。该接口的模型列表结果同样按 Key 独立探测；日常手动刷新请优先使用上面的 `probe` 接口（同步写回并随响应返回结果）。
 
 ### 路由接口
 
@@ -699,7 +720,7 @@ curl -X POST http://127.0.0.1:8000/api/routes \
 
 | 状态码 | 场景 |
 | --- | --- |
-| `200/201` | 管理接口读写成功（创建类返回 `201`，同步探测 `POST /api/providers/{id}/probe` 返回 `200`） |
+| `200/201` | 管理接口读写成功（创建类返回 `201`，同步探测 `POST /api/providers/{id}/probe` 与 `POST /api/providers/{id}/keys/{key_name}/probe` 返回 `200`） |
 | `202` | 异步探测任务已接受（`/api/probes/keys`） |
 | `204` | 删除成功 |
 | `400` | 缺少 `model`、更新体为空或配置校验失败 |

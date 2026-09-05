@@ -263,10 +263,10 @@ def test_list_providers_redacts_keys_and_returns_migrated_config_revision(
                     "enabled": True,
                     "allow_visitor": False,
                     "api_key_fingerprint": "65bbff9a6cb9",
+                    "capabilities": None,
                 }
             ],
             "routes": {},
-            "capabilities": None,
         }
     ]
     assert '"api_key":' not in response.text
@@ -554,19 +554,27 @@ def test_route_crud_synchronizes_model_key_targets(tmp_path: Path) -> None:
     assert "upstream-c" not in saved["models"]
 
 
-def test_provider_probe_refreshes_capabilities_and_persists(
+def test_provider_probe_refreshes_each_key_and_single_key_probe(
     tmp_path: Path, monkeypatch
 ) -> None:
     app, path = create_file_backed_app(tmp_path)
 
-    monkeypatch.setattr(
-        "auto_model_key_router.config_editor.probe_provider_capability",
-        lambda provider, key_names, timeout=15.0: {
+    probed_keys: list[str] = []
+    probed_modes: list[list[str] | None] = []
+
+    def fake_probe(provider, key_name, *, modes=None, timeout=15.0):
+        probed_keys.append(key_name)
+        probed_modes.append(modes)
+        return {
             "models": ["model-a", "model-b"],
             "route_status": {"openai": "ok"},
             "errors": {},
             "checked_at": "2026-09-01T00:00:00+00:00",
-        },
+        }
+
+    monkeypatch.setattr(
+        "auto_model_key_router.config_editor.probe_key_capability",
+        fake_probe,
     )
 
     async def requests(client: httpx.AsyncClient):
@@ -581,19 +589,35 @@ def test_provider_probe_refreshes_capabilities_and_persists(
             headers=AUTH_HEADERS,
             json={"config_revision": current.json()["config_revision"]},
         )
-        return denied, refreshed
+        current2 = await client.get("/api/providers", headers=AUTH_HEADERS)
+        single = await client.post(
+            "/api/providers/a.example.test/keys/key-a/probe",
+            headers=AUTH_HEADERS,
+            json={
+                "config_revision": current2.json()["config_revision"],
+                "modes": ["responses"],
+            },
+        )
+        return denied, refreshed, single
 
-    denied, refreshed = run_client(app, requests)
+    denied, refreshed, single = run_client(app, requests)
 
     assert denied.status_code == 401
     assert refreshed.status_code == 200
     body = refreshed.json()
-    assert body["provider"]["capabilities"]["models"] == ["model-a", "model-b"]
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["providers"]["a.example.test"]["capabilities"]["models"] == [
+    assert body["provider"]["keys"][0]["capabilities"]["models"] == [
         "model-a",
         "model-b",
     ]
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    key_a = saved["providers"]["a.example.test"]["keys"]["key-a"]
+    assert key_a["capabilities"]["models"] == ["model-a", "model-b"]
+    # 全 Key 刷新探测所有 key；单 Key 端点带 modes 过滤。
+    assert probed_keys == ["key-a", "key-a"]
+    assert probed_modes == [None, ["responses"]]
+    assert single.status_code == 200
+    assert single.json()["key"]["name"] == "key-a"
+    assert single.json()["key"]["capabilities"]["models"] == ["model-a", "model-b"]
 
 
 def test_key_probe_is_async_redacted_and_requires_full_access(

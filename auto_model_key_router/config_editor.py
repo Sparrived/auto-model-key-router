@@ -433,99 +433,123 @@ def select_or_enter_model_id(
 
 
 
-def probe_provider_capability(
+def probe_key_capability(
     provider: dict[str, Any],
-    key_names: list[str],
+    key_name: str,
+    *,
+    modes: list[str] | None = None,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
-    """Probe a provider once and fold results into its capabilities block.
+    """Probe a single provider Key: /v1/models discovery plus one minimal
+    request per upstream route mode, all made with that Key.
 
-    v4 probes at provider level: the /v1/models discovery plus one minimal
-    call per configured upstream route mode. The first usable key is used for
-    the discovery; route availability is tested per endpoint mode with that
-    key (provider routes are identical for every key of the provider).
+    Different keys of the same provider often have access to different model
+    sets (e.g. a free tier vs a paid tier key), so the probe result is cached
+    per key in providers.<id>.keys.<key>.capabilities and never folded across
+    keys. ``modes`` restricts which route modes get the minimal request
+    (defaults to all probe modes); route availability is a property of the
+    key, since upstream may authorize endpoints per credential.
     """
     base_url = str(provider.get("base_url") or "").strip()
     keys = provider_keys(provider)
-    usable = [
-        key_name
-        for key_name in key_names
-        if isinstance(keys.get(key_name), dict) and keys[key_name].get("api_key")
-    ]
+    raw_key = keys.get(key_name)
     errors: dict[str, str] = {}
     discovered: list[str] = []
+    api_key = str(raw_key.get("api_key") or "") if isinstance(raw_key, dict) else ""
     if not base_url:
         errors["provider"] = "缺少 Base URL"
-    elif not usable:
-        errors["provider"] = "没有可用的 API Key"
+    elif not isinstance(raw_key, dict):
+        errors[key_name] = "Key 不存在"
+    elif not api_key:
+        errors[key_name] = "API Key 为空"
     else:
-        probe_key_name = usable[0]
         models, error = discover_upstream_models_result(
-            base_url, str(keys[probe_key_name].get("api_key") or ""), set(),
-            timeout=timeout,
+            base_url, api_key, set(), timeout=timeout
         )
         if error:
-            errors[probe_key_name] = error
+            errors[key_name] = error
         else:
             discovered = models
     route_status: dict[str, str] = {}
-    probe_routes = (
-        provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
-    )
-    if usable and not errors:
-        probe_key_name = usable[0]
-        probe_key = dict(keys[probe_key_name])
-        probe_key["name"] = probe_key_name
+    probe_modes = [mode for mode in (modes or list(PROBE_ROUTE_MODES)) if mode in UPSTREAM_ROUTE_MODES]
+    if api_key and base_url and not errors:
+        probe_key = dict(raw_key)
+        probe_key["name"] = key_name
         probe_key["base_url"] = base_url
-        probe_data = {"upstream_routes": {base_url: probe_routes}}
+        routes = provider.get("routes") if isinstance(provider.get("routes"), dict) else {}
+        probe_data = {"upstream_routes": {base_url: routes}}
+        model_for_probe = (discovered or ["probe-model"])[0]
         for result in probe_key_availability(
-            probe_data,
-            (discovered or ["probe-model"])[0],
-            probe_key,
-            timeout=timeout,
+            probe_data, model_for_probe, probe_key, timeout=timeout, modes=probe_modes
         ):
-            route_status[result.mode] = (
-                "ok" if result.available else f"failed: {result.error or result.status_code}"
-            )
-    capabilities = {
+            if result.mode in probe_modes:
+                route_status[result.mode] = (
+                    "ok" if result.available else f"failed: {result.error or result.status_code}"
+                )
+    return {
         "models": discovered,
         "route_status": route_status,
         "errors": errors,
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    return capabilities
 
 
 def provider_capabilities_panel(provider: dict[str, Any]) -> Any:
-    capabilities = provider.get("capabilities")
-    if not isinstance(capabilities, dict):
+    """Per-key capability summary used as the provider detail content."""
+    keys = provider_keys(provider)
+    if not keys:
         return section_panel(
-            "[yellow]尚未探测。添加第一个 Key 时自动探测，或手动刷新。[/yellow]",
+            "[yellow]该供应商暂无 Key。添加 Key 时会自动探测其可用模型。[/yellow]",
             "供应商能力",
             "yellow",
         )
-    models = capabilities.get("models") or []
-    route_status = capabilities.get("route_status") or {}
-    checked_at = capabilities.get("checked_at") or "-"
-    errors = capabilities.get("errors") or {}
-    lines = [f"探测时间: [bold]{checked_at}[/bold]"]
-    if errors:
-        lines.append("[red]探测错误: " + "; ".join(str(v) for v in errors.values()) + "[/red]")
-    if route_status:
-        lines.append(
-            "路由: "
-            + " · ".join(
-                f"{UPSTREAM_ROUTE_LABELS.get(mode, mode)}: [{'green' if str(status) == 'ok' else 'red'}]{status}[/{'green' if str(status) == 'ok' else 'red'}]"
-                for mode, status in sorted(route_status.items())
+    blocks: list[Any] = []
+    any_probed = False
+    for key_name, key in sorted(keys.items()):
+        capabilities = key.get("capabilities") if isinstance(key, dict) else None
+        enabled_text = "启用" if key.get("enabled", True) else "禁用"
+        if not isinstance(capabilities, dict):
+            blocks.append(
+                section_panel(
+                    f"[yellow]尚未探测。[/yellow]",
+                    f"Key · {key_name} · {enabled_text}",
+                    "yellow",
+                )
             )
+            continue
+        any_probed = True
+        models = capabilities.get("models") or []
+        route_status = capabilities.get("route_status") or {}
+        checked_at = capabilities.get("checked_at") or "-"
+        errors = capabilities.get("errors") or {}
+        lines = [f"探测时间: [bold]{checked_at}[/bold]"]
+        if errors:
+            lines.append("[red]探测错误: " + "; ".join(str(v) for v in errors.values()) + "[/red]")
+        if route_status:
+            lines.append(
+                "路由: "
+                + " · ".join(
+                    f"{UPSTREAM_ROUTE_LABELS.get(mode, mode)}: [{'green' if str(status) == 'ok' else 'red'}]{status}[/{'green' if str(status) == 'ok' else 'red'}]"
+                    for mode, status in sorted(route_status.items())
+                )
+            )
+        if models:
+            lines.append(f"模型（{len(models)}）: " + ", ".join(short_text(str(model_id), 40) for model_id in models[:8]))
+            if len(models) > 8:
+                lines.append(f"[dim]… 共 {len(models)} 个模型[/dim]")
+        else:
+            lines.append("[dim]未发现模型[/dim]")
+        blocks.append(section_panel("\n".join(lines), f"Key · {key_name} · {enabled_text}", "cyan"))
+    if not any_probed:
+        blocks.insert(
+            0,
+            section_panel(
+                "[yellow]全部 Key 尚未探测。添加 Key 时自动探测该 Key，或选「刷新能力探测」。[/yellow]",
+                "提示",
+                "yellow",
+            ),
         )
-    model_text = "\n".join(f"{index}. [bold]{short_text(str(model_id), 64)}[/bold]" for index, model_id in enumerate(models, 1))
-    if not model_text:
-        model_text = "[dim]未发现模型[/dim]"
-    return Group(
-        section_panel("\n".join(lines), "探测状态", "cyan"),
-        section_panel(model_text, f"可用模型（{len(models)}）", "blue"),
-    )
+    return Group(*blocks) if len(blocks) > 1 else blocks[0]
 
 
 def select_models_to_serve(
@@ -624,36 +648,16 @@ def add_provider_key_interactively(
         api_key,
         enabled=True,
     )
-    existing_capabilities = provider.get("capabilities")
-    probe: dict[str, Any] | None = None
-    needs_probe = not (
-        isinstance(existing_capabilities, dict)
-        and existing_capabilities.get("models")
-        and not existing_capabilities.get("errors")
-    )
-    if needs_probe:
-        with console.status(
-            f"[cyan]正在探测供应商 {provider_id} 的可用能力...[/cyan]",
-            spinner="dots",
-        ):
-            probe = probe_provider_capability(provider, [key_name])
-        provider["capabilities"] = probe
-    else:
-        probe = None
-    capabilities = probe or existing_capabilities or {}
-    # Verify the newly added key can discover models; fall back to provider cache.
-    models = capabilities.get("models") or []
-    errors = capabilities.get("errors") or {}
-    if not needs_probe:
-        with console.status(
-            f"[cyan]正在用新 Key 探测供应商 {provider_id}...[/cyan]", spinner="dots"
-        ):
-            probe = probe_provider_capability(provider, [key_name])
-        if probe.get("models") or probe.get("errors"):
-            provider["capabilities"] = probe
-            capabilities = probe
-            models = probe.get("models") or []
-            errors = probe.get("errors") or {}
+    # 每个 Key 单独探测：不同 Key 能访问的模型集合可能不同（如免费/付费
+    # 额度、不同订阅），探测结果按 Key 缓存，互不复用。
+    with console.status(
+        f"[cyan]正在探测 Key {provider_id}/{key_name} 的可用能力...[/cyan]",
+        spinner="dots",
+    ):
+        probe = probe_key_capability(provider, key_name)
+    provider["keys"][key_name]["capabilities"] = probe
+    models = probe.get("models") or []
+    errors = probe.get("errors") or {}
     if not models and errors:
         show_result_page(
             "添加 Key",
@@ -878,12 +882,16 @@ def add_model_route_interactively(path: Path, model_id: str | None = None) -> An
     if key_choice == "0":
         return None
     key_name = key_choice
+    key = keys[key_name]
+    key_capabilities = key.get("capabilities") if isinstance(key, dict) else None
+    key_models = (
+        key_capabilities.get("models")
+        if isinstance(key_capabilities, dict)
+        and key_capabilities.get("models")
+        else []
+    )
     default_upstream = str(
-        draft.get("upstream_model", "")
-        or provider.get("capabilities", {}).get("models")[0]
-        if isinstance(provider.get("capabilities"), dict)
-        and provider["capabilities"].get("models")
-        else model_id
+        draft.get("upstream_model", "") or key_models[0] if key_models else model_id
     )
     upstream_model = prompt_text(
         "添加模型 Key",
@@ -1193,36 +1201,80 @@ def delete_provider_interactively(path: Path, provider_id: str) -> Any:
 
 
 def refresh_provider_capability_interactively(path: Path, provider_id: str) -> Any:
-    """Manually re-probe a provider: model list + route availability."""
+    """Manually re-probe one or all keys of a provider.
+
+    Probes are per key (each key may see a different model list), and for a
+    single key the user may refresh all route modes at once or check one
+    endpoint mode specifically (openai / anthropic / responses).
+    """
     data = load_v2_config_data(path)
     old_config = RouterConfig.from_dict(data)
     provider = raw_providers(data)[provider_id]
     keys = provider_keys(provider)
     if not keys:
         return section_panel("[yellow]该供应商暂无 Key，无法探测。[/yellow]", "刷新能力", "yellow")
-    with console.status(
-        f"[cyan]正在探测供应商 {provider_id} 的能力...[/cyan]", spinner="dots"
-    ):
-        probe = probe_provider_capability(provider, sorted(keys))
-    provider["capabilities"] = probe
-    restart = commit_v2_config(path, data, old_config)
-    models = probe.get("models") or []
-    errors = probe.get("errors") or {}
-    route_status = probe.get("route_status") or {}
-    message_lines = [
-        f"探测时间: [bold]{probe.get('checked_at') or '-'}[/bold]",
-        f"可用模型: [bold]{len(models)}[/bold]",
-    ]
-    if route_status:
-        message_lines.append(
-            "路由: "
-            + " · ".join(
-                f"{UPSTREAM_ROUTE_LABELS.get(mode, mode)}: [{'green' if str(status) == 'ok' else 'red'}]{status}[/{'green' if str(status) == 'ok' else 'red'}]"
-                for mode, status in sorted(route_status.items())
-            )
+    scope_choice = select_option(
+        "刷新能力探测",
+        [("1", "刷新全部 Key"), ("2", "指定 Key")] + [("0", "返回")],
+        content=provider_capabilities_panel(provider),
+    )
+    if scope_choice == "0":
+        return None
+    key_names = sorted(keys)
+    modes: list[str] | None = None
+    if scope_choice == "2":
+        key_choice = select_option(
+            "选择要刷新的 Key",
+            [(key_name, key_name) for key_name in key_names] + [("0", "返回")],
         )
-    if errors:
-        message_lines.append("[red]错误: " + "; ".join(str(v) for v in errors.values()) + "[/red]")
+        if key_choice == "0":
+            return None
+        key_names = [key_choice]
+        mode_choice = select_option(
+            "端点检查范围",
+            [("1", "全部路由模式"), ("2", "仅 Chat (openai)"), ("3", "仅 Messages (anthropic)"), ("4", "仅 Responses")],
+        )
+        if mode_choice == "0":
+            return None
+        modes = {
+            "1": None,
+            "2": ["openai"],
+            "3": ["anthropic"],
+            "4": ["responses"],
+        }[mode_choice]
+    refreshed: list[str] = []
+    with console.status(
+        f"[cyan]正在探测 {provider_id} 的 {len(key_names)} 个 Key...[/cyan]",
+        spinner="dots",
+    ):
+        for key_name in key_names:
+            probe = probe_key_capability(
+                provider, key_name, modes=modes
+            )
+            if isinstance(keys[key_name], dict):
+                keys[key_name]["capabilities"] = probe
+            refreshed.append(key_name)
+    restart = commit_v2_config(path, data, old_config)
+    message_lines = [f"已刷新 Key: [bold]{', '.join(refreshed)}[/bold]"]
+    for key_name in refreshed:
+        probe = keys[key_name]["capabilities"] if isinstance(keys[key_name], dict) else None
+        if not isinstance(probe, dict):
+            continue
+        models = probe.get("models") or []
+        errors = probe.get("errors") or {}
+        route_status = probe.get("route_status") or {}
+        lines = [f"[bold]{key_name}[/bold]: {len(models)} 个模型"]
+        if route_status:
+            lines.append(
+                "路由: "
+                + " · ".join(
+                    f"{UPSTREAM_ROUTE_LABELS.get(mode, mode)}: [{'green' if str(status) == 'ok' else 'red'}]{status}[/{'green' if str(status) == 'ok' else 'red'}]"
+                    for mode, status in sorted(route_status.items())
+                )
+            )
+        if errors:
+            lines.append("[red]错误: " + "; ".join(str(v) for v in errors.values()) + "[/red]")
+        message_lines.append("\n".join(lines))
     return Group(
         section_panel("\n".join(message_lines), "刷新完成", "green"),
         restart,
@@ -1514,6 +1566,7 @@ def probe_key_availability(
     model_id: str,
     key: dict[str, Any],
     timeout: float = 15.0,
+    modes: list[str] | None = None,
 ) -> list[KeyProbeResult]:
     key_name = str(key.get("name") or f"{model_id}-key")
     api_key = str(key.get("api_key") or "")
@@ -1521,6 +1574,7 @@ def probe_key_availability(
         key.get("base_url") or data.get("default_base_url") or "https://api.openai.com"
     )
     routes = upstream_routes_for_base_url(data, base_url)
+    probe_modes = [mode for mode in (modes or list(PROBE_ROUTE_MODES)) if mode in PROBE_ROUTE_MODES]
     results: list[KeyProbeResult] = []
 
     try:
@@ -1541,11 +1595,11 @@ def probe_key_availability(
                 duration_ms=0,
                 error=error,
             )
-            for mode in PROBE_ROUTE_MODES
+            for mode in probe_modes
         ]
 
     with httpx.Client(timeout=timeout) as client:
-        for mode in PROBE_ROUTE_MODES:
+        for mode in probe_modes:
             path = upstream_route_path(routes, mode)
             url = _join_url(base_url, path)
             started = monotonic()

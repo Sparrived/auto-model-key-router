@@ -430,11 +430,14 @@ def test_v3_config_migrates_on_disk_to_v4_key_targets(tmp_path: Path) -> None:
 
     assert saved["config_version"] == 4
     assert "pools" not in saved["providers"]["gateway"]
+    assert "capabilities" not in saved["providers"]["gateway"]
     assert saved["providers"]["gateway"]["keys"]["main"]["api_key"] == "sk-main"
-    # v3 池探测元数据合并进 v4 供应商级 capabilities。
-    caps = saved["providers"]["gateway"]["capabilities"]
-    assert set(caps["models"]) == {"gpt-a", "gpt-b", "gpt-c"}
-    assert caps["checked_at"] == "2026-08-01T00:00:00+00:00"
+    # v3 池探测元数据折入 v4 每个 Key 的 capabilities（迁移期保守共享，
+    # 后续逐 Key 刷新会得到各自结果）。
+    for key_name in ("main", "backup"):
+        caps = saved["providers"]["gateway"]["keys"][key_name]["capabilities"]
+        assert set(caps["models"]) == {"gpt-a", "gpt-b", "gpt-c"}
+        assert caps["checked_at"] == "2026-08-01T00:00:00+00:00"
     # 每个模型 target 展开为该池全部 key 的 key 级 target。
     assert saved["models"]["gpt-a"]["targets"] == [
         {"provider": "gateway", "key": "main", "upstream_model": "gpt-a"},
@@ -478,4 +481,80 @@ def test_v3_pool_whitelist_filters_models_on_migration(tmp_path: Path) -> None:
     assert saved["models"]["gpt-a"]["targets"] == [
         {"provider": "gateway", "key": "main", "upstream_model": "gpt-a"}
     ]
+
+
+def test_early_v4_provider_capabilities_promote_onto_keys(tmp_path: Path) -> None:
+    """Provider-level capabilities (written by early v4 builds) are promoted
+    to per-key capabilities on load and removed from the provider."""
+    early_v4 = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {
+                    "main": {"api_key": "sk-main"},
+                    "backup": {"api_key": "sk-backup"},
+                },
+                "capabilities": {
+                    "models": ["gpt-a", "gpt-b"],
+                    "route_status": {"openai": "ok"},
+                    "checked_at": "2026-09-01T00:00:00+00:00",
+                },
+            }
+        },
+        "models": {},
+    }
+    path = tmp_path / "router-config.json"
+    path.write_text(json.dumps(early_v4), encoding="utf-8")
+
+    config = RouterConfig.load(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    provider = saved["providers"]["gateway"]
+    assert "capabilities" not in provider
+    for key_name in ("main", "backup"):
+        caps = provider["keys"][key_name]["capabilities"]
+        assert caps["models"] == ["gpt-a", "gpt-b"]
+        assert caps["route_status"] == {"openai": "ok"}
+        assert caps["checked_at"] == "2026-09-01T00:00:00+00:00"
+
+
+def test_per_key_capabilities_are_not_overwritten_by_legacy_promotion(tmp_path: Path) -> None:
+    """Keys that already carry their own per-key capabilities keep them."""
+    mixed = {
+        "config_version": 4,
+        "providers": {
+            "gateway": {
+                "base_url": "https://gateway.example.test",
+                "keys": {
+                    "main": {
+                        "api_key": "sk-main",
+                        "capabilities": {
+                            "models": ["gpt-main-only"],
+                            "route_status": {},
+                            "errors": {},
+                            "checked_at": "2026-09-02T00:00:00+00:00",
+                        },
+                    },
+                    "fresh": {"api_key": "sk-fresh"},
+                },
+                # 早期 v4 遗留的供应商级缓存：只应补到没有探测缓存的 key。
+                "capabilities": {
+                    "models": ["gpt-old"],
+                    "checked_at": "2026-09-01T00:00:00+00:00",
+                },
+            }
+        },
+        "models": {},
+    }
+    path = tmp_path / "router-config.json"
+    path.write_text(json.dumps(mixed), encoding="utf-8")
+
+    config = RouterConfig.load(path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    keys = saved["providers"]["gateway"]["keys"]
+    assert keys["main"]["capabilities"]["models"] == ["gpt-main-only"]
+    assert keys["fresh"]["capabilities"]["models"] == ["gpt-old"]
+    assert keys["main"]["capabilities"]["checked_at"] == "2026-09-02T00:00:00+00:00"
 

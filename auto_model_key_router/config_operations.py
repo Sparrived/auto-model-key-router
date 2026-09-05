@@ -268,6 +268,8 @@ def update_provider_key(
         raise ConfigOperationError(f"Key 已存在: {target_name}", status_code=409)
     if api_key is not None:
         key["api_key"] = _non_empty(api_key, "API key")
+        # 探测缓存属于旧凭据：更换 Key 后失效，下次刷新重新探测。
+        key.pop("capabilities", None)
     if enabled is not None:
         key["enabled"] = bool(enabled)
     if allow_visitor is not None:
@@ -703,6 +705,8 @@ def update_model_key_local(data: dict[str, Any], model_id: str, key_name: str, *
         raise ConfigOperationError(f"Key 已存在: {actual}", status_code=409)
     if api_key is not None:
         key["api_key"] = _non_empty(api_key, "API key")
+        # 探测缓存属于旧凭据：更换 Key 后失效，下次刷新重新探测。
+        key.pop("capabilities", None)
     if enabled is not None:
         key["enabled"] = bool(enabled)
     if allow_visitor is not None:
@@ -767,6 +771,10 @@ def transferable_config(data: dict[str, Any], *, include_visitor: bool) -> dict[
     for provider in result_providers.values():
         if isinstance(provider, dict):
             provider.pop("_amkr_model_key_clone", None)
+            # 探测缓存是机器本地信息（各 Key 看到的模型清单），不随 Key 配置迁移。
+            for key in provider_keys(provider).values():
+                if isinstance(key, dict):
+                    key.pop("capabilities", None)
     result_models = deepcopy(models(data))
     if not include_visitor:
         for provider in result_providers.values():

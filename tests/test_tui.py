@@ -2345,8 +2345,8 @@ def test_v2_tui_adds_provider_key_and_creates_bound_model(tmp_path, monkeypatch)
     }
     monkeypatch.setattr(
         config_editor,
-        "probe_provider_capability",
-        lambda provider, key_names, timeout=15.0: probe_result,
+        "probe_key_capability",
+        lambda provider, key_name, *, modes=None, timeout=15.0: probe_result,
     )
     selected_models = []
     monkeypatch.setattr(
@@ -2362,7 +2362,7 @@ def test_v2_tui_adds_provider_key_and_creates_bound_model(tmp_path, monkeypatch)
     assert "添加完成" in render_plain(result)
     assert data["config_version"] == 4
     assert data["providers"]["openai"]["keys"]["main"]["api_key"] == "sk-main"
-    assert data["providers"]["openai"]["capabilities"] == probe_result
+    assert data["providers"]["openai"]["keys"]["main"]["capabilities"] == probe_result
     assert data["models"]["upstream-model"]["targets"] == [
         {"provider": "openai", "key": "main", "upstream_model": "upstream-model"}
     ]
@@ -2380,12 +2380,16 @@ def test_add_provider_key_with_provider_context_skips_provider_selection(tmp_pat
                 "providers": {
                     "vendor": {
                         "base_url": "https://vendor.test",
-                        "keys": {"old": {"api_key": "sk-old"}},
-                        "capabilities": {
-                            "models": ["gpt-a"],
-                            "route_status": {"openai": "ok"},
-                            "errors": {},
-                            "checked_at": "2026-01-01T00:00:00+00:00",
+                        "keys": {
+                            "old": {
+                                "api_key": "sk-old",
+                                "capabilities": {
+                                    "models": ["gpt-a"],
+                                    "route_status": {"openai": "ok"},
+                                    "errors": {},
+                                    "checked_at": "2026-01-01T00:00:00+00:00",
+                                },
+                            }
                         },
                     }
                 },
@@ -2395,7 +2399,7 @@ def test_add_provider_key_with_provider_context_skips_provider_selection(tmp_pat
         encoding="utf-8",
     )
     prompts = iter(["main", "sk-main"])
-    probed: list[list[str]] = []
+    probed: list[str] = []
     selected: list[tuple[str, str, list[str]]] = []
     monkeypatch.setattr(
         config_editor,
@@ -2404,8 +2408,8 @@ def test_add_provider_key_with_provider_context_skips_provider_selection(tmp_pat
     )
     monkeypatch.setattr(config_editor, "prompt_text", lambda *args, **kwargs: next(prompts))
 
-    def probe(provider, key_names, timeout=15.0):
-        probed.append(key_names)
+    def probe(provider, key_name, *, modes=None, timeout=15.0):
+        probed.append(key_name)
         return {
             "models": ["gpt-b"],
             "route_status": {"openai": "ok"},
@@ -2413,7 +2417,7 @@ def test_add_provider_key_with_provider_context_skips_provider_selection(tmp_pat
             "checked_at": "2026-02-01T00:00:00+00:00",
         }
 
-    monkeypatch.setattr(config_editor, "probe_provider_capability", probe)
+    monkeypatch.setattr(config_editor, "probe_key_capability", probe)
     monkeypatch.setattr(
         config_editor,
         "select_models_to_serve",
@@ -2426,8 +2430,9 @@ def test_add_provider_key_with_provider_context_skips_provider_selection(tmp_pat
 
     provider = data["providers"]["vendor"]
     assert sorted(provider["keys"]) == ["main", "old"]
-    assert provider["capabilities"]["models"] == ["gpt-b"]
-    assert probed == [["main"]]
+    assert provider["keys"]["main"]["capabilities"]["models"] == ["gpt-b"]
+    assert provider["keys"]["old"]["capabilities"]["models"] == ["gpt-a"]
+    assert probed == ["main"]
     assert selected == [("vendor", "main", ["gpt-b"])]
     assert data["models"]["gpt-b"]["targets"] == [
         {"provider": "vendor", "key": "main", "upstream_model": "gpt-b"}
@@ -2463,11 +2468,11 @@ def test_add_provider_key_probe_failure_still_saves_key_without_binding_models(
     monkeypatch.setattr(config_editor, "restart_service_after_config_change", lambda *args: Text("restart"))
     monkeypatch.setattr(
         config_editor,
-        "probe_provider_capability",
-        lambda provider, key_names, timeout=15.0: {
+        "probe_key_capability",
+        lambda provider, key_name, *, modes=None, timeout=15.0: {
             "models": [],
             "route_status": {"openai": "fail"},
-            "errors": {key_names[0]: "HTTP 401"},
+            "errors": {key_name: "HTTP 401"},
             "checked_at": "2026-03-01T00:00:00+00:00",
         },
     )
@@ -2477,7 +2482,9 @@ def test_add_provider_key_probe_failure_still_saves_key_without_binding_models(
     assert "添加完成" in render_plain(result)
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert data["providers"]["vendor"]["keys"]["main"]["api_key"] == "sk-main"
-    assert data["providers"]["vendor"]["capabilities"]["errors"] == {"main": "HTTP 401"}
+    assert data["providers"]["vendor"]["keys"]["main"]["capabilities"]["errors"] == {
+        "main": "HTTP 401"
+    }
     assert data["models"] == {}
 
 
@@ -2511,11 +2518,11 @@ def test_add_provider_key_with_probe_errors_still_binds_selected_models(
     )
     monkeypatch.setattr(
         config_editor,
-        "probe_provider_capability",
-        lambda provider, key_names, timeout=15.0: {
+        "probe_key_capability",
+        lambda provider, key_name, *, modes=None, timeout=15.0: {
             "models": ["gpt-a"],
             "route_status": {"openai": "ok"},
-            "errors": {key_names[0]: "HTTP 401"},
+            "errors": {key_name: "HTTP 401"},
             "checked_at": "2026-03-01T00:00:00+00:00",
         },
     )
@@ -2526,7 +2533,9 @@ def test_add_provider_key_with_probe_errors_still_binds_selected_models(
 
     assert "添加完成" in render_plain(result)
     assert data["providers"]["vendor"]["keys"]["main"]["api_key"] == "sk-main"
-    assert data["providers"]["vendor"]["capabilities"]["errors"] == {"main": "HTTP 401"}
+    assert data["providers"]["vendor"]["keys"]["main"]["capabilities"]["errors"] == {
+        "main": "HTTP 401"
+    }
     assert selected == [("vendor", "main", ["gpt-a"])]
     assert data["models"]["gpt-a"]["targets"] == [
         {"provider": "vendor", "key": "main", "upstream_model": "gpt-a"}
