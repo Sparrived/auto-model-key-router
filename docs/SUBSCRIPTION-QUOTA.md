@@ -44,20 +44,74 @@ CPA-XX Panel、cpa-usage-keeper…），CLIProxyAPI 的 README 自己也把这�
 
 ### CPA 自己怎么把额度暴露出去
 
-CPA 从 v6.10.0 起把内置用量统计拆了出去，但**额度的读取通道留在 Management API**：
+**有对外接口，而且分成两条独立通道**，都在 Management API 上
+（`/v0/management`，密钥走 `Authorization: Bearer <key>` 或 `X-Management-Key`）。
 
-- `GET /v0/management/auth-files`：列出认证文件条目，**Claude 的额度就缓存在条目的
-  `quota.signals` 里**——CPA 把上游响应头 `Anthropic-Ratelimit-Unified-*` 的 5h/7d
-  `Utilization`（0~1）与 `Reset`（epoch 秒）存了下来，读它**不需要回源请求**。
-- `POST /v0/management/api-call`：让 CPA 用**指定账号的 OAuth token** 代打上游额度接口。
-  配套工具靠它拿 Codex 的 `chatgpt.com/backend-api/wham/usage`、Antigravity 的
-  `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`、Grok 的
-  `cli-chat-proxy.grok.com/v1/billing?format=credits`。
-- `internal/api/handlers/management/quota.go` 里的 `ResetQuota`：按 `auth_index` 清掉该账号的
-  额度/冷却路由状态——说明 CPA 内部确实在按账号跟踪额度，并把它接进了选路。
+**通道一：被动采集的原始信号（CPA 自己采的，不额外发请求）**
 
-（证据：[cc-status-line README「额度来源」](https://github.com/kinka/cc-status-line)、
-CLIProxyAPI `internal/api/handlers/management/quota.go`。）
+`GET /v0/management/auth-files` 的每个条目里带：
+
+- `quota = {observed_at, signals{}}`，以及按模型的 `model_quotas{<model>: {observed_at, signals}}`
+- `supports_quota` / `quota_provider`（该 provider 是否支持采集）、`quota_probe`（声明式探测配置）
+
+采集范围（`sdk/cliproxy/auth/quota_signals.go`）：**只有 `claude`、`codex`、`devin` 三个
+provider**。白名单头是 `anthropic-ratelimit-unified-*`、`retry-after`（claude/codex）、
+`x-codex-*`（`x-codex-plan-type`、`x-codex-active-limit`、`x-codex-credits-*`、
+`x-codex-{limit}-primary|secondary-*`、`x-codex-additional-*` 等）。
+
+语义上有几条硬约束，直接决定了你怎么用它：
+
+- **整体替换而非累加**：只保留最近一次带额度头的响应快照。像 `Retry-After` 这种水位线只在
+  产生它的那次响应上出现，累加会让过期值一直可见。
+- 没带额度头的响应（5xx、传输失败）**不动旧快照**；每个快照最多 64 个头、值 ≤512 字节，
+  含控制字符的值丢弃。
+- 只写 `observed_at` + `signals`，**绝不碰冷却/调度字段**；管理面响应也刻意排除 cooldown 字段，
+  免得被误当成调度状态。
+- 拿到的就是**上游响应头原文**（例如 `X-Codex-Primary-Used-Percent: 58`），百分比要自己解析
+  ——cc-status-line 干的就是这件事。
+
+**通道二：主动回源的归一化额度**
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /v0/management/quota/providers` | 列出已注册的 quota provider |
+| `POST /v0/management/quota/fetch`（body `{"auth_index":"..."}`） | 取该凭据的**归一化**额度 |
+| `POST /v0/management/quota/reset` | 重置该凭据的额度/用量 |
+| `GET` / `POST` / `DELETE /v0/management/plugins/:id/quota`、`POST .../quota/reset` | 插件维度的同一件事 |
+| `POST /v0/management/reset-quota`（body `{"auth_index":"..."}`） | 清掉额度/冷却路由状态 |
+
+`quota/fetch` 的返回形状（`sdk/pluginapi/types.go` 的 `QuotaFetchResponse`）：
+
+```json
+{"subscription": {"plan": "Pro", "tierName": "..."},
+ "summary": [{"key": "credits_used", "label": "...", "value": 1740.28, "unit": "...", "currency": "..."}],
+ "groups": [{"displayName": "...", "buckets": [{"window": "5h", "remainingFraction": 0.9, "resetTime": "...", "description": "..."}]}],
+ "serverTimeOffsetMs": 0}
+```
+
+额度来自配额插件，或凭据 metadata 里的**声明式探测** `quota_probe`（`{url, method, mapping…}`，
+用上游响应映射出上面的形状）；两者都没有时返回
+`501 no quota provider available for credential`。
+
+**兜底：`POST /v0/management/api-call`** —— 它**不是**读 CPA 的缓存，而是让 CPA 用某个
+`auth_index` 的凭据**代打任意上游 URL**。请求体
+`{auth_index, method, url, header, data, proxy_url}`，header 里的 `$TOKEN$` 会替换为该凭据的
+`metadata.access_token`（回退 `attributes.api_key` → `metadata.token` / `id_token` / `cookie`），
+响应是 `{status_code, header, body}`。Antigravity、Grok、Copilot 这些**不在被动采集白名单**里的
+额度，第三方工具就是靠它拿的。
+
+**用量（不是额度）**：`GET /v0/management/usage-queue?count=N` 从队列**弹出**每次请求的用量记录
+（`timestamp` / `latency_ms` / `auth_index` / `tokens{input,output,reasoning,cached,total}` /
+`provider` / `model` / `endpoint` / `request_id`…），同端口还有 Redis 兼容队列（RESP）。
+官方文档明确旧的内存聚合端点 `/usage`、`/usage/export`、`/usage/import` **已移除**；
+另有 `GET /v0/management/api-key-usage`（按 provider + `base_url|api_key` 聚合成功/失败与
+recent buckets）。
+
+（证据：本地 clone 的 main 分支路由表 `internal/api/server_management.go`，
+以及 `internal/api/handlers/management/auth_files.go`、`quota.go`、`usage.go`、
+`plugin_quota.go`、`sdk/cliproxy/auth/quota_signals.go`、`sdk/pluginapi/types.go`；
+官方文档：[管理 API](https://help.router-for.me/cn/management/api)、
+[Redis 用量队列](https://help.router-for.me/cn/management/redis-usage-queue.html)。）
 
 ## 2. 官方程度分四层
 
@@ -234,6 +288,9 @@ CPA 就是走第三条：`/v0/management/api-call` 用账号 OAuth token 代打
 - 有一类供应商**已经有官方文档化的余额接口**（Kimi 的 `users/me/balance`、MiniMax 的
   `token_plan/remains`），它们本来就用 API Key 鉴权，接入成本最低，可以先拿它们把
   「按 Key 显示额度」的链路和 UI 跑通，再扩到需要 OAuth 的订阅账号。
+- **如果某个供应商的上游本身就是 CPA 实例**（很常见的接法），不要重复逆向：直接读它的
+  `POST /v0/management/quota/fetch`（归一化额度）与 `GET /v0/management/auth-files` 的
+  `quota.signals`（被动原始信号）即可，只需管理密钥，不用碰 OAuth。
 - 订阅额度只用于**观测与选路**，不要拿它当计费依据。
 
 ## 5. 参考
