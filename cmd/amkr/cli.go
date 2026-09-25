@@ -454,6 +454,8 @@ func configSummaryLine(cfg *config.RouterConfig, healthy bool, width int) string
 //
 // 只产出**行数据**：Go 的表格用固定列宽，与 rich 的 expand 列宽分配不同（internal/tui
 // 的既定差异），因此只保证单元格内容一致，版式由渲染层自行决定。
+//
+// 与参照实现的差异：隐藏别名列已随该概念一并移除（可调用名只有模型 ID 与 aliases）。
 func configModelRows(cfg *config.RouterConfig) [][]string {
 	rows := [][]string{}
 	for _, model := range cfg.Models {
@@ -461,36 +463,15 @@ func configModelRows(cfg *config.RouterConfig) [][]string {
 		if len(model.Aliases) > 0 {
 			displayNames = strings.Join(model.Aliases, "\n")
 		}
-		autoHidden := map[string]struct{}{}
-		for _, key := range model.Keys {
-			if key.UpstreamModel == "" {
-				continue
-			}
-			if key.UpstreamModel == model.ID || containsString(model.Aliases, key.UpstreamModel) {
-				continue
-			}
-			if containsString(model.HiddenAliases, key.UpstreamModel) {
-				continue
-			}
-			autoHidden[key.UpstreamModel] = struct{}{}
-		}
-		hiddenText := strings.Join(model.HiddenAliases, ", ")
-		if len(autoHidden) > 0 {
-			hiddenText = strings.TrimSpace(fmt.Sprintf("%s +%d 自动", hiddenText, len(autoHidden)))
-		}
-		if hiddenText == "" {
-			hiddenText = "-"
-		}
 		rows = append(rows, []string{
 			formatting.ShortText(model.ID, 28),
-			formatting.ShortText(displayNames, 24),
-			formatting.ShortText(hiddenText, 24),
+			formatting.ShortText(displayNames, 36),
 			routingModeText(model.RoutingMode),
 			fmt.Sprintf("%d", len(model.Keys)),
 		})
 	}
 	if len(cfg.Models) == 0 {
-		rows = append(rows, []string{"未配置", "-", "-", "-", "0"})
+		rows = append(rows, []string{"未配置", "-", "-", "0"})
 	}
 	return rows
 }

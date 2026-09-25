@@ -92,7 +92,6 @@ type KeyPool struct {
 	routingModes    map[string]string
 	reasoningEffort map[string]string
 	aliases         map[string]string
-	hiddenNames     map[string]bool
 
 	failureThreshold int
 	cooldownSeconds  float64
@@ -124,9 +123,8 @@ type stickyKey = [3]string
 
 // applyConfig 装载配置。
 //
-// 字段划分与参照实现的 _apply_config 一一对应，含两处易错点：
-//   - hidden_names 需排除已是真实 ID/别名的名字，再以 setdefault 语义补进别名表
-//     （真实 ID/别名优先）。
+// 可调用名只有模型的 ID 与 aliases（target 的 upstream_model 只是发给上游的名字，
+// 不参与本地解析），因此这里的别名表与 `/v1/models` 的清单恒等。
 func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 	p.keys = map[string][]config.KeyConfig{}
 	p.routingModes = map[string]string{}
@@ -144,19 +142,6 @@ func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 		p.aliases[model.ID] = model.ID
 		for _, alias := range model.Aliases {
 			p.aliases[alias] = model.ID
-		}
-	}
-
-	hiddenNames := cfg.HiddenModelNames()
-	p.hiddenNames = map[string]bool{}
-	for name := range hiddenNames {
-		if _, isAlias := p.aliases[name]; !isAlias {
-			p.hiddenNames[name] = true
-		}
-	}
-	for name, modelID := range hiddenNames {
-		if _, exists := p.aliases[name]; !exists {
-			p.aliases[name] = modelID
 		}
 	}
 
@@ -252,27 +237,15 @@ func (p *KeyPool) ModelIDs() []string {
 	return sortedMapKeys(p.keys)
 }
 
-// HiddenModelIDs 返回可直接调用但不在 /v1/models 中列出的名字（排序）。
-func (p *KeyPool) HiddenModelIDs() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	result := make([]string, 0, len(p.hiddenNames))
-	for name := range p.hiddenNames {
-		result = append(result, name)
-	}
-	slices.Sort(result)
-	return result
-}
-
 // PublicModelIDs 返回对外可见的模型名（排序）。
+//
+// 可调用名与对外可见名是同一份集合（模型 ID + aliases），因此这里就是别名表的键。
 func (p *KeyPool) PublicModelIDs() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	seen := map[string]bool{}
 	for name := range p.aliases {
-		if !p.hiddenNames[name] {
-			seen[name] = true
-		}
+		seen[name] = true
 	}
 	return sortedSet(seen)
 }
@@ -287,7 +260,7 @@ func (p *KeyPool) AvailableModelIDs(accessKey *config.AccessKeyConfig) []string 
 	defer p.mu.Unlock()
 	result := []string{}
 	for name, modelID := range p.aliases {
-		if !p.hiddenNames[name] && len(p.keysForModelLocked(modelID, accessKey)) > 0 {
+		if len(p.keysForModelLocked(modelID, accessKey)) > 0 {
 			result = append(result, name)
 		}
 	}

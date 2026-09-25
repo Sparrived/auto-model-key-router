@@ -92,25 +92,10 @@ func taskResponse(task config.TaskConfig) *canonical.Value {
 }
 
 // modelResponse 对应 management_api.py:1440 的 _model_response。
+//
+// 可调用名只有 id 与 aliases，两者都会出现在 /v1/models 里，因此响应里不再有
+// hidden_aliases / auto_hidden_aliases（上游名只是上游名）。
 func modelResponse(model config.ModelConfig) *canonical.Value {
-	// auto_hidden_aliases：targets 的上游名同样可直接调用但不列出，一并回显。
-	// Python 用 set 去重后 sorted()，Go 侧用排序去重得到同样的结果。
-	own := map[string]bool{model.ID: true}
-	for _, alias := range model.Aliases {
-		own[alias] = true
-	}
-	for _, alias := range model.HiddenAliases {
-		own[alias] = true
-	}
-	seen := map[string]bool{}
-	for _, key := range model.Keys {
-		if key.UpstreamModel == "" || own[key.UpstreamModel] {
-			continue
-		}
-		seen[key.UpstreamModel] = true
-	}
-	autoHidden := sortedKeys(seen)
-
 	keys := canonical.NewArray()
 	for _, key := range model.Keys {
 		keys.Arr = append(keys.Arr, keyResponse(key))
@@ -118,8 +103,6 @@ func modelResponse(model config.ModelConfig) *canonical.Value {
 	return objectOf(
 		canonical.ObjectPair{Key: "id", Value: canonical.NewString(model.ID)},
 		canonical.ObjectPair{Key: "aliases", Value: stringArray(model.Aliases)},
-		canonical.ObjectPair{Key: "hidden_aliases", Value: stringArray(model.HiddenAliases)},
-		canonical.ObjectPair{Key: "auto_hidden_aliases", Value: stringArray(autoHidden)},
 		canonical.ObjectPair{Key: "routing_mode", Value: canonical.NewString(model.RoutingMode)},
 		canonical.ObjectPair{Key: "reasoning_effort", Value: nullableString(model.ReasoningEffort)},
 		canonical.ObjectPair{Key: "keys", Value: keys},
@@ -286,16 +269,6 @@ func probeResponse(record *probeRecord) *canonical.Value {
 		canonical.ObjectPair{Key: "results", Value: results},
 		canonical.ObjectPair{Key: "error", Value: nullableString(record.err)},
 	)
-}
-
-// sortedKeys 返回升序去重后的键。Python 侧对应 sorted(set)。
-func sortedKeys(set map[string]bool) []string {
-	out := make([]string, 0, len(set))
-	for key := range set {
-		out = append(out, key)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // sortedStringMapKeys 返回 map 的键并按字典序排序。

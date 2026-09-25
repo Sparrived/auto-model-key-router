@@ -14,7 +14,18 @@ import (
 // 所有 handler 都走这一条出口，保证错误映射只有一处（writeError），不会出现
 // 「某个分支忘了映射状态码」的漏网之鱼。
 func (s *Server) run(w http.ResponseWriter, status int, fn func() (*canonical.Value, error)) {
-	body, err := fn()
+	s.runStatus(w, func() (int, *canonical.Value, error) {
+		body, err := fn()
+		return status, body, err
+	})
+}
+
+// runStatus 是 run 的「状态码由主体决定」版本。
+//
+// 只有 PUT /api/routes/{id} 需要它：同样的请求可能得到 200（路由被改写）或
+// 204（targets 被清空，路由随之被删掉），状态码依赖主体执行到什么结果。
+func (s *Server) runStatus(w http.ResponseWriter, fn func() (int, *canonical.Value, error)) {
+	status, body, err := fn()
 	if err != nil {
 		writeError(w, err)
 		return

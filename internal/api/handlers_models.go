@@ -58,7 +58,6 @@ func (s *Server) handleCreateModel(w http.ResponseWriter, r *http.Request) {
 		cfg, err := s.updateConfig(r, func(data *canonical.Value) error {
 			return configops.CreateModelWithKeys(data, modelID, configops.CreateModelOptions{
 				Aliases:         trailingStringSlice(modelData, "aliases"),
-				HiddenAliases:   trailingStringSlice(modelData, "hidden_aliases"),
 				RoutingMode:     routingMode,
 				ReasoningEffort: reasoningEffort,
 			}, keys.Arr)
@@ -124,7 +123,6 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 			_, err := configops.UpdateModel(data, modelID, configops.UpdateModelOptions{
 				NewID:                 optString(updates, "id"),
 				Aliases:               optStringSlice(updates, "aliases"),
-				HiddenAliases:         optStringSlice(updates, "hidden_aliases"),
 				RoutingMode:           optString(updates, "routing_mode"),
 				ReasoningEffort:       optString(updates, "reasoning_effort"),
 				UpdateReasoningEffort: hasKey(updates, "reasoning_effort"),

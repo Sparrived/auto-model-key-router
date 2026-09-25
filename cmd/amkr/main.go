@@ -451,7 +451,7 @@ func printConfigSummary(terminal *tui.Terminal, cfg *config.RouterConfig) {
 		cells = append(cells, row)
 	}
 	terminal.Print(tui.SectionPanel(tui.Table{
-		Columns: []tui.TableColumn{{Width: 28}, {Width: 24}, {Width: 24}, {Width: 8}, {Width: 6}},
+		Columns: []tui.TableColumn{{Width: 28}, {Width: 36}, {Width: 10}, {Width: 6}},
 		Rows:    cells,
 	}, "模型配置", "blue"))
 }

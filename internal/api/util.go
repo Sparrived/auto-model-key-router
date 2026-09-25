@@ -76,13 +76,13 @@ func rejectNullFields(data *canonical.Value, fields ...string) error {
 // 「strip 后为空 → None」这步很关键：它让 `reasoning_effort: ""` 与
 // `reasoning_effort: null` 在下游的 update_reasoning_effort 语义上都能清空配置。
 func normalizeModelUpdates(data *canonical.Value) error {
-	if err := rejectNullFields(data, "id", "aliases", "hidden_aliases", "routing_mode"); err != nil {
+	if err := rejectNullFields(data, "id", "aliases", "routing_mode"); err != nil {
 		return err
 	}
 	if value, present := data.LookupOK("id"); present && value != nil && !value.IsNull() {
 		data.SetKey("id", canonical.NewString(trimSpace(value.PyStr())))
 	}
-	for _, field := range []string{"aliases", "hidden_aliases"} {
+	for _, field := range []string{"aliases"} {
 		value, present := data.LookupOK(field)
 		if !present || value == nil || value.IsNull() || !value.IsArray() {
 			continue

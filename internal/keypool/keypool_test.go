@@ -369,59 +369,36 @@ func TestCapabilityStoreCorruptFileIsIgnored(t *testing.T) {
 	}
 }
 
-// TestHiddenNamesPreferRealIDs 验证真实 ID/别名优先于隐藏名。
+// TestUpstreamNamesAreNotCallable 锁定「上游名只是上游名」。
 //
-// 手写的 hidden_aliases 与模型 ID 撞名会被 config 校验直接拒绝
-// （config.py:1153），但**自动推导**的隐藏名（来自 target 的 upstream_model，
-// config.py:1238）不参与那项校验，因此可以撞名。此时真实 ID 必须优先——否则
-// 一个正常模型的请求会被路由到另一个模型上。
-func TestHiddenNamesPreferRealIDs(t *testing.T) {
+// target 的 upstream_model 是发给上游的名字，不再自动成为可调用名：可调用名只有模型
+// ID 与 aliases（两者都出现在 /v1/models）。需要某个上游叫法也能被调用时，把它写进
+// 模型的 aliases——那时它同样会出现在 /v1/models，不再有「能调但不列出」的第三类名字。
+func TestUpstreamNamesAreNotCallable(t *testing.T) {
 	raw := `{
 		"config_version": 4, "local_api_key": "local",
 		"providers": {"p": {"base_url": "https://a.example", "keys": {
 			"k1": {"api_key": "1"}}}},
 		"models": {
-			"alpha": {"targets": [{"provider": "p", "key": "k1", "upstream_model": "beta"}]},
+			"alpha": {"aliases": ["alias-alpha"],
+			          "targets": [{"provider": "p", "key": "k1", "upstream_model": "beta"}]},
 			"beta": {"targets": [{"provider": "p", "key": "k1", "upstream_model": "u"}]}
 		}
 	}`
 	pool := New(mustConfig(t, raw), nil, func() float64 { return 1000 })
 
 	if got := pool.ResolveModelID("beta"); got != "beta" {
-		t.Fatalf("隐藏名撞真实 ID 时应解析到真实模型，实际 %q", got)
+		t.Fatalf("真实 ID 应解析到自己，实际 %q", got)
 	}
-	// hidden_model_names() 含 beta（alpha 的上游名）与 u（beta 的上游名），但
-	// beta 是真实 ID，因此只剩 u 作为隐藏名。
-	if hidden := pool.HiddenModelIDs(); !slices.Equal(hidden, []string{"u"}) {
-		t.Fatalf("隐藏名列表应为 [u]（beta 被真实 ID 遮蔽），实际 %v", hidden)
+	if got := pool.ResolveModelID("alias-alpha"); got != "alpha" {
+		t.Fatalf("别名应解析到其模型，实际 %q", got)
 	}
-	// 未撞名的自动推导名仍然可作为隐藏名直接调用。
-	if got := pool.ResolveModelID("u"); got != "beta" {
-		t.Fatalf("未撞名的上游名应解析到其模型，实际 %q", got)
+	// u 是 beta 的上游名；alpha 的上游名 beta 恰好是真实 ID，两者都不该被解析成模型。
+	if got := pool.ResolveModelID("u"); got != "u" {
+		t.Fatalf("上游名不应被解析成模型，实际 %q", got)
 	}
-}
-
-// TestExplicitHiddenAliasCollidingWithModelIDIsRejected 锁定 config 层的校验。
-//
-// 这条行为的价值在于：它说明「隐藏名撞真实 ID」是**不允许**的，所以
-// KeyPool 里那段「真实 ID 优先」的逻辑只可能被自动推导名触发。
-func TestExplicitHiddenAliasCollidingWithModelIDIsRejected(t *testing.T) {
-	raw := `{
-		"config_version": 4, "local_api_key": "local",
-		"providers": {"p": {"base_url": "https://a.example", "keys": {
-			"k1": {"api_key": "1"}}}},
-		"models": {
-			"alpha": {"targets": [{"provider": "p", "key": "k1", "upstream_model": "u"}],
-			          "hidden_aliases": ["beta"]},
-			"beta": {"targets": [{"provider": "p", "key": "k1", "upstream_model": "v"}]}
-		}
-	}`
-	_, err := config.FromDict(mustValue(t, raw))
-	if err == nil {
-		t.Fatal("隐藏别名与模型 ID 撞名应被拒绝")
-	}
-	if !strings.Contains(err.Error(), "模型名称重复") {
-		t.Fatalf("错误文本不符: %v", err)
+	if public := pool.PublicModelIDs(); !slices.Equal(public, []string{"alias-alpha", "alpha", "beta"}) {
+		t.Fatalf("对外模型名应为 ID + 别名，实际 %v", public)
 	}
 }
 

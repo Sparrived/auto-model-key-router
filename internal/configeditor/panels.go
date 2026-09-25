@@ -8,58 +8,6 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/tui"
 )
 
-// HiddenAliasesText 对应 config_editor.py:288 的 hidden_aliases_text：隐藏别名单元格。
-//
-// 手写的别名直接列出来；自动推导的（各 target 的上游模型名）只报个数——展开它们会
-// 让这些面板重新暴露上游细节（见 test_v2_summary_model_section_focuses_on_mapping）。
-//
-// 与参照实现的差异：aliases / hidden_aliases 不是数组时（字符串会被 Python 逐字符
-// 迭代）Go 侧按空处理。
-func HiddenAliasesText(modelID string, model *canonical.Value) (string, error) {
-	visible := map[string]bool{modelID: true}
-	for _, alias := range stringItems(model.Lookup("aliases")) {
-		if alias != "" {
-			visible[alias] = true
-		}
-	}
-	explicit := make([]string, 0)
-	explicitSet := map[string]bool{}
-	for _, alias := range stringItems(model.Lookup("hidden_aliases")) {
-		if alias == "" || visible[alias] {
-			continue
-		}
-		explicit = append(explicit, alias)
-		explicitSet[alias] = true
-	}
-	targets, err := modelTargets(model)
-	if err != nil {
-		return "", err
-	}
-	auto := map[string]bool{}
-	for _, target := range targets.Arr {
-		upstream := target.Lookup("upstream_model")
-		if !upstream.Truthy() {
-			continue
-		}
-		name := upstream.PyStr()
-		if visible[name] || explicitSet[name] {
-			continue
-		}
-		auto[name] = true
-	}
-	parts := make([]string, 0, 2)
-	if len(explicit) > 0 {
-		parts = append(parts, strings.Join(explicit, ", "))
-	}
-	if len(auto) > 0 {
-		parts = append(parts, "+"+strconv.Itoa(len(auto))+" 自动")
-	}
-	if len(parts) == 0 {
-		return "-", nil
-	}
-	return strings.Join(parts, " "), nil
-}
-
 // stringItems 返回数组里的字符串成员（非数组返回空）。
 //
 // 参照实现写 `for alias in model.get("aliases", [])`，对字符串会逐字符迭代；那属于
@@ -125,12 +73,11 @@ func (e *Editor) V2SummaryPanel(data *canonical.Value) (tui.Renderable, error) {
 
 	modelTable := tui.Table{Columns: []tui.TableColumn{
 		{Width: 28},
-		{Width: 36},
-		{Width: 36},
+		{Width: 44},
 		{Width: 14},
 		{Width: 6, Align: "right"},
 	}}
-	modelTable.Rows = append(modelTable.Rows, []string{"本地模型", "别名", "隐藏别名", "路由模式", "Keys"})
+	modelTable.Rows = append(modelTable.Rows, []string{"本地模型", "别名", "路由模式", "Keys"})
 	modelRowCount := 0
 	for _, modelID := range sortedKeysOf(models) {
 		model := models.Lookup(modelID)
@@ -139,10 +86,6 @@ func (e *Editor) V2SummaryPanel(data *canonical.Value) (tui.Renderable, error) {
 			if alias != "" {
 				aliases = append(aliases, alias)
 			}
-		}
-		hidden, err := HiddenAliasesText(modelID, model)
-		if err != nil {
-			return nil, err
 		}
 		targets, err := modelTargets(model)
 		if err != nil {
@@ -156,20 +99,16 @@ func (e *Editor) V2SummaryPanel(data *canonical.Value) (tui.Renderable, error) {
 		if aliasText == "" {
 			aliasText = "-"
 		}
-		if hidden == "" {
-			hidden = "-"
-		}
 		modelTable.Rows = append(modelTable.Rows, []string{
 			shortText(modelID, 28),
-			shortText(aliasText, 36),
-			shortText(hidden, 36),
+			shortText(aliasText, 44),
 			routingMode,
 			strconv.Itoa(len(targets.Arr)),
 		})
 		modelRowCount++
 	}
 	if modelRowCount == 0 {
-		modelTable.Rows = append(modelTable.Rows, []string{"-", "-", "-", "-", "0"})
+		modelTable.Rows = append(modelTable.Rows, []string{"-", "-", "-", "0"})
 	}
 
 	return tui.Group{Items: []tui.Renderable{

@@ -395,10 +395,9 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			_, err := configops.CreateModel(current, routeID, configops.CreateModelOptions{
-				Aliases:       trailingStringSlice(route, "aliases"),
-				HiddenAliases: trailingStringSlice(route, "hidden_aliases"),
-				RoutingMode:   routingMode,
-				Targets:       targetItems,
+				Aliases:     trailingStringSlice(route, "aliases"),
+				RoutingMode: routingMode,
+				Targets:     targetItems,
 			})
 			return err
 		}, optString(payload, "config_revision"))
@@ -448,11 +447,16 @@ func (s *Server) handleGetRoute(w http.ResponseWriter, r *http.Request) {
 
 // —— PUT /api/routes/{route_id} ——
 
+// handleUpdateRoute 整体替换某个模型路由的 id / targets / aliases / routing_mode。
+//
+// 一个特例：`targets` 写成**空数组**等于删除这个路由，响应 204。理由是「路由下没有
+// 目标就不该存在」是写路径的全局不变式（取消 Key 勾选、解绑 Key、删 Key 都遵守），
+// 要求调用方先清空再 DELETE 只是把这条不变式漏给客户端去维持。
 func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
-	s.run(w, http.StatusOK, func() (*canonical.Value, error) {
+	s.runStatus(w, func() (int, *canonical.Value, error) {
 		payload, _, err := decodePayload(r, specRouteUpdate, false)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		routeID := r.PathValue("route_id")
 		updates := updatesWithout(payload, "config_revision")
@@ -465,34 +469,47 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 			targetItems = targetsValue.Arr
 		}
 
+		if targetsValue.IsArray() && len(targetItems) == 0 {
+			_, err := s.v3Update(r, func(current *canonical.Value) error {
+				return configops.DeleteModel(current, routeID)
+			}, optString(payload, "config_revision"))
+			if err != nil {
+				return 0, nil, err
+			}
+			return http.StatusNoContent, nil, nil
+		}
+
 		data, err := s.v3Update(r, func(current *canonical.Value) error {
 			_, err := configops.UpdateModel(current, routeID, configops.UpdateModelOptions{
-				NewID:         optString(updates, "id"),
-				Aliases:       optStringSlice(updates, "aliases"),
-				HiddenAliases: optStringSlice(updates, "hidden_aliases"),
-				RoutingMode:   optString(updates, "routing_mode"),
-				Targets:       targetItems,
+				NewID:       optString(updates, "id"),
+				Aliases:     optStringSlice(updates, "aliases"),
+				RoutingMode: optString(updates, "routing_mode"),
+				Targets:     targetItems,
 			})
 			return err
 		}, optString(payload, "config_revision"))
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		name, ok := stringOrDefault(updates, "id", routeID)
 		if !ok {
-			return nil, &pyValueError{message: "路由不存在: null"}
+			return 0, nil, &pyValueError{message: "路由不存在: null"}
 		}
 		routesValue, err := rawRoutes(data)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		route := routesValue.Lookup(name)
 		if route == nil || !route.IsObject() {
-			return nil, &pyValueError{message: "路由不存在: " + name}
+			return 0, nil, &pyValueError{message: "路由不存在: " + name}
 		}
-		return withRevision(data, objectOf(
+		body, err := withRevision(data, objectOf(
 			canonical.ObjectPair{Key: "route", Value: routeWithID(name, route)},
 		))
+		if err != nil {
+			return 0, nil, err
+		}
+		return http.StatusOK, body, nil
 	})
 }
 

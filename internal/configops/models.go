@@ -104,7 +104,10 @@ func UpdateModelTarget(data *canonical.Value, modelID string, targetIndex int, u
 
 // DeleteModelTarget 按下标删除一条 target 并返回被删掉的那条（已是脱离配置的副本）。
 //
-// 对齐 config_operations.py:550。
+// 这是「无 target 即无路由」不变式的落点之一：删掉最后一条 target 会连带删掉整个
+// 路由（并修复 unified_model / 任务对它的引用），而不是留下一条空路由。
+//
+// 对齐 config_operations.py:550，额外补上最后一条 target 被删时的路由清理。
 func DeleteModelTarget(data *canonical.Value, modelID string, targetIndex int) (*canonical.Value, error) {
 	model, err := RequireModel(data, modelID)
 	if err != nil {
@@ -122,6 +125,9 @@ func DeleteModelTarget(data *canonical.Value, modelID string, targetIndex int) (
 	remaining = append(remaining, targets.Arr[:targetIndex]...)
 	remaining = append(remaining, targets.Arr[targetIndex+1:]...)
 	targets.Arr = remaining
+	if len(remaining) == 0 {
+		return removed, DeleteModel(data, modelID)
+	}
 	if err := RepairModelReferences(data); err != nil {
 		return nil, err
 	}
@@ -133,13 +139,7 @@ func normalizeAliases(aliases []string) ([]string, error) {
 	return normalizeNameList(aliases, "模型别称不能重复")
 }
 
-// normalizeHiddenAliases 复刻 _normalize_hidden_aliases（config_operations.py:586）。
-func normalizeHiddenAliases(aliases []string) ([]string, error) {
-	return normalizeNameList(aliases, "隐藏别名不能重复")
-}
-
-// normalizeNameList 去空白、丢空项、查重。两个别称列表共用一套规则，只有报错
-// 文案不同——参照实现也是这么写的，不要合并成一种消息。
+// normalizeNameList 去空白、丢空项、查重。
 func normalizeNameList(aliases []string, duplicateMessage string) ([]string, error) {
 	result := make([]string, 0, len(aliases))
 	seen := map[string]bool{}
@@ -157,18 +157,16 @@ func normalizeNameList(aliases []string, duplicateMessage string) ([]string, err
 	return result, nil
 }
 
-// validateModelNames 校验模型 ID / 别称 / 隐藏别名不与现有名字冲突。
+// validateModelNames 校验模型 ID / 别称不与现有名字冲突。
 //
-// 对齐 config_operations.py:593。注意「可见名」与「隐藏名」的相互屏蔽方向：
-// 隐藏名要减去可见名（同名时以可见名为准，不再算冲突），而可见名只跟排除后的
-// 隐藏名比较。exclude 用于「改名/改别名时跳过自己」。
-func validateModelNames(data *canonical.Value, modelID string, aliases []string, exclude *string, hiddenAliases []string) error {
+// 可调用名只有模型 ID 与 aliases，两者同处一个全局命名空间：同一个名字落在两个模型
+// 上会让解析结果取决于遍历顺序。exclude 用于「改名/改别名时跳过自己」。
+func validateModelNames(data *canonical.Value, modelID string, aliases []string, exclude *string) error {
 	all, err := Models(data)
 	if err != nil {
 		return err
 	}
 	names := map[string]bool{}
-	hiddenNames := map[string]bool{}
 	for _, pair := range objectItems(all) {
 		if exclude != nil && pair.Key == *exclude {
 			continue
@@ -187,29 +185,12 @@ func validateModelNames(data *canonical.Value, modelID string, aliases []string,
 				names[alias] = true
 			}
 		}
-		hidden, err := iterateOrDefault(model, "hidden_aliases")
-		if err != nil {
-			return err
-		}
-		for _, alias := range hidden {
-			if alias != "" {
-				hiddenNames[alias] = true
-			}
-		}
-	}
-	for name := range names {
-		delete(hiddenNames, name)
 	}
 	if names[modelID] {
 		return opErrf(409, "模型名称重复: %s", modelID)
 	}
 	for _, alias := range aliases {
-		if alias == modelID || names[alias] || hiddenNames[alias] {
-			return opErrf(409, "模型名称重复: %s", alias)
-		}
-	}
-	for _, alias := range hiddenAliases {
-		if alias == modelID || names[alias] || hiddenNames[alias] || containsStringValue(aliases, alias) {
+		if alias == modelID || names[alias] {
 			return opErrf(409, "模型名称重复: %s", alias)
 		}
 	}
@@ -227,14 +208,12 @@ type CreateModelOptions struct {
 	RoutingMode     string
 	ReasoningEffort *string
 	Targets         []*canonical.Value
-	HiddenAliases   []string
 }
 
 // CreateModel 新建模型并返回它。
 //
-// 对齐 config_operations.py:615。模型对象的键顺序固定为
-// aliases、routing_mode、targets、[hidden_aliases]、[reasoning_effort]，落盘
-// 直接受影响，不能改。
+// 模型对象的键顺序固定为 aliases、routing_mode、targets、[reasoning_effort]，
+// 落盘直接受影响，不能改。
 func CreateModel(data *canonical.Value, modelID string, options CreateModelOptions) (*canonical.Value, error) {
 	id, err := nonEmptyString(modelID, "模型 ID")
 	if err != nil {
@@ -251,11 +230,7 @@ func CreateModel(data *canonical.Value, modelID string, options CreateModelOptio
 	if err != nil {
 		return nil, err
 	}
-	hiddenAliases, err := normalizeHiddenAliases(options.HiddenAliases)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateModelNames(data, id, aliases, nil, hiddenAliases); err != nil {
+	if err := validateModelNames(data, id, aliases, nil); err != nil {
 		return nil, err
 	}
 	routingMode := strings.TrimSpace(options.RoutingMode)
@@ -275,9 +250,6 @@ func CreateModel(data *canonical.Value, modelID string, options CreateModelOptio
 		canonical.ObjectPair{Key: "routing_mode", Value: canonical.NewString(routingMode)},
 		canonical.ObjectPair{Key: "targets", Value: cloneValues(options.Targets)},
 	)
-	if len(hiddenAliases) > 0 {
-		model.SetKey("hidden_aliases", canonical.NewStringArray(hiddenAliases))
-	}
 	if options.ReasoningEffort != nil {
 		effort := strings.TrimSpace(*options.ReasoningEffort)
 		if effort != "" && effort != "default" && effort != "downstream" {
@@ -290,8 +262,7 @@ func CreateModel(data *canonical.Value, modelID string, options CreateModelOptio
 
 // UpdateModelOptions 是 UpdateModel 的可选参数。
 //
-// nil 表示 Python 的 None（不改）；Aliases/HiddenAliases 的非 nil 空切片表示
-// 「显式清空」——这两者在参照实现里行为不同（清空别名 vs 不动）。
+// nil 表示 Python 的 None（不改）；Aliases 的非 nil 空切片表示「显式清空别名」。
 type UpdateModelOptions struct {
 	NewID                 *string
 	Aliases               []string
@@ -299,7 +270,6 @@ type UpdateModelOptions struct {
 	ReasoningEffort       *string
 	UpdateReasoningEffort bool
 	Targets               []*canonical.Value
-	HiddenAliases         []string
 }
 
 // UpdateModel 修改模型，返回最终 ID（改名时是新 ID）。
@@ -325,7 +295,7 @@ func UpdateModel(data *canonical.Value, modelID string, options UpdateModelOptio
 		return "", opErrf(409, "模型已存在: %s", targetID)
 	}
 	if targetID != modelID {
-		// 新 ID 不能撞上本模型自己的别称/隐藏别名。
+		// 新 ID 不能撞上本模型自己的别称。
 		own, err := ownNames(model)
 		if err != nil {
 			return "", err
@@ -337,7 +307,7 @@ func UpdateModel(data *canonical.Value, modelID string, options UpdateModelOptio
 		if err != nil {
 			return "", err
 		}
-		if err := validateModelNames(data, targetID, aliases, StringPtr(modelID), nil); err != nil {
+		if err := validateModelNames(data, targetID, aliases, StringPtr(modelID)); err != nil {
 			return "", err
 		}
 	}
@@ -346,45 +316,10 @@ func UpdateModel(data *canonical.Value, modelID string, options UpdateModelOptio
 		if err != nil {
 			return "", err
 		}
-		if err := validateModelNames(data, targetID, aliases, StringPtr(modelID), nil); err != nil {
+		if err := validateModelNames(data, targetID, aliases, StringPtr(modelID)); err != nil {
 			return "", err
-		}
-		// 本模型已有的隐藏别名不在上面的全局扫描范围内，要单独比一次。
-		// Python 用的是 `alias in model.get("hidden_aliases", [])`，因此值为 null
-		// 时报的是「argument of type 'NoneType' is not iterable」，与 for 循环的
-		// 报错文本不同，必须走 pyContains。
-		hidden := lookup(model, "hidden_aliases")
-		if hidden == nil {
-			hidden = canonical.NewArray()
-		}
-		for _, alias := range aliases {
-			found, err := pyContains(hidden, alias)
-			if err != nil {
-				return "", err
-			}
-			if found {
-				return "", opErrf(409, "模型名称重复: %s", alias)
-			}
 		}
 		model.SetKey("aliases", canonical.NewStringArray(aliases))
-	}
-	if options.HiddenAliases != nil {
-		hiddenAliases, err := normalizeHiddenAliases(options.HiddenAliases)
-		if err != nil {
-			return "", err
-		}
-		aliases, err := iterateOrDefault(model, "aliases")
-		if err != nil {
-			return "", err
-		}
-		if err := validateModelNames(data, targetID, aliases, StringPtr(modelID), hiddenAliases); err != nil {
-			return "", err
-		}
-		if len(hiddenAliases) > 0 {
-			model.SetKey("hidden_aliases", canonical.NewStringArray(hiddenAliases))
-		} else {
-			model.DeleteKey("hidden_aliases")
-		}
 	}
 	if options.RoutingMode != nil {
 		routingMode := strings.TrimSpace(*options.RoutingMode)
@@ -449,20 +384,14 @@ func targetIdentity(target *canonical.Value) string {
 		pyStrOf(lookup(target, "upstream_model"))
 }
 
-// ownNames 返回模型自身的别称与隐藏别名集合（str() 归一后）。
-//
-// 对应 config_operations.py:643 的 `{str(alias) for alias in (*aliases, *hidden_aliases) if str(alias)}`。
+// ownNames 返回模型自身的别称集合（str() 归一后）。
 func ownNames(model *canonical.Value) (map[string]bool, error) {
 	result := map[string]bool{}
 	aliases, err := iterateOrDefault(model, "aliases")
 	if err != nil {
 		return nil, err
 	}
-	hidden, err := iterateOrDefault(model, "hidden_aliases")
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range append(append([]string{}, aliases...), hidden...) {
+	for _, name := range aliases {
 		if name != "" {
 			result[name] = true
 		}
@@ -496,16 +425,6 @@ func cloneSlice(values []*canonical.Value) []*canonical.Value {
 		cloned = append(cloned, cloneOf(value))
 	}
 	return cloned
-}
-
-// containsStringValue 报告字符串切片里是否含目标值。
-func containsStringValue(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 // isValidRoutingMode 报告路由模式是否合法（与 config 包同一份取值）。

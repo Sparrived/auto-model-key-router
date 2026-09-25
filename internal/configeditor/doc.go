@@ -20,7 +20,6 @@
 //	v2_summary_panel                    → Editor.V2SummaryPanel
 //	provider_capabilities_panel         → ProviderCapabilitiesPanel
 //	model_key_targets_panel             → ModelKeyTargetsPanel
-//	hidden_aliases_text                 → HiddenAliasesText
 //	select_provider / select_provider_key / select_v2_model → Editor 上的同名方法
 //	*_interactively                     → Editor 上的同名导出方法
 //	commit_v2_config                    → Editor.commitV2Config

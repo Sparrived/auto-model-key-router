@@ -155,7 +155,6 @@ var specModelCreate = newModelSpec("ModelCreate",
 	nul("config_revision", kindStr).minLenOf(1),
 	req("id", kindStr).minLenOf(1),
 	def("aliases", kindStrList),
-	def("hidden_aliases", kindStrList),
 	def("routing_mode", kindStr),
 	nul("reasoning_effort", kindStr),
 	def("keys", kindNestedList).withNested(specKeyCreate),
@@ -169,7 +168,6 @@ var specModelUpdate = newModelSpec("ModelUpdate",
 	nul("config_revision", kindStr).minLenOf(1),
 	nul("id", kindStr).minLenOf(1),
 	nul("aliases", kindStrList),
-	nul("hidden_aliases", kindStrList),
 	nul("routing_mode", kindStr),
 	nul("reasoning_effort", kindStr),
 )
@@ -378,17 +376,18 @@ var specRouteCreate = newModelSpec("RouteCreate",
 	req("id", kindStr).minLenOf(1),
 	req("targets", kindTargetList).minLenOf(1),
 	def("aliases", kindStrList),
-	def("hidden_aliases", kindStrList),
 	nul("routing_mode", kindStr),
 )
 
 // specRouteUpdate 对应 RouteUpdate。
+//
+// targets 允许空数组：把一个路由的目标清空就等于删掉这个路由（见
+// handleUpdateRoute），因此这里不能加 minLenOf(1)。
 var specRouteUpdate = newModelSpec("RouteUpdate",
 	req("config_revision", kindStr).minLenOf(1),
 	nul("id", kindStr).minLenOf(1),
 	nul("targets", kindTargetList),
 	nul("aliases", kindStrList),
-	nul("hidden_aliases", kindStrList),
 	nul("routing_mode", kindStr),
 )
 

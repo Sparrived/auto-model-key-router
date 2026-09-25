@@ -366,11 +366,10 @@ func (e *Editor) ManageV2ModelSettingsInteractively() error {
 		}
 		choice := e.selectOption("模型设置 · "+shortText(modelID, 28), []tui.Option{
 			{Value: "1", Label: "别名"},
-			{Value: "2", Label: "隐藏别名"},
-			{Value: "3", Label: "路由模式"},
-			{Value: "4", Label: "管理 Key"},
-			{Value: "5", Label: "绑定 Key"},
-			{Value: "6", Label: "删除模型"},
+			{Value: "2", Label: "路由模式"},
+			{Value: "3", Label: "管理 Key"},
+			{Value: "4", Label: "绑定 Key"},
+			{Value: "5", Label: "删除模型"},
 			{Value: "0", Label: "返回"},
 		}, tui.SelectOptions{Content: panel})
 		if choice == "0" {
@@ -379,21 +378,21 @@ func (e *Editor) ManageV2ModelSettingsInteractively() error {
 		e.clearTerminalHistory()
 		var result any
 		switch choice {
-		case "1", "2", "3":
+		case "1", "2":
 			result, err = e.UpdateV2ModelSettingsInteractively(modelID, choice)
 			if err != nil {
 				return err
 			}
-		case "4":
+		case "3":
 			e.runSubmodule(func() (any, error) {
 				return nil, e.ManageModelRoutesInteractively(modelID)
 			})
 			continue
-		case "5":
+		case "4":
 			result = e.runSubmodule(func() (any, error) {
 				return e.AddModelRouteInteractively(modelID)
 			})
-		case "6":
+		case "5":
 			result, err = e.DeleteV2ModelInteractively(modelID)
 			if err != nil {
 				return err
@@ -404,7 +403,7 @@ func (e *Editor) ManageV2ModelSettingsInteractively() error {
 		if result != nil {
 			e.showResultPage("模型设置", result)
 		}
-		if choice == "6" {
+		if choice == "5" {
 			return nil
 		}
 	}
@@ -446,27 +445,6 @@ func (e *Editor) UpdateV2ModelSettingsInteractively(modelID, choice string) (any
 		}
 		message = "已更新 " + modelID + " 的别名。"
 	case "2":
-		hidden := stringItems(model.Lookup("hidden_aliases"))
-		defaultValue := strings.Join(hidden, ", ")
-		text, err := e.promptText(
-			"隐藏别名",
-			"可调用但不在 /v1/models 中列出，多个用逗号分隔",
-			tui.PromptOptions{Default: &defaultValue},
-		)
-		if err != nil {
-			return nil, err
-		}
-		parsed := make([]string, 0)
-		for _, alias := range strings.Split(strings.TrimSpace(text), ",") {
-			if trimmed := strings.TrimSpace(alias); trimmed != "" {
-				parsed = append(parsed, trimmed)
-			}
-		}
-		if _, err := configops.UpdateModel(data, modelID, configops.UpdateModelOptions{HiddenAliases: parsed}); err != nil {
-			return nil, err
-		}
-		message = "已更新 " + modelID + " 的隐藏别名。"
-	case "3":
 		current := stringOrEmpty(model, "routing_mode")
 		if current == "" {
 			current = "round_robin"

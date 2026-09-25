@@ -21,6 +21,9 @@ type KeyConfig struct {
 }
 
 // ModelConfig 是一个可路由的模型。
+//
+// 可调用名恰好是 ID 与 Aliases：两者都会出现在 /v1/models 里。target 的
+// upstream_model 是**上游**叫法，只用于发给上游，不会成为本地可调用名。
 type ModelConfig struct {
 	ID              string
 	Keys            []KeyConfig
@@ -28,8 +31,6 @@ type ModelConfig struct {
 	RoutingMode     string
 	ReasoningEffort string
 	NativeFirst     bool
-	// HiddenAliases 是可直接调用但不出现在 /v1/models 的名字。
-	HiddenAliases []string
 }
 
 // ProviderKeyConfig 是 provider 下配置的一个 key。
@@ -582,12 +583,6 @@ func parseModels(raw *canonical.Value, providerKeys map[[2]string]providerKeyRef
 				aliases = append(aliases, rendered)
 			}
 		}
-		hiddenAliases := []string{}
-		for _, alias := range model.Lookup("hidden_aliases").Items() {
-			if rendered := strings.TrimSpace(alias.PyStr()); rendered != "" {
-				hiddenAliases = append(hiddenAliases, rendered)
-			}
-		}
 		routingMode := strings.TrimSpace(model.Lookup("routing_mode").StringValue())
 		if routingMode == "" {
 			routingMode = defaultRoutingMode
@@ -608,7 +603,6 @@ func parseModels(raw *canonical.Value, providerKeys map[[2]string]providerKeyRef
 			RoutingMode:     routingMode,
 			ReasoningEffort: reasoningEffort,
 			NativeFirst:     boolOr(model.Lookup("native_first"), true),
-			HiddenAliases:   hiddenAliases,
 		})
 	}
 	return models, nil
@@ -1066,7 +1060,6 @@ func (c *RouterConfig) Validate() error {
 	}
 
 	modelNames := map[string]bool{}
-	idsByName := map[string]string{}
 	modelsByID := map[string]ModelConfig{}
 	for _, model := range c.Models {
 		if model.ID == "" {
@@ -1083,7 +1076,6 @@ func (c *RouterConfig) Validate() error {
 				return errf("模型名称重复: %s", name)
 			}
 			modelNames[name] = true
-			idsByName[name] = model.ID
 		}
 		modelsByID[model.ID] = model
 
@@ -1105,27 +1097,6 @@ func (c *RouterConfig) Validate() error {
 		}
 	}
 
-	// 手写隐藏别名的冲突检查。自动推导的上游名允许重复（两个模型指向同一上游名时
-	// 按 models 顺序取第一个），这里只管用户显式声明的那些。
-	claimedHidden := map[string]string{}
-	for _, model := range c.Models {
-		for _, name := range model.HiddenAliases {
-			if name == "" {
-				return errf("模型 %s 存在空隐藏别名", model.ID)
-			}
-			if name == UNIFIED_MODEL_ID {
-				return errf("隐藏别名不能使用保留名称: %s", UNIFIED_MODEL_ID)
-			}
-			if owner, found := idsByName[name]; found && owner != model.ID {
-				return errf("模型名称重复: %s", name)
-			}
-			if previous, found := claimedHidden[name]; found && previous != model.ID {
-				return errf("模型名称重复: %s", name)
-			}
-			claimedHidden[name] = model.ID
-		}
-	}
-
 	for _, baseURL := range sortedKeys(c.UpstreamRoutes) {
 		if !hasHTTPScheme(baseURL) {
 			return errf("upstream_routes 的上游URL %s 必须以 http:// 或 https:// 开头", baseURL)
@@ -1144,7 +1115,6 @@ func (c *RouterConfig) Validate() error {
 	// 任务名本身只在**同一个工作空间内**唯一：这正是工作空间的意义所在，
 	// 两个空间各有一个 `summarize` 是合法配置。
 	taskNames := map[[2]string]bool{}
-	hidden := c.HiddenModelNames()
 	for i := range c.Tasks {
 		task := &c.Tasks[i]
 		if task.Name == "" {
@@ -1159,7 +1129,7 @@ func (c *RouterConfig) Validate() error {
 		if taskNames[key] {
 			return errf("任务名重复: %s", task.Name)
 		}
-		if modelNames[task.Name] || hidden[task.Name] != "" {
+		if modelNames[task.Name] {
 			return errf("任务名与模型名称冲突: %s", task.Name)
 		}
 		if task.Name == UNIFIED_MODEL_ID {
@@ -1368,28 +1338,6 @@ func (c *RouterConfig) WorkspaceAllowedModels(workspace string) (map[string]bool
 		return allowed, true
 	}
 	return nil, false
-}
-
-// HiddenModelNames 返回可直接调用、但不出现在 /v1/models 中的名字 -> 本地模型 ID。
-//
-// 手写 hidden_aliases 加上从每个 target 的 upstream_model 自动推导的名字（上游叫法
-// 不变即可直接调用，无需重复维护）。同名的真实 ID/别名优先。
-func (c *RouterConfig) HiddenModelNames() map[string]string {
-	result := map[string]string{}
-	for _, model := range c.Models {
-		names := append([]string{}, model.HiddenAliases...)
-		for _, key := range model.Keys {
-			if key.UpstreamModel != "" {
-				names = append(names, key.UpstreamModel)
-			}
-		}
-		for _, name := range names {
-			if _, exists := result[name]; !exists {
-				result[name] = model.ID
-			}
-		}
-	}
-	return result
 }
 
 // NativeFirstForModel 返回模型的 native_first 设置（缺省 true）。
