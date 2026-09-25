@@ -2,7 +2,35 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **写接口支持 `?dry_run=1` 预演，WebUI 据此弹二次确认。** 改一个模型会连带改掉别处：
+  某把访问密钥少一项授权、某个工作空间少一个能直呼的模型、引用它的任务被删掉、
+  `unified_model` 被改写。这些原先只能等落盘之后再翻配置才发现（或者干脆被校验挡住，见
+  下面的修复）。现在**会让模型或供应商消失的写接口**——`PUT /api/providers/{p}/keys/{k}/models`、
+  `DELETE /api/providers/{p}/keys/{k}`、`DELETE /api/providers/{p}`、`PUT|DELETE /api/routes/{id}`、
+  `DELETE /api/models/{id}`、`DELETE /api/models/{id}/keys/{k}`——都支持带 `?dry_run=1`：
+  跑一遍**完全相同**的改动、回报它连带摘掉哪些引用（`removed_models` / `access_keys` /
+  `workspaces` / `removed_tasks` / `unified_model`），但一个字节都不落盘，状态码一律 `200`。
+  预演与真写共用同一段 mutation，因此清单与最终结果同源，而不是照着重写一遍判定规则。
+  WebUI 供应商页（保存 Key 服务模型、删 Key、删供应商）与模型路由页（删路由、把目标清空后
+  保存）据此在动手前列出将要变动的内容；没有连带变动时不弹框，删除类操作即使没有连带变动
+  也照常问一句。影响清单的呈现与「先预演、再确认、最后真写」这条流程收在
+  `webui/model-impact.js`，两页共用。回归由 `internal/api/model_cascade_test.go` 与新的
+  `webui/probes/webui_model_impact_probe.mjs`（已接入 CI）钉住。
+
 ### 修复
+
+- **删模型不再被「引用了未配置的模型」顶回来。** `access_keys.<id>.models`、
+  `access_keys.<id>.providers` 与 `workspaces.<空间>.models` 和任务、`unified_model` 一样是
+  **引用**，但不在既有的引用修复里。于是在供应商页取消勾选一个只绑在这把 Key 上的模型、
+  或删掉那个供应商时，配置层会以 `access_keys.public.models[0] 引用了未配置的模型: <name>`
+  拒绝整次保存（HTTP 400「配置校验失败」）——用户想删的恰恰是那个模型，却因为一份清单里
+  还写着它而删不动。现在这三份清单在写模型/供应商的路径上被一并清理，顺序在 `unified_model`
+  之前（后者要先能完整解析一遍候选配置才敢改，残留的失效引用会让那次解析直接失败）。
+  摘空时**保留空数组**而不删字段：这两份清单是三态的，字段缺失或 `null` 表示「不限制」、
+  `[]` 表示「一个都不许」，删字段等于把禁令松开，那是扩权。用例见
+  `internal/api/model_cascade_test.go`（连带清理与 `providers` 清单各一条）。
 
 - **Antigravity 的额度要问 `daily-cloudcode-pa`，问 prod 会永远显示满额。** 账号资源看板
   给 Antigravity 配的那条 `quota_probe` 原先指向 `cloudcode-pa.googleapis.com`（Code Assist

@@ -65,6 +65,7 @@ x-api-key: your-local-api-key
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}` | 仅本地 | 查询、更新或删除 Provider |
 | `GET/POST` | `/api/providers/{provider_id}/keys` | 仅本地 | 查询或创建 Provider Key |
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Provider Key |
+| `GET/PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` | 仅本地 | 查询或设定该 Key 对外提供的模型（取消勾选只绑在它上面的最后一个模型会连带删除那个模型） |
 | `POST` | `/api/providers/{provider_id}/probe` | 仅本地 | 同步刷新该 Provider 全部启用 Key 的能力探测（各 Key 的模型列表 + 路由可用性） |
 | `POST` | `/api/providers/{provider_id}/keys/{key_name}/probe` | 仅本地 | 同步刷新指定 Key 的能力探测，可用 `modes` 限定路由检查范围 |
 | `GET/POST` | `/api/routes` | 仅本地 | 查询或创建模型路由 |
@@ -574,6 +575,70 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 
 查询响应不会返回上游 `api_key` 明文，只返回 SHA-256 前 12 位的 `api_key_fingerprint`。
 
+### 改模型会连带改掉别处的引用
+
+模型不是孤立资源：`tasks.*.model` / `fallback_model`、`workspaces.<空间>.models`、
+`access_keys.<id>.models`、`access_keys.<id>.providers`、`unified_model.*` 里都可能写着它的
+名字。删掉一个模型（或让某个模型**失去全部 `targets`**，例如取消勾选 Key 的最后一个服务
+模型、删掉那把 Key、删掉那个供应商）时，这些引用会被**一并自动清理**，而不是让整次保存
+失败：
+
+| 引用 | 清理方式 |
+| --- | --- |
+| `tasks.<任务>.model` / `fallback_model` | 引用失效的任务被删除 |
+| `workspaces.<空间>.models` | 摘掉失效的名字 |
+| `access_keys.<id>.models` | 摘掉失效的名字 |
+| `access_keys.<id>.providers` | 删除供应商时摘掉失效的名字 |
+| `unified_model.<计划>.<primary\|fallback>` | 指向被删模型的计划被改写（回落另一个模型）或移除 |
+
+清单被摘空后**保留空数组**而不是删掉字段：这两份清单是三态的，字段缺失或 `null` 表示
+「不限制」，`[]` 表示「一个都不许」。删字段等于把禁令松开，那是扩权。因此一把访问密钥的
+模型清单可能被摘成 `[]`——它此后调不动任何模型，需要重新授权。
+
+#### 预演：`?dry_run=1`
+
+上表里的连带变动不该等落盘之后才发现，因此**会让模型或供应商消失的写接口**都支持
+`?dry_run=1`：
+
+| 方法 | 路径 |
+| --- | --- |
+| `PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` |
+| `DELETE` | `/api/providers/{provider_id}/keys/{key_name}` |
+| `DELETE` | `/api/providers/{provider_id}` |
+| `PUT` | `/api/routes/{route_id}`（`targets: []` 即删路由） |
+| `DELETE` | `/api/routes/{route_id}` |
+| `DELETE` | `/api/models/{model_id}` |
+| `DELETE` | `/api/models/{model_id}/keys/{key_name}` |
+
+带该参数时接口跑一遍**完全相同**的改动、回报它连带改掉哪些引用，但**一个字节都不落盘**，
+状态码一律 `200`（原本回 `204` 的删除接口在预演时回响应体）。请求体与真写完全一致，差别
+只有这一个查询参数。
+
+```json
+{
+  "dry_run": true,
+  "removed_models": ["gemini-3-flash"],
+  "access_keys": [
+    {"id": "public", "name": "公开", "models": ["gemini-3-flash"], "providers": [],
+     "models_cleared": false, "providers_cleared": false}
+  ],
+  "workspaces": [
+    {"id": "teamA", "name": "teamA", "models": ["gemini-3-flash"], "providers": [],
+     "models_cleared": false, "providers_cleared": false}
+  ],
+  "removed_tasks": ["shared", "teamA/only-a"],
+  "unified_model": true,
+  "config_revision": "..."
+}
+```
+
+`removed_models` 是失去全部目标而被删除的模型；`models_cleared` / `providers_cleared` 报告
+那份清单是否被摘空。命名工作空间的任务用 `空间/任务名` 限定，默认空间按原名。
+
+预演不改动配置，因此响应里的 `config_revision` 仍是**当前**版本号，真写照常用它做并发校验。
+预演本身**不比对**该版本号：它不写盘，用不上防丢改动；并发写只会让预演结果过期（确认框里
+多列或少列一条），不会让配置受损。
+
 ### 数据结构
 
 #### ModelCreate
@@ -776,7 +841,7 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `DELETE /api/models/{model_id}`
 
-成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。只删除模型本身及其绑定关系，被删除模型绑定的供应商 Key 与供应商会保留（供应商 Key 被模型引用不算配置错误）。若引用该模型的 Key 不再被任何模型使用，可另行通过 `/api/providers/{provider_id}/keys/{key_name}` 删除。
+成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。只删除模型本身及其绑定关系，被删除模型绑定的供应商 Key 与供应商会保留（供应商 Key 被模型引用不算配置错误）。若引用该模型的 Key 不再被任何模型使用，可另行通过 `/api/providers/{provider_id}/keys/{key_name}` 删除。引用该模型的任务、工作空间与访问密钥清单会被一并清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
 
 ### Key 接口
 
@@ -933,6 +998,8 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 - **任务名不受清单限制**：任务自己固定的模型就是该空间被授权用的。
 - 判定发生在**别名解析之后**：同一个模型写成别名不会绕过白名单。
+- 清单里的名字是**引用**：模型被删掉时会被服务端自动摘掉（摘空则留下 `[]`，该空间此后
+  不能直呼任何模型，任务名照常可用）。机制与预演方式见「改模型会连带改掉别处的引用」。
 - `422`：清单里有名字解析不到任何已配置的模型。
 - `400` 目标是默认空间（它没有作用域凭据，清单配了也没有对象生效），`404` 空间不存在。
 
@@ -1049,6 +1116,11 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 `providers` / `models` 只在配置里**显式写了**该字段时才出现：**省略表示「不限制」**，
 **空数组表示「一个都不许」**。两者是有区别的授权状态，因此不能让空数组顶替省略——那会把
 运维写下的禁令显示成「未限制」。这与 `/api/workspaces` 里 `models` 的处理是同一约定。
+
+两份清单里的名字都是**引用**，所以模型或供应商被删掉时会被服务端自动摘掉（摘空则留下
+`[]`，即该密钥此后调不动任何模型）。这是写模型/供应商那一侧的连带清理，不是本组接口的
+行为；机制与预演方式见「改模型会连带改掉别处的引用」。本组接口自己的校验仍然是严格的：
+在这里写下一个不存在的名字照旧 `422`。
 
 #### `POST /api/access-keys`
 
@@ -1179,7 +1251,7 @@ v4 中 Key 与探测都以 Key 为单元：`providers.<id>` 保存 `base_url`、
 
 #### `GET/PUT/DELETE /api/providers/{provider_id}`
 
-查询、更新（`id`、`base_url`、`routes`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes` 可省略）+ `config_revision`。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。
+查询、更新（`id`、`base_url`、`routes`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes` 可省略）+ `config_revision`。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。引用这些模型的访问密钥、工作空间与任务同样会被清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
 
 #### `GET/POST /api/providers/{provider_id}/keys`
 
@@ -1233,7 +1305,7 @@ curl -X POST http://127.0.0.1:8000/api/providers/openai/keys/main/probe \
 - `PUT /api/routes/{route_id}` 传 `targets: []` 会**删除该路由**并返回 `204 No Content`（没有响应体，也就没有 `config_revision`）。省略 `targets` 字段则表示不改动目标，与传空数组是两回事。
 - 解绑 Key、取消 Key 勾选、删除 Key 等路径删掉最后一条 target 时，同样会连带删除该路由。
 
-被删掉的路由会从 `models` 里消失，引用它的 `unified_model` 与任务引用会被一并清理（与 `DELETE /api/routes/{route_id}` 同一套修复）。
+被删掉的路由会从 `models` 里消失，引用它的 `unified_model`、任务、工作空间与访问密钥清单会被一并清理（与 `DELETE /api/routes/{route_id}` 同一套修复，见「改模型会连带改掉别处的引用」）。这两条删除路径都支持 `?dry_run=1` 先预演。
 
 不变式管的是「**失去**最后一个目标」：新模型仍然可以先不带 Key 建出来（`POST /api/models` 的 `keys` 可为空，见下），在它绑上第一个 Key 之前只是不可调用；`POST /api/routes` 则要求 `targets` 至少一项，不能用它建一条空路由。
 
@@ -1384,7 +1456,7 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
 | `403` | 访问密钥无权访问该模型（不在它的 `providers` 或 `models` 清单里），或该访问密钥已被停用 |
 | `404` | 模型、Key、供应商、探测或访问密钥不存在；任务指向的模型没有启用的 Key；任务尚未指定模型；工作空间不存在（迁移导出按名取空间时） |
 | `409` | 名称冲突、删除最后一个 Key、无法持久化嵌入式配置 |
-| `422` | 管理 API 请求字段类型错误、缺少必填字段或包含未知字段；供应商暂无 Key 时探测；工作空间迁移包畸形、含 `default` 或看起来是配置导出的整包；访问密钥的 `providers` / `models` 引用了未配置的供应商或模型，或凭据与实例内其它凭据重复 |
+| `422` | 管理 API 请求字段类型错误、缺少必填字段或包含未知字段；供应商暂无 Key 时探测；工作空间迁移包畸形、含 `default` 或看起来是配置导出的整包；**在访问密钥接口里**写下的 `providers` / `models` 引用了未配置的供应商或模型，或凭据与实例内其它凭据重复 |
 | `500` | 配置保存失败 |
 | `502` | 上游连接或响应转换失败 |
 | `503` | 没有可用 Key |
