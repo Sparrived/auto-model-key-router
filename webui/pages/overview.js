@@ -557,6 +557,14 @@ function heatmapCard() {
 // —— 请求流：刚刚发生了什么 ——
 // 从「用量统计」（原「实时活动」）移到概览：它回答的是"此刻正在发生什么"，
 // 与概览的实时定位一致；用量统计则专注于历史聚合。
+//
+// 每一行要回答四件事，缺一件就得去翻日志：
+//   1. 谁、从哪儿来 —— 调用方档位、工作空间、来源地址（含 User-Agent 悬停）；
+//   2. 走了哪条路 —— 请求模型 → 实际模型 → 供应商 / 上游 Key / 上游模型；
+//   3. 花了多少 Token —— 输入、输出、缓存读、合计（缓存写与未缓存输入在悬停里）；
+//   4. 结果如何 —— 成功/失败、状态码、是否重试、耗时与首字。
+// 四组信息一列一组，因此这张卡在概览里独占一整行（col-12）：半宽放不下，
+// 硬塞会把模型名与来源挤成省略号。
 function filteredRequests() {
   const items = state.requests?.items || [];
   if (state.streamFilter === "failure") return items.filter((item) => !item.success);
@@ -599,26 +607,117 @@ function streamCard() {
   );
 }
 
+// 每列一条：子元素个数必须与 styles.css 里 .stream-row 的轨道数一致
+// （webui/probes/webui_layout_probe.mjs 会逐档断言这件事）。
 function streamRow(item) {
   const tone = !item.success ? "is-failure" : item.retried ? "is-retry" : "";
   return h(`div.stream-row${tone ? `.${tone}` : ""}`, {},
-    h("span.stream-bar"),
+    h("span.stream-bar", { title: resultText(item) }),
     h("span.stream-time", { title: item.created_at }, formatClockSeconds(item.created_at)),
     h("div.stream-main", {},
-      h("span.stream-model", { title: item.model_id }, item.model_id),
-      h("span.stream-meta", {},
-        [
-          CALLER_TYPE_LABELS[item.caller_type] || item.caller_type,
-          item.key_name,
-          item.provider_id || null,
-          `HTTP ${item.status_code ?? "无响应"}`,
-          item.retried ? "已重试" : null,
-        ].filter(Boolean).join(" · ")),
+      h("span.stream-model", { title: routeTitle(item) }, item.model_id),
+      h("span.stream-meta", { title: routeTitle(item) }, routeText(item)),
     ),
-    h("span.stream-tokens", {}, item.total_tokens ? formatCompact(item.total_tokens) : "—"),
-    h("span.stream-latency", {}, formatDuration(item.duration_ms)),
+    h("div.stream-source", { title: sourceTitle(item) },
+      h("span.stream-source-line", {}, sourceText(item)),
+      h("span.stream-source-addr", {}, clientAddress(item.client_addr)),
+    ),
+    h("div.stream-tokens", { title: tokenTitle(item) },
+      item.total_tokens
+        ? [
+            h("span.stream-tokens-line", {},
+              `输入 ${formatCompact(item.prompt_tokens)} · 输出 ${formatCompact(item.completion_tokens)}`),
+            h("span.stream-tokens-line.muted", {},
+              `缓存 ${formatCompact(item.cached_tokens)} · 合计 ${formatCompact(item.total_tokens)}`),
+          ]
+        : h("span.stream-tokens-line.muted", {}, "无 Token 读数"),
+    ),
+    h("div.stream-result", {},
+      h("span.stream-result-line", { class: resultTone(item) }, resultText(item)),
+      h("span.stream-result-sub", {}, `${formatDuration(item.duration_ms)} · 首字 ${formatDuration(item.first_token_ms)}`),
+    ),
     h("span.stream-cost", { title: costTitle(item) }, costText(item)),
   );
+}
+
+// routeText 描述这次请求实际走的路径：请求模型 → 实际模型 → 供应商 / Key / 上游模型。
+//
+// 请求模型与实际模型不同才写前者：两者相同时（直接请求真实模型 ID）重复一遍只是噪声。
+function routeText(item) {
+  return [
+    item.requested_model_id && item.requested_model_id !== item.model_id
+      ? `${item.requested_model_id} → ${item.model_id}`
+      : null,
+    item.provider_id || null,
+    item.key_name || null,
+    item.upstream_model_id && item.upstream_model_id !== item.model_id ? item.upstream_model_id : null,
+  ].filter(Boolean).join(" · ");
+}
+
+function routeTitle(item) {
+  return [
+    `请求模型 ${item.requested_model_id || "—"}`,
+    `实际模型 ${item.model_id || "—"}`,
+    `上游模型 ${item.upstream_model_id || "—"}`,
+    `供应商 ${item.provider_id || "—"}`,
+    `上游 Key ${item.key_name || "—"}`,
+  ].join("\n");
+}
+
+// sourceText 是调用方身份：档位 + 工作空间。空值一律不写，避免出现" · · "。
+function sourceText(item) {
+  return [
+    CALLER_TYPE_LABELS[item.caller_type] || item.caller_type,
+    item.workspace,
+  ].filter(Boolean).join(" · ") || "—";
+}
+
+// clientAddress 把 host:port 折成可读的地址：端口对"谁在用这个实例"没有信息量，
+// 一列里还占掉近一半宽度。IPv6 的方括号一并去掉，完整原值留在悬停提示里。
+function clientAddress(addr) {
+  if (!addr) return "—";
+  const text = String(addr);
+  const v6 = /^\[(.+)\]:\d+$/.exec(text);
+  if (v6) return v6[1];
+  const v4 = /^(.+):\d+$/.exec(text);
+  if (v4) return v4[1];
+  return text;
+}
+
+// sourceTitle 在悬停里给出完整的来源：地址带端口、User-Agent、请求 ID。
+// User-Agent 往往很长（一整串客户端版本信息），放进列里会把地址挤没，只适合悬停。
+function sourceTitle(item) {
+  return [
+    `来源地址 ${item.client_addr || "未记录"}`,
+    `工作空间 ${item.workspace || "未记录"}`,
+    `调用方 ${CALLER_TYPE_LABELS[item.caller_type] || item.caller_type || "未记录"}`,
+    `User-Agent ${item.user_agent || "未记录"}`,
+    `请求 #${item.id}`,
+  ].join("\n");
+}
+
+// tokenTitle 给出完整 Token 读数：列里放最常看的四项，缓存写与未缓存输入在悬停里。
+function tokenTitle(item) {
+  return [
+    `输入 ${formatCount(item.prompt_tokens)}（未缓存 ${formatCount(item.uncached_prompt_tokens)}）`,
+    `输出 ${formatCount(item.completion_tokens)}`,
+    `缓存读 ${formatCount(item.cache_read_input_tokens)}`,
+    `缓存写 ${formatCount(item.cache_creation_input_tokens)}`,
+    `缓存合计 ${formatCount(item.cached_tokens)}`,
+    `总计 ${formatCount(item.total_tokens)}`,
+  ].join("\n");
+}
+
+function resultText(item) {
+  return `${item.success ? "成功" : "失败"} · HTTP ${item.status_code ?? "无响应"}${item.retried ? " · 已重试" : ""}`;
+}
+
+// resultTone 复用设计令牌里的语义色：失败用错误色，重试用警示色，成功不再上色
+// （成功是绝大多数，给每一行都染一遍绿反而让失败那一行不显眼）。
+function resultTone(item) {
+  if (!item.success) return "tone-bad";
+  if (item.retried) return "tone-warn";
+  return "";
 }
 
 // 成本列：拿不到价格时显示 "—" 而不是 "$0" —— 0 会被读成"这次请求免费"，
@@ -830,16 +929,15 @@ function draw(firstPaint = false) {
     h("div.col-6", {}, unifiedCard()),
     // 热力图是"一眼看节律"的图，占满整行；24 个小时列塞进 col-4 每格只剩十几像素。
     h("div.col-12", {}, heatmapCard()),
-    // 同上：请求流与它右边那一列在窄档都退化成半宽，只有 6+6 能成行。
-    h("div.col-6", {}, streamCard()),
-    // 两张堆叠柱上下同列：它们画的是同一份 points、同一个桶宽，横轴完全对齐，
-    // 并排看"结果结构"与"Token 结构"才读得出同步异动。此前 Token 图单独占
-    // col-12，而请求流限高 520px 把本排撑到 652px，"结果构成"卡下方空出近 300px
-    // —— 不是把图拉高填满（定高图表拉长只会让图内多出空白），而是把这张图搬进来。
-    h("div.col-6", {},
-      outcomeCard(points, bucketSeconds),
-      tokenBreakdownCard(points, bucketSeconds),
-    ),
+    // 请求流独占一整行：它要一列一组地给出「谁从哪儿来 / 走了哪条路 / 花了多少
+    // Token / 结果如何」四组读数，半宽（col-6）会把模型名、来源与 Token 挤成省略号。
+    // 之前它与右边那列的「结果构成 + Token 构成」两张图同排，图表看不出受损，
+    // 受损的正是请求流这一侧。
+    h("div.col-12", {}, streamCard()),
+    // 两张堆叠柱各占半宽并排：它们画的是同一份 points、同一个桶宽，列宽相等，
+    // 横轴因此仍然完全对齐，并排看"结果结构"与"Token 结构"才读得出同步异动。
+    h("div.col-6", {}, outcomeCard(points, bucketSeconds)),
+    h("div.col-6", {}, tokenBreakdownCard(points, bucketSeconds)),
     h("div.col-4", {}, compositionCard(metrics)),
     h("div.col-4", {}, statusCard(metrics)),
     h("div.col-4", {}, statusCodeCard(metrics)),

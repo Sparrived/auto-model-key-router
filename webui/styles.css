@@ -911,32 +911,65 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .log-panel .lv-debug { color: #9e9e9e; }
 .log-toolbar { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
 
-/* 请求流：比裸日志更可读的"最近请求"列表 */
+/* 请求流：比裸日志更可读的"最近请求"列表。
+ *
+ * 一行 = 一次上游尝试，四组读数各占一列：模型路由、来源、Token、结果。
+ * 列数必须等于 streamRow() 的直接子元素数（webui/probes/webui_layout_probe.mjs
+ * 逐档断言这件事）：窄档隐藏了哪几列，就要把轨道数一起减下来，否则被隐藏列省下的
+ * 轨道会把最后一列挤到第二行去。 */
 .stream { display: flex; flex-direction: column; }
 .stream-row {
   display: grid;
-  grid-template-columns: 4px 66px minmax(0, 1fr) 78px 74px 78px;
+  /* 状态条 / 时间 / 模型路由 / 来源 / Token / 结果 / 成本 */
+  grid-template-columns:
+    4px 62px minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.1fr) 78px;
   gap: 10px; align-items: center;
   padding: 8px 4px;
   border-bottom: 1px solid var(--md-outline);
   font-size: 12px;
 }
 .stream-row:last-child { border-bottom: 0; }
-.stream-row .stream-bar { width: 4px; height: 24px; border-radius: 2px; background: var(--md-secondary-variant); }
+/* 状态条跟着行高走：一行里有两行读数时，固定 24px 会显得半截悬空。 */
+.stream-row .stream-bar {
+  align-self: stretch; min-height: 24px; width: 4px; border-radius: 2px;
+  background: var(--md-secondary-variant);
+}
 .stream-row.is-failure .stream-bar { background: var(--md-error); }
 .stream-row.is-retry .stream-bar { background: #f9a825; }
 .stream-row .stream-time { color: var(--md-on-surface-variant); font-variant-numeric: tabular-nums; }
-.stream-row .stream-main { min-width: 0; }
-.stream-row .stream-model {
+/* 四组多行单元格共用一套排版：纵向两行，各自溢出省略。 */
+.stream-row .stream-main,
+.stream-row .stream-source,
+.stream-row .stream-tokens,
+.stream-row .stream-result {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.stream-row .stream-model,
+.stream-row .stream-meta,
+.stream-row .stream-source-line,
+.stream-row .stream-source-addr,
+.stream-row .stream-tokens-line,
+.stream-row .stream-result-line,
+.stream-row .stream-result-sub {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.stream-row .stream-meta {
-  display: block; font-size: 11px; color: var(--md-on-surface-variant);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* 副行统一 11px 灰字：一列里两行读数靠字号与颜色分级，不靠分隔线。
+ * 首行（"输入 x · 输出 y"、"成功 · HTTP 200"）保持 12px 正文色，它是这一列的主读数。 */
+.stream-row .stream-meta,
+.stream-row .stream-source-addr,
+.stream-row .stream-result-sub {
+  font-size: 11px; color: var(--md-on-surface-variant);
 }
-.stream-row .stream-tokens, .stream-row .stream-latency {
-  text-align: right; font-variant-numeric: tabular-nums; color: var(--md-on-surface-variant);
-}
+/* 单行读数（"无 Token 读数"）与 Token 的副行同一档；三个类压得过 .card .muted 的 13px。 */
+.stream-row .stream-tokens-line.muted { font-size: 11px; color: var(--md-on-surface-variant); }
+/* 来源地址用等宽字体：IPv6 与端口都是数字，等宽下多行之间能按位对齐。 */
+.stream-row .stream-source-addr { font-family: var(--mono); }
+.stream-row .stream-tokens,
+.stream-row .stream-result { font-variant-numeric: tabular-nums; }
+/* 结果行着色：失败用错误色、重试用警示色。成功**刻意不上色** —— 成功占绝大多数，
+ * 逐行染绿只会让真正要看的那一行不显眼。 */
+.stream-row .stream-result-line.tone-bad { color: var(--md-error); font-weight: 600; }
+.stream-row .stream-result-line.tone-warn { color: #f9a825; font-weight: 600; }
 .stream-empty { padding: var(--sp-3) 0; text-align: center; color: var(--md-on-surface-variant); font-size: 13px; }
 /* 成本列：金额右对齐并用等宽数字，否则 $0.0012 与 $12.34 混排时小数点对不齐。 */
 .stream-row .stream-cost {
@@ -1175,6 +1208,13 @@ details > summary:focus-visible { outline: 2px solid var(--md-primary-variant); 
   .col-3, .col-4, .col-5 { grid-column: span 6; }
   .col-7, .col-8 { grid-column: span 12; }
   .rail-split { grid-template-columns: minmax(160px, 184px) minmax(0, 1fr); }
+  /* 请求流先收成本列：它是派生估算（目录拿不到就只有"—"），而来源与 Token 是这一版
+   * 新增的实测读数。少一列就少一条轨道，列数必须跟着减（见 .stream-row 的说明）。 */
+  .stream-row {
+    grid-template-columns:
+      4px 62px minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.1fr);
+  }
+  .stream-row .stream-cost { display: none; }
 }
 @media (max-width: 860px) {
   :root { --nav-w: 100%; }
@@ -1205,12 +1245,6 @@ details > summary:focus-visible { outline: 2px solid var(--md-primary-variant); 
   .app-bar .brand small { display: none; }
   .live-pill .live-metrics { display: none; }
   .stat-value { font-size: 23px; }
-  /* 窄屏只留 4 轨：状态条 / 时间 / 模型 / 金额，与 .cost-row 的取舍一致
-   * （丢掉 Token 计数、留住金额）。列数与可见子元素必须一致，否则多出来的
-   * 金额列会掉到下一行、贴在那条 4px 状态条下面。 */
-  .stream-row { grid-template-columns: 4px 58px minmax(0, 1fr) 64px; }
-  .stream-row .stream-latency,
-  .stream-row .stream-tokens { display: none; }
   .cost-row { grid-template-columns: minmax(0, 1fr) 64px; }
   .cost-row .cost-tokens { display: none; }
 }
@@ -1221,6 +1255,13 @@ details > summary:focus-visible { outline: 2px solid var(--md-primary-variant); 
   /* cols-5 同 1280px 断点：2 个类压得过 1 个类，不一起写概览在手机上会是 5 列挤成一团。 */
   .stat-grid,
   .stat-grid.cols-5 { grid-template-columns: minmax(0, 1fr); }
+  /* 请求流只留 4 轨：状态条 / 时间 / 模型路由 / 结果。来源与 Token 各要一两百像素
+   * 才读得全，在这个宽度上只会退化成"输入 1.2K…"；与其留一串省略号，不如让模型路由
+   * 与结果两行读完整。要看来源与 Token 请用更宽的屏（或直接读 /metrics/requests）。
+   * 列数必须与可见子元素一致（见 .stream-row 的说明）。 */
+  .stream-row { grid-template-columns: 4px 58px minmax(0, 1fr) 104px; }
+  .stream-row .stream-source,
+  .stream-row .stream-tokens { display: none; }
 }
 
 /* 系统级减弱动效：关掉位移与循环动画，但保留状态可辨识度 */
