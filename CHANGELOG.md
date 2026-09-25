@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### 修复
+
+- **Antigravity 的额度要问 `daily-cloudcode-pa`，问 prod 会永远显示满额。** 账号资源看板
+  给 Antigravity 配的那条 `quota_probe` 原先指向 `cloudcode-pa.googleapis.com`（Code Assist
+  的生产端点）。实测发现它与 IDE 实际连的 `daily-cloudcode-pa` **不是同一份额度**：同一个
+  账号、同一时刻，prod 回 Gemini weekly/5h 各剩 `1.000`（重置窗口也不同），daily 回
+  `0.679` / `0.865`。于是出现了自相矛盾的读数——该凭据累计 861 次请求、97.1M prompt tokens，
+  看板上却是满额，用户据此会以为额度没被消耗。`quota_probe` 只支持单个 URL、没有回退，
+  所以配方固定写 daily，并把三个后端的实测对照写进 `docs/SUBSCRIPTION-QUOTA.md`。
+
 ## [6.2.0] - 2026-09-25
 
 ### 新增

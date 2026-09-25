@@ -232,7 +232,7 @@ Antigravity 落进 default，于是 auth-files 里它的 `quota.signals` 恒为�
 ```jsonc
 // 写在 CPA 凭据文件（如 /root/.cli-proxy-api/antigravity-<email>.json）的顶层
 "quota_probe": {
-  "url": "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+  "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
   "method": "POST",
   "data": "{\"project\":\"<project_id>\"}",
   "header": {
@@ -242,6 +242,21 @@ Antigravity 落进 default，于是 auth-files 里它的 `quota.signals` 恒为�
   }
 }
 ```
+
+**端点必须用 `daily-cloudcode-pa`（Antigravity IDE 实际连的那台），不能用 prod。**
+2026-09-25 实测：同一个账号、同一时刻，两台后端给出的**不是同一份额度**——
+
+| 后端 | Gemini weekly | Gemini 5h | 该窗口的重置时间 |
+| --- | --- | --- | --- |
+| `daily-cloudcode-pa.googleapis.com` | 0.679 | 0.865 | 09-30 17:37Z |
+| `daily-cloudcode-pa.sandbox.googleapis.com` | 0.679 | 0.865 | 09-30 17:37Z |
+| `cloudcode-pa.googleapis.com`（prod） | **1.000** | **1.000** | 10-02 09:39Z |
+
+prod 那份是**另一个池子**（这台账号的流量没有消耗过它），连重置窗口都不同。用它做看板会
+得到自相矛盾的读数：该凭据累计 861 次请求、97.1M prompt tokens，窗口却显示满额。这正是
+`antigravity-priority` / `credential-priority` / `credential-tier-router` 一律按
+`daily → daily.sandbox → prod` 顺序回退的原因。`quota_probe` 只支持一个 URL、没有回退，
+所以这里固定写 daily。
 
 `$TOKEN$` 由 CPA 换成该凭据的 access token，请求走该凭据自己的传输（代理）。`retrieveUserQuotaSummary`
 的响应**本身就是** CPA 的归一化形状（`groups[].buckets[].{window, remainingFraction, resetTime,

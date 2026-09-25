@@ -224,10 +224,11 @@ AMKR 不需要额外请求）。重置倒计时按 CPA 报来的 `serverTimeOffs
 [`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md)。
 
 **想让 Antigravity 也出额度**：把 CPA 升到 ≥ 7.3，然后在该账号的凭据文件里加一条**声明式
-探测**（不用装插件）——`quota_probe` 指向 `v1internal:retrieveUserQuotaSummary`，用 `$TOKEN$`
-让 CPA 注入该账号的 access token；响应本身已经是 CPA 的归一化形状，所以不必写 `mapping`。
-配好后看板上就会出现「Gemini Models」与「Claude and GPT models」两组各 5 小时 + 周期两条
-窗口。完整配方（实测的 URL、body、User-Agent 与字段）见
+探测**（不用装插件）——`quota_probe` 指向 `daily-cloudcode-pa.googleapis.com` 的
+`v1internal:retrieveUserQuotaSummary`（**必须是 daily 这台**；prod 那份是另一个池子、会一直
+显示满额），用 `$TOKEN$` 让 CPA 注入该账号的 access token；响应本身已经是 CPA 的归一化形状，
+所以不必写 `mapping`。配好后看板上就会出现「Gemini Models」与「Claude and GPT models」两组
+各 5 小时 + 周期两条窗口。完整配方（实测的 URL、body、User-Agent，以及三个后端的差异对照）见
 [`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md) 的 3.3 节。
 
 **几个约定**：
