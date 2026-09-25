@@ -99,7 +99,7 @@ func (s *Store) KeyUsage(params KeyUsageParams) (*canonical.Value, error) {
 
 	// 时间条件必须落在 **WHERE** 里。
 	//
-	// 别照抄 workspace.go 那几处「把 metricWindow 的片段直接接在查询串尾部」的写法：
+	// 别照抄 workspace.go 那几处「把 workspaceWindow 的片段直接接在查询串尾部」的写法：
 	// 那几处是 INNER JOIN，ON 与 WHERE 等价，所以看不出问题；这里是 LEFT JOIN，
 	// 接在 ON 后面会被当成**连接条件**——窗口外的行照样返回，只是右表整列被置空
 	// （实测：整库的行都会冒出来，且 access_key_id 全是 NULL，看起来像"访问密钥
