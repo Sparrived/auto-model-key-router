@@ -1172,6 +1172,16 @@ AMKR 的代理入口是 `/v1/{path}`，主要兼容：
 | `/v1/messages` | 默认原生 `/v1/messages`，不支持时回退 `/v1/chat/completions` | Anthropic Messages 原生优先；可用 URL 级 `upstream_routes[base_url].anthropic` 改原生路径 |
 | `/v1/messages/count_tokens` | 本地处理 | 返回 token 估算，不访问上游 |
 | `/v1/responses` | 默认探测 `/v1/responses`，不支持时回退 `/v1/chat/completions`；配置 URL 级 `upstream_routes[base_url].responses` 时改原生 Responses 路径 | Responses 原生透传或转 Chat Completions |
+| `/v1/decide`、`/v1/classify` | 原样转发到同名上游路径（`v1/decide`、`v1/classify`） | 结构化决策端点（Laya / Jev 等）。**不带 `model` 时按 `laya` 路由**，见下 |
+
+### 结构化决策端点（`/v1/decide` 与 `/v1/classify`）
+
+Laya / Jev 这类结构化决策模型的规范调用**不带 `model`**：用哪个模型由上游按 Key 决定。AMKR 需要有模型名才能选 Key，因此这两个端点上的请求按以下规则处理：
+
+- 请求体里带了可用的 `model`：按它路由（与其它端点一致），不会改道。
+- 请求体里没有 `model`（或为 `null` / 空串）：按名为 **`laya`** 的路由路由。因此需要在 AMKR 里**建一条叫 `laya` 的模型路由**，并把服务这类端点的供应商 Key 绑上去——"哪些 Key 服务 /v1/decide"就是这么表达的。
+- 这类请求的**请求体逐字节原样转发**（不带 `model` 的体不参与 AMKR 的改写），上游收到它自己规范的形态。
+- 配置里没有 `laya` 路由时返回 `404`「模型 laya 未配置；请先在 AMKR 的模型设置中配置该模型」，而不是 `400`「请求体中缺少 model 字段」。
 
 兼容转换包括：
 

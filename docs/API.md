@@ -136,7 +136,7 @@ x-api-key: your-local-api-key
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `model` | string | 是 | 模型 ID、模型别名、`unified-model`、任务名（`TASK_XXXXXX`）或 `模型[Key名称]`。上游模型名（各 target 的 `upstream_model`）**不是**可调用名 |
+| `model` | string | 是（`/v1/decide` 与 `/v1/classify` 除外） | 模型 ID、模型别名、`unified-model`、任务名（`TASK_XXXXXX`）或 `模型[Key名称]`。上游模型名（各 target 的 `upstream_model`）**不是**可调用名 |
 | `stream` | boolean | 否 | 为 `true` 时使用流式响应，并自动向上游补充 `stream_options.include_usage=true` |
 | `stream_options` | object | 否 | 流式选项；服务会保留已有字段并强制加入 `include_usage=true` |
 | `reasoning_effort` | string | 否 | 推理强度；模型配置中的非空值优先级更高 |
@@ -165,6 +165,17 @@ x-api-key: your-local-api-key
 ```
 
 配置文件中的字段名仍为 `unified_model`；请求中的虚拟模型 ID 为 `unified-model`。
+
+### 结构化决策端点：`model` 可省略
+
+`/v1/decide` 与 `/v1/classify`（Laya / Jev 等结构化决策模型）的规范调用**不带 `model`**：用哪个模型由上游按 Key 决定。这两个端点上：
+
+- 带了可用的 `model` → 按它路由，与其它端点一致；
+- 没有 `model`（或为 `null` / 空串）→ 按名为 **`laya`** 的路由路由，因此配置里需要有一条叫 `laya` 的模型路由来指定走哪些 Key；
+- 上游路径为同名的 `v1/decide` / `v1/classify`，且这类请求的**请求体逐字节原样转发**（不带 `model` 的体不参与 AMKR 的改写）；
+- 没配 `laya` 路由时是 `404`「模型 laya 未配置」，不是 `400`「请求体中缺少 model 字段」。
+
+详见 [`docs/USAGE.md`](USAGE.md#结构化决策端点v1decide-与-v1classify)。
 
 ### 任务路由
 
