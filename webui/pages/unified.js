@@ -15,7 +15,7 @@ const EFFORTS = [
   { value: "max", label: "max" },
 ];
 
-const state = { unified: null, models: [], revision: null, loading: true, error: null, editing: false, saving: false, notice: null };
+const state = { unified: null, models: [], revision: null, loading: true, error: null, editing: false, saving: false, saveError: null };
 
 let host = null;
 
@@ -35,19 +35,38 @@ function statusText(unified) {
   return primary.key ? `固定 Key · ${primary.key}` : "自动路由";
 }
 
+// knownModel 把「已不存在的模型名」折成空串。
+//
+// state.unified 与 state.models 是两次独立取数的结果，中间可能刚好有供应商被删掉：
+// 那时 unified 仍指向一个已随供应商一起消失的模型。此时必须把它当成「没选」——
+// 否则下拉里根本没有这个选项、界面显示空值，而保存时却仍会把它发给服务端，被
+// 「引用了未配置的模型」顶回来（页面看起来就是保存无效）。
+function knownModel(id) {
+  return state.models.some((model) => model.id === id) ? id : "";
+}
+
 function editor() {
-  const primaryModel = state.unified?.default?.primary?.model || state.models[0]?.id || "";
-  let primaryKey = state.unified?.default?.primary?.key || "";
+  const storedDefault = state.unified?.default || {};
+  const storedPrimary = knownModel(storedDefault.primary?.model || "");
+  const storedFallback = knownModel(storedDefault.fallback?.model || "");
+  const storedImage = knownModel(state.unified?.image?.primary?.model || "");
+  const storedEmbedding = knownModel(state.unified?.embeddings?.primary?.model || "");
+  // 模型被折成空串时，挂在它上面的固定 Key 也必须一起丢掉：Key 是模型级的，
+  // 留着它只会让保存继续被拒。
+  const primaryModel = storedPrimary || state.models[0]?.id || "";
+  let primaryKey = storedPrimary ? storedDefault.primary?.key || "" : "";
   let routing = primaryKey ? "key" : "auto";
-  let fallbackModel = state.unified?.default?.fallback?.model || "";
-  let fallbackKey = state.unified?.default?.fallback?.key || "";
-  let imageModel = state.unified?.image?.primary?.model || "";
-  let imageKey = state.unified?.image?.primary?.key || "";
-  let embeddingModel = state.unified?.embeddings?.primary?.model || "";
-  let embeddingKey = state.unified?.embeddings?.primary?.key || "";
+  let fallbackModel = storedFallback;
+  let fallbackKey = storedFallback ? storedDefault.fallback?.key || "" : "";
+  let imageModel = storedImage;
+  let imageKey = storedImage ? state.unified?.image?.primary?.key || "" : "";
+  let embeddingModel = storedEmbedding;
+  let embeddingKey = storedEmbedding ? state.unified?.embeddings?.primary?.key || "" : "";
   let effort = state.models.find((model) => model.id === primaryModel)?.reasoning_effort || "";
 
-  const errorHost = h("div");
+  // 错误必须画在**当前**这棵 DOM 里：保存失败时会重画整个表单，写进旧节点的提示
+  // 早已脱离文档，用户看到的就是「按钮点了没反应」。
+  const errorHost = h("div", state.saveError ? notice(state.saveError, "error") : null);
   const formHost = h("div.stack");
 
   const modelOptions = () => state.models.map((model) => ({ value: model.id, label: model.id }));
@@ -161,6 +180,7 @@ function editor() {
         onClick: async () => {
           const problem = validate();
           if (problem) { render(errorHost, notice(problem, "error")); return; }
+          state.saveError = null;
           state.saving = true;
           render(host, editor());
           try {
@@ -183,18 +203,22 @@ function editor() {
                 : null,
             };
             await api.updateUnified(revision, payload);
+            // saving 必须在成功路径上复位：它同时控制着下拉/单选的 disabled 与保存
+            // 按钮的文案。漏掉这一步，下一次点「编辑」拿到的是一整个禁用、按钮写着
+            // 「正在保存」的表单——页面从此再也存不进任何改动，直到刷新浏览器。
+            state.saving = false;
             await load();
             state.editing = false;
             toast("统一模型已更新。");
             draw();
           } catch (error) {
-            render(errorHost, notice(`统一模型操作失败: ${errorText(error)}`, "error"));
+            state.saveError = `统一模型操作失败: ${errorText(error)}`;
             state.saving = false;
             render(host, editor());
           }
         },
       }),
-      buttonNode("取消", { variant: "text", disabled: state.saving, onClick: () => { state.editing = false; draw(); } }),
+      buttonNode("取消", { variant: "text", disabled: state.saving, onClick: () => { state.saveError = null; state.editing = false; draw(); } }),
     );
 
     formHost.append(actions, errorHost);
@@ -203,18 +227,22 @@ function editor() {
   return formHost;
 }
 
+// renderUnified 每次进入页面都重新取数。
+//
+// 不能只在首次进入时取：模型与 config_revision 会被**别的页面**改掉（例如在供应商页
+// 删掉一个供应商会连同它的模型一起删掉），而缓存下来的旧模型名既选不中、又会被服务端
+// 以「引用了未配置的模型」拒绝，旧版本号更会让每次保存都撞到 409。统一模型页依赖
+// 供应商/模型页的结果，因此必须与「访问密钥」页一样每次进入都重新读取。
 export function renderUnified(context) {
   host = h("div.stack");
-  if (state.loading) {
-    render(host, h("div.page-head", h("h1", "统一模型")), loading("正在读取统一模型配置。"));
-    (async () => {
-      try { await load(); state.error = null; } catch (error) { state.error = errorText(error); }
-      state.loading = false;
-      draw();
-    })();
-    return host;
-  }
+  state.loading = true;
+  state.error = null;
   draw();
+  (async () => {
+    try { await load(); state.error = null; } catch (error) { state.error = errorText(error); }
+    state.loading = false;
+    draw();
+  })();
   return host;
 }
 
@@ -229,6 +257,11 @@ function draw() {
     ),
   ];
   if (state.error) children.push(notice(`读取失败: ${state.error}`, "error"));
+  if (state.loading) {
+    children.push(card(cardHead("当前配置"), loading("正在读取统一模型配置。")));
+    render(host, children);
+    return;
+  }
   if (!state.models.length) {
     children.push(empty("尚未配置可用模型。"));
     render(host, children);
@@ -239,7 +272,7 @@ function draw() {
   } else {
     const unified = state.unified;
     children.push(card(
-      cardHead("当前配置", buttonNode("编辑", { small: true, variant: "text", onClick: () => { state.editing = true; draw(); } })),
+      cardHead("当前配置", buttonNode("编辑", { small: true, variant: "text", onClick: () => { state.saveError = null; state.editing = true; draw(); } })),
       kv([
         ["文本模型", unified?.default?.primary?.model || "未配置"],
         ["路由方式", statusText(unified)],
