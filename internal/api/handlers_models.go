@@ -147,23 +147,33 @@ func (s *Server) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 // —— DELETE /api/models/{model_id} ——
 
 func (s *Server) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
-	s.run(w, http.StatusNoContent, func() (*canonical.Value, error) {
+	s.runStatus(w, func() (int, *canonical.Value, error) {
 		// 这条路由的请求体是**可选**的（management_api.py:958 的
 		// `payload: RevisionPayload | None = None`）：不带 body 时不校验版本，
 		// 带 {} 反而是 422 missing。同一族的 providers/routes DELETE 则是必填。
 		payload, present, err := decodePayload(r, specRevisionPayload, true)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		var revision *string
 		if present {
 			revision = optString(payload, "config_revision")
 		}
 		modelID := r.PathValue("model_id")
-		_, err = s.updateConfig(r, func(data *canonical.Value) error {
+		mutate := func(data *canonical.Value) error {
 			return configops.DeleteModel(data, modelID)
-		}, revision)
-		return nil, err
+		}
+		if dryRunRequested(r) {
+			body, err := s.dryRunImpact(r, mutate)
+			if err != nil {
+				return 0, nil, err
+			}
+			return http.StatusOK, body, nil
+		}
+		if _, err := s.updateConfig(r, mutate, revision); err != nil {
+			return 0, nil, err
+		}
+		return http.StatusNoContent, nil, nil
 	})
 }
 
@@ -370,10 +380,10 @@ func (s *Server) handleUpdateModelKey(w http.ResponseWriter, r *http.Request) {
 // —— DELETE /api/models/{model_id}/keys/{key_name} ——
 
 func (s *Server) handleDeleteModelKey(w http.ResponseWriter, r *http.Request) {
-	s.run(w, http.StatusNoContent, func() (*canonical.Value, error) {
+	s.runStatus(w, func() (int, *canonical.Value, error) {
 		payload, present, err := decodePayload(r, specRevisionPayload, true)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		var revision *string
 		if present {
@@ -381,10 +391,22 @@ func (s *Server) handleDeleteModelKey(w http.ResponseWriter, r *http.Request) {
 		}
 		modelID := r.PathValue("model_id")
 		keyName := r.PathValue("key_name")
-		_, err = s.updateConfig(r, func(data *canonical.Value) error {
+		mutate := func(data *canonical.Value) error {
 			return configops.DeleteModelKey(data, modelID, keyName)
-		}, revision)
-		return nil, err
+		}
+		// 解绑最后一个 key 会把这个模型一起删掉（模型下没有目标就不该存在），
+		// 因此这条路由同样支持预演。
+		if dryRunRequested(r) {
+			body, err := s.dryRunImpact(r, mutate)
+			if err != nil {
+				return 0, nil, err
+			}
+			return http.StatusOK, body, nil
+		}
+		if _, err := s.updateConfig(r, mutate, revision); err != nil {
+			return 0, nil, err
+		}
+		return http.StatusNoContent, nil, nil
 	})
 }
 

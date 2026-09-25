@@ -156,17 +156,28 @@ func stringOrDefault(data *canonical.Value, key, fallback string) (string, bool)
 // —— DELETE /api/providers/{provider_id} ——
 
 func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
-	s.run(w, http.StatusNoContent, func() (*canonical.Value, error) {
+	s.runStatus(w, func() (int, *canonical.Value, error) {
 		payload, _, err := decodePayload(r, specRevisionPayload, false)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		providerID := r.PathValue("provider_id")
-		_, err = s.v3Update(r, func(data *canonical.Value) error {
+		mutate := func(data *canonical.Value) error {
 			_, err := configops.DeleteProvider(data, providerID)
 			return err
-		}, optString(payload, "config_revision"))
-		return nil, err
+		}
+		// 供应商的 Key 可能撑着一批模型，删它等于把那批模型一起删掉——连带变动先给用户看。
+		if dryRunRequested(r) {
+			body, err := s.dryRunImpact(r, mutate)
+			if err != nil {
+				return 0, nil, err
+			}
+			return http.StatusOK, body, nil
+		}
+		if _, err := s.v3Update(r, mutate, optString(payload, "config_revision")); err != nil {
+			return 0, nil, err
+		}
+		return http.StatusNoContent, nil, nil
 	})
 }
 
@@ -313,18 +324,28 @@ func (s *Server) handleUpdateProviderKey(w http.ResponseWriter, r *http.Request)
 // —— DELETE /api/providers/{provider_id}/keys/{key_name} ——
 
 func (s *Server) handleDeleteProviderKey(w http.ResponseWriter, r *http.Request) {
-	s.run(w, http.StatusNoContent, func() (*canonical.Value, error) {
+	s.runStatus(w, func() (int, *canonical.Value, error) {
 		payload, _, err := decodePayload(r, specRevisionPayload, false)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		providerID := r.PathValue("provider_id")
 		keyName := r.PathValue("key_name")
-		_, err = s.v3Update(r, func(data *canonical.Value) error {
+		mutate := func(data *canonical.Value) error {
 			_, err := configops.DeleteProviderKey(data, providerID, keyName)
 			return err
-		}, optString(payload, "config_revision"))
-		return nil, err
+		}
+		if dryRunRequested(r) {
+			body, err := s.dryRunImpact(r, mutate)
+			if err != nil {
+				return 0, nil, err
+			}
+			return http.StatusOK, body, nil
+		}
+		if _, err := s.v3Update(r, mutate, optString(payload, "config_revision")); err != nil {
+			return 0, nil, err
+		}
+		return http.StatusNoContent, nil, nil
 	})
 }
 
@@ -470,10 +491,17 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if targetsValue.IsArray() && len(targetItems) == 0 {
-			_, err := s.v3Update(r, func(current *canonical.Value) error {
+			mutate := func(current *canonical.Value) error {
 				return configops.DeleteModel(current, routeID)
-			}, optString(payload, "config_revision"))
-			if err != nil {
+			}
+			if dryRunRequested(r) {
+				body, err := s.dryRunImpact(r, mutate)
+				if err != nil {
+					return 0, nil, err
+				}
+				return http.StatusOK, body, nil
+			}
+			if _, err := s.v3Update(r, mutate, optString(payload, "config_revision")); err != nil {
 				return 0, nil, err
 			}
 			return http.StatusNoContent, nil, nil
@@ -516,16 +544,26 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 // —— DELETE /api/routes/{route_id} ——
 
 func (s *Server) handleDeleteRoute(w http.ResponseWriter, r *http.Request) {
-	s.run(w, http.StatusNoContent, func() (*canonical.Value, error) {
+	s.runStatus(w, func() (int, *canonical.Value, error) {
 		payload, _, err := decodePayload(r, specRevisionPayload, false)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		routeID := r.PathValue("route_id")
-		_, err = s.v3Update(r, func(data *canonical.Value) error {
+		mutate := func(data *canonical.Value) error {
 			return configops.DeleteModel(data, routeID)
-		}, optString(payload, "config_revision"))
-		return nil, err
+		}
+		if dryRunRequested(r) {
+			body, err := s.dryRunImpact(r, mutate)
+			if err != nil {
+				return 0, nil, err
+			}
+			return http.StatusOK, body, nil
+		}
+		if _, err := s.v3Update(r, mutate, optString(payload, "config_revision")); err != nil {
+			return 0, nil, err
+		}
+		return http.StatusNoContent, nil, nil
 	})
 }
 
@@ -697,10 +735,16 @@ func (s *Server) handleSetProviderKeyModels(w http.ResponseWriter, r *http.Reque
 		providerID := r.PathValue("provider_id")
 		keyName := r.PathValue("key_name")
 		requested := trailingStringSlice(payload, "models")
-		data, err := s.v3Update(r, func(current *canonical.Value) error {
+		mutate := func(current *canonical.Value) error {
 			_, err := configops.SetKeyServiceModels(current, providerID, keyName, requested)
 			return err
-		}, optString(payload, "config_revision"))
+		}
+		// 取消勾选一个只绑在这把 Key 上的模型，等于把那个模型删掉——它可能还被访问密钥、
+		// 工作空间或任务引用着。先把连带变动算出来给用户确认，而不是等落盘时被校验顶回来。
+		if dryRunRequested(r) {
+			return s.dryRunImpact(r, mutate)
+		}
+		data, err := s.v3Update(r, mutate, optString(payload, "config_revision"))
 		if err != nil {
 			return nil, err
 		}
