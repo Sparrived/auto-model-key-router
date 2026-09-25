@@ -104,6 +104,13 @@ jobs:
         # 401（请重填）与 403（已被停用，去找管理员）必须给出不同指引。
         run: node webui/probes/webui_guest_probe.mjs
 
+      - name: 访问密钥探针
+        # 访问密钥是发给**外部使用者**的凭据，两份清单（供应商 / 模型）是它唯一的权限收窄
+        # 手段，而三态里「不限制」与「一个都不许」是两个相反的授权。这里锁两件事：界面
+        # 上没有可以手写清单的文本框（名字要能直接勾选），以及提交体里的三态逐字节正确
+        # ——把「全部取消勾选」折叠成「不限制」会让一条禁令静默失效。
+        run: node webui/probes/webui_accesskeys_probe.mjs
+
   go:
     name: Go 静态检查与测试
     runs-on: ubuntu-latest
