@@ -621,7 +621,7 @@ export function sankey({ links, layers, metricLabel, height = 420, formatValue: 
     // 层标题：说明每一列是什么，否则读者不知道第 3 列为什么是 provider。
     // 画在顶带里（y=12），首列左对齐、末列右对齐，中间列居中，都不会越出画布。
     if (layers && layers.length) {
-      const labels = { workspace: "工作空间", requested_model_id: "请求模型", model_id: "实际模型", provider_id: "供应商", upstream_model_id: "上游模型" };
+      const labels = { workspace: "工作空间", requested_model_id: "请求模型", model_id: "实际模型", provider_id: "供应商", key_name: "上游 Key", upstream_model_id: "上游模型" };
       layout.columns.forEach((column, index) => {
         const key = layers[index];
         const anchor = index === 0 ? "start" : index === layout.columns.length - 1 ? "end" : "middle";

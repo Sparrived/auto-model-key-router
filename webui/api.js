@@ -117,6 +117,14 @@ export const api = {
       ? "/ui/workspace-usage.json?all_history=true"
       : `/ui/workspace-usage.json?hours=${hours}`),
 
+  // Key 用量读数：「这些流量是哪把 Key 出去的」（上游 Key + 访问密钥两份拆分）。
+  // 同样挂 /ui/ 且要完整鉴权：/metrics 是**对照参照实现**的读数，形状已发布不能加
+  // 字段，所以这份按 Key 拆分的读数是单独一条本项目自有的接口。
+  keyUsage: ({ hours = 24, allHistory = false } = {}) =>
+    request(allHistory
+      ? "/ui/key-usage.json?all_history=true"
+      : `/ui/key-usage.json?hours=${hours}`),
+
   // 价格目录（models.dev）：由服务端缓存并定期刷新，挂在 WebUI 前缀下。
   // **不鉴权**——内容是 models.dev 的公开数据，静态资源本身也是公开的。
   // 服务端还没取到目录时回 503，由 webui/pricing.js 吞掉并降级成"无定价"。

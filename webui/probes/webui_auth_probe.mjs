@@ -157,6 +157,9 @@ const server = {
   // 工作空间用量快照（/ui/workspace-usage.json）。null = 服务端尚未给出，
   // 此时页面应走加载态骨架而不是画空看板。
   workspaceUsage: null,
+  // Key 用量读数（/ui/key-usage.json）：用量统计页的「按上游 Key」「按访问密钥」
+  // 与「模型 / 上游 Key」三张表都出自这一份。
+  keyUsage: null,
 };
 
 function respond(status, payload) {
@@ -258,6 +261,18 @@ global.fetch = async (url, options = {}) => {
   if (path.startsWith("/ui/workspace-usage.json")) {
     if (!server.workspaceUsage) return respond(503, { detail: "工作空间用量尚不可用" });
     return respond(200, server.workspaceUsage);
+  }
+  // Key 用量读数（/ui/key-usage.json）。与 /metrics 同级的完整权限读数，因此放在
+  // 鉴权分支之后；未配置时给一份结构完整的空载荷，页面应画空态而不是崩掉。
+  if (path.startsWith("/ui/key-usage.json")) {
+    return respond(200, server.keyUsage || {
+      count_semantics: "upstream_attempt",
+      window: { from: null, to: "2026-01-01T10:00:00+08:00", hours: 1 },
+      upstream_keys: [],
+      model_keys: [],
+      access_keys: [],
+      unattributed: { requests: 0, successes: 0, failures: 0, total_tokens: 0 },
+    });
   }
   if (path.startsWith("/api/models")) {
     return respond(200, {
@@ -546,6 +561,25 @@ const setup = {
   usage_page_renders_history_ranges: () => {
     global.location.hash = "#/activity";
     storage.set("amkr.apiKey", "good-key");
+    // 按 Key 拆分（/ui/key-usage.json）：两家供应商**同名** Key（都是 main）+ 一把访问
+    // 密钥 + 一行没有供应商归因的历史行。这个组合专门覆盖这次要修的三种情形：
+    // 同名 Key 不能并成一行、访问密钥要单独一张表、未归属要在表里说明出处。
+    server.keyUsage = {
+      count_semantics: "upstream_attempt",
+      window: { from: null, to: "2026-01-01T10:00:00+08:00", hours: 1 },
+      upstream_keys: [
+        { provider_id: "openai", key_name: "main", stats: { requests: 7, successes: 7, failures: 0, total_tokens: 700 } },
+        { provider_id: "azure", key_name: "main", stats: { requests: 3, successes: 3, failures: 0, total_tokens: 300 } },
+      ],
+      model_keys: [
+        { model_id: "route-a", provider_id: "openai", key_name: "main", stats: { requests: 7, successes: 7, failures: 0, total_tokens: 700 } },
+        { model_id: "route-b", provider_id: "azure", key_name: "main", stats: { requests: 3, successes: 3, failures: 0, total_tokens: 300 } },
+      ],
+      access_keys: [
+        { access_key_id: "ak1", access_key_name: "试用账号 A", stats: { requests: 5, successes: 5, failures: 0, total_tokens: 500 } },
+      ],
+      unattributed: { requests: 2, successes: 1, failures: 1, total_tokens: 20 },
+    };
   },
   // 「全部历史」的跨度由 /metrics/requests 的 window.from 推导：服务端给出的一年多
   // 以前的记录，应当被夹到后端上限（8760 小时）并如实说明"只覆盖到上限"。
@@ -569,12 +603,14 @@ const setup = {
       ],
       // 未归属非零：升级前的历史行，页面要把它当"说明"而不是"次要细节"。
       unattributed: { requests: 30, total_tokens: 3000, successes: 29, failures: 1 },
-      layers: ["workspace", "requested_model_id", "model_id", "provider_id", "upstream_model_id"],
+      // 六层：供应商与上游模型之间还有「上游 Key」这一层。
+      layers: ["workspace", "requested_model_id", "model_id", "provider_id", "key_name", "upstream_model_id"],
       links: [
         { source_layer: 0, target_layer: 1, source: "default", target: "unified-model", requests: 120, total_tokens: 10000 },
         { source_layer: 1, target_layer: 2, source: "unified-model", target: "deepseek-v4.1-flash", requests: 120, total_tokens: 10000 },
         { source_layer: 2, target_layer: 3, source: "deepseek-v4.1-flash", target: "wb2api", requests: 120, total_tokens: 10000 },
-        { source_layer: 3, target_layer: 4, source: "wb2api", target: "deepseek-v4.1-flash", requests: 120, total_tokens: 10000 },
+        { source_layer: 3, target_layer: 4, source: "wb2api", target: "primary", requests: 120, total_tokens: 10000 },
+        { source_layer: 4, target_layer: 5, source: "primary", target: "deepseek-v4.1-flash", requests: 120, total_tokens: 10000 },
       ],
     };
   },
@@ -1139,6 +1175,23 @@ if (scenario === "stale_key_prompts_login") {
   checks.noLogPanel = byClass("log-panel").length === 0;
   // 请求流也搬走了（它属于概览）。
   checks.noStreamRows = byClass("stream-row").length === 0;
+
+  // —— 按 Key 拆分：这次改动的核心，答「这些流量是哪把 Key 出去的」 ——
+  checks.hasUpstreamKeyCard = body.includes("按上游 Key 用量");
+  checks.hasAccessKeyCard = body.includes("按访问密钥用量");
+  // 同名 Key 必须带上供应商前缀，否则两家的 main 看起来是一把。
+  checks.showsProviderPrefixedKeys = body.includes("openai / main") && body.includes("azure / main");
+  // 「模型 / Key」也要能区分同名 Key（模型 / 供应商 / Key 三段）。
+  checks.showsModelProviderKeyRows = body.includes("route-a / openai / main")
+    && body.includes("route-b / azure / main");
+  // 上游分布卡里多出来的那一段。
+  checks.hasUpstreamDistributionByKey = body.includes("上游分布") && body.includes("按上游 Key");
+  // 访问密钥那一张：显示名 + 配置里的 key_id 都要在（显示名可重名，id 才是标识符）。
+  checks.showsAccessKeyNameAndID = body.includes("试用账号 A") && body.includes("ak1");
+  // 没有供应商归因的历史行必须在表里说明出处，否则表内合计与顶部总量对不上就成了
+  // 「看板数字互相矛盾」。
+  checks.explainsUnattributedKeyRows = body.includes("没有供应商归因")
+    && body.includes("另有 2 次调用");
 } else if (scenario === "usage_all_history_clamps_span") {
   // 切到「全部」触发跨度推导：这里直接驱动页面上的分段控件。
   await settle();

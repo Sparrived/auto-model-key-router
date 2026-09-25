@@ -165,12 +165,13 @@ global.fetch = async (url, options = {}) => {
         stats: { requests: 4, successes: 3, failures: 1, total_tokens: 400, cached_tokens: 0, avg_duration_ms: 120 },
       }],
       unattributed: {},
-      layers: ["workspace", "requested_model_id", "model_id", "provider_id", "upstream_model_id"],
+      layers: ["workspace", "requested_model_id", "model_id", "provider_id", "key_name", "upstream_model_id"],
       links: [
         { source_layer: 0, target_layer: 1, source: server.workspace, target: "TASK_1", requests: 4, total_tokens: 400 },
         { source_layer: 1, target_layer: 2, source: "TASK_1", target: "model-a", requests: 4, total_tokens: 400 },
         { source_layer: 2, target_layer: 3, source: "model-a", target: "prov-a", requests: 4, total_tokens: 400 },
-        { source_layer: 3, target_layer: 4, source: "prov-a", target: "up-model", requests: 4, total_tokens: 400 },
+        { source_layer: 3, target_layer: 4, source: "prov-a", target: "primary", requests: 4, total_tokens: 400 },
+        { source_layer: 4, target_layer: 5, source: "primary", target: "up-model", requests: 4, total_tokens: 400 },
       ],
     });
   }
@@ -281,10 +282,21 @@ if (scenario === "no_key_asks_for_one") {
   checks.showsWorkspaceName = text().includes("teamA");
   checks.showsRequests = text().includes("4");
   checks.showsFlowLayers = text().includes("任务/别名") && text().includes("上游模型");
+  // 补进流向图的 Key 层要有自己的中文名（LAYER_LABELS 与 workspaceFlowLayers 同序）。
+  checks.showsKeyLayer = text().includes("上游 Key");
   checks.showsTasks = text().includes("TASK_1") || text().includes("任务（1）");
-  // 任务表下面那两张半宽卡：任务用量按连边起点（任务名）汇总，上游模型用量按第 4 段
-  // 终点汇总。栅格本身的 12 + 6 + 6 形状由 webui_layout_probe.mjs 锁。
+  // 任务表下面那两张半宽卡：任务用量按连边起点（任务名）汇总，上游模型用量按终点是
+  // 上游模型的那一段汇总。栅格本身的 12 + 6 + 6 形状由 webui_layout_probe.mjs 锁。
   checks.hasUsageCards = text().includes("任务用量") && text().includes("上游模型用量");
+  // 上游模型用量那张卡必须列**上游模型名**（up-model），不能列成 Key 名（primary）：
+  // 层级顺序里插入 Key 层之后，写死取第 3→4 段就会静默变成"供应商 → Key"。这条断言
+  // 只在那张卡自己的节点里找，避免被桑基图的节点标签误判为通过。
+  const upstreamCard = findAll(root, (n) => n.tagName === "div"
+    && String(n.className).includes("card")
+    && n.textContent.includes("上游模型用量"))[0];
+  checks.upstreamCardListsUpstreamModel = !!upstreamCard
+    && upstreamCard.textContent.includes("up-model")
+    && !upstreamCard.textContent.includes("primary");
 } else if (scenario === "wrong_key_says_invalid") {
   // 被拒时要说"key 无效"，并且**重新给出填写入口**——只说失败会让人无处可去。
   checks.saysKeyInvalid = text().includes("无效");

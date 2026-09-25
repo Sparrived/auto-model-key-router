@@ -26,13 +26,14 @@ import {
   USAGE_RANGES, ALL_HISTORY, rangeSpec, formatPercentValue, formatCompactNumber,
 } from "./chart-math.js";
 
-// 五层流向的中文名，与 internal/metrics/workspace.go 的 workspaceFlowLayers 一一对应。
+// 六层流向的中文名，与 internal/metrics/workspace.go 的 workspaceFlowLayers 一一对应。
 // 那份是英文列名（它们同时是 SQL 列），这里只做展示翻译。
 const LAYER_LABELS = {
   workspace: "工作空间",
   requested_model_id: "任务/别名",
   model_id: "模型",
   provider_id: "供应商",
+  key_name: "上游 Key",
   upstream_model_id: "上游模型",
 };
 
@@ -122,7 +123,7 @@ function rangeLabel() {
   return from ? `全部历史（自 ${formatDateTime(from)}）` : "全部历史";
 }
 
-// flowChain 把桑基图的五层折成一行文字链路。
+// flowChain 把桑基图的六层折成一行文字链路。
 //
 // 存在的意义有两条，都不是装饰：
 //   - 桑基图在窄 iframe 里会挤成一团，文字链路是它在任何宽度下的可读摘要；
@@ -248,6 +249,15 @@ function flowCard(usage) {
   );
 }
 
+// layerIndexOf 按层名查下标（找不到给 -1）。
+//
+// 层级顺序由服务端给（usage.layers），因此**必须按层名定位**而不是写死数字：这次在
+// 供应商与上游模型之间插入「上游 Key」层时，原先写死的 3→4 段就从"供应商 → 上游模型"
+// 变成了"供应商 → Key"，那张卡会安静地把 Key 名当成上游模型名列出来。
+function layerIndexOf(usage, name) {
+  return (usage?.layers || []).indexOf(name);
+}
+
 // sumLinks 把某一段连边按一端汇总成排行行。side 决定取起点还是终点：
 // 同一段"任务→模型"的连边，取起点是任务排行、取终点是模型排行，两者别混。
 function sumLinks(usage, layer, side) {
@@ -261,11 +271,12 @@ function sumLinks(usage, layer, side) {
     .sort((a, b) => b.value - a.value);
 }
 
-// 任务用量：第 1→2 段连边的**起点**才是任务名（调用方传 TASK_XXXXXX，它以
-// requested_model_id 的身份出现，见 internal/metrics/workspace.go 的层级注释）。
-// 取终点会画成「任务用量」里列一串模型名，和卡头说的不是一回事。
+// 任务用量：取 requested_model_id 那一层的**起点连边**才是任务名（调用方传
+// TASK_XXXXXX，它以 requested_model_id 的身份出现，见 internal/metrics/workspace.go
+// 的层级注释）。取终点会画成「任务用量」里列一串模型名，和卡头说的不是一回事。
 function taskUsageCard(usage) {
-  const rows = sumLinks(usage, 1, "source");
+  const layer = layerIndexOf(usage, "requested_model_id");
+  const rows = layer < 0 ? [] : sumLinks(usage, layer, "source");
   return card(
     cardHead("任务用量", badge(rangeLabel(), "muted")),
     rows.length
@@ -274,11 +285,12 @@ function taskUsageCard(usage) {
   );
 }
 
-// 上游模型用量：第 4 段连边的终点（provider → upstream_model）。面板要看清这个空间
-// 实际打到哪些厂商模型上——本地路由名（model_id）与上游模型名是两回事。
+// 上游模型用量：取**终点是上游模型**的那一段（它的起点是 Key 层）。面板要看清这个
+// 空间实际打到哪些厂商模型上——本地路由名（model_id）与上游模型名是两回事。
 // 空数据时也返回一张卡：它和任务用量同处一排，留空会看见缺口。
 function upstreamUsageCard(usage) {
-  const rows = sumLinks(usage, 3, "target");
+  const layer = layerIndexOf(usage, "upstream_model_id") - 1;
+  const rows = layer < 0 ? [] : sumLinks(usage, layer, "target");
   return card(
     cardHead("上游模型用量", badge(rangeLabel(), "muted")),
     rows.length

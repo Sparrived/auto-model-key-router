@@ -5,7 +5,7 @@
 // 经过任务/模型/供应商一直流到上游模型的那条链路。
 //
 // 数据源是 /ui/workspace-usage.json（**本项目自有的接口**，不对照参照实现）：
-// 它同时给出各空间的用量统计与五层流向连边，共用同一个时间窗口。
+// 它同时给出各空间的用量统计与六层流向连边，共用同一个时间窗口。
 
 import {
   h, formatCount, formatCompact, formatDuration, errorText,

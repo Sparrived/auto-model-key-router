@@ -39,6 +39,10 @@ const state = {
   snapshot: null,
   snapshotAt: null,
   snapshotError: null,
+  // 按 Key 拆分的读数（哪把上游 Key 出去了、哪把访问密钥发起的）。单独一条接口
+  // （/ui/key-usage.json），单独一份错误状态——它读失败不该把整页其余读数一起清掉。
+  keyUsage: null,
+  keyUsageError: null,
   loading: true,
   sort: { key: "requests", direction: "desc" },
   cumulativeMetric: "requests",
@@ -116,9 +120,13 @@ async function loadWindow(force = false) {
   if (!force && state.series && state.seriesKey === key) return;
   const bucket = pickBucketSeconds(spec.hours);
   const token = ++seriesToken;
-  const [snapshot, series] = await Promise.all([
+  // 三条读数用**同一个** spec.hours：本页的「全部历史」是先由最早一条记录推出跨度、
+  // 再当小时数查（series 根本没有 all_history），因此这里不能单独传 all_history=true
+  // ——那会让按 Key 的表覆盖比上方 KPI/曲线更长的跨度，同屏数字对不上。
+  const [snapshot, series, keyUsage] = await Promise.all([
     api.metrics(spec.hours).catch((error) => ({ __error: errorText(error) })),
     api.series(spec.hours, bucket).catch((error) => ({ __error: errorText(error) })),
+    api.keyUsage({ hours: spec.hours }).catch((error) => ({ __error: errorText(error) })),
   ]);
   if (token !== seriesToken) return;
   state.snapshotError = snapshot.__error || null;
@@ -126,6 +134,8 @@ async function loadWindow(force = false) {
   if (!snapshot.__error) state.snapshotAt = new Date().toISOString();
   state.seriesError = series.__error || null;
   state.series = series.__error ? null : (series.points || []);
+  state.keyUsageError = keyUsage.__error || null;
+  state.keyUsage = keyUsage.__error ? null : keyUsage;
   state.seriesKey = key;
   state.seriesBucket = series.bucket_seconds || bucket;
   state.loading = false;
@@ -377,12 +387,16 @@ function comparator() {
   };
 }
 
-function breakdownCard(title, entries, keyLabel, emptyText) {
+// note 是一行可选的脚注：用来解释"这张表的合计为什么不等于页面顶部的总量"
+// （例如没有供应商归因的历史行、或只有访问密钥才有的归属），而不是让读者自己猜。
+function breakdownCard(title, entries, keyLabel, emptyText, note = null) {
   const rows = Object.entries(entries || {})
     .map(([name, stats]) => ({ name, stats }))
     .sort(comparator());
   if (!rows.length) {
-    return card(cardHead(title, badge("0 项", "muted")), empty(emptyText, { icon: "logs" }));
+    return card(cardHead(title, badge("0 项", "muted")),
+      empty(emptyText, { icon: "logs" }),
+      note ? h("div.card-foot", {}, note) : null);
   }
   // 总量行：让"表里各项加起来是多少"有对照，避免只看到分布看不到规模。
   const totalRow = rows.reduce((acc, row) => ({
@@ -416,21 +430,68 @@ function breakdownCard(title, entries, keyLabel, emptyText) {
           h("strong", formatPercent(totalRow.successes, totalRow.requests)),
         ),
       ),
+      note ? h("div.muted", { style: { marginTop: "8px" } }, note) : null,
     ),
   );
 }
 
-function flattenKeys(keys) {
+// —— 按 Key 拆分的三张表 ——
+//
+// 数据来自 /ui/key-usage.json（本项目自有的读数）：上游 Key 与访问密钥是**两个不同的
+// 问题**，因此各成一张表，互不嵌套——一把访问密钥的流量会打到多把上游 Key 上，反之
+// 亦然，把两者套成一层会答不出其中任何一个。
+//
+// 行名都带上能唯一标识那一行的前缀，这不是装饰：
+//   - key_name 只在**同一个供应商内**唯一，两家的同名 Key 在 /metrics 的 keys 里会并成
+//     一行（「模型 / Key 用量」原先是 `模型 / Key 名`，正是这个问题）；
+//   - 访问密钥的显示名可以重名，配置里的 key_id 才是稳定标识符，因此两个都显示。
+// 没配到名字（配置里已删掉这把 key）时只显示 id——回填 id 当名字会让"这把 key 还配着"
+// 看起来像真的。
+function upstreamKeyEntries(rows) {
   const flat = {};
-  for (const [model, byKey] of Object.entries(keys || {})) {
-    for (const [key, stats] of Object.entries(byKey || {})) flat[`${model} / ${key}`] = stats;
+  for (const row of rows || []) flat[`${row.provider_id} / ${row.key_name}`] = row.stats;
+  return flat;
+}
+
+function accessKeyEntries(rows) {
+  const flat = {};
+  for (const row of rows || []) {
+    const label = row.access_key_name
+      ? `${row.access_key_name}（${row.access_key_id}）`
+      : row.access_key_id;
+    flat[label] = row.stats;
   }
   return flat;
 }
 
-function upstreamCard(metrics) {
+function modelKeyEntries(rows) {
+  const flat = {};
+  for (const row of rows || []) flat[`${row.model_id} / ${row.provider_id} / ${row.key_name}`] = row.stats;
+  return flat;
+}
+
+// unattributedNote 说明「按上游 Key」这张表少算的那一部分。
+//
+// provider_id 可空（升级前的历史行、不走 proxy 的写入路径），这些行没有可归属的供应商，
+// 因此进不了按 Key 的行。不说清楚的话，表里的合计与页面顶部的总量对不上就成了"看板的
+// 数字互相矛盾"，而不是"有一段没归因的历史"。
+function unattributedNote(keyUsage) {
+  const requests = keyUsage?.unattributed?.requests || 0;
+  if (!requests) return null;
+  return `另有 ${formatCount(requests)} 次调用没有供应商归因（多为升级前的历史行），`
+    + "不在上表内，但计入页面顶部的总量。";
+}
+
+// upstreamCard 的三段分别回答「哪个上游模型名」「哪家供应商」「哪把 Key」。
+//
+// 三段用各自的小标题区分，不靠颜色：因此第三段沿用 .bar-fill 的默认主色，不去新造一个
+// 色阶（新增颜色要动 styles.css，而这张卡片的语义不需要第四种颜色）。
+function upstreamCard(metrics, keyUsage) {
   const rows = rank(metrics.upstream_models, { limit: 8, value: (stats) => stats.requests });
   const providers = rank(metrics.providers, { limit: 8, value: (stats) => stats.requests });
+  const keys = rank(upstreamKeyEntries(keyUsage?.upstream_keys), {
+    limit: 8, value: (stats) => stats.requests,
+  });
   return card(
     cardHead("上游分布", badge(rangeLabel(), "muted")),
     h("div.stack", {},
@@ -447,6 +508,13 @@ function upstreamCard(metrics) {
             }),
           )
         : h("p.muted", "历史数据的供应商归因可能为空（v4 起不再写入模型池归因）。"),
+      h("div", {},
+        h("h4", { class: "muted", style: { marginBottom: "8px" } }, "按上游 Key"),
+        barList(keys, {
+          emptyText: "没有上游 Key 归因数据。",
+          format: (row) => `${formatCount(row.value)} 次`,
+        }),
+      ),
     ),
   );
 }
@@ -530,6 +598,8 @@ function draw(firstPaint = false) {
   }
   if (state.snapshotError && !metrics) children.push(notice(`指标读取失败：${state.snapshotError}`, "error"));
   if (state.seriesError) children.push(notice(`趋势数据读取失败：${state.seriesError}`, "error"));
+  // 按 Key 是单独一条读数：它读失败只该让那三张卡显示空态，不该连累上面的总量与曲线。
+  if (state.keyUsageError) children.push(notice(`按 Key 用量读取失败：${state.keyUsageError}`, "error"));
   // 切到长窗口时查询要一会儿（1 年 = 扫更多行、点也更多）。这时下面的数字还是上一
   // 个窗口的，必须说明"正在换成你选的那个窗口"，否则会被当成新窗口的读数。
   if (state.loading && metrics) children.push(notice("正在读取所选窗口的数据，下方读数仍属于上一次查询的窗口。", "info"));
@@ -546,17 +616,27 @@ function draw(firstPaint = false) {
   // 靠的是两种排法：整宽卡（col-12）自成一行，半宽卡（col-4/col-5/col-6）两两成对。
   // 因此 col-8 不能夹在半宽卡中间：<=1024px 时它会变成整行，把前面的半宽卡剩在
   // 半行里（性能趋势与上游构成原来各占 col-8/col-4，就在这一档留了空轨）。
+  //
+  // 「按 Key」两张半宽卡与「模型 / 上游 Key」整宽卡排在最后：前者回答"哪把 Key 出去了"
+  // （上游 Key 与访问密钥各一张），后者是带供应商前缀的「模型 × Key」明细。
+  const keyUsage = state.keyUsage;
   children.push(h("div.grid-12", {},
     h("div.col-12", {}, cumulativeCard(points, bucketSeconds)),
     h("div.col-8", {}, dailyCard(points)),
     h("div.col-4", {}, hourlyCard(points)),
     h("div.col-4", {}, compositionCard(metrics)),
     h("div.col-4", {}, statusCard(metrics)),
-    h("div.col-4", {}, upstreamCard(metrics)),
+    h("div.col-4", {}, upstreamCard(metrics, keyUsage)),
     h("div.col-12", {}, latencyCard(points, bucketSeconds)),
     h("div.col-6", {}, breakdownCard("模型用量", metrics.models, "模型", "窗口内没有模型调用。")),
     h("div.col-6", {}, breakdownCard("调用方用量", metrics.caller_types, "调用方", "窗口内没有调用方数据。")),
-    h("div.col-12", {}, breakdownCard("模型 / Key 用量", flattenKeys(metrics.keys), "条目", "窗口内没有 Key 调用数据。")),
+    h("div.col-6", {}, breakdownCard("按上游 Key 用量", upstreamKeyEntries(keyUsage?.upstream_keys),
+      "Key", "窗口内没有可归因到上游 Key 的调用。", unattributedNote(keyUsage))),
+    h("div.col-6", {}, breakdownCard("按访问密钥用量", accessKeyEntries(keyUsage?.access_keys),
+      "访问密钥", "窗口内没有访问密钥发起的调用。",
+      "只统计访问密钥发起的调用；完整权限与工作空间凭据的流量不在这一维。")),
+    h("div.col-12", {}, breakdownCard("模型 / 上游 Key 用量", modelKeyEntries(keyUsage?.model_keys),
+      "条目", "窗口内没有 Key 调用数据。")),
   ));
 
   render(host, children);
