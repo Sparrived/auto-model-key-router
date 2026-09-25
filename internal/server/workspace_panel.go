@@ -67,8 +67,8 @@ func (a *App) handleWorkspacePanel(w http.ResponseWriter, r *http.Request) {
 		body.SetKey("workspace", canonical.NewString(workspace))
 		// 建/改任务要选模型，而面板 key 不是调用方凭据（进不了 /v1/models），管理面的
 		// GET /api/models 又只认完整权限。因此把**可选择的名字**随读数一起给它：
-		// 就是配置里的模型 id 与别名，不多不少——隐藏别名刻意不含（那是"能直接调用
-		// 但不该被展示"的名字，面板是给人挑模型的界面）。
+		// 就是配置里的模型 id 与别名，不多不少——两者正是可调用名的全部，也是
+		// /v1/models 会列出的清单。
 		body.SetKey("models", workspacePanelModels(resources.Config))
 		writeJSON(w, http.StatusOK, body)
 	})
@@ -76,9 +76,8 @@ func (a *App) handleWorkspacePanel(w http.ResponseWriter, r *http.Request) {
 
 // workspacePanelModels 列出面板可用于建任务的名字（模型 id 与别名，按配置顺序）。
 //
-// 不含隐藏别名：它们是「能直接调用但不该被展示」的名字（见
-// config.HiddenModelNames 的说明），面板是给人挑模型的界面，展示它们会让人以为
-// 那些是正常的可选项。
+// 恰好就是可调用名的全集（模型 ID + aliases，见 config.ModelConfig）：面板是给人挑
+// 模型的界面，清单与 /v1/models 同口径才不会让人挑到一个调不通的名字。
 func workspacePanelModels(cfg *config.RouterConfig) *canonical.Value {
 	items := canonical.NewArray()
 	if cfg == nil {

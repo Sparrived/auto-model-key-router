@@ -128,7 +128,7 @@ func TestWorkspacePanelIsScopedToItsKey(t *testing.T) {
 			}
 		}
 	}
-	// 模型清单供面板建任务时挑选：含别名，不含隐藏别名（这里没有隐藏别名）。
+	// 模型清单供面板建任务时挑选：模型 ID + 别名，与 /v1/models 同口径。
 	if len(body.Models) == 0 {
 		t.Errorf("models 不应为空: %+v", body.Models)
 	}
