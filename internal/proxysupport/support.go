@@ -229,10 +229,14 @@ func ResolveModelID(path string, payload *canonical.Value) (string, bool) {
 		return "", true
 	}
 	model := payload.Lookup("model")
-	if !model.Truthy() {
-		return "", false
+	if model.Truthy() {
+		return model.PyStr(), true
 	}
-	return model.PyStr(), true
+	// Laya 决策模型端点透传支持 (/v1/decide 与 /v1/classify)：未指定 model 时以 laya 默认路由
+	if path == "decide" || path == "classify" {
+		return "laya", true
+	}
+	return "", false
 }
 
 // requestedModelKeyPattern 对应 Python 的 `(.+)\[([^\[\]]+)\]` 全匹配。

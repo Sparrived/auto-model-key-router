@@ -364,6 +364,9 @@ func TestResolveModelIDMatchesPython(t *testing.T) {
 		{"chat/completions", `{"model":[]}`, "", false},
 		// 非空非字符串会被 str() 化。
 		{"chat/completions", `{"model":123}`, "123", true},
+		{"decide", `{}`, "laya", true},
+		{"classify", `{}`, "laya", true},
+		{"decide", `{"model":"custom-laya"}`, "custom-laya", true},
 	}
 	for _, item := range cases {
 		got, ok := ResolveModelID(item.path, mustValue(t, item.payload))
