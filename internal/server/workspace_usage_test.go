@@ -102,8 +102,9 @@ func TestWorkspaceUsageEndpoint(t *testing.T) {
 		t.Fatalf("解析响应失败: %v（body=%s）", err, recorder.Body.String())
 	}
 
-	if len(body.Layers) != 5 {
-		t.Errorf("层数 = %d，期望 5", len(body.Layers))
+	// 六层：供应商与上游模型之间还有「上游 Key」这一层（同一家可以配多把 Key）。
+	if len(body.Layers) != 6 {
+		t.Errorf("层数 = %d，期望 6", len(body.Layers))
 	}
 	if len(body.Workspaces) != 2 {
 		t.Fatalf("工作空间数 = %d，期望 2", len(body.Workspaces))

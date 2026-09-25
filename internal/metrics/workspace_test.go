@@ -62,7 +62,7 @@ func statInt(t *testing.T, stats *canonical.Value, key string) int64 {
 // TestWorkspaceUsageGroupsByWorkspace 断言按工作空间分组与流向连边的形状。
 //
 // 这是新增读接口的**唯一一条可运行检查**：覆盖分组计数、token 汇总、未归属行不
-// 落入任何工作空间，以及五层连边的相邻关系。
+// 落入任何工作空间，以及六层连边的相邻关系。
 func TestWorkspaceUsageGroupsByWorkspace(t *testing.T) {
 	installClock(t, beijingTime(t, "2026-07-14T12:00:00+08:00"))
 	store := tempStore(t)
@@ -110,15 +110,21 @@ func TestWorkspaceUsageGroupsByWorkspace(t *testing.T) {
 	}
 
 	layers, _ := value.Obj.Get("layers")
-	if len(layers.Arr) != 5 {
-		t.Fatalf("层数 = %d, 期望 5", len(layers.Arr))
+	if len(layers.Arr) != 6 {
+		t.Fatalf("层数 = %d, 期望 6", len(layers.Arr))
+	}
+	// Key 这一层必须在供应商与上游模型之间：它是「同一家供应商的哪把 Key」，
+	// 放到别的位置（例如上游模型之后）就成了两个互不相干的问题。
+	if layers.Arr[3].Str != "provider_id" || layers.Arr[4].Str != "key_name" || layers.Arr[5].Str != "upstream_model_id" {
+		t.Errorf("末三层 = %s/%s/%s, 期望 provider_id/key_name/upstream_model_id",
+			layers.Arr[3].Str, layers.Arr[4].Str, layers.Arr[5].Str)
 	}
 
 	// 连边只来自有归属的行：teamA/teamB。
-	// 每层相邻关系各 2 条（teamA 与 teamB 各贡献一条），共 4 段 × 2 = 8 条。
+	// 每层相邻关系各 2 条（teamA 与 teamB 各贡献一条），共 5 段 × 2 = 10 条。
 	links, _ := value.Obj.Get("links")
-	if len(links.Arr) != 8 {
-		t.Errorf("连边数 = %d, 期望 8", len(links.Arr))
+	if len(links.Arr) != 10 {
+		t.Errorf("连边数 = %d, 期望 10", len(links.Arr))
 	}
 	// 第一条连边应是 teamA -> TASK_000001，宽度 2。
 	if len(links.Arr) > 0 {

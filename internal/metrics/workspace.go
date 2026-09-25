@@ -19,17 +19,23 @@ import (
 
 // workspaceFlowLayers 是桑基图的层级顺序，与前端约定一致。
 //
-// 五层恰好是请求在系统里的流转链路：
+// 六层恰好是请求在系统里的流转链路：
 //
-//	工作空间 → 请求模型（任务名/别名）→ 实际模型 → Provider → 上游模型
+//	工作空间 → 请求模型（任务名/别名）→ 实际模型 → Provider → 上游 Key → 上游模型
 //
 // 任务名以 requested_model_id 的身份出现（调用方传 TASK_XXXXXX），因此第 1→2 层
 // 就是「哪个工作空间在用哪个任务」——这正是工作空间隔离后最需要看清的一段。
+//
+// Key 这一层是后补的（原先是五层，供应商直接连到上游模型）：同一家供应商可以配多把
+// Key，而 v4 起「模型 → target」的选择就是**选 Key**，所以「打到哪家」与「用的哪把
+// Key」是两个不同的问题，只画到供应商会把它们并成一条流带。key_name 就是被选中的
+// 那把上游 Provider Key 名（见 internal/proxy 的 recordMetric），该列恒非空。
 var workspaceFlowLayers = []string{
 	"workspace",
 	"requested_model_id",
 	"model_id",
 	"provider_id",
+	"key_name",
 	"upstream_model_id",
 }
 
@@ -42,7 +48,8 @@ var flowPairs = []struct{ Source, Target string }{
 	{"w.workspace", "m.requested_model_id"},
 	{"m.requested_model_id", "m.model_id"},
 	{"m.model_id", "m.provider_id"},
-	{"m.provider_id", "m.upstream_model_id"},
+	{"m.provider_id", "m.key_name"},
+	{"m.key_name", "m.upstream_model_id"},
 }
 
 // WorkspaceUsageParams 是工作空间读数的参数。
