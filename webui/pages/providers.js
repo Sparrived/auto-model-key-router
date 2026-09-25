@@ -278,9 +278,15 @@ function openCreateKey(provider) {
     setStatus("done", "探测完成");
     await new Promise((resolve) => setTimeout(resolve, 450));
     ref.close();
-    state.modelEditor = { provider: provider.id, key: name };
     toast(`Key ${name} 已添加。`);
+    // 加完立刻展开这个 Key 的「服务模型」编辑器（与点「管理模型」同一条路径）。
+    //
+    // 这里曾经是裸的 `{ provider, key }`：modelEditor() 会直接展开 models / selected，
+    // 缺字段就在重画时抛 TypeError，而 draw() 抛错的后果是**整页一个字都不更新**——
+    // Key 其实已经存进服务端了，界面却还停在加之前的样子，只能手动刷新。
+    state.modelEditor = modelEditorState(provider.id, name);
     draw();
+    loadKeyModels(provider.id, name);
   };
 
   const body = h("div.stack", {},
@@ -413,9 +419,18 @@ async function probeOne(provider, key) {
 }
 
 // —— Key 的模型绑定 ——
+// modelEditorState 造一份完整的「Key 服务模型」编辑器状态。
+//
+// 字段必须一次给全：modelEditor() 会直接展开 models / selected，缺任何一个都是在重画时
+// 抛 TypeError，而 draw() 抛错的后果是整页不更新（新增 Key 之后界面不刷新就是这个原因）。
+// 建状态的入口只留这一个，避免以后再有人漏掉字段。
+function modelEditorState(providerId, keyName) {
+  return { provider: providerId, key: keyName, loading: true, models: [], selected: new Set(), error: null };
+}
+
 function toggleModelEditor(provider, key) {
   const same = state.modelEditor && state.modelEditor.provider === provider.id && state.modelEditor.key === key.name;
-  state.modelEditor = same ? null : { provider: provider.id, key: key.name, loading: true, models: [], selected: new Set(), error: null };
+  state.modelEditor = same ? null : modelEditorState(provider.id, key.name);
   draw();
   if (!same) loadKeyModels(provider.id, key.name);
 }
