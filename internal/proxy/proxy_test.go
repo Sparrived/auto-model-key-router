@@ -566,6 +566,30 @@ func TestMetricsRowsForRetryAndFailure(t *testing.T) {
 	}
 }
 
+// TestMetricsRowCarriesRequestSource 断言指标行带上入站请求的来源。
+//
+// 来源（客户端地址与 User-Agent）是看板请求流的输入，却不在 request_metrics 的列里
+// （落到 request_source 旁挂表）。派生字段只有一个填充点（recordMetric），流式路径
+// 的收尾也走它，因此这条用例守着非流式路径；流式那条见 stream_test.go。
+func TestMetricsRowCarriesRequestSource(t *testing.T) {
+	env := newTestEnv(t, simpleChatConfig(), Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
+	env.route("/v1/chat/completions", jsonStep(200, `{"id":"x"}`))
+	env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`,
+		map[string]string{"User-Agent": "claude-cli/1.0"})
+
+	records := env.metrics.take()
+	if len(records) != 1 {
+		t.Fatalf("指标行数: got %d want 1", len(records))
+	}
+	// httptest.NewRequest 把 RemoteAddr 固定成 192.0.2.1:1234。
+	if records[0].ClientAddr != "192.0.2.1:1234" {
+		t.Fatalf("ClientAddr = %q，期望 192.0.2.1:1234", records[0].ClientAddr)
+	}
+	if records[0].UserAgent != "claude-cli/1.0" {
+		t.Fatalf("UserAgent = %q，期望 claude-cli/1.0", records[0].UserAgent)
+	}
+}
+
 // TestMetricsRowForConnectionFailure 覆盖「上游请求直接失败」：状态码为 nil，
 // failed=true，retried=true，且 first_token_ms == duration_ms。
 func TestMetricsRowForConnectionFailure(t *testing.T) {

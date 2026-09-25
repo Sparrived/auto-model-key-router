@@ -96,6 +96,10 @@ func recordParams(record proxy.MetricRecord) metrics.RecordParams {
 		// AccessKeyID 同理原样传递（有意增补，见 metrics.RecordParams）：空串表示
 		// 这次请求不出自访问密钥，落库时不写 request_access_key 旁挂表。
 		AccessKeyID: record.AccessKeyID,
+		// ClientAddr / UserAgent 是请求来源（有意增补，见 metrics.RecordParams）：
+		// 同样不落 request_metrics，空串表示没有来源可记，落库时不写 request_source。
+		ClientAddr: record.ClientAddr,
+		UserAgent:  record.UserAgent,
 	}
 }
 

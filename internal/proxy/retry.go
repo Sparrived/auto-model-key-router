@@ -716,6 +716,12 @@ func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, re
 	if context.AccessKey != nil {
 		record.AccessKeyID = context.AccessKey.ID
 	}
+	// 请求来源同样只在这里填：流式与非流式两条路径最终都汇到本函数
+	// （streamLifecycle 的 onFinish 也调用它），漏一处就会出现「流式请求没有来源」。
+	if context.Request != nil {
+		record.ClientAddr = context.Request.RemoteAddr
+		record.UserAgent = context.Request.UserAgent()
+	}
 	_ = h.metrics.Record(contextOf(context.Request), record)
 }
 

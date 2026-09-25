@@ -173,11 +173,17 @@ func TestRawStreamExtractsUsageFromSSE(t *testing.T) {
 	))
 
 	env.request(http.MethodPost, "chat/completions",
-		`{"model":"vendor-model","messages":[],"stream":true}`, nil)
+		`{"model":"vendor-model","messages":[],"stream":true}`,
+		map[string]string{"User-Agent": "claude-cli/1.0"})
 
 	records := env.metrics.take()
 	if len(records) != 1 {
 		t.Fatalf("指标行数: got %d want 1", len(records))
+	}
+	// 流式路径的收尾走 streamLifecycle.onFinish -> recordMetric，来源字段必须与
+	// 非流式一致地填上（漏填会出现"流式请求没有来源"）。
+	if records[0].ClientAddr != "192.0.2.1:1234" || records[0].UserAgent != "claude-cli/1.0" {
+		t.Fatalf("流式指标行应带来源，实得 %q / %q", records[0].ClientAddr, records[0].UserAgent)
 	}
 	usage := records[0].Usage
 	if usage == nil {

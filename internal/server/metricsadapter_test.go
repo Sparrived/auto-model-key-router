@@ -53,6 +53,8 @@ func TestMetricsAdapterRecordFieldMapping(t *testing.T) {
 		ProviderID:       &providerID,
 		PoolName:         &poolName,
 		UpstreamModelID:  &upstreamModel,
+		ClientAddr:       "127.0.0.1:50874",
+		UserAgent:        "claude-cli/1.0",
 	}
 
 	params := recordParams(record)
@@ -89,6 +91,12 @@ func TestMetricsAdapterRecordFieldMapping(t *testing.T) {
 	}
 	if params.UpstreamModelID == nil || *params.UpstreamModelID != "gpt-upstream" {
 		t.Errorf("UpstreamModelID = %v", params.UpstreamModelID)
+	}
+	if params.ClientAddr != "127.0.0.1:50874" {
+		t.Errorf("ClientAddr = %q", params.ClientAddr)
+	}
+	if params.UserAgent != "claude-cli/1.0" {
+		t.Errorf("UserAgent = %q", params.UserAgent)
 	}
 }
 

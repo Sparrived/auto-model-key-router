@@ -172,6 +172,18 @@ type MetricRecord struct {
 	// 注意不要拿 KeyName 顶替：那是**被选中的上游 Provider key 名**（见 internal/proxy
 	// 的 recordMetric），与调用方身份无关。
 	AccessKeyID string
+	// ClientAddr / UserAgent 是入站请求的来源（客户端地址与 User-Agent）。
+	//
+	// 与 Workspace / AccessKeyID 同样是**有意增补**，同样不进入 request_metrics 的列，
+	// 而是落到 request_source 旁挂表（见 internal/metrics/schema.go）。看板的请求流
+	// 要回答「这次请求是谁、从哪儿发来的」，而 request_metrics 里没有任何一列能表达
+	// 网络位置。
+	//
+	// ClientAddr 取 http.Request.RemoteAddr（host:port），**不读 X-Forwarded-For**：
+	// 那个头由调用方自带、可伪造，与访问日志（internal/server/accesslog.go）保持
+	// 同一个取值来源。
+	ClientAddr string
+	UserAgent  string
 }
 
 // Options 是 Handler 的可选配置。零值即「按产品决策的默认档」。

@@ -147,6 +147,36 @@ const createAccessKeyIndexSQL = `
         CREATE INDEX IF NOT EXISTS idx_request_access_key ON request_access_key(access_key_id)
         `
 
+// createRequestSourceTableSQL 是请求来源旁挂表的建表语句。
+//
+// 与 request_workspace / request_access_key 同构，理由相同（见
+// createWorkspaceTableSQL）：只在 sqlite_master 里多一条新表条目，request_metrics
+// 自身的建表原文与列序逐字节不变，旧二进制打开新库照常读写指标。
+//
+// **为什么需要它**：WebUI 的请求流要回答「这次请求是谁、从哪儿发来的」。
+// request_metrics.caller_type 只说得出凭据档位（本机 / 工作空间 / 访问密钥），
+// request_workspace 只说得出空间归属，两者都答不出**发起方的网络位置**。
+//
+// client_addr 存入站请求的 RemoteAddr（host:port，IPv6 形如 `[::1]:50874`），与
+// 访问日志（internal/server/accesslog.go）取的是同一个值。**刻意不读
+// X-Forwarded-For**：那个头由调用方自带、可伪造，把它当来源会让看板显示一个
+// 攻击者选定的 IP，比没有来源更糟。
+//
+// user_agent 允许为空（curl 之类可以不带头）。没有 client_addr 的行不写这张表：
+// 历史行与不走 HTTP 的写入路径不会凭空获得一个来源，查询端把它们渲染成 null。
+const createRequestSourceTableSQL = `
+            CREATE TABLE IF NOT EXISTS request_source (
+                request_id INTEGER PRIMARY KEY,
+                client_addr TEXT NOT NULL,
+                user_agent TEXT
+            )
+            `
+
+// insertRequestSourceSQL 写入一行请求来源，与另外两张旁挂表同一次 record() 的写入。
+const insertRequestSourceSQL = `
+        INSERT OR REPLACE INTO request_source (request_id, client_addr, user_agent) VALUES (?, ?, ?)
+        `
+
 // createIndexStatements 对应 metrics.py:929-947 的 7 条索引。
 //
 // requested_model_id / caller / provider / upstream_model 四类维度是后加的，

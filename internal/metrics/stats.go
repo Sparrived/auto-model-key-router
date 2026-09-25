@@ -533,6 +533,10 @@ func seriesPointLimitExceeded(hours float64, bucketSeconds int64) bool {
 //
 // 与 key_stats 的 recent_requests 不同，这里的 success/retried 会经过 bool()
 // 转成真正的布尔（JSON true/false），而后者原样返回整数。别把两处合并。
+//
+// 末尾三列来自两条旁挂表（workspace / client_addr / user_agent，见 store.go 的
+// RequestHistory 与 schema.go）：没有归属的行是 NULL，渲染成 JSON null 而不是空串，
+// 让「这次请求没有来源记录」与「来源是空字符串」在读端分得开。
 func requestItem(row *sql.Rows) (*canonical.Value, error) {
 	var (
 		id                                                  int64
@@ -542,6 +546,7 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		success, retried                                    sql.NullInt64
 		promptTokens, completionTokens, totalTokens, cached sql.NullInt64
 		cacheCreation, cacheRead, firstTokenMS, durationMS  sql.NullInt64
+		workspace, clientAddr, userAgent                    sql.NullString
 	)
 	if err := row.Scan(
 		&id, &createdAt, &callerType, &modelID, &requestedModelID,
@@ -549,6 +554,7 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		&statusCode, &success, &retried, &promptTokens,
 		&completionTokens, &totalTokens, &cached,
 		&cacheCreation, &cacheRead, &firstTokenMS, &durationMS,
+		&workspace, &clientAddr, &userAgent,
 	); err != nil {
 		return nil, err
 	}
@@ -580,6 +586,11 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		canonical.ObjectPair{Key: "cache_read_input_tokens", Value: canonical.NewIntValue(cacheRead.Int64)},
 		canonical.ObjectPair{Key: "first_token_ms", Value: canonical.NewIntValue(firstTokenMS.Int64)},
 		canonical.ObjectPair{Key: "duration_ms", Value: canonical.NewIntValue(durationMS.Int64)},
+		// —— 请求来源（本项目增补，参照实现的 items 没有这三项）——
+		// 插在末尾而不是中间：既有调用方按名字取字段，新增键只影响读全量的用法。
+		canonical.ObjectPair{Key: "workspace", Value: nullableString(workspace)},
+		canonical.ObjectPair{Key: "client_addr", Value: nullableString(clientAddr)},
+		canonical.ObjectPair{Key: "user_agent", Value: nullableString(userAgent)},
 	), nil
 }
 

@@ -99,6 +99,14 @@ type RecordParams struct {
 	//
 	// 与 Workspace **互不排斥**：访问密钥照常带工作空间头，两者会各写各的旁挂表。
 	AccessKeyID string
+	// ClientAddr 是发起本次请求的客户端地址（入站请求的 RemoteAddr，host:port）。
+	//
+	// 空串表示这次写入没有来源可记（历史路径、不走 HTTP 的写入路径，以及测试里的
+	// 最小参数）。它不落 request_metrics 的列，而是进 request_source 旁挂表，
+	// 理由见 schema.go。
+	ClientAddr string
+	// UserAgent 是入站请求的 User-Agent，与 ClientAddr 同表；允许为空。
+	UserAgent string
 }
 
 // Open 打开（必要时创建）指标库，对应 MetricsStore.__init__。
@@ -255,6 +263,13 @@ func (s *Store) initSchema() error {
 	if _, err := s.writeDB.Exec(createAccessKeyIndexSQL); err != nil {
 		return err
 	}
+	// 请求来源旁挂表（理由见 schema.go）。与另外两张旁挂表同一位置：只在
+	// sqlite_master 里多一条新表条目，request_metrics 自身逐字节不变。
+	//
+	// 它按 request_id 一对一 JOIN，不需要自己的索引（与 request_workspace 同理）。
+	if _, err := s.writeDB.Exec(createRequestSourceTableSQL); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -380,17 +395,17 @@ func (s *Store) recordSync(
 	if err != nil {
 		return err
 	}
-	// 两张旁挂表都写在这里，**必须在 writeMu 内**（调用方已持锁）：LastInsertId
+	// 三张旁挂表都写在这里，**必须在 writeMu 内**（调用方已持锁）：LastInsertId
 	// 是连接级状态，writeDB 恰好只有一条连接（SetMaxOpenConns(1)），因此这里读到
 	// 的就是刚插入的那一行——换连接池就会读到别的连接的上一次插入。
 	//
 	// 用 INSERT OR REPLACE 而非 INSERT：request_id 是主键，重放同一行（测试里的
 	// 重复写入）不应炸掉，且替换语义与"归属只有一份"一致。
 	//
-	// 两张表各自独立判空：访问密钥的请求**同时**有工作空间归属（它照常带
+	// 各表独立判空：访问密钥的请求**同时**有工作空间归属（它照常带
 	// X-AMKR-Workspace），因此不能用 `if params.Workspace == ""` 提前 return，
 	// 那会把访问密钥那一行整个丢掉。
-	if params.Workspace != "" || params.AccessKeyID != "" {
+	if params.Workspace != "" || params.AccessKeyID != "" || params.ClientAddr != "" {
 		requestID, err := result.LastInsertId()
 		if err != nil {
 			return err
@@ -407,8 +422,24 @@ func (s *Store) recordSync(
 				return err
 			}
 		}
+		// 同理：没有来源地址的行不写来源旁挂表。user_agent 为空时写 NULL 而不是
+		// 空串，让「没带这个头」在库里只有一种表示。
+		if params.ClientAddr != "" {
+			if _, err := s.writeDB.Exec(insertRequestSourceSQL,
+				requestID, params.ClientAddr, nullableText(params.UserAgent)); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// nullableText 把空串写成 SQL NULL，非空原样写入。
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // nullableParam 把可选参数转成驱动可接受的 nil/值。
@@ -723,13 +754,24 @@ func (s *Store) RequestHistory(params RequestHistoryParams) (*canonical.Value, e
 		itemWhere = appendFilter(itemWhere, "id < ?")
 		itemParams = append(itemParams, *params.BeforeID)
 	}
+	// 两条 LEFT JOIN 取「请求来源」：工作空间与客户端地址各在一张旁挂表里，都不是
+	// request_metrics 的列（理由见 schema.go）。LEFT 而不是 INNER：没有归属的行
+	// （历史行、不走 proxy 的写入路径）必须照常出现在明细里，来源字段为 null。
+	//
+	// JOIN 条件里的 request_metrics.id 不写别名：whereSQL 用的是裸列名
+	// （见 stats.go 的 metricFilter.sql），给主表起别名会让两边的列名对不上。
+	// 两张旁挂表只有 request_id 与自己的列，不存在列名歧义。
 	itemQuery := "SELECT id, created_at, caller_type, model_id, requested_model_id,\n" +
 		"                   provider_id, pool_name, upstream_model_id, key_name,\n" +
 		"                   status_code, success, retried, prompt_tokens,\n" +
 		"                   completion_tokens, total_tokens, cached_tokens,\n" +
 		"                   cache_creation_input_tokens, cache_read_input_tokens,\n" +
-		"                   first_token_ms, duration_ms\n" +
-		"            FROM request_metrics" + itemWhere + "\n" +
+		"                   first_token_ms, duration_ms,\n" +
+		"                   w.workspace, s.client_addr, s.user_agent\n" +
+		"            FROM request_metrics\n" +
+		"            LEFT JOIN request_workspace w ON w.request_id = request_metrics.id\n" +
+		"            LEFT JOIN request_source s ON s.request_id = request_metrics.id" +
+		itemWhere + "\n" +
 		"            ORDER BY id DESC LIMIT ?"
 	rows, err := s.db().Query(itemQuery, append(itemParams, params.Limit+1)...)
 	if err != nil {
