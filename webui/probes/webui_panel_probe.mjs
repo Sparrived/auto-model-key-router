@@ -314,7 +314,7 @@ if (scenario === "no_key_asks_for_one") {
   await clickButton("新建任务");
   const nameInput = inputs().find((n) => n.attrs["aria-label"] === "任务名");
   checks.newTaskNameEditable = Boolean(nameInput) && nameInput.disabled !== true;
-  // 模型下拉来自面板读数里的 models（隐藏别名不含），且带一个「未指定」空选项
+  // 模型下拉来自面板读数里的 models（模型 ID + 可见别名），且带一个「未指定」空选项
   // ——任务可以先占位，那个空选项必须存在。要在编辑器还开着的时候断言。
   const modelSelect = selects().find((n) => n.attrs["aria-label"] === "模型");
   checks.modelOptionsPresent = Boolean(modelSelect)

@@ -208,15 +208,16 @@ export const api = {
     request(`/api/probes/${encodeURIComponent(probeId)}/cancel`, { method: "POST" }),
 
   routes: () => request("/api/routes"),
-  createRoute: (revision, id, targets, aliases, hiddenAliases, routingMode) =>
+  createRoute: (revision, id, targets, aliases, routingMode) =>
     request("/api/routes", {
       method: "POST",
-      body: { config_revision: revision, id, targets, aliases, hidden_aliases: hiddenAliases, routing_mode: routingMode },
+      body: { config_revision: revision, id, targets, aliases, routing_mode: routingMode },
     }),
-  updateRoute: (revision, routeId, targets, aliases, hiddenAliases, routingMode) =>
+  // newId 非空时同时改名（服务端会一并改写 unified_model 与任务里的引用）。
+  updateRoute: (revision, routeId, targets, aliases, routingMode, newId = null) =>
     request(`/api/routes/${encodeURIComponent(routeId)}`, {
       method: "PUT",
-      body: { config_revision: revision, targets, aliases, hidden_aliases: hiddenAliases, routing_mode: routingMode },
+      body: { config_revision: revision, id: newId, targets, aliases, routing_mode: routingMode },
     }),
   deleteRoute: (revision, routeId) =>
     request(`/api/routes/${encodeURIComponent(routeId)}`, {

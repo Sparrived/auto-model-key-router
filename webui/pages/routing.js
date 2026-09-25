@@ -1,8 +1,20 @@
-// 模型路由：路由别名、模式与目标 Key 顺序。
+// 模型路由：对外名称（路由 ID + 别名）与轮询目标（供应商 Key + 上游模型名）。
+//
+// 两个概念刻意分开呈现：
+//   - 对外名称 = 路由 ID 与别名，两者都出现在 /v1/models，外部请求的 model 字段写的就是它们；
+//   - 轮询目标 = 某个 Key 加上"发给这个上游的模型名"（upstream_model）。同一个模型在各上游
+//     叫法不同时，就在目标行里各写各的名字，名字不会变成可调用名。
+//
+// 「一条路由下没有目标就不该存在」是服务端的写路径不变式（见 internal/configops），
+// 因此这里的编辑器允许把目标删到一个不剩，保存时由服务端把整条路由删掉——页面上
+// 用文案与二次确认明确这一点，而不是偷偷拦住用户。
 
 import { h, errorText } from "../dom.js";
 import { api } from "../api.js";
-import { card, cardHead, notice, badge, empty, loading, render, toast, buttonNode, input, select, confirmDialog } from "../ui.js";
+import {
+  card, cardHead, notice, badge, empty, loading, render, toast, buttonNode,
+  input, select, confirmDialog, dialog, field,
+} from "../ui.js";
 
 const MODES = [
   { value: "", label: "默认策略" },
@@ -12,6 +24,8 @@ const MODES = [
 ];
 
 const modeLabel = (value) => (MODES.find((mode) => mode.value === (value || "")) || MODES[0]).label;
+
+const DATALIST_ID = "routing-upstream-options";
 
 const state = {
   routes: [],
@@ -36,89 +50,280 @@ async function load() {
   }
 }
 
-// 候选目标：探测到该模型的 Key，且尚未绑定。
+// 路由的对外名称集合：路由 ID + 别名。两者等价，都会出现在 /v1/models。
+const routeNames = (route) => [route.id, ...(route.aliases || [])];
+
+// keyUpstreams 返回某个 Key 探测到的上游模型名（去重排序）。
+//
+// 这是"上游叫什么"的唯一权威来源：页面用它给上游名输入框做候选，不再把它当成
+// 可调用名称。没探测过（capabilities 缺失）的 Key 返回空，用户仍可手填。
+function keyUpstreams(key) {
+  const names = (key.capabilities?.models || []).map((name) => String(name).trim()).filter(Boolean);
+  return [...new Set(names)].sort();
+}
+
+const targetText = (target) => `${target.provider} / ${target.key} / ${target.upstream_model}`;
+
+// candidates 返回"探测到的上游名正好是本路由某个对外名称、且尚未绑定"的目标。
+//
+// 只是一个快捷入口：上游名与路由名不一致时（同一个模型在各家叫法不同），用下面的
+// 「添加目标」手选 Key 与上游名即可。
 function candidates(route) {
-  // 注意别写成 \${target.key}：转义掉的插值会变成字面量 "${target.key}"，
-  // 于是所有已绑定的 Key 都被当成未绑定，候选列表里出现重复项。
-  const existing = new Set((route.targets || []).map((target) => `${target.provider}|${target.key}`));
+  const names = new Set(routeNames(route));
+  const bound = new Set((route.targets || []).map((target) => `${target.provider}|${target.key}|${target.upstream_model}`));
   const list = [];
   for (const provider of state.providers) {
     for (const key of provider.keys || []) {
-      const models = key.capabilities?.models || [];
-      if (!models.includes(route.id)) continue;
-      if (existing.has(`${provider.id}|${key.name}`)) continue;
-      list.push({ provider: provider.id, key: key.name });
+      for (const upstream of keyUpstreams(key)) {
+        if (!names.has(upstream)) continue;
+        if (bound.has(`${provider.id}|${key.name}|${upstream}`)) continue;
+        list.push({ provider: provider.id, key: key.name, upstream_model: upstream });
+      }
     }
   }
   return list;
 }
 
+// allKeyOptions 列出全部 (供应商, Key)，供"添加目标"选择。
+function allKeyOptions() {
+  const options = [];
+  for (const provider of state.providers) {
+    for (const key of provider.keys || []) {
+      options.push({
+        value: `${provider.id}|${key.name}`,
+        label: `${provider.id} / ${key.name}（探测到 ${keyUpstreams(key).length} 个上游模型）`,
+      });
+    }
+  }
+  return options;
+}
+
+// —— 只读详情 ——
+
+function targetRow(route, target, index) {
+  return h("div.inline", { style: { padding: "8px 12px", background: "#fafafa", borderRadius: "4px" } },
+    h("span.mono", targetText(target)),
+    h("span", { style: { flex: "1" } }),
+    buttonNode("移到其它路由…", {
+      small: true,
+      variant: "text",
+      disabled: state.saving || state.routes.length < 2,
+      onClick: () => moveDialog(route, index),
+    }),
+  );
+}
+
+function routeDetail(route) {
+  const targets = route.targets || [];
+  return h("div.stack", {},
+    h("div.stack.tight", {},
+      h("div", {}, h("span.muted", "对外名称："), h("span.mono", route.id)),
+      h("div", {}, h("span.muted", "别名："), (route.aliases || []).length ? h("span.mono", route.aliases.join(", ")) : "无别名"),
+      h("p.muted", "路由 ID 与别名都出现在 /v1/models；上游模型名只是发给上游的名字，不会被调用。"),
+    ),
+    h("div.stack.tight", {},
+      h("div", {}, h("span.muted", "轮询目标（按顺序，越靠前越优先）：")),
+      targets.length
+        ? h("ul", { "aria-label": `${route.id} 的路由目标`, style: { margin: "0", paddingLeft: "20px" } },
+            targets.map((target) => h("li.mono", targetText(target))))
+        : h("p.muted", "尚未绑定目标。没有目标的路由不会被调用，保存空目标会直接删除它。"),
+      targets.length
+        ? h("div.stack.tight", {}, targets.map((target, index) => targetRow(route, target, index)))
+        : null,
+    ),
+  );
+}
+
+// —— 目标迁移 ——
+
+// moveDialog 选一个接收方路由，把这条目标整条搬过去。
+//
+// 上游模型名随目标一起搬（它就是"发给那个上游的名字"，与落在哪条路由无关）。
+function moveDialog(route, index) {
+  const target = route.targets[index];
+  const destinations = state.routes.filter((item) => item.id !== route.id);
+  if (!destinations.length) {
+    toast("没有其它路由可以接收这个目标。", "error");
+    return;
+  }
+  const picker = select(destinations.map((item) => ({
+    value: item.id,
+    label: `${item.id}（${(item.targets || []).length} 个目标）`,
+  })), { value: destinations[0].id });
+  const ref = dialog({
+    title: "移动到其它路由",
+    body: h("div.stack", {},
+      h("p.mono", targetText(target)),
+      field("目标路由", picker),
+      h("p.muted", "上游模型名保持不变。原路由若没有别的目标，会被自动删除。"),
+    ),
+    actions: [
+      { label: "取消", variant: "text", onClick: () => ref.close() },
+      { label: "移动", onClick: () => { ref.close(); void moveTarget(route, index, picker.value); } },
+    ],
+  });
+}
+
+async function moveTarget(route, index, destinationID) {
+  const destination = state.routes.find((item) => item.id === destinationID);
+  if (!destination) return;
+  const target = route.targets[index];
+  const remaining = (route.targets || []).filter((_, position) => position !== index);
+  state.saving = true;
+  draw();
+  try {
+    // 先给接收方追加，再从来源移除：两步之间中断也只会留下一条重复目标（可在页面上
+    // 手动删掉），反过来则会直接丢目标。
+    await api.updateRoute(state.revision, destination.id, [...(destination.targets || []), target],
+      destination.aliases || [], destination.routing_mode || null, null);
+    await load();
+    // 空目标等于删除路由：这一步同时完成了"搬空即删来源"。
+    await api.updateRoute(state.revision, route.id, remaining, route.aliases || [], route.routing_mode || null, null);
+    await load();
+    state.active = remaining.length === 0 ? destination.id : route.id;
+    toast(remaining.length === 0
+      ? `目标已移到 ${destination.id}，原路由 ${route.id} 已删除。`
+      : `目标已移到 ${destination.id}。`);
+  } catch (error) {
+    toast(errorText(error), "error");
+    await load();
+  }
+  state.saving = false;
+  draw();
+}
+
+// —— 编辑态 ——
+
 function routeEditor(route) {
+  const idInput = input({ value: route.id, placeholder: "对外模型名" });
   const aliasInput = input({ value: (route.aliases || []).join(", "), placeholder: "逗号分隔，留空表示无别名" });
-  const hiddenInput = input({ value: (route.hidden_aliases || []).join(", "), placeholder: "可调用但不列出，逗号分隔" });
   const modeSelect = select(MODES, { value: route.routing_mode || "" });
   const errorHost = h("div");
-  const targets = [...(route.targets || [])];
+  const targets = (route.targets || []).map((target) => ({ ...target }));
+
+  const upstreamInput = (target) => input({
+    value: target.upstream_model,
+    placeholder: "上游模型名",
+    "aria-label": `${target.provider} / ${target.key} 的上游模型名`,
+    onInput: (event) => { target.upstream_model = event.target.value; },
+  });
 
   const listHost = h("div.stack.tight");
   const drawTargets = () => {
     render(listHost,
       targets.length
         ? targets.map((target, index) => h("div.inline", { style: { padding: "8px 12px", background: "#fafafa", borderRadius: "4px" } },
-            h("span.mono", `${target.provider} / ${target.key} / ${target.upstream_model}`),
+            h("span.mono", `${target.provider} / ${target.key} /`),
+            upstreamInput(target),
             h("span", { style: { flex: "1" } }),
             buttonNode("上移", { small: true, variant: "text", disabled: index === 0, onClick: () => { [targets[index - 1], targets[index]] = [targets[index], targets[index - 1]]; drawTargets(); } }),
             buttonNode("下移", { small: true, variant: "text", disabled: index === targets.length - 1, onClick: () => { [targets[index + 1], targets[index]] = [targets[index], targets[index + 1]]; drawTargets(); } }),
             buttonNode("移除", { small: true, variant: "text", onClick: () => { targets.splice(index, 1); drawTargets(); } }),
           ))
-        : h("p.muted", "尚未绑定目标 Key。"),
+        : h("p.muted", "此路由没有任何目标。保存后它会连同路由一起被删除——空路由不会出现在 /v1/models 里。"),
     );
   };
   drawTargets();
 
+  // —— 添加目标：先选 Key，再从该 Key 探测到的上游名里挑（也允许手填） ——
+  const keyOptions = allKeyOptions();
+  const keySelect = select(keyOptions, { value: keyOptions[0]?.value || "" });
+  const upstreamField = input({ placeholder: "上游模型名", list: DATALIST_ID });
+  const datalist = h("datalist", { id: DATALIST_ID });
+  const refreshUpstreams = () => {
+    const [providerID, keyName] = String(keySelect.value).split("|");
+    const provider = state.providers.find((item) => item.id === providerID);
+    const key = (provider?.keys || []).find((item) => item.name === keyName);
+    render(datalist, ...keyUpstreams(key || {}).map((name) => h("option", { value: name })));
+    if (!upstreamField.value) upstreamField.value = route.id;
+  };
+  if (keyOptions.length) {
+    keySelect.addEventListener("change", refreshUpstreams);
+    refreshUpstreams();
+  }
+
+  const addTarget = () => {
+    const [providerID, keyName] = String(keySelect.value).split("|");
+    if (!providerID || !keyName) return;
+    const upstream = String(upstreamField.value || "").trim() || route.id;
+    if (targets.some((target) => target.provider === providerID && target.key === keyName && target.upstream_model === upstream)) {
+      render(errorHost, notice("这个目标已经在本路由里了。", "warn"));
+      return;
+    }
+    render(errorHost);
+    targets.push({ provider: providerID, key: keyName, upstream_model: upstream });
+    drawTargets();
+  };
+
+  const addHost = keyOptions.length
+    ? h("div.stack.tight", {},
+        h("div.inline", {},
+          keySelect,
+          upstreamField,
+          buttonNode("添加目标", { small: true, variant: "secondary", onClick: addTarget }),
+        ),
+        h("p.muted", "上游模型名可留空（默认与路由 ID 相同），也可以直接输入探测不到的名字。"),
+        datalist,
+      )
+    : h("p.muted", "还没有任何供应商 Key。先在供应商页添加 Key，再回来绑定目标。");
+
   const options = candidates(route);
   const candidateHost = options.length
-    ? h("div.btn-row", {}, options.map((candidate) => buttonNode(`+ ${candidate.provider} / ${candidate.key}`, {
-        small: true, variant: "secondary",
+    ? h("div.btn-row", {}, options.map((candidate) => buttonNode(`+ ${targetText(candidate)}`, {
+        small: true,
+        variant: "secondary",
         onClick: () => {
-          targets.push({ provider: candidate.provider, key: candidate.key, upstream_model: route.id });
+          targets.push({ ...candidate });
           drawTargets();
           render(candidateHost);
         },
       })))
-    : h("p.muted", `没有其它探测到模型 ${route.id} 的 Key。`);
+    : h("p.muted", "没有探测到本路由名称的未绑定 Key。上游名与路由名不同时，用上面的「添加目标」手选 Key 与上游名。");
+
+  const save = async () => {
+    const newID = idInput.value.trim() || route.id;
+    const aliases = aliasInput.value.split(",").map((item) => item.trim()).filter(Boolean);
+    const mode = modeSelect.value || null;
+    // 上游名留空回落到路由名：那是"同一名字发给上游"的默认含义。
+    const cleaned = targets.map((target) => ({
+      provider: target.provider,
+      key: target.key,
+      upstream_model: String(target.upstream_model || "").trim() || newID,
+    }));
+    state.saving = true;
+    draw();
+    try {
+      if (!cleaned.length) {
+        await api.deleteRoute(state.revision, route.id);
+        toast(`路由 ${route.id} 没有目标，已删除。`);
+      } else {
+        await api.updateRoute(state.revision, route.id, cleaned, aliases, mode, newID === route.id ? null : newID);
+        toast("路由已保存。");
+      }
+      await load();
+      state.editing = null;
+      state.active = newID;
+    } catch (error) {
+      render(errorHost, notice(`保存失败: ${errorText(error)}`, "error"));
+      if (error.status === 409) load().then(draw);
+    }
+    state.saving = false;
+    draw();
+  };
 
   return h("div.stack", {},
     h("div.form-grid", {},
-      h("label.field", h("span", "编辑别名"), aliasInput),
-      h("label.field", h("span", "编辑隐藏别名"), hiddenInput),
-      h("label.field", h("span", "编辑模式"), modeSelect),
+      h("label.field", h("span", "对外名称（路由名）"), idInput),
+      h("label.field", h("span", "别名"), aliasInput),
+      h("label.field", h("span", "路由模式"), modeSelect),
     ),
-    h("p.muted", "隐藏别名可以直接调用，但不会出现在 /v1/models 里；各目标 Key 的上游模型名也会自动获得同样待遇。"),
-    h("div", {}, h("h4", "绑定目标 Key"), h("p.muted", `仅显示探测到模型 ${route.id} 的 Key。`), candidateHost),
-    listHost,
+    h("p.muted", "对外名称与别名都会出现在 /v1/models，外部请求的 model 字段写的就是它们；改名会同时改写 unified_model 与任务里的引用。"),
+    h("div", {}, h("h4", "轮询目标（按顺序）"), listHost),
+    h("div", {}, h("h4", "添加目标"), addHost),
+    h("div", {}, h("h4", "探测到本路由名称的 Key"), candidateHost),
     errorHost,
     h("div.btn-row", {},
-      buttonNode(state.saving ? "保存中…" : "保存路由", {
-        disabled: state.saving,
-        onClick: async () => {
-          state.saving = true;
-          draw();
-          try {
-            const aliases = aliasInput.value.split(",").map((item) => item.trim()).filter(Boolean);
-            const hiddenAliases = hiddenInput.value.split(",").map((item) => item.trim()).filter(Boolean);
-            await api.updateRoute(state.revision, route.id, targets, aliases, hiddenAliases, modeSelect.value || null);
-            await load();
-            state.editing = null;
-            toast("路由已保存。");
-          } catch (error) {
-            render(errorHost, notice(`保存失败: ${errorText(error)}`, "error"));
-            if (error.status === 409) load();
-          }
-          state.saving = false;
-          draw();
-        },
-      }),
+      buttonNode(state.saving ? "保存中…" : "保存路由", { disabled: state.saving, onClick: save }),
       buttonNode("取消", { variant: "text", onClick: () => { state.editing = null; draw(); } }),
       buttonNode("删除路由", {
         variant: "danger",
@@ -188,7 +393,7 @@ function draw() {
   const children = [
     h("div.page-head", {},
       h("div", {}, h("h1", "模型路由"),
-        h("p.sub", "管理路由别名和路由模式；模型的目标 Key 在右侧按顺序排列。")),
+        h("p.sub", "对外名称（路由 ID + 别名）与它下面的轮询目标；每个目标自带发给上游的模型名。")),
       h("div.spacer"),
       state.revision ? badge(`版本 ${String(state.revision).slice(0, 12)}`, "muted") : null,
     ),
@@ -210,18 +415,10 @@ function draw() {
     detail.push(card(
       cardHead(route.id,
         badge(modeLabel(route.routing_mode), "muted"),
-        badge(`${(route.targets || []).length} 个目标`, "muted"),
+        badge(`${(route.targets || []).length} 个目标`, (route.targets || []).length ? "muted" : "warn"),
         buttonNode("编辑", { small: true, variant: "text", onClick: () => { state.editing = route.id; draw(); } }),
       ),
-      h("div.stack.tight", {},
-        h("div", {}, h("span.muted", "别名："), (route.aliases || []).length ? h("span.mono", route.aliases.join(", ")) : "无别名"),
-        h("div", {}, h("span.muted", "隐藏别名："), (route.hidden_aliases || []).length ? h("span.mono", route.hidden_aliases.join(", ")) : "无隐藏别名"),
-        h("div", {}, h("span.muted", "路由目标（按顺序）：")),
-        (route.targets || []).length
-          ? h("ul", { "aria-label": `${route.id} 的路由目标`, style: { margin: "0", paddingLeft: "20px" } },
-              route.targets.map((target) => h("li.mono", `${target.provider} / ${target.key} / ${target.upstream_model}`)))
-          : h("p.muted", "尚未绑定目标 Key。"),
-      ),
+      routeDetail(route),
     ));
   }
 
