@@ -79,6 +79,8 @@ x-api-key: your-local-api-key
 | `GET/POST` | `/api/access-keys` | 仅本地 | 列出访问密钥（只给指纹）或新建一把（响应里含**明文 `key`**，仅此一次） |
 | `PUT/DELETE` | `/api/access-keys/{key_id}` | 仅本地 | 改名、启停与两份清单（**不换 key**），或删除 |
 | `POST` | `/api/access-keys/{key_id}/rotate` | 仅本地 | 换掉该访问密钥的明文（旧 key 立即失效）；新 key 仅在本次响应返回 |
+| `GET/PUT` | `/api/cpa-instances` | 仅本地 | 列出或**整体替换** CPA 实例清单（配置键 `cpa_instances`；响应含管理密钥明文，故要求完整权限） |
+| `GET` | `/api/cpa-accounts` | 仅本地 | 服务端扇出各 CPA 实例的账号与额度读数（只读、不缓存） |
 | `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
 | `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
 | `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 GitHub Releases 版本检查 |
@@ -106,10 +108,10 @@ x-api-key: your-local-api-key
 **已发布接口**的清单，不能随意增减：这些响应的形状已经对外承诺，改动会破坏既有调用方。
 新增能力因此分两类：
 
-- **管理面的正式资源**（工作空间自身的读/改/删与整包迁移、访问密钥）注册在 `/api` 之下，
-  但列在**另一份**清单（`workspacePatterns()`）里。它们没有历史版本可对照，塞进那 47 条会让
-  「这 47 条就是已发布行为」这句话失去意义。两批注册在同一棵 mux 上，因此错方法的
-  `405` / `Allow` 判定要同时看两份清单。
+- **管理面的正式资源**（工作空间自身的读/改/删与整包迁移、访问密钥、CPA 实例与账号资源）
+  注册在 `/api` 之下，但列在**另一份**清单（`workspacePatterns()`）里。它们没有历史版本可
+  对照，塞进那 47 条会让「这 47 条就是已发布行为」这句话失去意义。两批注册在同一棵 mux 上，
+  因此错方法的 `405` / `Allow` 判定要同时看两份清单。
 - **本项目自有的读数**（价格目录 `/ui/pricing.json`、自更新入口、工作空间用量
   `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`）挂在 `/ui/` 前缀下：
   它们与 `/api` 面在语义上不连续，挂 `/ui/` 既落在那份已发布清单之外，也让「不开 WebUI
@@ -1214,6 +1216,94 @@ curl -X POST http://127.0.0.1:8000/api/routes \
     ]
   }'
 ```
+
+### CPA 账号资源接口
+
+`/api/cpa-instances` 与 `/api/cpa-accounts` 把若干个
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（下称 CPA）实例的账号与额度汇总到
+一块看板上（WebUI 的「账号资源」页）。实例清单存在配置文件的顶层键 `cpa_instances` 里：
+
+```json
+{
+  "config_version": 4,
+  "cpa_instances": {
+    "cpa-a": {
+      "label": "主力 CPA",
+      "base_url": "http://127.0.0.1:8317",
+      "management_key": "your-cpa-management-key"
+    }
+  }
+}
+```
+
+`management_key` 是 CPA **管理面**（`/v0/management/*`）的密钥，不是模型调用 key。写入时
+`base_url` 去尾斜杠并要求 `http`/`https`，`management_key` 去空白且非空，`label` 缺省时用实例
+ID 兜底；实例里未知的字段原样保留（与配置整体一致：旧版本写回不该丢新字段）。这个键不在
+`/api/settings` 那批已发布字段里，因此它的增删不会牵动那份逐字对齐的契约。
+
+```bash
+# 读实例清单：响应含 config_revision 与各实例的 management_key（要求完整权限）
+curl http://127.0.0.1:8000/api/cpa-instances -H "Authorization: Bearer your-local-api-key"
+
+# 整体替换清单（不是逐条增删；config_revision 必填，防并发覆盖）
+curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
+  -H "Authorization: Bearer your-local-api-key" -H "Content-Type: application/json" \
+  -d '{"config_revision":"<上一条响应里的值>","instances":{
+        "cpa-a":{"label":"主力 CPA","base_url":"http://127.0.0.1:8317","management_key":"..."}}}'
+```
+
+`GET /api/cpa-accounts` 由 AMKR 的**服务端**替调用方去问各实例，返回归一化后的账号与额度：
+
+```json
+{
+  "fetched_at": "2026-01-01T00:00:00Z",
+  "instances": [
+    {
+      "id": "cpa-a", "label": "主力 CPA", "base_url": "http://127.0.0.1:8317",
+      "ok": true, "observed_at": "2026-01-01T00:00:00Z",
+      "accounts": [
+        {
+          "auth_index": "0", "name": "claude-1.json", "provider": "claude",
+          "email": "a@example.com", "status": "active", "disabled": false, "unavailable": false,
+          "success": 12, "failed": 1, "supports_quota": false,
+          "windows": [
+            {"key": "claude/5h", "label": "5 小时", "remaining": 0.58,
+             "reset_at": "2027-01-15T08:00:00Z", "source": "passive"}
+          ],
+          "signals": {"Anthropic-Ratelimit-Unified-5h-Utilization": "0.42"}
+        }
+      ]
+    },
+    {"id": "cpa-b", "label": "备用 CPA", "base_url": "http://10.0.0.9:8317",
+     "ok": false, "error": "无法连接 CPA: ... connection refused", "accounts": []}
+  ]
+}
+```
+
+口径与边界：
+
+- **为什么由服务端去问**：CPA 的管理接口与 AMKR 不同源、也没有 CORS 头，浏览器直接请求必被
+  拦；而 `management_key` 是能改 CPA 配置的凭据，不该长期放进浏览器。请求只发
+  `Authorization: Bearer <management_key>` 一种凭据头。
+- **只读、不缓存**：只调 CPA 的 `GET /v0/management/auth-files` 与
+  `POST /v0/management/quota/fetch`，不改 CPA 的任何状态，AMKR 侧也不留副本——看板上的数字
+  与 CPA 里的一致，没有中间层会过期。因此**没有**轮询：每次调用都是一次真实的扇出。
+- **额度的两个来源**（`windows[].source`）：`passive` 是 CPA 从上游响应头采到并缓存的快照
+  （Anthropic 的 `anthropic-ratelimit-unified-*`、Codex 的 `x-codex-*`，白名单见 CPA 的
+  `sdk/cliproxy/auth/quota_signals.go`）；`quota` 是现场 `quota/fetch` 的归一化结果。同一账号
+  两者都有时**后者覆盖前者**——它们算的是同一件事，而现场值更新，混起来会出现一半新一半旧的
+  进度条。两条通道都不需要 AMKR 自己去请求上游。
+- **`remaining` 是剩余比例**（0..1），不是已用；`reset_at` 归一成 RFC3339。
+- **只有 `supports_quota` 的账号会被额外问一次额度**：CPA 没有额度提供者时回
+  `501 no quota provider available for credential`。此时若该账号已有被动窗口，`quota_error`
+  为空（不构成故障，报出来只是噪音）；一个窗口都没有时才会带上 `quota_error`。
+- **失败是逐实例的**：某个实例连不上、管理密钥不对或条目残缺，只让它的 `error` 有值，其余实例
+  照常返回。整个扇出有 60 秒总预算，到点未回的账号按无额度处理。
+- **只看不拦**：这些读数**不参与** AMKR 的 Key 冷却与失败切换。AMKR 路由的是它自己的上游 Key，
+  与 CPA 侧的账号额度没有耦合关系；额度耗尽该由 CPA 自己的冷却机制处理。
+
+额度通道的来路与官方程度（哪些 provider 有得读、哪些只能靠本地语言服务器）见
+[`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md)。
 
 ## 状态码与错误格式
 
