@@ -270,6 +270,8 @@ amkr --version
 
 `--service` 的取值为 `install`、`install-user`、`uninstall`、`start`、`stop`、`restart`、`status`，以及对应的 `*-elevated` 变体（只在 Windows 上有意义，用于 UAC 提权）。`amkr --help` 会打印用法摘要；从源码构建、没有把二进制放进 PATH 时，把上面的 `amkr` 换成 `./amkr`。
 
+版本检查与自更新（`--check-update` / `--update`）优先直连 GitHub，直连失败时自动回退到公共镜像加速地址（`gh-proxy` 形态）——被阻断的网络下不会再停在一个 `dial tcp ... timeout` 上。可用 `AMKR_GITHUB_MIRROR` 指定自建前缀、或设成空串只走直连；设了 `HTTPS_PROXY` 则请求直接走代理。见 [CLI 文档的「版本检查与更新」](docs/CLI.md#版本检查与更新)。
+
 ## 配置示例
 
 ```json

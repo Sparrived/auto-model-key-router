@@ -240,6 +240,38 @@ amkr --config router-config.json --update
 
 因为第 5 步由助手完成，`--update` 执行完就可以退出，服务会自行恢复。
 
+第 1、2 步都可能因为**GitHub 直连不可达**而失败（典型报错是
+`dial tcp 20.205.243.166:443: connectex: ...`，常见于只封了 `github.com` 而没有封
+`api.github.com` 的网络）。此时程序不会硬等重试，而是按**直连 → 镜像加速地址**的顺序
+换路：直连永远优先，只有在它失败之后才使用公共加速前缀（`gh-proxy` 形态，把原始地址
+原样拼在前缀之后）。这条回退对 `--check-update`、`--update` 与 WebUI 的
+`POST /api/update/check`、`POST /ui/update/apply` 都生效。
+
+用 `AMKR_GITHUB_MIRROR` 控制这份前缀列表，取值是逗号分隔的前缀：
+
+```bash
+# 未设置：用内置的公共加速前缀兜底（普通用户的默认体验）
+amkr --update
+
+# 指向自建反代：完全掌控中转方，推荐在受限网络里长期使用
+AMKR_GITHUB_MIRROR=https://mirror.example.com/ amkr --update
+
+# 设为空串：关闭镜像回退，只走直连（例如只允许白名单出口的内网）
+AMKR_GITHUB_MIRROR= amkr --update
+
+# 也可以不改代码，直接让请求走代理（Go 的默认传输层认这两个变量）
+HTTPS_PROXY=http://127.0.0.1:7890 amkr --update
+```
+
+**信任代价**：产物与校验和各自独立地走这条回退，因此只要 GitHub 有一条通，校验和拿到的
+就是 GitHub 的原件；两边都只能走镜像时，`checksums.txt` 同样来自中转方，SHA-256 校验就
+只剩「防传输损坏」的作用，不再是「防中转方替换」。要在受限网络里长期更新，建议把
+`AMKR_GITHUB_MIRROR` 指向自己信任的反代。
+
+公共加速前缀是第三方服务，可能限流、改址或下线；它们只影响"能不能更新"，失败时会退回
+上面的更新失败提示。该变量只作用于 `amkr` 自身的版本检查与自更新，安装脚本
+（`install.ps1` / `install.sh`）仍直连 GitHub。
+
 **权限限制**：Windows 上若服务以 SYSTEM 计划任务运行，普通用户既查不到该任务
 （`schtasks /Query` 会返回「拒绝访问」）也停不掉它。此时 `--update` 仍会完成替换，
 但不会启动助手，并明确提示需要以管理员身份执行 `amkr --service restart`，而不会
