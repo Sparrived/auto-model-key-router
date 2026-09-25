@@ -103,15 +103,33 @@ const ROUTES = [
   { id: "claude-sonnet-4-5", targets: [{ provider: "local-lab", key: "a", upstream_model: "claude-sonnet-4-5" }] },
 ];
 
-global.fetch = async (url) => {
+// 请求流水：新增 Key 那一节要断言"真的写到了服务端"，而不只是"页面重画了一下"。
+const requests = [];
+global.fetch = async (url, options = {}) => {
   const target = String(url);
-  let payload = {};
-  if (target.includes("/api/providers")) {
-    payload = { providers: PROVIDERS, config_revision: "rev-000000000000" };
-  } else if (target.includes("/api/routes")) {
-    payload = { routes: ROUTES, config_revision: "rev-000000000000" };
+  const method = (options.method || "GET").toUpperCase();
+  const payload = options.body ? JSON.parse(options.body) : null;
+  requests.push(`${method} ${target.split("?")[0].replace(/^.*\/ui/, "")}`);
+  // 新建 Key：像服务端一样把这把 Key 真的加进配置，后续的重新取数必须能拿到它。
+  if (method === "POST" && /\/api\/providers\/[^/]+\/keys$/.test(target)) {
+    const provider = PROVIDERS.find((item) => target.includes(`/providers/${item.id}/keys`));
+    provider.keys = [...(provider.keys || []), { name: payload.name, enabled: true, capabilities: { models: ["gpt-5.5"], errors: {} } }];
+    return { ok: true, status: 201, async text() { return JSON.stringify({ key: { name: payload.name }, config_revision: "rev-000000000001" }); } };
   }
-  return { ok: true, status: 200, async text() { return JSON.stringify(payload); } };
+  if (method === "POST" && target.endsWith("/probe")) {
+    return { ok: true, status: 200, async text() { return JSON.stringify({ config_revision: "rev-000000000001" }); } };
+  }
+  // 新建的 Key 还没有任何绑定，所以这份清单是空的。
+  if (/\/keys\/[^/]+\/models$/.test(target)) {
+    return { ok: true, status: 200, async text() { return JSON.stringify({ models: [] }); } };
+  }
+  let payloadBody = {};
+  if (target.includes("/api/providers")) {
+    payloadBody = { providers: PROVIDERS, config_revision: "rev-000000000000" };
+  } else if (target.includes("/api/routes")) {
+    payloadBody = { routes: ROUTES, config_revision: "rev-000000000000" };
+  }
+  return { ok: true, status: 200, async text() { return JSON.stringify(payloadBody); } };
 };
 global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 global.location = { pathname: "/ui/", hash: "#/providers" };
@@ -254,6 +272,37 @@ check("brand_unknown_is_null", brandForProvider("local-lab", "https://gateway.in
 check("brand_local_by_port", brandForProvider("local", "http://127.0.0.1:11434") === "ollama");
 check("brand_handles_garbage_url", brandForProvider("vllm", "::not a url::") === "vllm");
 check("brand_trailing_slash_ok", brandForProvider("x", "https://api.groq.com/openai/") === "groq");
+
+// —— 新增 Key：页面必须自己更新，不能要求手动刷新 ——
+//
+// 锁的是一个**静默**故障：新增流程结束时会给「服务模型」编辑器塞一份状态，那份状态若不
+// 完整，modelEditor() 会在重画时抛 TypeError，而 draw() 抛错的后果是**整页一个字都不更新**
+// ——Key 已经写进服务端了（这里的假 fetch 也真的改了配置），界面却还停在加之前的样子，
+// 只有手动刷新才看得到。所以断言落在"新 Key 的行、计数、编辑器都在页面上"，而不是"发过请求"。
+// 先把上一个用例留在 body 里的对话框清掉，否则取到的会是「添加供应商」那个框。
+document.body.children = [];
+click(buttonWithText(host, "添加 Key"));
+const keyDialog = byClass(document.body, "dialog")[0];
+const keyInputs = byClass(keyDialog || new FakeNode("x"), "input");
+check("add_key_dialog_has_name_and_secret", keyInputs.length === 2, `${keyInputs.length} 个输入框`);
+keyInputs[0].value = "secondary";
+keyInputs[1].value = "sk-secondary";
+click(buttonWithText(keyDialog, "添加 Key"));
+// 新增流程在探测完成后会停 450ms 再关框重画（探针不垫片化 setTimeout，这里如实等它）。
+await new Promise((resolve) => setTimeout(resolve, 600));
+await new Promise((resolve) => setTimeout(resolve, 0));
+
+check("add_key_posts_to_server", requests.includes("POST /api/providers/openai/keys"));
+check("add_key_count_updated", host.textContent.includes("Key（2）"), host.textContent.replace(/\s+/g, " ").slice(0, 160));
+const addedRows = byTag(byClass(host, "table")[0] || new FakeNode("x"), "tr");
+check("add_key_row_appears_without_reload",
+  addedRows.some((row) => row.textContent.includes("secondary")),
+  `${addedRows.length} 行：${addedRows.map((row) => row.textContent.trim()).join(" / ")}`);
+check("add_key_drops_empty_placeholder", !findText(host, "尚无 Key。"));
+check("add_key_opens_model_editor", findText(host, "Key secondary 的服务模型"));
+check("add_key_editor_reads_bindings",
+  requests.includes("GET /api/providers/openai/keys/secondary/models") && host.textContent.includes("0 个已选"),
+  host.textContent.includes("0 个已选") ? "" : "编辑器仍停在读取中");
 
 const failed = Object.entries(checks).filter(([, value]) => value !== true);
 console.log(JSON.stringify({ checks, failed: failed.length }, null, 2));
