@@ -204,12 +204,50 @@ project 放 body）：
 
 | 端点 | 给什么 | 关键字段 |
 | --- | --- | --- |
-| `loadCodeAssist` | 只有套餐，**没有额度数字** | `currentTier` / `paidTier` / `allowedTiers` / `cloudaicompanionProject` |
+| `loadCodeAssist` | 套餐 + **Google One AI 积分余额**（没有窗口） | `currentTier` / `paidTier.{id, availableCredits[]}` / `allowedTiers` / `cloudaicompanionProject`；CPA 从 `paidTier.availableCredits[]` 里取 `creditType == "GOOGLE_ONE_AI"` 的 `creditAmount` 与 `minimumCreditAmountForUsage` |
 | `fetchAvailableModels` | **模型级**剩余额度 | `models["<model>"].quotaInfo.{remainingFraction, resetTime}`；有 daily-sandbox → daily → prod 三级回退 |
 | `retrieveUserQuotaSummary` | **5h / 7d 分组**额度 | `groups[].buckets[] = {bucketId, window, remainingFraction, resetTime, displayName, description}`，`bucketId` 形如 `gemini-5h` / `gemini-weekly` / `3p-5h` / `3p-weekly` |
 
-CPA 就是走第三条：`/v0/management/api-call` 用账号 OAuth token 代打
-`retrieveUserQuotaSummary`，对外给出 5h + 7d 两条额度条。
+**更正（2026-09 实测，CPA 7.3.17）**：第一行以前写的是「只有套餐，**没有额度数字**」——不准确。
+CPA 自己的 `internal/runtime/executor/antigravity_executor_credits.go` 正是从 `loadCodeAssist`
+的 `paidTier.availableCredits[]` 里读 Google One AI 积分（`creditAmount` /
+`minimumCreditAmountForUsage`），只是它把结果压成布尔（`Available: creditAmount >= minAmount`）
+存进 Home KV，用于「积分不够就走 credits fallback」的决策，**不对外暴露**；窗口型额度也确实
+不在这里。
+
+**CPA 本体不采集 Antigravity 的窗口额度**：`sdk/cliproxy/auth/quota_signals.go` 的
+`ProviderSupportsQuotaObservation` 白名单只有 `claude`、`codex`（main 分支加了 `devin`），
+Antigravity 落进 default，于是 auth-files 里它的 `quota.signals` 恒为空表、也没有
+`supports_quota` 字段。要看它的 5h/7d 窗口，只能在对端自己补一条查询：
+
+- **声明式探测 `quota_probe`**（CPA ≥ 7.3 的核心能力，写在凭据 metadata 里，**不需要装插件**）；
+- 或装额度插件——但官方插件商店里**没有**实现 CPA 原生 `QuotaProvider` 能力的 Antigravity 插件
+  （`antigravity-priority`、`credential-priority`、`quota-activation`、`cpa-quota-api-extension`、
+  `credential-tier-router` 全是各自探测 + 自带 UI/调度，不经过 `quota/fetch`）；
+- 或走 `/v0/management/api-call` 用账号 OAuth token 代打（第三方额度工具的做法；AMKR 不采用，
+  它只读 CPA、不主动请求上游）。
+
+`quota_probe` 的最小可用配置（实测可用）：
+
+```jsonc
+// 写在 CPA 凭据文件（如 /root/.cli-proxy-api/antigravity-<email>.json）的顶层
+"quota_probe": {
+  "url": "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+  "method": "POST",
+  "data": "{\"project\":\"<project_id>\"}",
+  "header": {
+    "Authorization": "Bearer $TOKEN$",
+    "Content-Type": "application/json",
+    "User-Agent": "antigravity/2.17.0 (linux; amd64)"
+  }
+}
+```
+
+`$TOKEN$` 由 CPA 换成该凭据的 access token，请求走该凭据自己的传输（代理）。`retrieveUserQuotaSummary`
+的响应**本身就是** CPA 的归一化形状（`groups[].buckets[].{window, remainingFraction, resetTime,
+description}`），因此**不需要写 `mapping`**。配好后 auth-files 里该账号带 `supports_quota: true`，
+`POST /v0/management/quota/fetch {"auth_index": "<...>"}` 就能取到「Gemini Models」与
+「Claude and GPT models」两组各 5h + weekly 两条窗口。
 
 **Gemini CLI 的额度接口不一样**：`retrieveUserQuota`（`v1internal`）返回
 `buckets[] {remainingAmount, remainingFraction, resetTime, tokenType, modelId}`，
@@ -290,7 +328,11 @@ CPA 就是走第三条：`/v0/management/api-call` 用账号 OAuth token 代打
   「按 Key 显示额度」的链路和 UI 跑通，再扩到需要 OAuth 的订阅账号。
 - **如果某个供应商的上游本身就是 CPA 实例**（很常见的接法），不要重复逆向：直接读它的
   `POST /v0/management/quota/fetch`（归一化额度）与 `GET /v0/management/auth-files` 的
-  `quota.signals`（被动原始信号）即可，只需管理密钥，不用碰 OAuth。
+  `quota.signals`（被动原始信号）即可，只需管理密钥，不用碰 OAuth。**两条通道的覆盖面不重合**：
+  `quota.signals` 只覆盖 claude/codex/devin，而 `quota/fetch` 取决于对端有没有额度提供者
+  （插件或 `quota_probe`）——Antigravity 属于「对端配了 probe 才有」的那类，没配时它回
+  `501 no quota provider available for credential`，界面要如实说「对端没有额度提供者」，
+  既不能显示成 0，也不能编一条出来。
 - 订阅额度只用于**观测与选路**，不要拿它当计费依据。
 
 ## 5. 参考

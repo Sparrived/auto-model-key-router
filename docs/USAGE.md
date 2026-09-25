@@ -202,18 +202,33 @@ AMKR 只知道自己上游 Key 的成功与失败，不知道那些账号**还�
 可用账号数与额度告警数（剩余不足 20%，其中已用尽的单独标出）。剩余 5% 以下的条会转成红色——
 这是"该去加号了"与"已经不好使了"的分界。
 
+额度这一列尽量把 CPA 给的细节都摆出来：窗口按**模型组**分区（Antigravity 的 Gemini 与
+Claude/GPT 各有一套 5 小时 + 周期额度，窗口名一模一样，不分区就看不出哪条管哪些模型）；上游
+附的那句说明单独成行，不顶替窗口名；账号标题下带**订阅档位**（`plan` / `tier_id`）与账号类型、
+项目 ID；`summary[]` 里的数值项（余额、积分这类不成窗口的量）按「值 + 单位」显示；每个账号
+还能展开**逐模型额度**与看到**最近十分钟的成功/失败柱**（后两者 CPA 随 auth-files 一起给，
+AMKR 不需要额外请求）。重置倒计时按 CPA 报来的 `serverTimeOffsetMs` 校正过——对端与本地
+时钟不一致时倒计时不会跟着偏。
+
 **额度从哪来**：AMKR 不自己请求上游，只问 CPA：
 
 | 来源 | 说明 |
 | --- | --- |
 | `CPA 采集`（被动） | CPA 从上游响应头抄下来的快照（Anthropic 的 `anthropic-ratelimit-unified-*`、Codex 的 `x-codex-*`），不额外发请求。**多数 CPA 安装只有这一条**：它不需要装任何插件，只要账号真的发过请求 |
-| `现场查询` | CPA 装了额度提供者时，AMKR 为每个账号单独问一次 `quota/fetch`，拿到归一化结果。同一账号两者都有时以现场值为准 |
+| `现场查询` | CPA 有额度提供者时，AMKR 为每个账号单独问一次 `quota/fetch`，拿到归一化结果（窗口 + 数值项 + 订阅档位 + 时钟偏移）。同一账号两者都有时以现场值为准 |
 
 因此**不是每个 provider 都有额度可读**：CPA 的被动采集只覆盖 Claude 与 Codex（外加 Devin，
 但 Devin 一侧没有任何头会被采下）。Antigravity / Gemini / Copilot / Kiro 这类要在上游侧主动
-查询，CPA 没有内置通道，看板上会显示「对端未配置额度查询」（对端回的 `501`）或「上游未提供
-额度信号」。哪些通道存在、官方程度如何，见
+查询，CPA 没有内置通道，看板上会显示「对端没有额度提供者（未装额度插件，也没配
+`quota_probe`）」（对端回的 `501`）或「上游未提供额度信号」。哪些通道存在、官方程度如何，见
 [`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md)。
+
+**想让 Antigravity 也出额度**：把 CPA 升到 ≥ 7.3，然后在该账号的凭据文件里加一条**声明式
+探测**（不用装插件）——`quota_probe` 指向 `v1internal:retrieveUserQuotaSummary`，用 `$TOKEN$`
+让 CPA 注入该账号的 access token；响应本身已经是 CPA 的归一化形状，所以不必写 `mapping`。
+配好后看板上就会出现「Gemini Models」与「Claude and GPT models」两组各 5 小时 + 周期两条
+窗口。完整配方（实测的 URL、body、User-Agent 与字段）见
+[`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md) 的 3.3 节。
 
 **几个约定**：
 
