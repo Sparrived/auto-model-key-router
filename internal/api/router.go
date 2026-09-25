@@ -56,6 +56,13 @@ func (s *Server) register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/access-keys/{key_id}", s.handleDeleteAccessKey)
 	mux.HandleFunc("POST /api/access-keys/{key_id}/rotate", s.handleRotateAccessKey)
 
+	// —— CPA 账号资源（Go 侧新增，见 handlers_cpa.go 与 workspacePatterns）——
+	// 实例清单存在配置的 cpa_instances 顶层键里；账号读数是**只读**扇出，AMKR 只替
+	// 调用方去问各实例的管理面，不在本地留缓存，也不改 CPA 的任何状态。
+	mux.HandleFunc("GET /api/cpa-instances", s.handleListCPAInstances)
+	mux.HandleFunc("PUT /api/cpa-instances", s.handleReplaceCPAInstances)
+	mux.HandleFunc("GET /api/cpa-accounts", s.handleListCPAAccounts)
+
 	// —— 设置 ——
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
@@ -154,7 +161,7 @@ func routePatterns() []string {
 	}
 }
 
-// workspacePatterns 列出 Go 侧新增的 /api 路由（工作空间、访问密钥）。
+// workspacePatterns 列出 Go 侧新增的 /api 路由（工作空间、访问密钥、CPA 账号资源）。
 //
 // 名字保留 workspacePatterns 是因为工作空间是这批里最大的一块，且测试与文档都按这个
 // 名字引用它；它描述的是「参照实现没有的 /api 能力」，不只是工作空间。
@@ -193,5 +200,8 @@ func workspacePatterns() []string {
 		"PUT /api/access-keys/{key_id}",
 		"DELETE /api/access-keys/{key_id}",
 		"POST /api/access-keys/{key_id}/rotate",
+		"GET /api/cpa-instances",
+		"PUT /api/cpa-instances",
+		"GET /api/cpa-accounts",
 	}
 }

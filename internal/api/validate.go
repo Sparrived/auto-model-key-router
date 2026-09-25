@@ -283,6 +283,18 @@ var specWorkspaceImport = newModelSpec("WorkspaceImport",
 	nul("prefix", kindStr).minLenOf(1),
 )
 
+// specCPAInstances 是 CPA 实例清单的请求体（Go 侧新增，无 Python 先例）。
+//
+// instances 用 kindAnyDict：它是配置里的一整段，先原样收下再交给 configops 逐条校验
+// 并报出精确的中文错误（与 specWorkspaceImport 的 bundle 同一思路）。
+//
+// config_revision 必填：整体替换实例清单是明确的读-改-写，必须能防住「基于过期配置
+// 提交」——两个标签页各自加一个实例时，后提交的那个不该把先提交的悄悄抹掉。
+var specCPAInstances = newModelSpec("CPAInstances",
+	req("config_revision", kindStr).minLenOf(1),
+	req("instances", kindAnyDict),
+)
+
 // —— 访问密钥（Go 侧新增，取代已删除的访客模式）——
 
 // specAccessKeyCreate 是新建访问密钥请求体。
