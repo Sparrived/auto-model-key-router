@@ -76,6 +76,9 @@ func (a *App) buildHandler() http.Handler {
 		// 访客看板的读数（理由见 accesskey_usage.go）：只认访问密钥，且只回**这一把
 		// key** 自己的用量。身份完全由凭据决定，不接受任何参数指定密钥。
 		mux.HandleFunc(path+accessKeyUsagePath, a.handleAccessKeyUsage)
+		// Key 用量读数（理由见 key_usage.go）：回答「这些流量是哪把 Key 出去的」。
+		// 与 workspace-usage 同样挂 /ui/，因为 /metrics 的形状已发布、不能加字段。
+		mux.HandleFunc(path+keyUsagePath, a.handleKeyUsage)
 		a.webuiMounted = true
 	}
 

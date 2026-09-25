@@ -106,6 +106,16 @@ var workspaceUsageParams = []qParam{
 	{name: "all_history", kind: qBool, def: qBoolFalse},
 }
 
+// keyUsageParams 是 GET /ui/key-usage.json 的签名。
+//
+// 同样复用 hours + all_history 这一对，让「哪把 Key 出去了」的读数与 /metrics、
+// workspace-usage 的时间选择器语义一致。**有意增补**的读数：参照实现没有按 Key 拆分
+// 的口径，因此没有对应签名可比对，这里的取值方式只是复用既有解析器，不构成兼容性声明。
+var keyUsageParams = []qParam{
+	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	{name: "all_history", kind: qBool, def: qBoolFalse},
+}
+
 // accessKeyUsageParams 是 GET /ui/access-key-usage.json（访客看板）的签名。
 //
 // 同样复用 hours + all_history 这一对，让看板与 /metrics、workspace-usage 的时间
