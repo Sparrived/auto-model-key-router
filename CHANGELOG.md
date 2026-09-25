@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [6.2.1] - 2026-09-25
 
 ### 新增
 
@@ -18,6 +18,22 @@
   也照常问一句。影响清单的呈现与「先预演、再确认、最后真写」这条流程收在
   `webui/model-impact.js`，两页共用。回归由 `internal/api/model_cascade_test.go` 与新的
   `webui/probes/webui_model_impact_probe.mjs`（已接入 CI）钉住。
+
+- **请求形态入档，概览请求流多一列「形态」。** `request_metrics` 记的是一次请求的**结果**
+  （状态码、耗时、token），记不下「这次请求长什么样」：同一条 200 分不出是流式还是非流式、
+  走的哪条入站路径、以什么推理强度发出去——而这三件事决定了排查时该去看哪一层。现在 proxy
+  在 prepare 阶段把最终生效的推理强度记进 `RequestContext`，落库新增 `request_shape` 旁挂表
+  （`stream` / `api_format` / `reasoning_effort`），`/metrics/requests` 的 items 末尾返回这
+  三项；看板的请求流相应多一列（首行流式/非流式，次行 API 格式短标签与思考强度，悬停给出完整
+  入站路径与「未设置」）。`api_format` 存的是**入站路径**（`chat/completions`、`messages`…），
+  刻意不折算成方言名——同一条路径既可能原生透传、也可能被改写成 chat 形态，归一必然丢掉这层
+  区别；强度复用 `proxysupport.ApplyReasoningEffort` 这唯一一份优先级实现，看板显示的正是上游
+  实际收到的值，Anthropic 的 `thinking` 不参与折算（AMKR 不改写它，折算会造出上游并不认识的
+  取值）。空态区分「非流式」（`false`）与「没有形态记录」（`null`）——把 `null` 画成非流式会
+  谎报一次流式请求。用旁挂表而不是给 `request_metrics` 加列，与 `request_workspace` /
+  `request_source` 同一个理由：加列要重写建表原文，而那是旧二进制的兼容面。用例见
+  `internal/metrics/shape_test.go` 与 `internal/proxy` 的三条，看板一侧由
+  `webui_layout_probe.mjs` 的八列与四档断点断言钉住。
 
 ### 修复
 
@@ -54,6 +70,36 @@
   `0.679` / `0.865`。于是出现了自相矛盾的读数——该凭据累计 861 次请求、97.1M prompt tokens，
   看板上却是满额，用户据此会以为额度没被消耗。`quota_probe` 只支持单个 URL、没有回退，
   所以配方固定写 daily，并把三个后端的实测对照写进 `docs/SUBSCRIPTION-QUOTA.md`。
+
+- **账号资源页的额度组改回一行两个。** Antigravity 这类供应商的额度天然是两组（Gemini 一组、
+  Claude 与 GPT 一组），原先两组竖着叠、各占一整行，而额度列又被写死 44% 宽——圆环只占该列
+  左端一小截，于是「行很高、很空」，账号列的长文件名反被挤成两行、成功/失败被推到最右边脱开。
+  现在组容器改 `grid`（`repeat(auto-fit, minmax(200px, 1fr))`）并排、行高减半，额度列不再写死
+  宽度而交给表格按内容分配；组内的环行固定两列（`flex-wrap` 会按列宽把三四个窗口挤成一排，
+  百分比与窗口名连成一串小数）。探针补两条排版断言锁住这两件事。
+
+### 文档
+
+- `docs/API.md` 的「改模型会连带改掉别处的引用」拆成两节：目标消失时引用**被清理**、改名时引用
+  **跟着改**（哪些接口的哪个字段、跟哪些名字、为什么不是摘掉、为什么只跟与旧 ID 完全相同的
+  名字），并写明 `?dry_run=1` 支持哪些接口、响应形状与版本号口径；模型删除、供应商删除、路由
+  删除、工作空间模型清单、访问密钥清单各处都指向对应小节。`/metrics/requests` 的响应示例与
+  字段表补上 `stream` / `api_format` / `reasoning_effort`，逐项说明取值口径与 `null` / `false`
+  的区别。
+- `docs/SUBSCRIPTION-QUOTA.md` 更正 Antigravity 的额度口径（见上面的修复），`docs/USAGE.md`
+  的账号资源一节同步；模型路由页与供应商页的编辑器补上「改名会跟随改写引用」的说明
+  （供应商页原先对改名的影响只字未提），`README.md` 的 WebUI 页面总览说明请求流给出请求形态。
+
+### 工程
+
+- 新增 `webui/probes/webui_model_impact_probe.mjs`（已接入 CI，见上）；同时补齐
+  `release.yml` 的探针清单——那份清单自己写着「漏掉一个等于发布门禁比 CI 松」，而这次新增的
+  探针只进了 `ci.yml`，tag 上的发布门禁仍少跑一个。
+- `webui_accounts_probe.mjs` 补两条排版断言（组容器必须是 grid、环行必须固定两列）；
+  `internal/api/model_cascade_test.go` / `model_rename_test.go` 与
+  `internal/configops/references_test.go` / `impact_test.go` 分别钉住连带清理、改名跟随与
+  预演结果，`internal/metrics/shape_test.go` 与 `internal/proxy/proxy_test.go` 钉住形态落库与
+  推理强度的三级优先级。
 
 ## [6.2.0] - 2026-09-25
 
