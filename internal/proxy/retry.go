@@ -722,6 +722,11 @@ func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, re
 		record.ClientAddr = context.Request.RemoteAddr
 		record.UserAgent = context.Request.UserAgent()
 	}
+	// 请求形态（流式与否、API 格式、推理强度）同理：三个字段在 prepare 时就定了，
+	// 每次尝试写下的都是同一份读数，重试不会让它们漂移。
+	record.Stream = context.IsStream
+	record.APIFormat = context.Path
+	record.ReasoningEffort = context.ReasoningEffort
 	_ = h.metrics.Record(contextOf(context.Request), record)
 }
 

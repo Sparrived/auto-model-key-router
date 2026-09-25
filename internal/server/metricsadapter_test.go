@@ -55,6 +55,9 @@ func TestMetricsAdapterRecordFieldMapping(t *testing.T) {
 		UpstreamModelID:  &upstreamModel,
 		ClientAddr:       "127.0.0.1:50874",
 		UserAgent:        "claude-cli/1.0",
+		Stream:           true,
+		APIFormat:        "messages",
+		ReasoningEffort:  "high",
 	}
 
 	params := recordParams(record)
@@ -97,6 +100,15 @@ func TestMetricsAdapterRecordFieldMapping(t *testing.T) {
 	}
 	if params.UserAgent != "claude-cli/1.0" {
 		t.Errorf("UserAgent = %q", params.UserAgent)
+	}
+	if !params.Stream {
+		t.Error("Stream 应为 true")
+	}
+	if params.APIFormat != "messages" {
+		t.Errorf("APIFormat = %q", params.APIFormat)
+	}
+	if params.ReasoningEffort != "high" {
+		t.Errorf("ReasoningEffort = %q", params.ReasoningEffort)
 	}
 }
 

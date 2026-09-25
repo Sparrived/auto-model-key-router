@@ -177,6 +177,37 @@ const insertRequestSourceSQL = `
         INSERT OR REPLACE INTO request_source (request_id, client_addr, user_agent) VALUES (?, ?, ?)
         `
 
+// createRequestShapeTableSQL 是请求形态旁挂表的建表语句。
+//
+// 与 request_workspace / request_access_key / request_source 同构，理由相同（见
+// createWorkspaceTableSQL）：只在 sqlite_master 里多一条新表条目，request_metrics
+// 自身的建表原文与列序逐字节不变，旧二进制打开新库照常读写指标。
+//
+// **为什么需要它**：request_metrics 记的是**结果**（状态码、耗时、token），记不下
+// 「这次请求长什么样」。少了形态，事后分不出同一条 200 是流式还是非流式、走的是哪条
+// API 路径、以什么推理强度发出去的——而这三件事恰好决定了排查时该去看哪一层。
+//
+// api_format 存**入站路径**（chat/completions、messages、responses、embeddings、
+// images/*）而不折算成方言名：同一路径既可能原生透传、也可能被改写成 chat 形态，归一
+// 必然丢掉这层区别，而路径本身是稳定的分类（未知路径照原样记下，不静默归并）。
+//
+// reasoning_effort 允许为空：模型配置与请求体都没给强度时它就是 NULL，表示「没有生效
+// 的强度」，而不是某个默认档。没有 api_format 的行不写这张表：历史行与不走 proxy 的
+// 写入路径不会凭空获得一个形态，查询端把它们渲染成 null。
+const createRequestShapeTableSQL = `
+            CREATE TABLE IF NOT EXISTS request_shape (
+                request_id INTEGER PRIMARY KEY,
+                stream INTEGER NOT NULL,
+                api_format TEXT NOT NULL,
+                reasoning_effort TEXT
+            )
+            `
+
+// insertRequestShapeSQL 写入一行请求形态，与另外三张旁挂表同一次 record() 的写入。
+const insertRequestShapeSQL = `
+        INSERT OR REPLACE INTO request_shape (request_id, stream, api_format, reasoning_effort) VALUES (?, ?, ?, ?)
+        `
+
 // createIndexStatements 对应 metrics.py:929-947 的 7 条索引。
 //
 // requested_model_id / caller / provider / upstream_model 四类维度是后加的，

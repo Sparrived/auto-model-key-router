@@ -100,6 +100,12 @@ func recordParams(record proxy.MetricRecord) metrics.RecordParams {
 		// 同样不落 request_metrics，空串表示没有来源可记，落库时不写 request_source。
 		ClientAddr: record.ClientAddr,
 		UserAgent:  record.UserAgent,
+		// Stream / APIFormat / ReasoningEffort 是请求形态（有意增补，见
+		// metrics.RecordParams）：APIFormat 空串表示这次写入没有形态可记，落库时不写
+		// request_shape。
+		Stream:          record.Stream,
+		APIFormat:       record.APIFormat,
+		ReasoningEffort: record.ReasoningEffort,
 	}
 }
 

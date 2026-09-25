@@ -534,9 +534,10 @@ func seriesPointLimitExceeded(hours float64, bucketSeconds int64) bool {
 // 与 key_stats 的 recent_requests 不同，这里的 success/retried 会经过 bool()
 // 转成真正的布尔（JSON true/false），而后者原样返回整数。别把两处合并。
 //
-// 末尾三列来自两条旁挂表（workspace / client_addr / user_agent，见 store.go 的
-// RequestHistory 与 schema.go）：没有归属的行是 NULL，渲染成 JSON null 而不是空串，
-// 让「这次请求没有来源记录」与「来源是空字符串」在读端分得开。
+// 末尾六列来自三条旁挂表（workspace / client_addr / user_agent / stream / api_format /
+// reasoning_effort，见 store.go 的 RequestHistory 与 schema.go）：没有归属的行全是
+// NULL，渲染成 JSON null 而不是空串或 false——「这次请求没有形态记录」与「这次请求是
+// 非流式的」是两件事，读端必须分得开。
 func requestItem(row *sql.Rows) (*canonical.Value, error) {
 	var (
 		id                                                  int64
@@ -547,6 +548,8 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		promptTokens, completionTokens, totalTokens, cached sql.NullInt64
 		cacheCreation, cacheRead, firstTokenMS, durationMS  sql.NullInt64
 		workspace, clientAddr, userAgent                    sql.NullString
+		stream                                              sql.NullInt64
+		apiFormat, reasoningEffort                          sql.NullString
 	)
 	if err := row.Scan(
 		&id, &createdAt, &callerType, &modelID, &requestedModelID,
@@ -555,6 +558,7 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		&completionTokens, &totalTokens, &cached,
 		&cacheCreation, &cacheRead, &firstTokenMS, &durationMS,
 		&workspace, &clientAddr, &userAgent,
+		&stream, &apiFormat, &reasoningEffort,
 	); err != nil {
 		return nil, err
 	}
@@ -591,6 +595,12 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		canonical.ObjectPair{Key: "workspace", Value: nullableString(workspace)},
 		canonical.ObjectPair{Key: "client_addr", Value: nullableString(clientAddr)},
 		canonical.ObjectPair{Key: "user_agent", Value: nullableString(userAgent)},
+		// —— 请求形态（同样增补）——
+		// stream 过 nullableBool 而不是 `!= 0`：旁挂表缺行时必须给 null，给 false 会把
+		// 「没有形态记录」谎报成「这次是非流式的」。
+		canonical.ObjectPair{Key: "stream", Value: nullableBool(stream)},
+		canonical.ObjectPair{Key: "api_format", Value: nullableString(apiFormat)},
+		canonical.ObjectPair{Key: "reasoning_effort", Value: nullableString(reasoningEffort)},
 	), nil
 }
 
@@ -600,6 +610,17 @@ func nullableString(value sql.NullString) *canonical.Value {
 		return canonical.NewNull()
 	}
 	return canonical.NewString(value.String)
+}
+
+// nullableBool 把 SQL NULL 渲染成 JSON null，否则给真正的布尔。
+//
+// 与 success / retried 的区别：那两列是 NOT NULL，可以直接 `!= 0`；形态旁挂表缺行时
+// 这里必须给出 null（见 requestItem 的说明）。
+func nullableBool(value sql.NullInt64) *canonical.Value {
+	if !value.Valid {
+		return canonical.NewNull()
+	}
+	return canonical.NewBool(value.Int64 != 0)
 }
 
 // nullableInt 把 SQL NULL 渲染成 JSON null，否则给整数。

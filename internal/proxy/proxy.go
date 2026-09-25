@@ -184,6 +184,21 @@ type MetricRecord struct {
 	// 同一个取值来源。
 	ClientAddr string
 	UserAgent  string
+	// Stream / APIFormat / ReasoningEffort 描述**这次请求的形态**：是否流式、走的是哪种
+	// API 格式（入站路径，如 chat/completions、messages、responses）、最终生效的推理
+	// 强度（thinking effort）。
+	//
+	// 与 Workspace / AccessKeyID / ClientAddr 同样是**有意增补**，同样不进入
+	// request_metrics 的列，而是落到 request_shape 旁挂表（见 internal/metrics/schema.go）。
+	// request_metrics 记的是结果（状态码、耗时、token），记不下「这次请求长什么样」；
+	// 少了形态，事后分不出同一条 200 是流式还是非流式、走的哪条 API 路径、以什么强度
+	// 发出去的，而这三件事决定了排查时该去看哪一层。
+	//
+	// APIFormat 为空串表示这次写入没有形态可记（如 runtime 的流式接缝），落库时不写
+	// 这张旁挂表。
+	Stream          bool
+	APIFormat       string
+	ReasoningEffort string
 }
 
 // Options 是 Handler 的可选配置。零值即「按产品决策的默认档」。

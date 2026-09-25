@@ -590,6 +590,104 @@ func TestMetricsRowCarriesRequestSource(t *testing.T) {
 	}
 }
 
+// TestMetricsRowCarriesRequestShape 断言指标行带上请求形态（流式与否、API 格式、推理强度）。
+//
+// 形态同样不在 request_metrics 的列里（落到 request_shape 旁挂表），且与来源一样只有
+// 一个填充点（recordMetric）。这里覆盖三条容易各错一处的事：
+//   - 非流式请求的 stream 必须是 false 而不是"缺省"——两者在库里是 0 与 NULL 的区别；
+//   - api_format 是**入站路径**（不是上游路径，也不是归一后的方言名）；
+//   - reasoning_effort 取模型级配置（它覆盖载荷里已有的值），且非流式请求同样带着它。
+func TestMetricsRowCarriesRequestShape(t *testing.T) {
+	cfg := simpleChatConfig()
+	cfg.ReasoningEffortByModel = map[string]string{"vendor-model": "high"}
+	env := newTestEnv(t, cfg, Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
+	env.route("/v1/chat/completions", jsonStep(200, `{"id":"x"}`))
+	// 载荷里显式写一个更低的强度：模型级配置必须覆盖它。
+	env.request(http.MethodPost, "chat/completions",
+		`{"model":"vendor-model","reasoning_effort":"low"}`, nil)
+
+	records := env.metrics.take()
+	if len(records) != 1 {
+		t.Fatalf("指标行数: got %d want 1", len(records))
+	}
+	if records[0].Stream {
+		t.Fatal("非流式请求的 Stream 应为 false")
+	}
+	if records[0].APIFormat != "chat/completions" {
+		t.Fatalf("APIFormat = %q，期望 chat/completions", records[0].APIFormat)
+	}
+	if records[0].ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q，期望 high（模型级配置覆盖载荷）", records[0].ReasoningEffort)
+	}
+}
+
+// TestMetricsRowRequestShapeForStreaming 断言流式请求（SSE）的形态是 stream=true，
+// 且 API 格式来自入站路径而非上游路径。
+func TestMetricsRowRequestShapeForStreaming(t *testing.T) {
+	env := newTestEnv(t, simpleChatConfig(), Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
+	env.route("/v1/chat/completions", sseStep(
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+		"data: [DONE]\n\n",
+	))
+	env.request(http.MethodPost, "chat/completions",
+		`{"model":"vendor-model","messages":[],"stream":true}`, nil)
+
+	records := env.metrics.take()
+	if len(records) != 1 {
+		t.Fatalf("指标行数: got %d want 1", len(records))
+	}
+	if !records[0].Stream {
+		t.Fatal("流式请求的 Stream 应为 true")
+	}
+	if records[0].APIFormat != "chat/completions" {
+		t.Fatalf("APIFormat = %q，期望 chat/completions", records[0].APIFormat)
+	}
+	// 模型与载荷都没给强度：空串表示"没有生效的强度"，落库为 NULL。
+	if records[0].ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q，期望空串", records[0].ReasoningEffort)
+	}
+}
+
+// TestEffectiveReasoningEffort 逐条锁定三级优先级与两处刻意的留白。
+//
+// 这里测的是形态字段的**取值来源**，因此直接打这个函数；上游体那条路径的同一份优先级
+// 由 internal/proxysupport 的 TestApplyReasoningEffortPrecedence 守着，两处共用同一个
+// ApplyReasoningEffort，不会漂移。
+func TestEffectiveReasoningEffort(t *testing.T) {
+	cfg := &config.RouterConfig{ReasoningEffortByModel: map[string]string{"m1": "medium"}}
+	cases := []struct {
+		name    string
+		payload string
+		modelID string
+		want    string
+	}{
+		{"模型级覆盖载荷", `{"reasoning_effort":"low"}`, "m1", "medium"},
+		{"无模型级配置时取载荷", `{"reasoning_effort":"low"}`, "other", "low"},
+		{"从 reasoning.effort 提升", `{"reasoning":{"effort":"high"}}`, "other", "high"},
+		{"两处都没有", `{"model":"m"}`, "other", ""},
+		// Anthropic 的 thinking 不参与：折算成 reasoning_effort 会造出一个上游并不
+		// 认识的取值，宁可留空。
+		{"Anthropic thinking 不参与", `{"thinking":{"type":"enabled","budget_tokens":16000}}`, "other", ""},
+		// 非字符串强度不解释：照 str() 展示成 "true" 只会让看板多一个读不懂的词。
+		{"非字符串强度不解释", `{"reasoning_effort":true}`, "other", ""},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			payload, err := canonical.ParseString(item.payload)
+			if err != nil {
+				t.Fatalf("解析载荷: %v", err)
+			}
+			if got := effectiveReasoningEffort(payload, item.modelID, cfg); got != item.want {
+				t.Fatalf("effectiveReasoningEffort = %q，期望 %q", got, item.want)
+			}
+		})
+	}
+	// multipart 表单的载荷是 `{}`，不是对象时同样不解释（这里直接给非对象值）。
+	if got := effectiveReasoningEffort(canonical.NewString("x"), "m1", cfg); got != "" {
+		t.Fatalf("非对象载荷应返回空串，实得 %q", got)
+	}
+}
+
 // TestMetricsRowForConnectionFailure 覆盖「上游请求直接失败」：状态码为 nil，
 // failed=true，retried=true，且 first_token_ms == duration_ms。
 func TestMetricsRowForConnectionFailure(t *testing.T) {

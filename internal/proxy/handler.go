@@ -137,6 +137,35 @@ func rotatesKeys(context *RequestContext) bool {
 		!context.OnlyFirst
 }
 
+// effectiveReasoningEffort 取本次请求**最终生效**的推理强度（thinking effort）。
+//
+// 直接复用构造上游请求体那条路径上的 proxysupport.ApplyReasoningEffort，读它写进上游体
+// 的 reasoning_effort。三级优先级（模型级配置覆盖一切 → 载荷顶层 reasoning_effort →
+// 载荷 reasoning.effort）只有那一份实现：抄一遍迟早会与真正发出去的体不一致，而看板上
+// 显示的正是「上游实际收到的强度」。
+//
+// 返回空串表示没有可读的强度，落库为 NULL。载荷不是对象（multipart 表单）或该字段不是
+// 字符串时同样返回空串——数字/布尔形态的强度既不是配置值也不是合法取值，照 str() 展示成
+// "true" 只会让看板多一个读不懂的词。
+//
+// 两处刻意的留白，都不是遗漏：
+//   - Anthropic 的 thinking（{type, budget_tokens}）不参与：AMKR 不改写也不解释它，
+//     折算成 reasoning_effort 会造出一个上游并不认识的取值。原生透传时上游收到的是
+//     调用方自己写的 thinking，看板因此可能显示模型级配置值或空——那是 AMKR 侧的决策，
+//     不是上游体里的值。
+//   - 备选模型路径沿用首选 context 的这份读数：备选的强度由同一份配置与同一份载荷决定，
+//     重算一遍只会在两次克隆之间引入不一致。
+func effectiveReasoningEffort(payload *canonical.Value, modelID string, cfg *config.RouterConfig) string {
+	if !payload.IsObject() {
+		return ""
+	}
+	effort := proxysupport.ApplyReasoningEffort(payload, modelID, cfg).Lookup("reasoning_effort")
+	if !effort.IsString() {
+		return ""
+	}
+	return effort.Str
+}
+
 // prepare 完成鉴权、body 解析、路由解析与预算计算。
 //
 // 返回 nil 表示已经把错误响应写给下游。
@@ -374,6 +403,7 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		Workspace:          workspace,
 		TaskName:           taskName,
 		TaskParams:         taskParams,
+		ReasoningEffort:    effectiveReasoningEffort(payload, modelID, resources.Config),
 		FlatPayload:        flat,
 		now:                h.now,
 		upstreamCalls:      &upstreamCallCounter{max: h.maxCalls, logger: h.logger},

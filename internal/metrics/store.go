@@ -107,6 +107,15 @@ type RecordParams struct {
 	ClientAddr string
 	// UserAgent 是入站请求的 User-Agent，与 ClientAddr 同表；允许为空。
 	UserAgent string
+	// Stream / APIFormat / ReasoningEffort 描述这次请求的形态（是否流式、哪条 API 路径、
+	// 最终生效的推理强度）。
+	//
+	// APIFormat 空串表示这次写入没有形态可记（历史路径、不走 HTTP 的写入路径，以及测试
+	// 里的最小参数），此时不写 request_shape 旁挂表；Stream 与 ReasoningEffort 只在写
+	// 那张表时有意义。三者都不落 request_metrics 的列，理由见 schema.go。
+	Stream          bool
+	APIFormat       string
+	ReasoningEffort string
 }
 
 // Open 打开（必要时创建）指标库，对应 MetricsStore.__init__。
@@ -270,6 +279,10 @@ func (s *Store) initSchema() error {
 	if _, err := s.writeDB.Exec(createRequestSourceTableSQL); err != nil {
 		return err
 	}
+	// 请求形态旁挂表（理由见 schema.go）。同样按 request_id 一对一 JOIN，不需要索引。
+	if _, err := s.writeDB.Exec(createRequestShapeTableSQL); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -395,7 +408,7 @@ func (s *Store) recordSync(
 	if err != nil {
 		return err
 	}
-	// 三张旁挂表都写在这里，**必须在 writeMu 内**（调用方已持锁）：LastInsertId
+	// 四张旁挂表都写在这里，**必须在 writeMu 内**（调用方已持锁）：LastInsertId
 	// 是连接级状态，writeDB 恰好只有一条连接（SetMaxOpenConns(1)），因此这里读到
 	// 的就是刚插入的那一行——换连接池就会读到别的连接的上一次插入。
 	//
@@ -405,7 +418,8 @@ func (s *Store) recordSync(
 	// 各表独立判空：访问密钥的请求**同时**有工作空间归属（它照常带
 	// X-AMKR-Workspace），因此不能用 `if params.Workspace == ""` 提前 return，
 	// 那会把访问密钥那一行整个丢掉。
-	if params.Workspace != "" || params.AccessKeyID != "" || params.ClientAddr != "" {
+	if params.Workspace != "" || params.AccessKeyID != "" ||
+		params.ClientAddr != "" || params.APIFormat != "" {
 		requestID, err := result.LastInsertId()
 		if err != nil {
 			return err
@@ -427,6 +441,19 @@ func (s *Store) recordSync(
 		if params.ClientAddr != "" {
 			if _, err := s.writeDB.Exec(insertRequestSourceSQL,
 				requestID, params.ClientAddr, nullableText(params.UserAgent)); err != nil {
+				return err
+			}
+		}
+		// 同理：没有 API 格式的行不写形态旁挂表（无从判断它是流式还是别的）。
+		// 流式与否存 0/1 整数：SQLite 没有布尔类型，与 success / retried 同一约定。
+		if params.APIFormat != "" {
+			stream := int64(0)
+			if params.Stream {
+				stream = 1
+			}
+			if _, err := s.writeDB.Exec(insertRequestShapeSQL,
+				requestID, stream, params.APIFormat,
+				nullableText(params.ReasoningEffort)); err != nil {
 				return err
 			}
 		}
@@ -754,23 +781,25 @@ func (s *Store) RequestHistory(params RequestHistoryParams) (*canonical.Value, e
 		itemWhere = appendFilter(itemWhere, "id < ?")
 		itemParams = append(itemParams, *params.BeforeID)
 	}
-	// 两条 LEFT JOIN 取「请求来源」：工作空间与客户端地址各在一张旁挂表里，都不是
-	// request_metrics 的列（理由见 schema.go）。LEFT 而不是 INNER：没有归属的行
-	// （历史行、不走 proxy 的写入路径）必须照常出现在明细里，来源字段为 null。
+	// 三条 LEFT JOIN 取「请求的来源与形态」：工作空间、客户端地址、请求形态各在一张
+	// 旁挂表里，都不是 request_metrics 的列（理由见 schema.go）。LEFT 而不是 INNER：
+	// 没有归属的行（历史行、不走 proxy 的写入路径）必须照常出现在明细里，那些字段为 null。
 	//
 	// JOIN 条件里的 request_metrics.id 不写别名：whereSQL 用的是裸列名
 	// （见 stats.go 的 metricFilter.sql），给主表起别名会让两边的列名对不上。
-	// 两张旁挂表只有 request_id 与自己的列，不存在列名歧义。
+	// 三张旁挂表只有 request_id 与自己的列，不存在列名歧义。
 	itemQuery := "SELECT id, created_at, caller_type, model_id, requested_model_id,\n" +
 		"                   provider_id, pool_name, upstream_model_id, key_name,\n" +
 		"                   status_code, success, retried, prompt_tokens,\n" +
 		"                   completion_tokens, total_tokens, cached_tokens,\n" +
 		"                   cache_creation_input_tokens, cache_read_input_tokens,\n" +
 		"                   first_token_ms, duration_ms,\n" +
-		"                   w.workspace, s.client_addr, s.user_agent\n" +
+		"                   w.workspace, s.client_addr, s.user_agent,\n" +
+		"                   sh.stream, sh.api_format, sh.reasoning_effort\n" +
 		"            FROM request_metrics\n" +
 		"            LEFT JOIN request_workspace w ON w.request_id = request_metrics.id\n" +
-		"            LEFT JOIN request_source s ON s.request_id = request_metrics.id" +
+		"            LEFT JOIN request_source s ON s.request_id = request_metrics.id\n" +
+		"            LEFT JOIN request_shape sh ON sh.request_id = request_metrics.id" +
 		itemWhere + "\n" +
 		"            ORDER BY id DESC LIMIT ?"
 	rows, err := s.db().Query(itemQuery, append(itemParams, params.Limit+1)...)

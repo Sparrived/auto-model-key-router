@@ -56,6 +56,13 @@ type RequestContext struct {
 	TaskName   *string
 	TaskParams *canonical.Value
 
+	// ReasoningEffort 是本次请求最终生效的推理强度（thinking effort），空串表示没有
+	// 可读的强度。它在 prepare 里一次算好（见 effectiveReasoningEffort）。
+	//
+	// 纯观测项：不参与任何决策，只进 request_shape 旁挂表。放在 context 上而不是写
+	// 指标时现算，是因为算它要克隆整份载荷，而写指标是**每次尝试**一次。
+	ReasoningEffort string
+
 	// FallbackTarget 非空表示这是个备选 context（仅用于日志区分）。
 	FallbackTarget string
 
