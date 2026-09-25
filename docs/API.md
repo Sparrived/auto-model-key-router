@@ -495,7 +495,10 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
       "duration_ms": 3100,
       "workspace": "default",
       "client_addr": "127.0.0.1:50874",
-      "user_agent": "claude-cli/1.0"
+      "user_agent": "claude-cli/1.0",
+      "stream": false,
+      "api_format": "chat/completions",
+      "reasoning_effort": "high"
     }
   ],
   "next_before_id": 1235
@@ -512,6 +515,18 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 可伪造，当真来源用会让看板显示一个攻击者选定的 IP。`user_agent` 允许为 `null`（客户端可以不带
 这个头）。两者存放在旁挂表而不是 `request_metrics` 的新列，理由见
 [`docs/WORKSPACE.md`](WORKSPACE.md) 的「存储：旁挂表而不是新列」。
+
+再往后的 `stream` / `api_format` / `reasoning_effort` 是同样增补的**请求形态**（取自
+`request_shape` 旁挂表）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `stream` | boolean \| null | 这次请求是否流式（请求体 `stream: true`）。没有形态记录时为 `null`，**不是** `false` —— 「不知道」与「非流式」是两件事 |
+| `api_format` | string \| null | **入站路径**：`chat/completions`、`messages`、`responses`、`embeddings`、`images/generations`、`images/edits`。刻意不折算成方言名：同一条路径既可能原生透传、也可能被改写成 chat 形态，归一必然丢掉这层区别。未知路径原样记下 |
+| `reasoning_effort` | string \| null | 这次请求**最终生效**的推理强度：模型级 `reasoning_effort` 覆盖载荷里已有的值，否则取载荷顶层 `reasoning_effort`，再否则取载荷 `reasoning.effort`。都没给时为 `null`（没有生效的强度，而不是某个默认档） |
+
+Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_effort`：AMKR 不改写也不
+解释它，折算过去会造出一个上游并不认识的取值。
 
 当 `next_before_id` 为 `null` 时没有下一页。刷新第一页时不要携带 `before_id`。
 
