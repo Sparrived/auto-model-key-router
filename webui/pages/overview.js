@@ -53,6 +53,20 @@ const CALLER_TYPE_LABELS = {
   access_key: "访问密钥",
 };
 
+// API_FORMAT_LABELS 把入站路径翻成短标签。
+//
+// 后端记的是**入站路径**（chat/completions 等），这里只负责缩短显示，不做分类：表里
+// 没有的路径原样显示，将来接一条新路径时看板会直接露出真实路径，而不是一个看起来像
+// 已知分类的词。悬停里始终给出完整路径。
+const API_FORMAT_LABELS = {
+  "chat/completions": "Chat",
+  messages: "Messages",
+  responses: "Responses",
+  embeddings: "Embeddings",
+  "images/generations": "Images",
+  "images/edits": "Images 编辑",
+};
+
 // 页面级状态：时间范围与主图指标是用户选择，需在轮询重绘间保持。
 const state = {
   hours: 1,
@@ -560,7 +574,8 @@ function heatmapCard() {
 //
 // 每一行要回答四件事，缺一件就得去翻日志：
 //   1. 谁、从哪儿来 —— 调用方档位、工作空间、来源地址（含 User-Agent 悬停）；
-//   2. 走了哪条路 —— 请求模型 → 实际模型 → 供应商 / 上游 Key / 上游模型；
+//   2. 发了什么 —— 请求模型 → 实际模型 → 供应商 / 上游 Key / 上游模型，以及请求形态
+//      （流式与否、哪条 API 格式、什么思考强度）；
 //   3. 花了多少 Token —— 输入、输出、缓存读、合计（缓存写与未缓存输入在悬停里）；
 //   4. 结果如何 —— 成功/失败、状态码、是否重试、耗时与首字。
 // 四组信息一列一组，因此这张卡在概览里独占一整行（col-12）：半宽放不下，
@@ -618,6 +633,10 @@ function streamRow(item) {
       h("span.stream-model", { title: routeTitle(item) }, item.model_id),
       h("span.stream-meta", { title: routeTitle(item) }, routeText(item)),
     ),
+    h("div.stream-shape", { title: shapeTitle(item) },
+      h("span.stream-shape-line", {}, streamText(item)),
+      h("span.stream-shape-line.muted", {}, shapeText(item)),
+    ),
     h("div.stream-source", { title: sourceTitle(item) },
       h("span.stream-source-line", {}, sourceText(item)),
       h("span.stream-source-addr", {}, clientAddress(item.client_addr)),
@@ -670,6 +689,36 @@ function sourceText(item) {
     CALLER_TYPE_LABELS[item.caller_type] || item.caller_type,
     item.workspace,
   ].filter(Boolean).join(" · ") || "—";
+}
+
+// streamText 是形态列的首行：流式与否。
+//
+// 必须区分「非流式」与「没有记录」（null）：后端只在真正知道这次请求的形态时才记它，
+// 历史行没有记录。把 null 显示成"非流式"会谎报一次流式请求。空态用 "—"。
+function streamText(item) {
+  if (item.stream === null || item.stream === undefined) return "—";
+  return item.stream ? "流式" : "非流式";
+}
+
+// shapeText 是形态列的次行：API 格式 + 思考强度，两者都缺时给 "—"。
+function shapeText(item) {
+  return [
+    item.api_format ? (API_FORMAT_LABELS[item.api_format] || item.api_format) : null,
+    item.reasoning_effort ? `思考 ${item.reasoning_effort}` : null,
+  ].filter(Boolean).join(" · ") || "—";
+}
+
+// shapeTitle 在悬停里给出完整形态：原始路径、流式与否、思考强度（含"未设置"）。
+//
+// 短标签只用于列内；路径与强度都是排障时要照抄进命令行的值，必须能原样看到。
+function shapeTitle(item) {
+  const stream = item.stream === null || item.stream === undefined
+    ? "未记录" : (item.stream ? "是" : "否");
+  return [
+    `流式 ${stream}`,
+    `API 格式 ${item.api_format || "未记录"}`,
+    `思考强度 ${item.reasoning_effort || "未设置"}`,
+  ].join("\n");
 }
 
 // clientAddress 把 host:port 折成可读的地址：端口对"谁在用这个实例"没有信息量，
