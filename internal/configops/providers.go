@@ -112,6 +112,9 @@ func UpdateProvider(data *canonical.Value, providerID string, options UpdateProv
 		moved, _ := all.LookupOK(providerID)
 		all.DeleteKey(providerID)
 		all.SetKey(targetID, moved)
+		// 与模型改名同一件事：改名要**跟随**到引用上。模型 target 里的 provider 在下面
+		// 逐条改写，访问密钥的供应商清单在这里跟着改。
+		FollowProviderRename(data, providerID, targetID)
 		allModels, err := Models(data)
 		if err != nil {
 			return "", err

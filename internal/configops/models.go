@@ -353,9 +353,12 @@ func UpdateModel(data *canonical.Value, modelID string, options UpdateModelOptio
 		moved, _ := all.LookupOK(modelID)
 		all.DeleteKey(modelID)
 		all.SetKey(targetID, moved)
+		// 改名必须**跟随**到所有引用上。漏掉任何一处，配置层就会以「引用了未配置的
+		// 模型」拒绝整次保存——而那正是用户想做的改名；顺手把引用摘掉又等于静默减权。
 		if err := ReplaceUnifiedModelName(data, modelID, targetID); err != nil {
 			return "", err
 		}
+		FollowModelRename(data, modelID, targetID)
 	}
 	return targetID, nil
 }
