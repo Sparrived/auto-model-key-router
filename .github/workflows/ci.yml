@@ -85,6 +85,14 @@ jobs:
         # 且切换模型/展开编辑器时右侧详情要跟着换。
         run: node webui/probes/webui_routing_probe.mjs
 
+      - name: 统一模型页探针
+        # 锁住统一模型页的四条静默故障：保存成功后 saving 必须复位（否则下一次点
+        # 「编辑」拿到的是一整个禁用、按钮写着「正在保存」的表单，页面从此存不进任何
+        # 改动）、保存失败的原因必须画在当前页面上（写进被重画掉的旧节点就等于没有）、
+        # 每次进入页面都要重新取数（模型与 config_revision 会被供应商页改掉），以及
+        # unified 指向已删除的模型时必须回落成可用模型而不是把它原样发出去。
+        run: node webui/probes/webui_unified_probe.mjs
+
       - name: 可嵌入面板探针
         # 锁住面板的三条安全规则：凭据只从 URL fragment 取、绝不碰 localStorage
         # （与管理面同源，共享存储会互相覆盖凭据）、绝不发 X-AMKR-Workspace
