@@ -21,6 +21,20 @@
 
 ### 修复
 
+- **改名不再被自己的引用清单顶回来：引用跟着改名一起走。** 上一条修的是「目标没了」，
+  这条修「目标改了名」——同一批引用的另一种命运，而改名在 WebUI 上就是两个普通操作：
+  模型路由页改「对外名称」、供应商页改「供应商名称」。原先只有 `unified_model`（模型）
+  与模型 `targets[].provider`（供应商）跟着改，`access_keys.<id>.models` /
+  `.providers`、`workspaces.<空间>.models`、`tasks.*.model` / `fallback_model` 都留着旧
+  名字，于是改完名之后配置层以 `access_keys.public.models[0] 引用了未配置的模型` /
+  `access_keys.public.providers[0] 引用了未配置的供应商` 拒绝整次保存——用户想做的恰恰
+  是这次改名。现在新增 `FollowModelRename` / `FollowProviderRename`，在
+  `UpdateModel` / `UpdateProvider` 的改名分支里把这些引用一并改成新名字。刻意不是「顺手
+  摘掉」：模型只是换了个名字，那把访问密钥并没有失去权限，摘掉等于把一次改名变成一次
+  静默减权。只改与旧 ID **完全相同**的那些名字，清单与任务里写着的别名不随 ID 改名失效，
+  跟着改反而会把一个仍然有效的别名改没。用例见 `internal/configops/references_test.go`
+  与 `internal/api/model_rename_test.go`（两条用例都先确认在去掉修复后会失败）。
+
 - **删模型不再被「引用了未配置的模型」顶回来。** `access_keys.<id>.models`、
   `access_keys.<id>.providers` 与 `workspaces.<空间>.models` 和任务、`unified_model` 一样是
   **引用**，但不在既有的引用修复里。于是在供应商页取消勾选一个只绑在这把 Key 上的模型、
@@ -30,7 +44,8 @@
   之前（后者要先能完整解析一遍候选配置才敢改，残留的失效引用会让那次解析直接失败）。
   摘空时**保留空数组**而不删字段：这两份清单是三态的，字段缺失或 `null` 表示「不限制」、
   `[]` 表示「一个都不许」，删字段等于把禁令松开，那是扩权。用例见
-  `internal/api/model_cascade_test.go`（连带清理与 `providers` 清单各一条）。
+  `internal/api/model_cascade_test.go`（连带清理与 `providers` 清单各一条）与
+  `internal/configops/references_test.go`。
 
 - **Antigravity 的额度要问 `daily-cloudcode-pa`，问 prod 会永远显示满额。** 账号资源看板
   给 Antigravity 配的那条 `quota_probe` 原先指向 `cloudcode-pa.googleapis.com`（Code Assist

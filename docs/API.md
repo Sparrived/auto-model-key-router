@@ -579,9 +579,27 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 
 模型不是孤立资源：`tasks.*.model` / `fallback_model`、`workspaces.<空间>.models`、
 `access_keys.<id>.models`、`access_keys.<id>.providers`、`unified_model.*` 里都可能写着它的
-名字。删掉一个模型（或让某个模型**失去全部 `targets`**，例如取消勾选 Key 的最后一个服务
-模型、删掉那把 Key、删掉那个供应商）时，这些引用会被**一并自动清理**，而不是让整次保存
-失败：
+名字。这些引用有两种命运，取决于被引用的目标**没了**还是**改了名**。
+
+#### 改名：引用跟着一起改
+
+模型或供应商改名时（`PUT /api/models/{model_id}`、`PUT /api/routes/{route_id}` 的 `id`，
+以及 `PUT /api/providers/{provider_id}` 的 `id`），上表里的引用会**跟着改成新名字**：
+
+- 模型改名：`tasks.*.model` / `fallback_model`、`workspaces.<空间>.models`、
+  `access_keys.<id>.models` 与 `unified_model` 里指向它的名字一起改。
+- 供应商改名：模型 `targets[].provider` 与 `access_keys.<id>.providers` 一起改。
+
+跟的是**与旧 ID 完全相同**的那些名字。清单与任务里允许写别名（调用方就是用那些名字请求
+的），而别名不随 ID 改名失效，跟着改反而会把一个仍然有效的别名改没。
+
+刻意不是「顺手把旧名字摘掉」：模型只是换了个名字，引用它的那把访问密钥并没有失去权限。
+摘掉等于把一次改名变成一次静默减权，而留着旧名字会让下一次保存被校验拒绝——两种都不对。
+
+#### 消失：引用被一并清理
+
+删掉一个模型（或让某个模型**失去全部 `targets`**，例如取消勾选 Key 的最后一个服务模型、
+删掉那把 Key、删掉那个供应商）时，这些引用会被**一并自动清理**，而不是让整次保存失败：
 
 | 引用 | 清理方式 |
 | --- | --- |
@@ -653,7 +671,7 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 
 #### ModelUpdate
 
-字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`（`aliases: []` 表示清空别名）；`reasoning_effort: null` 用于清除模型级覆盖。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。
+字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`（`aliases: []` 表示清空别名）；`reasoning_effort: null` 用于清除模型级覆盖。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。改 `id` 即改名，引用这个模型的名字会跟着改（见「改模型会连带改掉别处的引用」）。
 
 #### KeyCreate
 
@@ -876,7 +894,7 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 #### `DELETE /api/models/{model_id}/keys/{key_name}`
 
-成功返回 `204 No Content`。该接口与 WebUI 模型路由页的 Key 操作等价：解绑当前模型的这条 Key 绑定。若该 Key 不再被任何模型绑定，会连带删除供应商下的这个 Key；供应商随后没有 Key 时也会一并删除。若这是模型的最后一条绑定，模型会被自动删除。
+成功返回 `204 No Content`。该接口与 WebUI 模型路由页的 Key 操作等价：解绑当前模型的这条 Key 绑定。若该 Key 不再被任何模型绑定，会连带删除供应商下的这个 Key；供应商随后没有 Key 时也会一并删除。若这是模型的最后一条绑定，模型会被自动删除，引用它的任务、工作空间与访问密钥清单同样会被清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
 
 ### 任务路由接口
 
@@ -1251,7 +1269,7 @@ v4 中 Key 与探测都以 Key 为单元：`providers.<id>` 保存 `base_url`、
 
 #### `GET/PUT/DELETE /api/providers/{provider_id}`
 
-查询、更新（`id`、`base_url`、`routes`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes` 可省略）+ `config_revision`。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。引用这些模型的访问密钥、工作空间与任务同样会被清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
+查询、更新（`id`、`base_url`、`routes`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes` 可省略）+ `config_revision`。改 `id` 即改名，模型 `targets[].provider` 与访问密钥的供应商清单会跟着改（见「改模型会连带改掉别处的引用」）。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。引用这些模型的访问密钥、工作空间与任务同样会被清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
 
 #### `GET/POST /api/providers/{provider_id}/keys`
 
@@ -1298,7 +1316,7 @@ curl -X POST http://127.0.0.1:8000/api/providers/openai/keys/main/probe \
 
 ### 路由接口
 
-`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。请求体还认 `id`（改名，会一并改写 `unified_model` 与任务里的引用）与 `aliases`（额外的可调用名）；`hidden_aliases` 已移除，请求里带上它会被当成未知字段返回 `422`。
+`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。请求体还认 `id`（改名，会一并改写 `unified_model`、任务、工作空间与访问密钥清单里的引用，见「改模型会连带改掉别处的引用」）与 `aliases`（额外的可调用名）；`hidden_aliases` 已移除，请求里带上它会被当成未知字段返回 `422`。
 
 一条路由下没有 target 就不该存在，这条不变式由服务端在各条写路径上保证：
 
