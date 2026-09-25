@@ -310,6 +310,11 @@ func (s *Store) workspaceFlowLinks(since, until *string, scope string) (*canonic
 // workspaceWindow 拼出时间窗口条件与参数。
 //
 // 用 m.created_at 限定（JOIN 后无歧义，但显式写别名更抗后续改动）。
+//
+// 返回的是以 " AND " 开头的**片段**，调用方直接接在查询串尾部——这只在 **INNER JOIN**
+// 下成立（ON 与 WHERE 对 INNER JOIN 等价）。**LEFT JOIN 不能用它**：接在 ON 后面会被
+// 当成连接条件，窗口外的行照样返回、只是右表整列被置空（看起来像"归属丢了"而不是
+// "窗口没生效"）。确实需要 LEFT JOIN 时请自己拼 WHERE，见 keyusage.go。
 func workspaceWindow(since, until *string) (string, []any) {
 	where := ""
 	parameters := make([]any, 0, 2)
