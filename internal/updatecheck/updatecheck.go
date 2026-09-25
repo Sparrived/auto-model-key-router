@@ -17,6 +17,8 @@ package updatecheck
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -147,48 +149,86 @@ type Fetcher func(url string, headers map[string]string, timeout time.Duration) 
 //
 // client 为 nil 时用 http.DefaultClient。超时通过请求 context 施加，与 Python 的
 // `urlopen(request, timeout=...)` 语义一致。
+//
+// **与参照实现的不同之处**：直连不可达时按 GitHubCandidates 自动回退到镜像前缀
+// （见 mirror.go）。超时在候选间**均分**，因此整体耗时与候选数量无关——否则「GitHub
+// 全被阻断」的用户会从等 10 秒变成等 50 秒，而他要的那个「查不到」结论一秒都没提前。
+//
+// 失败时返回**直连**的错误（附排查提示），而不是最后一个镜像的次生错误：用户要修的是
+// 自己这边的网络，镜像报的 403/502 只是症状的中转。
 func HTTPFetcher(client *http.Client) Fetcher {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	return func(url string, headers map[string]string, timeout time.Duration) (*canonical.Value, error) {
-		request, err := http.NewRequest(http.MethodGet, url, nil)
-		if err != nil {
-			return nil, err
+		candidates := candidatesFor(url)
+		perAttempt := timeout
+		if timeout > 0 && len(candidates) > 1 {
+			perAttempt = timeout / time.Duration(len(candidates))
 		}
-		for key, value := range headers {
-			request.Header.Set(key, value)
+		var directErr error
+		for index, candidate := range candidates {
+			value, err := fetchJSON(client, candidate, headers, perAttempt)
+			if err == nil {
+				return value, nil
+			}
+			if index == 0 {
+				directErr = err
+			}
 		}
-		// 与 Python 一致：整体超时覆盖取回过程。用 Client.Timeout 会污染共享 client，
-		// 因此这里只在本请求上施加。
-		if timeout > 0 {
-			ctx, cancel := context.WithTimeout(request.Context(), timeout)
-			defer cancel()
-			request = request.WithContext(ctx)
+		if directErr == nil {
+			// 只可能出现在候选为空列表时；保留一条可读的兜底错误。
+			return nil, errors.New("没有可用的下载地址 " + MirrorHint(0))
 		}
-		response, err := client.Do(request)
-		if err != nil {
-			return nil, err
-		}
-		defer response.Body.Close()
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			// Python 的 urllib 会对非 2xx 抛 HTTPError；这里给出等价的可读错误。
-			return nil, &HTTPStatusError{StatusCode: response.StatusCode, URL: url}
-		}
-		body, err := io.ReadAll(response.Body)
-		if err != nil {
-			return nil, err
-		}
-		parsed, err := canonical.Parse(body)
-		if err != nil {
-			// 错误文本与 Python 的 json.JSONDecodeError 不同（见 CheckLatestPyPI 的说明）。
-			return nil, err
-		}
-		if !parsed.IsObject() {
-			return nil, errNotJSONObject
-		}
-		return parsed, nil
+		return nil, fmt.Errorf("%w %s", directErr, MirrorHint(len(candidates)-1))
 	}
+}
+
+// candidatesFor 是候选地址的来源。
+//
+// 抽成变量而不是直接调 GitHubCandidates：测试要注入两个**本地**地址（一个必然失败、
+// 一个必然成功）来验证回退，而 GitHubCandidates 只对 github.com/api.github.com 展开，
+// 注入不进去——真去连 GitHub 的测试既慢又要求联网。生产代码从不改写它。
+var candidatesFor = GitHubCandidates
+
+// fetchJSON 对**单个**地址完成一次取回。非 2xx、非 JSON、非对象都算失败。
+func fetchJSON(client *http.Client, url string, headers map[string]string, timeout time.Duration) (*canonical.Value, error) {
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	// 与 Python 一致：整体超时覆盖取回过程。用 Client.Timeout 会污染共享 client，
+	// 因此这里只在本请求上施加。
+	if timeout > 0 {
+		ctx, cancel := context.WithTimeout(request.Context(), timeout)
+		defer cancel()
+		request = request.WithContext(ctx)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Python 的 urllib 会对非 2xx 抛 HTTPError；这里给出等价的可读错误。
+		return nil, &HTTPStatusError{StatusCode: response.StatusCode, URL: url}
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := canonical.Parse(body)
+	if err != nil {
+		// 错误文本与 Python 的 json.JSONDecodeError 不同（见 CheckLatestPyPI 的说明）。
+		return nil, err
+	}
+	if !parsed.IsObject() {
+		return nil, errNotJSONObject
+	}
+	return parsed, nil
 }
 
 // HTTPStatusError 表示上游返回非 2xx。
