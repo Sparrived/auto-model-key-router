@@ -58,7 +58,7 @@ irm https://raw.githubusercontent.com/Sparrived/auto-model-key-router/master/scr
 
 ```bash
 docker run -d --name amkr -p 8000:8000 -v amkr-data:/data \
-  ghcr.io/sparrived/auto-model-key-router:6.0.1
+  ghcr.io/sparrived/auto-model-key-router:6.1.0
 ```
 
 也可以自己从仓库构建镜像：
