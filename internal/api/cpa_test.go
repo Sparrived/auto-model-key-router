@@ -331,15 +331,34 @@ func TestListCPAAccountsAggregates(t *testing.T) {
 			{
 				"auth_index": "1", "name": "codex-1.json", "provider": "codex",
 				"status": "active", "supports_quota": true, "quota_provider": "codex",
+				"account_type": "oauth", "project_id": "proj-1",
 				"quota": map[string]any{"signals": map[string]any{
 					"X-Codex-Primary-Used-Percent": "58",
 				}},
+				// 逐模型额度：CPA 只在支持按模型观测的 provider 上给这段，看板据此展开。
+				"model_quotas": map[string]any{
+					"gpt-6-luna": map[string]any{
+						"observed_at": "2026-01-01T00:00:00Z",
+						"signals": map[string]any{
+							"X-Codex-Primary-Used-Percent":   "90",
+							"X-Codex-Primary-Window-Minutes": "300",
+						},
+					},
+				},
+				"recent_requests": []map[string]any{
+					{"time": "13:20-13:30", "success": 3, "failed": 1},
+					{"time": "13:30-13:40", "success": 0, "failed": 0},
+				},
 			},
 			{"auth_index": "2", "name": "gemini-1.json", "provider": "gemini", "status": "active"},
 		},
 		quota: map[string]any{
 			"1": map[string]any{
-				"subscription": map[string]any{"plan": "Pro"},
+				"subscription":       map[string]any{"plan": "Pro", "tierId": "pro-tier"},
+				"serverTimeOffsetMs": -674,
+				"summary": []map[string]any{
+					{"key": "credits", "label": "剩余积分", "value": 12.5, "unit": "credit"},
+				},
 				"groups": []any{map[string]any{
 					"displayName": "ChatGPT",
 					"buckets": []any{map[string]any{
@@ -396,20 +415,120 @@ func TestListCPAAccountsAggregates(t *testing.T) {
 		t.Fatalf("codex 应只有一个现场窗口: %+v", codex.Windows)
 	}
 	window := codex.Windows[0]
-	if window.Source != "quota" || window.Remaining != 0.25 || window.Label != "5 小时窗口" {
+	if window.Source != "quota" || window.Remaining != 0.25 {
 		t.Errorf("现场额度应覆盖被动信号: %+v", window)
+	}
+	// label 取窗口名、上游那句说明单独落在 description。以前 label 优先取 description，
+	// 于是同一个东西在上一条账号上显示「5h」、在这一条上显示整句英文说明。
+	if window.Label != "primary" || window.Window != "primary" || window.Group != "ChatGPT" {
+		t.Errorf("现场窗口应带窗口名与所属分组: %+v", window)
+	}
+	if window.Description != "5 小时窗口" {
+		t.Errorf("上游说明应落在 description 而不是 label: %+v", window)
 	}
 	if window.ResetAt != "2027-01-15T08:00:00Z" {
 		t.Errorf("重置时间未透传: %q", window.ResetAt)
 	}
-	if codex.Plan != "Pro" {
-		t.Errorf("订阅档位未透传: %q", codex.Plan)
+	if codex.Plan != "Pro" || codex.TierID != "pro-tier" {
+		t.Errorf("订阅档位未透传: plan=%q tier=%q", codex.Plan, codex.TierID)
+	}
+	if codex.ServerTimeOffsetMs != -674 {
+		t.Errorf("对端时钟偏移未透传: %d", codex.ServerTimeOffsetMs)
+	}
+	if len(codex.Summary) != 1 || codex.Summary[0].Key != "credits" ||
+		!closeTo(codex.Summary[0].Value, 12.5) || codex.Summary[0].Unit != "credit" {
+		t.Errorf("额度数值项未透传（含单位）: %+v", codex.Summary)
+	}
+	if codex.AccountType != "oauth" || codex.ProjectID != "proj-1" {
+		t.Errorf("账号类型与项目未透传: %+v", codex)
+	}
+	if len(codex.RecentRequests) != 2 || codex.RecentRequests[0].Success != 3 || codex.RecentRequests[0].Failed != 1 {
+		t.Errorf("最近请求桶未透传: %+v", codex.RecentRequests)
+	}
+	// 逐模型额度：解析口径与汇总行共用一份代码，因此 90% 已用 → 剩 0.10、标签同样是「5 小时」。
+	if len(codex.ModelQuotas) != 1 {
+		t.Fatalf("逐模型额度未透传: %+v", codex.ModelQuotas)
+	}
+	modelQuota, ok := codex.ModelQuotas["gpt-6-luna"]
+	if !ok {
+		t.Fatalf("逐模型额度缺 gpt-6-luna: %+v", codex.ModelQuotas)
+	}
+	if modelQuota.ObservedAt != "2026-01-01T00:00:00Z" {
+		t.Errorf("逐模型额度应带观测时间: %+v", modelQuota)
+	}
+	if len(modelQuota.Windows) != 1 || !closeTo(modelQuota.Windows[0].Remaining, 0.10) ||
+		modelQuota.Windows[0].Label != "5 小时" || modelQuota.Windows[0].Source != "passive" {
+		t.Errorf("逐模型窗口的解析口径应与汇总一致: %+v", modelQuota.Windows)
 	}
 
 	// gemini：两条通道都没有，看板要如实显示「没有窗口」，而不是编一个。
 	gemini := byName["gemini-1.json"]
 	if len(gemini.Windows) != 0 || gemini.QuotaError != "" {
 		t.Errorf("既没被动信号也不支持额度探测时不该报错: %+v", gemini)
+	}
+}
+
+// TestQuotaWindowLabel 钉住现场窗口的标签话术。
+//
+// 与被动窗口（claude/codex 的响应头）用同一套词：同一页上一条写「5 小时」、另一条写
+// 「5h」会让人以为是两种东西。认不出的窗口名原样保留——把季度窗猜成「7 天」比不猜更糟。
+func TestQuotaWindowLabel(t *testing.T) {
+	cases := map[string]string{
+		"5h":            "5 小时",
+		"5hours":        "5 小时",
+		"weekly":        "7 天",
+		"7D":            "7 天",
+		"monthly":       "30 天",
+		"primary":       "primary",
+		"":              "",
+		"quarterly-90d": "quarterly-90d",
+	}
+	for input, want := range cases {
+		if got := quotaWindowLabel(input); got != want {
+			t.Errorf("quotaWindowLabel(%q) = %q，期望 %q", input, got, want)
+		}
+	}
+}
+
+// TestListCPAAccountsSummaryWithoutWindows 钉住「只回数值项、不回窗口」的响应也会被采纳。
+//
+// 计费类额度插件常常只给余额、积分这种不成窗口的量。如果只在「有窗口」时才收下结果，
+// 这些读数会被静默丢掉——而它们往往正是那个插件存在的唯一理由。
+func TestListCPAAccountsSummaryWithoutWindows(t *testing.T) {
+	stub := cpaStub(t, cpaStubSpec{
+		files: []map[string]any{
+			{
+				"auth_index": "1", "name": "claude-1.json", "provider": "claude",
+				"status": "active", "supports_quota": true, "quota_provider": "claude",
+			},
+		},
+		quota: map[string]any{
+			"1": map[string]any{
+				"subscription": map[string]any{"plan": "Team"},
+				"summary": []map[string]any{
+					{"key": "balance", "label": "余额", "value": 3.5, "unit": "USD", "currency": "USD"},
+				},
+			},
+		},
+	})
+	server := cpaServer(t, `{"cpa-a":{"label":"主力","base_url":"`+stub.URL+`","management_key":"mk-1"}}`)
+	report := listCPAAccounts(t, server)
+
+	if len(report.Instances) != 1 || len(report.Instances[0].Accounts) != 1 {
+		t.Fatalf("扇出形状不对: %+v", report.Instances)
+	}
+	account := report.Instances[0].Accounts[0]
+	if account.QuotaError != "" {
+		t.Errorf("探到数值项就不该报错: %q", account.QuotaError)
+	}
+	if len(account.Summary) != 1 || account.Summary[0].Currency != "USD" {
+		t.Errorf("只回数值项的响应也应被采纳: %+v", account.Summary)
+	}
+	if account.Plan != "Team" {
+		t.Errorf("数值项响应里的订阅档位也该透传: %q", account.Plan)
+	}
+	if len(account.Windows) != 0 {
+		t.Errorf("没有窗口时不该编一个: %+v", account.Windows)
 	}
 }
 

@@ -17,13 +17,43 @@ import (
 // source 标出窗口的来路，看板上必须能分辨：
 //   - passive —— CPA 从上游响应头上抄下来的（不额外发请求，但可能已经是几小时前的）；
 //   - quota   —— 现场问来的（新，但要为每个账号多发一次请求）。
+//
+// 除了画进度条要的 label/remaining，窗口还带上它的**来路**：window 是上游的原始窗口名
+// （`5h`/`weekly`/`primary`），group 是 CPA 归一化额度里的模型组（`Gemini Models`、
+// `Claude and GPT models`），description 是上游附的说明文本。看板因此能按组分区显示，
+// 也能把「还有多少」与「为什么是这么多」分开呈现——Antigravity 的双组双窗口正是靠
+// group 才说得清：Gemini 与 Claude/GPT 各有一套 5 小时 + 周期额度。
 type cpaQuotaWindow struct {
-	Key       string  `json:"key"`
-	Label     string  `json:"label"`
-	Remaining float64 `json:"remaining"`
-	ResetAt   string  `json:"reset_at,omitempty"`
-	Status    string  `json:"status,omitempty"`
-	Source    string  `json:"source"`
+	Key         string  `json:"key"`
+	Label       string  `json:"label"`
+	Window      string  `json:"window,omitempty"`
+	Group       string  `json:"group,omitempty"`
+	Description string  `json:"description,omitempty"`
+	Remaining   float64 `json:"remaining"`
+	ResetAt     string  `json:"reset_at,omitempty"`
+	Status      string  `json:"status,omitempty"`
+	Source      string  `json:"source"`
+}
+
+// quotaWindowLabel 把上游的窗口名归一成界面上那套话术。
+//
+// 被动窗口（claude/codex 的响应头）早就在说「5 小时」「7 天」，而现场额度（quota/fetch）
+// 回的是 `5h`/`weekly` 这种机器名。同一页上两种写法会让人以为是两回事，所以这里统一一次。
+//
+// 认不出来的原样返回，**不做猜测**：把 `weekly` 猜成「7 天」是对的，但把月窗、季度窗也
+// 套上同一个词就是编数据了；宁可显示上游原文，让看板保留「这是我没见过的东西」这个信息。
+func quotaWindowLabel(window string) string {
+	trimmed := strings.TrimSpace(window)
+	switch strings.ToLower(trimmed) {
+	case "5h", "5hr", "5hrs", "5hour", "5hours", "five_hour", "fivehour":
+		return "5 小时"
+	case "weekly", "week", "7d", "7day", "7days":
+		return "7 天"
+	case "monthly", "month", "30d", "30day", "30days":
+		return "30 天"
+	default:
+		return trimmed
+	}
 }
 
 // claudeWindowSpecs 是 Anthropic 统一额度头的三个窗口。

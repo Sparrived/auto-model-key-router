@@ -126,6 +126,8 @@ type cpaAccount struct {
 	AuthIndex     string            `json:"auth_index"`
 	Name          string            `json:"name"`
 	Provider      string            `json:"provider"`
+	AccountType   string            `json:"account_type,omitempty"`
+	ProjectID     string            `json:"project_id,omitempty"`
 	Label         string            `json:"label,omitempty"`
 	Email         string            `json:"email,omitempty"`
 	Status        string            `json:"status,omitempty"`
@@ -137,10 +139,53 @@ type cpaAccount struct {
 	SupportsQuota bool              `json:"supports_quota"`
 	QuotaProvider string            `json:"quota_provider,omitempty"`
 	Plan          string            `json:"plan,omitempty"`
+	TierID        string            `json:"tier_id,omitempty"`
 	Windows       []cpaQuotaWindow  `json:"windows"`
 	Signals       map[string]string `json:"signals,omitempty"`
-	Cooldowns     json.RawMessage   `json:"cooldowns,omitempty"`
-	QuotaError    string            `json:"quota_error,omitempty"`
+	// ModelQuotas 是按模型维度的被动额度（CPA 的 model_quotas）。claude/codex 这类
+	// 「每个模型各自一组头」的 provider 会给出它，看板因此能展开到逐模型。
+	ModelQuotas map[string]cpaModelQuota `json:"model_quotas,omitempty"`
+	// Summary 是归一化额度里的数值项（CPA 的 summary[]）：额度插件用它回余额、积分、
+	// 计费系数这类**不成窗口**的量。CPA 自己不带，只有插件或声明式探测会填。
+	Summary []cpaQuotaMetric `json:"summary,omitempty"`
+	// RecentRequests 是 CPA 维护的十分钟桶请求计数，看板用它画迷你趋势。
+	RecentRequests []cpaRecentRequest `json:"recent_requests,omitempty"`
+	// ServerTimeOffsetMs 是对端与本地时钟的差（CPA 的 serverTimeOffsetMs）：重置倒计时
+	// 用本地时钟算，不校正就会整体偏一段。
+	ServerTimeOffsetMs int64           `json:"server_time_offset_ms,omitempty"`
+	Cooldowns          json.RawMessage `json:"cooldowns,omitempty"`
+	QuotaError         string          `json:"quota_error,omitempty"`
+}
+
+// cpaQuotaMetric 是归一化额度里的一个数值项，对齐 CPA 的 pluginapi.QuotaMetric。
+//
+// Format/Unit/Currency 原样透传而不是在这里格式化：同一个 value 在不同单位下读法不同
+// （百分比、次数、金额），把「怎么显示」放在前端，服务端只负责别把单位弄丢。
+type cpaQuotaMetric struct {
+	Key      string  `json:"key"`
+	Label    string  `json:"label"`
+	Value    float64 `json:"value"`
+	Unit     string  `json:"unit,omitempty"`
+	Format   string  `json:"format,omitempty"`
+	Currency string  `json:"currency,omitempty"`
+}
+
+// cpaRecentRequest 是 CPA 的十分钟请求桶。
+type cpaRecentRequest struct {
+	Time    string `json:"time"`
+	Success int    `json:"success"`
+	Failed  int    `json:"failed"`
+}
+
+// cpaModelQuota 是某个模型维度的被动额度快照。
+//
+// Windows 由该模型自己的信号解析出来（复用 passiveQuotaWindows）：provider 级的
+// Signals 与 model_quotas 里的信号是同一套头，因此解析口径也必须是同一份代码，
+// 否则同一个窗口在汇总行与展开行里会显示成两个数。
+type cpaModelQuota struct {
+	ObservedAt string            `json:"observed_at,omitempty"`
+	Signals    map[string]string `json:"signals,omitempty"`
+	Windows    []cpaQuotaWindow  `json:"windows"`
 }
 
 // handleListCPAAccounts 汇总各实例的账号与额度。
@@ -213,25 +258,32 @@ func (s *Server) collectCPAInstance(ctx context.Context, instance configops.CPAI
 	report.OK = true
 	report.ObservedAt = page.ObservedAt
 	for _, file := range page.Files {
+		// provider 先取出来：复合字面量里没法引用正在声明的变量，而窗口与逐模型额度
+		// 都要按同一个 provider 解析。
+		provider := firstNonEmpty(file.Provider, file.Type)
 		account := cpaAccount{
-			AuthIndex:     file.AuthIndex,
-			Name:          file.Name,
-			Provider:      firstNonEmpty(file.Provider, file.Type),
-			Label:         file.Label,
-			Email:         file.Email,
-			Status:        file.Status,
-			StatusMessage: file.StatusMessage,
-			Disabled:      file.Disabled,
-			Unavailable:   file.Unavailable,
-			Success:       file.Success,
-			Failed:        file.Failed,
-			SupportsQuota: file.SupportsQuota,
-			QuotaProvider: file.QuotaProvider,
-			Signals:       signalTexts(file.Quota.Signals),
-			Cooldowns:     file.Cooldowns,
+			AuthIndex:      file.AuthIndex,
+			Name:           file.Name,
+			Provider:       provider,
+			AccountType:    file.AccountType,
+			ProjectID:      file.ProjectID,
+			Label:          file.Label,
+			Email:          file.Email,
+			Status:         file.Status,
+			StatusMessage:  file.StatusMessage,
+			Disabled:       file.Disabled,
+			Unavailable:    file.Unavailable,
+			Success:        file.Success,
+			Failed:         file.Failed,
+			SupportsQuota:  file.SupportsQuota,
+			QuotaProvider:  file.QuotaProvider,
+			Signals:        signalTexts(file.Quota.Signals),
+			ModelQuotas:    modelQuotaMap(provider, file.ModelQuotas),
+			RecentRequests: file.RecentRequests,
+			Cooldowns:      file.Cooldowns,
 		}
 		// 被动信号先落成窗口：即使额度探测失败或对端没有额度插件，看板也有东西可显示。
-		account.Windows = passiveQuotaWindows(account.Provider, signalsOf(file.Quota))
+		account.Windows = passiveQuotaWindows(provider, signalsOf(file.Quota))
 		report.Accounts = append(report.Accounts, account)
 	}
 
@@ -274,11 +326,17 @@ func (s *Server) fillQuotaWindows(ctx context.Context, client cpaManagementClien
 				}
 				return
 			}
+			// 探测只要成功就采纳整份结果，而不是「有窗口才采纳」：窗口、数值项与订阅
+			// 档位是同一次响应里的三样东西，只回余额、不回窗口的插件（计费类插件常见）
+			// 否则会被判成「什么都没给」。
 			if windows := quotaProbeWindows(response); len(windows) > 0 {
 				accounts[index].Windows = windows
 				accounts[index].QuotaError = ""
-				accounts[index].Plan = quotaPlan(response)
 			}
+			accounts[index].Plan = quotaPlan(response)
+			accounts[index].TierID = quotaTierID(response)
+			accounts[index].Summary = response.Summary
+			accounts[index].ServerTimeOffsetMs = response.ServerTimeOffsetMs
 		}()
 	}
 	wait.Wait()
@@ -286,28 +344,36 @@ func (s *Server) fillQuotaWindows(ctx context.Context, client cpaManagementClien
 
 // quotaProbeWindows 把 CPA 归一化额度拍平成窗口列表。
 //
-// 拍平放在服务端做：groups 是给「按供应商分组渲染」准备的中间层，而看板上一行账号
-// 就是一组窗口，让前端再拆一层只会把 CPA 的形状泄漏进页面代码。
+// 拍平而不是保留 groups 嵌套：界面上一行账号就是一串窗口，多一层嵌套只会把 CPA 的形状
+// 泄漏进页面代码。但**组名要跟着窗口走**——Antigravity 的 Gemini 与 Claude/GPT 各有
+// 一套 5 小时 + 周期额度，不带上组名，两组窗口看起来就是四条重名的条。
+//
+// label 取窗口名（归一成「5 小时」这类话术），上游给的那句说明放 description：以前
+// label 优先取 description，于是「You have used some of your weekly limit, it will
+// fully refresh in 5 days, 9 hours.」会被当成标签画在进度条旁边，而同一页的另一条
+// 写着「5h」——同一种东西两种读法。
 func quotaProbeWindows(response cpaQuotaProbeResponse) []cpaQuotaWindow {
 	windows := make([]cpaQuotaWindow, 0, len(response.Groups))
 	for groupIndex, group := range response.Groups {
+		groupName := strings.TrimSpace(group.DisplayName)
 		for bucketIndex, bucket := range group.Buckets {
-			label := bucket.Description
+			window := strings.TrimSpace(bucket.Window)
+			label := quotaWindowLabel(window)
 			if label == "" {
-				label = bucket.Window
-			}
-			if label == "" {
-				label = group.DisplayName
+				label = groupName
 			}
 			if label == "" {
 				label = fmt.Sprintf("窗口 %d", bucketIndex+1)
 			}
 			windows = append(windows, cpaQuotaWindow{
-				Key:       fmt.Sprintf("quota/%d/%d", groupIndex, bucketIndex),
-				Label:     label,
-				Remaining: clampFraction(bucket.RemainingFraction),
-				ResetAt:   quotaTimeText(bucket.ResetTime),
-				Source:    "quota",
+				Key:         fmt.Sprintf("quota/%d/%d", groupIndex, bucketIndex),
+				Label:       label,
+				Window:      window,
+				Group:       groupName,
+				Description: strings.TrimSpace(bucket.Description),
+				Remaining:   clampFraction(bucket.RemainingFraction),
+				ResetAt:     quotaTimeText(bucket.ResetTime),
+				Source:      "quota",
 			})
 		}
 	}
@@ -320,6 +386,43 @@ func quotaPlan(response cpaQuotaProbeResponse) string {
 		return ""
 	}
 	return firstNonEmpty(response.Subscription.Plan, response.Subscription.TierName)
+}
+
+// quotaTierID 取订阅档位的机器名（如 `free-tier`）。
+//
+// 与 plan 分开存：plan 是给人看的（可能被各家翻译成不同说法），tierId 是上游的稳定标识，
+// 看板拿它做「同一个套餐的不同叫法」对齐，混进 plan 就再也分不出哪个是标识了。
+func quotaTierID(response cpaQuotaProbeResponse) string {
+	if response.Subscription == nil {
+		return ""
+	}
+	return strings.TrimSpace(response.Subscription.TierID)
+}
+
+// modelQuotaMap 把 CPA 的 model_quotas 转成看板形状，并给每个模型解析出窗口。
+//
+// 复用 passiveQuotaWindows 而不是另写一份解析：model_quotas 里装的就是同一族响应头，
+// 两处口径一旦分叉，同一个窗口在汇总行与展开行里会显示成两个数。
+func modelQuotaMap(provider string, raw map[string]cpaQuotaObservation) map[string]cpaModelQuota {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]cpaModelQuota, len(raw))
+	for model, entry := range raw {
+		name := strings.TrimSpace(model)
+		if name == "" {
+			continue
+		}
+		out[name] = cpaModelQuota{
+			ObservedAt: entry.ObservedAt,
+			Signals:    signalTexts(entry.Signals),
+			Windows:    passiveQuotaWindows(provider, signalsOf(entry)),
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // signalsOf 从被动快照里取信号表。
@@ -442,6 +545,8 @@ type cpaAuthFileEntry struct {
 	Name          string              `json:"name"`
 	Type          string              `json:"type"`
 	Provider      string              `json:"provider"`
+	AccountType   string              `json:"account_type"`
+	ProjectID     string              `json:"project_id"`
 	Label         string              `json:"label"`
 	Email         string              `json:"email"`
 	Status        string              `json:"status"`
@@ -453,7 +558,11 @@ type cpaAuthFileEntry struct {
 	SupportsQuota bool                `json:"supports_quota"`
 	QuotaProvider string              `json:"quota_provider"`
 	Quota         cpaQuotaObservation `json:"quota"`
-	Cooldowns     json.RawMessage     `json:"cooldowns"`
+	// ModelQuotas 只有该 provider 支持按模型观测时才出现（CPA 的 modelQuotas 分支）。
+	ModelQuotas map[string]cpaQuotaObservation `json:"model_quotas"`
+	// RecentRequests 是 CPA 自己维护的十分钟桶，随 auth-files 一起回，不需要额外请求。
+	RecentRequests []cpaRecentRequest `json:"recent_requests"`
+	Cooldowns      json.RawMessage    `json:"cooldowns"`
 }
 
 // cpaQuotaObservation 是 CPA 采到的被动额度快照。
@@ -470,12 +579,19 @@ type cpaQuotaObservation struct {
 //
 // 字段名是 camelCase，与 CPA 的 JSON tag 一致（它同时接受 snake_case，这里只发不解析，
 // 因此认一种就够）。
+//
+// ServerTimeOffsetMs 是 CPA 与它对上游时钟的差，看板的重置倒计时按本地时钟算，带上它
+// 才能把倒计时摆正；Summary 是「不成窗口的数值项」（余额、积分、计费系数），CPA 自己
+// 不产生，只有额度插件或声明式探测会填，所以它可能为空而窗口非空，反之亦然。
 type cpaQuotaProbeResponse struct {
 	Subscription *struct {
 		Plan     string `json:"plan"`
 		TierName string `json:"tierName"`
+		TierID   string `json:"tierId"`
 	} `json:"subscription"`
-	Groups []struct {
+	Summary            []cpaQuotaMetric `json:"summary"`
+	ServerTimeOffsetMs int64            `json:"serverTimeOffsetMs"`
+	Groups             []struct {
 		DisplayName string `json:"displayName"`
 		Buckets     []struct {
 			Window            string  `json:"window"`
