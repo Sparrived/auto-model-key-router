@@ -66,6 +66,7 @@ jobs:
           node webui/probes/webui_pricing_probe.mjs
           node webui/probes/webui_providers_probe.mjs
           node webui/probes/webui_routing_probe.mjs
+          node webui/probes/webui_model_impact_probe.mjs
           node webui/probes/webui_unified_probe.mjs
           node webui/probes/webui_panel_probe.mjs
           node webui/probes/webui_layout_probe.mjs
