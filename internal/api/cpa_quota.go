@@ -50,7 +50,10 @@ func passiveQuotaWindows(provider string, signals map[string]any) []cpaQuotaWind
 	case "codex":
 		return codexPassiveWindows(signals)
 	default:
-		return nil
+		// 空数组而不是 nil：nil 会被 encoding/json 写成 null，于是同一份响应里会同时
+		// 出现 "windows":[]（认识的 provider 但没有信号）与 "windows":null（不认识的
+		// provider）两种形状，客户端少一次判空就会炸。
+		return []cpaQuotaWindow{}
 	}
 }
 

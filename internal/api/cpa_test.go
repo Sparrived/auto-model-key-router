@@ -67,7 +67,9 @@ func TestPassiveQuotaWindowsClaude(t *testing.T) {
 	}
 
 	// 其它 provider 没有被动信号可解析，必须回空而不是硬套 Anthropic 的头。
-	if got := passiveQuotaWindows("gemini", signals); got != nil {
+	// 判空而不是判 nil：函数返回空数组而非 nil（nil 会被 JSON 写成 null，见
+	// TestListCPAAccountsWindowsAreAlwaysArrays）。
+	if got := passiveQuotaWindows("gemini", signals); len(got) != 0 {
 		t.Errorf("gemini 不应解析出窗口: %+v", got)
 	}
 }
@@ -408,6 +410,35 @@ func TestListCPAAccountsAggregates(t *testing.T) {
 	gemini := byName["gemini-1.json"]
 	if len(gemini.Windows) != 0 || gemini.QuotaError != "" {
 		t.Errorf("既没被动信号也不支持额度探测时不该报错: %+v", gemini)
+	}
+}
+
+// TestListCPAAccountsWindowsAreAlwaysArrays 钉住「没有窗口」在 JSON 里的形状。
+//
+// 这个形状必须逐字节固定：encoding/json 把 nil 切片写成 null、把空切片写成 []，而
+// windows 由三条不同的路径产出（claude 被动、codex 被动、现场探测），只要有一条返回
+// nil，同一份响应里就会同时出现 "windows":[] 与 "windows":null——客户端少一次判空
+// 就会炸。本文件第一版正是如此：不认识的 provider 给了 null。
+func TestListCPAAccountsWindowsAreAlwaysArrays(t *testing.T) {
+	stub := cpaStub(t, cpaStubSpec{
+		files: []map[string]any{
+			{"auth_index": "0", "name": "gemini-1.json", "provider": "gemini", "status": "active"},
+			{"auth_index": "1", "name": "claude-1.json", "provider": "claude", "status": "active",
+				"quota": map[string]any{"signals": map[string]any{}}},
+		},
+	})
+	server := cpaServer(t, `{"cpa-a":{"label":"主力","base_url":"`+stub.URL+`","management_key":"mk-1"}}`)
+
+	recorder := callCPA(t, server, http.MethodGet, "/api/cpa-accounts", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d（%s）", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, `"windows":null`) {
+		t.Errorf("没有额度的账号要给空数组而不是 null：%s", body)
+	}
+	if got := strings.Count(body, `"windows":[]`); got != 2 {
+		t.Errorf("期望两个账号各给一个空数组，实际 %d 个：%s", got, body)
 	}
 }
 
