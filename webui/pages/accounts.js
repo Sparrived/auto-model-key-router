@@ -197,7 +197,7 @@ function quotaCell(account) {
     return h("div.stack.tight", {}, h("span.muted", quotaHint(account)), ...extras);
   }
   return h("div.stack.tight", {},
-    ...groups.map((group) => h("div.bar-list", {},
+    ...groups.map((group) => h("div.stack.tight", {},
       // 组名用内联样式而不是新加一个 CSS 类：这一页的样式表是公共资产，为一行小标题
       // 去改它（并让别处的改动跟着一起动）不划算。
       group.name
@@ -205,11 +205,15 @@ function quotaCell(account) {
           style: { fontSize: "12px", fontWeight: "500", color: "var(--md-on-surface-variant)" },
         }, group.name)
         : null,
-      ...group.windows.map((window) => windowRow(window, offset)),
+      h("div", { style: ringRowStyle }, ...group.windows.map((window) => quotaRing(window, offset))),
     )),
     ...extras,
   );
 }
+
+// 圆环行的排版：一行放下该组的所有窗口，窄屏自动折行。列间距给得比行间距大，
+// 让"同一组里的几个环"读起来是一组，而不是连成一串。
+const ringRowStyle = { display: "flex", flexWrap: "wrap", gap: "4px 18px", alignItems: "flex-start" };
 
 // 按「模型组」切分窗口。
 //
@@ -230,28 +234,97 @@ function groupWindows(windows) {
   return groups;
 }
 
-function windowRow(window, offsetMs) {
-  // clampPercent 给的是 0..1 的比例，进度条要的是百分数——先乘 100 再取整，
+// 一个窗口 = 一个圆环 + 环里的百分比 + 窗口名 + 极短的重置提示。
+//
+// 为什么不用横条：一行账号常有四个窗口（Antigravity 就是两组 × 两个窗口），横条每个占满
+// 一整行，四条就把这块撑到大半屏；圆环把这些压进两行，百分比数字直接写在环里，也不必再
+// 把读数对齐到右端。
+//
+// 上游那句说明（"You have used some of your weekly limit, it will fully refresh in
+// 5 days, 9 hours."）只进 title 提示、**不占版面**：它是"为什么只剩这么多"的解释，不是
+// 窗口名——旧版把它当标题画上去，看板上就出现了"某个窗口叫这么长一句话"的怪状，而它说的
+// 重置时间又与提示行里的倒计时重复了一遍。
+function quotaRing(window, offsetMs) {
+  // clampPercent 给的是 0..1 的比例，环里要的是百分数——先乘 100 再取整，
   // 直接 round 比例只会得到 0 或 1（本文件的第一版就这么错过）。
-  const percent = Math.round(clampPercent(window.remaining) * 100);
-  const notes = [
+  //
+  // 取整用 floor 而不是 round：round 会把「只剩 99.6%」显示成 100%，等于替上游保证
+  // 一个它没说的满额（上面那句 "You have used some of your weekly limit" 正是反例）。
+  // 但纯 floor 会踩浮点：0.29*100 在 IEEE754 里是 28.999999999999996，floor 就成了 28%，
+  // 所以要加一个 1e-9 的台阶把这类误差抬回整数。
+  const percent = Math.min(100, Math.floor(clampPercent(window.remaining) * 100 + 1e-9));
+  const details = [
     window.source === "passive" ? "CPA 采集" : "现场查询",
     window.status === "rejected" ? "已用尽" : null,
     countdownText(window.reset_at, offsetMs),
+    window.description || null,
   ].filter(Boolean);
-  return h("div.bar-row", {},
-    h("div.bar-head", {},
-      h("span.bar-name", window.label),
-      h("span.bar-value", `${percent}%`),
+  const hint = resetHintText(window.reset_at, offsetMs);
+  return h("div.ring-item", {
+    title: details.join("\n"),
+    style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "3px", minWidth: "52px" },
+  },
+    // conic-gradient 画环：实色占 percent 对应的角度，其余用描边色。内圈盖住中心，
+    // 百分比写在里面——不引 SVG（页面别处也没用），一个 div 就够。
+    h("div.quota-ring", {
+      style: {
+        width: "46px",
+        height: "46px",
+        borderRadius: "50%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: `conic-gradient(${ringColor(window.remaining)} ${(percent * 3.6).toFixed(1)}deg, var(--md-outline) 0)`,
+      },
+    },
+      h("span.quota-ring-value", {
+        style: {
+          width: "34px",
+          height: "34px",
+          borderRadius: "50%",
+          background: "var(--md-surface)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: "12px",
+          fontWeight: "500",
+          fontVariantNumeric: "tabular-nums",
+        },
+      }, `${percent}%`),
     ),
-    h("div.bar-track", {},
-      h("div.bar-fill", { class: toneClass(window.remaining), style: { width: `${percent}%` } })),
-    notes.length ? h("span.bar-value", notes.join(" · ")) : null,
-    // 上游的整句说明单独一行。它是"为什么只剩这么多"的解释（"You have used some of your
-    // weekly limit, it will fully refresh in 5 days, 9 hours."），不是窗口名——以前它被
-    // 当成 label 画在进度条旁边，把窗口名与倒计时都挤掉了。
-    window.description ? h("span.muted", window.description) : null,
+    h("span.ring-label", {
+      style: { fontSize: "12px", color: "var(--md-on-surface-variant)" },
+    }, window.label),
+    hint
+      ? h("span.ring-reset", {
+        style: { fontSize: "11px", color: "var(--md-on-surface-variant)" },
+      }, hint)
+      : null,
   );
+}
+
+// 环色分界与横条时期的 toneClass 完全一致：≤5% 红（已经不好使了）、≤20% 橙（该去加号了）、
+// 其余主色。两处必须同源，否则"什么时候该报警"会随呈现形式变。
+function ringColor(remaining) {
+  const value = clampPercent(remaining);
+  if (value <= 0.05) return "var(--md-error)";
+  if (value <= 0.2) return "#f9a825";
+  return "var(--md-primary)";
+}
+
+// 圆环下面只留一个能扫的量级（"↻ 3 小时"），完整说法在 title 里。
+// 前缀 ↻ 不能省：光写"3 小时"读者得自己猜这是"还剩 3 小时"还是"还有 3 小时重置"。
+function resetHintText(resetAt, offsetMs) {
+  if (!resetAt) return "";
+  const at = new Date(resetAt).getTime();
+  if (!Number.isFinite(at)) return "";
+  const remaining = at - (Number(offsetMs) || 0) - Date.now();
+  if (remaining <= 0) return "↻ 即将重置";
+  const minutes = Math.round(remaining / 60000);
+  if (minutes < 60) return `↻ ${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `↻ ${hours} 小时`;
+  return `↻ ${Math.floor(hours / 24)} 天`;
 }
 
 // 数值项：CPA 的 summary[] 装的是「不成窗口的量」（余额、积分、计费系数…），单位各异，
@@ -291,7 +364,7 @@ function modelQuotaDetails(account, offsetMs) {
             h("span.bar-name", model),
             windows.length ? null : h("span.bar-value", "无信号"),
           ),
-          ...windows.map((window) => windowRow(window, offsetMs)),
+          h("div", { style: ringRowStyle }, ...windows.map((window) => quotaRing(window, offsetMs))),
         );
       })),
   );
@@ -350,20 +423,11 @@ function signalDetails(signals) {
 
 // —— 读数口径 ——
 
-// 剩余比例夹到 0..1：CPA 与上游都可能给出超界值，进度条宽度按这个前提算。
+// 剩余比例夹到 0..1：CPA 与上游都可能给出超界值，圆环的角度与告警分界都按这个前提算。
 function clampPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
   return Math.max(0, Math.min(1, number));
-}
-
-// 剩余比例 → 进度条颜色。20% 以下告警、5% 以下算耗尽：这是"该去加号了"与
-// "已经不好使了"的分界，与 CPA 自己的冷却阈值无关——它只是给人看的。
-function toneClass(remaining) {
-  const value = clampPercent(remaining);
-  if (value <= 0.05) return "tone-bad";
-  if (value <= 0.2) return "tone-warn";
-  return null;
 }
 
 // 一个账号里最紧的那个窗口；没有窗口时给 null（"没有数据"与"剩 0%"是两件事）。

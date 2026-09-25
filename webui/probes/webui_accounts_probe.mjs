@@ -219,27 +219,34 @@ check("kpi_usable_excludes_disabled",
 check("kpi_low_quota_counts_drained",
   statText(3).includes("1") && statText(3).includes("其中 1 个已用尽"), statText(3));
 
-// —— 进度条画的是剩余比例，颜色随剩余走 ——
-// 4 条 = 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口：
-// 逐模型额度用的就是同一套条，条数把两处都算上，才能保证没有窗口被漏画。
-const fills = byClass(host, "bar-fill");
-check("one_bar_per_window", fills.length === 4, String(fills.length));
-check("bar_shows_remaining_18",
-  fills[0]?.style.width === "18%" && hasClass(fills[0], "tone-warn"),
-  `${fills[0]?.style.width} / ${fills[0]?.className}`);
-check("bar_shows_remaining_3_as_drained",
-  fills[1]?.style.width === "3%" && hasClass(fills[1], "tone-bad"),
-  `${fills[1]?.style.width} / ${fills[1]?.className}`);
-check("bar_healthy_has_no_alert_tone",
-  fills[2]?.style.width === "90%" && !hasClass(fills[2], "tone-warn") && !hasClass(fills[2], "tone-bad"),
-  `${fills[2]?.style.width} / ${fills[2]?.className}`);
-check("bar_marks_source_and_reset",
-  findText(host, "CPA 采集") && findText(host, "后重置") && findText(host, "已用尽"));
+// —— 圆环画的是剩余比例：角度、颜色、环里的数字三者同源 ——
+// 4 个环 = 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口：
+// 逐模型额度用的就是同一套环，数量把两处都算上，才能保证没有窗口被漏画。
+const rings = byClass(host, "quota-ring");
+const ringValues = byClass(host, "quota-ring-value").map((node) => node.textContent);
+check("one_ring_per_window", rings.length === 4, String(rings.length));
+check("ring_degrees_match_percent",
+  rings[0]?.style.background.includes("64.8deg") && ringValues[0] === "18%",
+  `${rings[0]?.style.background} / ${ringValues[0]}`);
+check("ring_warn_and_drained_colors",
+  rings[0]?.style.background.includes("#f9a825") && rings[1]?.style.background.includes("var(--md-error)"),
+  `${rings[0]?.style.background} / ${rings[1]?.style.background}`);
+check("ring_healthy_has_no_alert_color",
+  ringValues[2] === "90%" && rings[2]?.style.background.includes("var(--md-primary)") &&
+    !rings[2]?.style.background.includes("#f9a825") && !rings[2]?.style.background.includes("--md-error"),
+  `${ringValues[2]} / ${rings[2]?.style.background}`);
+// 来源、完整倒计时、上游那句说明都进 title；版面上只留极短的重置提示（"↻ 3 小时"）。
+check("ring_marks_source_and_reset",
+  hasTitle(host, "CPA 采集") && hasTitle(host, "已用尽") &&
+    hasTitle(host, "3 小时 1 分钟后重置") && findText(host, "↻ 3 小时"));
 
 // —— 额度细节：这些都是 CPA 已经给了、AMKR 以前丢掉的东西 ——
 check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
-check("window_description_kept", findText(host, "本周额度已用去大部分"));
-check("countdown_uses_server_offset", findText(host, "3 小时 1 分钟后重置"));
+// 上游那句说明（"You have used some of your weekly limit…"）只进悬停提示，不占版面：
+// 旧版把它当窗口名画在进度条旁，于是看板上出现了"某个窗口叫这么长一句话"的怪状。
+check("window_description_only_in_tooltip",
+  hasTitle(host, "本周额度已用去大部分") && !findText(host, "本周额度已用去大部分"));
+check("countdown_uses_server_offset", hasTitle(host, "3 小时 1 分钟后重置"));
 check("plan_tier_and_project_shown", findText(host, "Pro") && findText(host, "proj-1"));
 check("summary_metric_with_unit", findText(host, "剩余积分 12.5 credit"));
 check("model_quota_section", findText(host, "逐模型额度") && findText(host, "gpt-6-luna"));
