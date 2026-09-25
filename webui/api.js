@@ -230,7 +230,8 @@ export const api = {
       method: "POST",
       body: { config_revision: revision, id, targets, aliases, routing_mode: routingMode },
     }),
-  // newId 非空时同时改名（服务端会一并改写 unified_model 与任务里的引用）。
+  // newId 非空时同时改名（服务端会把引用它的名字一起改：unified_model、任务、工作空间
+  // 与访问密钥清单）。
   updateRoute: (revision, routeId, targets, aliases, routingMode, newId = null) =>
     request(`/api/routes/${encodeURIComponent(routeId)}`, {
       method: "PUT",

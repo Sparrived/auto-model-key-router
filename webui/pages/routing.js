@@ -330,7 +330,7 @@ function routeEditor(route) {
       h("label.field", h("span", "别名"), aliasInput),
       h("label.field", h("span", "路由模式"), modeSelect),
     ),
-    h("p.muted", "对外名称与别名都会出现在 /v1/models，外部请求的 model 字段写的就是它们；改名会同时改写 unified_model 与任务里的引用。"),
+    h("p.muted", "对外名称与别名都会出现在 /v1/models，外部请求的 model 字段写的就是它们；改名会同时改写 unified_model、任务、工作空间与访问密钥清单里指向它的名字。"),
     h("div", {}, h("h4", "轮询目标（按顺序）"), listHost),
     h("div", {}, h("h4", "添加目标"), addHost),
     h("div", {}, h("h4", "探测到本路由名称的 Key"), candidateHost),

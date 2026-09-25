@@ -201,6 +201,7 @@ function providerForm(provider) {
       field("供应商名称", nameInput),
       field("供应商地址", urlInput),
     ),
+    h("p.muted", "改名称会同时改写模型目标与访问密钥的供应商清单里指向它的引用。"),
     h("details", {}, h("summary.muted", "高级路径设置"),
       h("div.form-grid", { style: { marginTop: "8px" } },
         ROUTE_MODES.map((mode) => {
