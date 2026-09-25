@@ -486,12 +486,26 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
       "cache_creation_input_tokens": 0,
       "cache_read_input_tokens": 900,
       "first_token_ms": 420,
-      "duration_ms": 3100
+      "duration_ms": 3100,
+      "workspace": "default",
+      "client_addr": "127.0.0.1:50874",
+      "user_agent": "claude-cli/1.0"
     }
   ],
   "next_before_id": 1235
 }
 ```
+
+`items` 末尾的 `workspace` / `client_addr` / `user_agent` 是**本项目增补的请求来源**（参照实现的
+`_request_item` 没有这三项，既有字段一个未改）：`workspace` 取自 `request_workspace` 旁挂表，
+后两项取自 `request_source` 旁挂表。没有来源记录的行（升级前的历史行、不走 HTTP 的写入路径）
+渲染成 `null`，**不会**兜底成空串或默认地址。
+
+`client_addr` 是入站请求的 `RemoteAddr`（`host:port`，IPv6 形如 `[::1]:50874`），与访问日志取的是
+同一个值（见 `internal/server/accesslog.go`），**不读 `X-Forwarded-For`**：那个头由调用方自带、
+可伪造，当真来源用会让看板显示一个攻击者选定的 IP。`user_agent` 允许为 `null`（客户端可以不带
+这个头）。两者存放在旁挂表而不是 `request_metrics` 的新列，理由见
+[`docs/WORKSPACE.md`](WORKSPACE.md) 的「存储：旁挂表而不是新列」。
 
 当 `next_before_id` 为 `null` 时没有下一页。刷新第一页时不要携带 `before_id`。
 
