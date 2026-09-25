@@ -100,6 +100,11 @@ func VerifySHA256(path, expected string) error {
 //
 // 与 internal/config/persist.go 的 replaceWithRetry 同形（4 次尝试、延迟倍增），
 // 不另造抽象。
+//
+// **重试救不了"整条链路被阻断"**：实测 `amkr --update` 的另一类失败是
+// `dial tcp 20.205.243.166:443: connectex: ...` —— 版本检查（api.github.com）通得过，
+// 但 github.com 这条分发链路不通，重试 4 次只是把同一个超时等 4 遍。因此每一轮还按
+// updatecheck.GitHubCandidates 的顺序走过**镜像加速地址**（见下面 fetchWithRetry）。
 const (
 	downloadAttempts   = 4
 	downloadRetryDelay = 500 * time.Millisecond
@@ -140,61 +145,105 @@ type permanentError struct{ err error }
 func (e *permanentError) Error() string { return e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }
 
+// candidatesFor 是候选地址的来源（直连 + 镜像加速）。
+//
+// 抽成变量而不是直接调 updatecheck.GitHubCandidates：测试要注入两个**本地**地址
+// （一个必然失败、一个必然成功）来验证回退，而 GitHubCandidates 只对 github.com 展开，
+// 注入不进去——真去连 GitHub 的测试既慢又要求联网。生产代码从不改写它。
+var candidatesFor = updatecheck.GitHubCandidates
+
 // fetchWithRetry 带重试地取回 url，把响应体交给 consume 消费。
 //
 // 重试规则：
-//   - 连接层失败（TLS 握手超时、连接重置、DNS）→ 重试。
+//   - 连接层失败（TLS 握手超时、连接重置、DNS）→ 换下一个候选地址，本轮不再回头试它。
 //   - 5xx / 429 / 408 → 重试；其余状态码立刻返回。
 //   - consume 返回 permanentError（本地写失败）→ 立刻返回。
 //   - consume 返回其它错误（读到一半断流）→ 重试。
+//
+// 地址回退：候选顺序是「直连 + 镜像加速」（updatecheck.GitHubCandidates），直连能通时
+// 永远用直连，镜像只在直连失败后被用到。**产物与校验和各自独立地走这条回退**，因此
+// 只要 GitHub 直连有一条通，校验和就拿的是 GitHub 的原件；两边都只能走镜像时，校验和
+// 退化为「防传输损坏」而不再是「防中转方替换」——这是可达性与信任之间无法两全的取舍，
+// 想完全避免就把 AMKR_GITHUB_MIRROR 指向自建反代（或设成空值只走直连）。
+//
+// 「连不上」与「连上了但这次没成」被区别对待，这是有意为之：一次 TCP 拨号超时在
+// **整条链路被阻断**时是确定性结论（用户实测的失败就是它），此时唯一有意义的事是赶紧
+// 换下一条路；而它只出现在**没有别的路可走**时（例如非 GitHub 地址、或被用户显式关掉了
+// 镜像），就是一次普通的瞬时抖动，值得照旧重试到 downloadAttempts 次。
 func fetchWithRetry(client *http.Client, url string, consume func(io.Reader) error) error {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	delay := downloadRetryDelay
+	candidates := candidatesFor(url)
 	var lastErr error
-	for attempt := 0; attempt < downloadAttempts; attempt++ {
-		if attempt > 0 {
+	var directErr error
+	delay := downloadRetryDelay
+	for round := 0; round < downloadAttempts && len(candidates) > 0; round++ {
+		if round > 0 {
 			retrySleep(delay)
 			delay *= 2
 		}
-		response, err := client.Get(url)
-		if err != nil {
-			// 传输层错误（TLS 握手超时、连接重置、DNS）：典型的一次性抖动。
-			lastErr = err
-			continue
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			// 先排空再关闭，让这条 keep-alive 连接能被下一次尝试复用。不读就走的话
-			// Go 会直接丢弃连接，于是每次重试都要重做一次 TLS 握手——而我们要处理的
-			// 失败恰恰经常就是 TLS 握手超时，那等于把最贵的部分重做一遍。
-			// 只读前 4KB：错误响应体没有价值，但要足够让连接回到池子里。
-			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-			_ = response.Body.Close()
-			status := &httpStatusError{Code: response.StatusCode, URL: url}
-			if !status.retryable() {
-				return status
+		// 本轮结束时仍值得再试的地址。连不上的地址在**还有别的候选**时被剔除：把它留在
+		// 池子里，每一轮都要白等一次 TCP 超时（实测那正是用户遇到的 20 秒级卡顿）。
+		survivors := make([]string, 0, len(candidates))
+		for index, candidate := range candidates {
+			err, unreachable := attemptFetch(client, candidate, consume)
+			if err == nil {
+				return nil
 			}
-			lastErr = status
-			continue
-		}
-		err = consume(response.Body)
-		closeErr := response.Body.Close()
-		if err != nil {
+			lastErr = err
+			if round == 0 && index == 0 {
+				directErr = err
+			}
 			var permanent *permanentError
 			if errors.As(err, &permanent) {
 				return permanent.err
 			}
-			// 其余当作读到一半断流：值得再试。
-			lastErr = err
-			continue
+			var status *httpStatusError
+			if errors.As(err, &status) && !status.retryable() {
+				return status
+			}
+			if unreachable && len(candidates) > 1 {
+				continue
+			}
+			survivors = append(survivors, candidate)
 		}
-		if closeErr != nil {
-			return closeErr
-		}
-		return nil
+		candidates = survivors
+	}
+	if directErr != nil {
+		// 报直连的错误 + 还能做什么；中间那一串镜像错误对用户没有价值。
+		return fmt.Errorf("%w %s", directErr, updatecheck.MirrorHint(len(candidatesFor(url))-1))
 	}
 	return lastErr
+}
+
+// attemptFetch 对**单个**候选地址做一次取回。
+//
+// 返回值 unreachable 表示 `client.Get` 自己失败了（拨号/TLS/DNS，没拿到任何响应）。
+// 它必须与「拿到了响应但这次没成」（5xx、读到一半断流）分开：前者的重试预算应当先花在
+// **换一条路**上，后者才是原地重试的对象。
+func attemptFetch(client *http.Client, url string, consume func(io.Reader) error) (err error, unreachable bool) {
+	response, err := client.Get(url)
+	if err != nil {
+		return err, true
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// 先排空再关闭，让这条 keep-alive 连接能被下一次尝试复用。不读就走的话
+		// Go 会直接丢弃连接，于是每次重试都要重做一次 TLS 握手——而我们要处理的
+		// 失败恰恰经常就是 TLS 握手超时，那等于把最贵的部分重做一遍。
+		// 只读前 4KB：错误响应体没有价值，但要足够让连接回到池子里。
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+		_ = response.Body.Close()
+		return &httpStatusError{Code: response.StatusCode, URL: url}, false
+	}
+	if err := consume(response.Body); err != nil {
+		_ = response.Body.Close()
+		return err, false
+	}
+	if err := response.Body.Close(); err != nil {
+		return err, false
+	}
+	return nil, false
 }
 
 // Download 把 url 取回并写入 path；client 为 nil 时用 http.DefaultClient。

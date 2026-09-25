@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Sparrived/auto-model-key-router/internal/updatecheck"
 )
 
 // 本文件覆盖自更新里最容易悄悄坏掉的三处：产物命名（与 release.yml 必须逐字一致）、
@@ -556,5 +558,172 @@ func TestDownloadRetriesMidStreamTruncation(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&attempts); n != 2 {
 		t.Errorf("尝试次数 = %d，期望 2", n)
+	}
+}
+
+// withCandidateList 把候选地址换成注入列表，返回恢复函数（配合 defer 使用）。
+//
+// 与 withReleasesBaseURL 同形：生产的候选列表由 updatecheck 从环境变量算出来，测试里
+// 要的是两个**本地**地址（一个必然失败、一个必然成功），不能真去连 GitHub。
+func withCandidateList(candidates []string) func() {
+	original := candidatesFor
+	candidatesFor = func(string) []string { return candidates }
+	return func() { candidatesFor = original }
+}
+
+// deadServerURL 起一个假服务再立刻关掉，返回它的地址：端口上没人监听，连接会被拒绝。
+//
+// 这正是「GitHub 直连被阻断」在客户端看到的样子——拨号失败，而不是某个 HTTP 状态码。
+func deadServerURL(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := server.URL
+	server.Close()
+	return url
+}
+
+// hijackAndClose 模拟传输层故障：握手成功但连接被直接掐断。
+func hijackAndClose(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Error("假服务不支持 Hijack")
+		return
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		t.Errorf("Hijack 失败: %v", err)
+		return
+	}
+	_ = conn.Close()
+}
+
+// TestDownloadFallsBackToMirrorWhenDirectUnreachable 锁定本次修复的主路径：
+// 直连拨号失败时改用镜像地址，而不是直接报「更新失败」。
+//
+// 起因是用户实测的失败：版本检查（api.github.com）通得过，但
+// `github.com/.../amkr_6.1.0_windows_amd64.exe` 拨号超时，整个 --update 就此中断。
+func TestDownloadFallsBackToMirrorWhenDirectUnreachable(t *testing.T) {
+	defer noRetrySleep()
+
+	payload := []byte("来自镜像的新版本内容")
+	var mirrorHits int32
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&mirrorHits, 1)
+		_, _ = w.Write(payload)
+	}))
+	defer mirror.Close()
+
+	direct := deadServerURL(t)
+	defer withCandidateList([]string{direct, mirror.URL})()
+
+	// url 参数取直连地址：镜像地址由 candidatesFor 注入，与生产一致（直连在前）。
+	path := filepath.Join(t.TempDir(), "payload")
+	if err := Download(mirror.Client(), direct, path); err != nil {
+		t.Fatalf("直连不可达时应回退到镜像，实际 %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("内容 = %q，期望 %q", got, payload)
+	}
+	if n := atomic.LoadInt32(&mirrorHits); n != 1 {
+		t.Errorf("镜像应被请求一次，实际 %d 次", n)
+	}
+}
+
+// TestDownloadPrefersDirectOverMirror 锁定「直连能通就不碰镜像」。
+//
+// 走第三方中转等于把产物交给别人转发，能直连时不该发生。
+func TestDownloadPrefersDirectOverMirror(t *testing.T) {
+	defer noRetrySleep()
+
+	payload := []byte("来自直连的新版本内容")
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer direct.Close()
+
+	var mirrorHits int32
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&mirrorHits, 1)
+		_, _ = w.Write([]byte("镜像内容"))
+	}))
+	defer mirror.Close()
+
+	defer withCandidateList([]string{direct.URL, mirror.URL})()
+
+	path := filepath.Join(t.TempDir(), "payload")
+	if err := Download(direct.Client(), direct.URL, path); err != nil {
+		t.Fatalf("直连可用时不该失败，实际 %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("内容 = %q，期望直连的内容 %q", got, payload)
+	}
+	if n := atomic.LoadInt32(&mirrorHits); n != 0 {
+		t.Errorf("直连可用时不该请求镜像，实际 %d 次", n)
+	}
+}
+
+// TestDownloadDoesNotRetryUnreachableCandidateWhenOthersRemain 锁定重试预算的分配：
+//
+// 一个「连不上」的候选地址在还有别的路可走时只试一次。否则用户要在同一个必死的 TCP
+// 超时上等 4 遍（实测那一次是 20 秒级的卡顿），而换一条路一秒就够了。
+func TestDownloadDoesNotRetryUnreachableCandidateWhenOthersRemain(t *testing.T) {
+	defer noRetrySleep()
+
+	var directHits int32
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&directHits, 1)
+		hijackAndClose(t, w)
+	}))
+	defer direct.Close()
+
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer mirror.Close()
+
+	defer withCandidateList([]string{direct.URL, mirror.URL})()
+
+	path := filepath.Join(t.TempDir(), "payload")
+	if err := Download(mirror.Client(), direct.URL, path); err != nil {
+		t.Fatalf("应回退到镜像并成功，实际 %v", err)
+	}
+	if n := atomic.LoadInt32(&directHits); n != 1 {
+		t.Errorf("连不上的直连地址只该试一次，实际 %d 次", n)
+	}
+}
+
+// TestDownloadErrorKeepsDirectCauseAndHint 锁定「全部失败」时的错误内容。
+//
+// 报的是**直连**的失败原因（用户要修的是自己这边的网络），并附上还能做什么——一个只会
+// 说"更新失败"的错误，正是这次用户求助的原因。
+func TestDownloadErrorKeepsDirectCauseAndHint(t *testing.T) {
+	defer noRetrySleep()
+
+	direct := deadServerURL(t)
+	defer withCandidateList([]string{direct, "http://127.0.0.1:1/mirror"})()
+
+	path := filepath.Join(t.TempDir(), "payload")
+	err := Download(nil, direct, path)
+	if err == nil {
+		t.Fatal("直连与镜像都不可用时必须报错")
+	}
+	if !strings.Contains(err.Error(), direct) {
+		t.Errorf("错误应点明失败的是直连地址 %s，实际 %v", direct, err)
+	}
+	if !strings.Contains(err.Error(), updatecheck.GitHubMirrorEnv) {
+		t.Errorf("错误应提示可用 %s 指定镜像，实际 %v", updatecheck.GitHubMirrorEnv, err)
+	}
+	// 失败后不该留下半截文件。
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("失败后不该留下下载文件")
 	}
 }

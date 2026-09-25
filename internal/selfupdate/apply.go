@@ -16,9 +16,10 @@ import (
 // 校验失败时**绝不安装**：宁可不更新，也不能把用户换成一个来源不可信的可执行文件。
 // 下载与校验都发生在暂存之前，因此任何一步失败都还没动过已安装的二进制。
 //
-// 产物与校验和两个地址都由 version/asset 推出（而不是由调用方传 url）：两者必须来自
-// **同一个**下载源，分开传入就有可能一个指向镜像、另一个指向 GitHub，那种不一致会表现
-// 成莫名其妙的校验失败。
+// 产物与校验和两个地址都由 version/asset 推出（而不是由调用方传 url）：调用方本就不该
+// 关心下载源。真正的下载源在更下一层决定（fetchWithRetry 的候选回退，见 selfupdate.go）：
+// 产物与校验和**各自独立**地先试直连、再试镜像，因此两者的内容始终来自同一个 GitHub
+// Release——不一致只会表现为校验失败（拒绝安装），不会装上错误的东西。
 func Apply(client *http.Client, version, asset, tempDir, executable string) (string, error) {
 	if tempDir == "" {
 		tempDir = os.TempDir()
