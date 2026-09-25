@@ -219,11 +219,39 @@ func JSONBody(body []byte) *canonical.Value {
 	return value
 }
 
+// decisionEndpointModel 是"不带 model 的结构化决策端点"回落到的默认模型名。
+//
+// 为什么需要一个约定名字：Laya / Jev 的 /v1/decide 与 /v1/classify 由上游按 Key 决定
+// 用哪个模型，规范调用根本不带 model；而 AMKR 必须先有模型名才能选 Key。约定一个固定
+// 名字之后，"哪些 Key 服务这类端点"就表达为"建一条叫这个名字的路由、把 Key 绑上去"，
+// 不需要为这两个端点新增一类配置。代价是配置里必须有这条路由，否则请求以 404
+// 「模型 laya 未配置」结束（见 ResolveModelID 的说明）。
+const decisionEndpointModel = "laya"
+
+// isDecisionEndpoint 报告路径是否为结构化决策端点（decide / classify）。
+//
+// 这两个路径在 UpstreamMode 里没有对应方言，因此上游路径按 "v1/" + path 拼，而请求体
+// 在载荷没有 model 时被 UpstreamBody 原样转发——正是这类端点需要的透传形态。
+func isDecisionEndpoint(path string) bool {
+	return path == "decide" || path == "classify"
+}
+
 // ResolveModelID 从路径与载荷里取出请求的模型 ID。
 //
 // 移植 proxy_support.py:66。返回 (值, 是否存在)：`models` 路径返回空串但**存在**
 // （表示"列出模型"，不需要模型）；载荷里 model 为假值时返回**不存在**。这个区分很
 // 关键——空串意味着"无需模型"，不存在意味着"没有模型，走默认路由"。
+//
+// 与参照实现的差异（Go 侧新增）：路径为 decide / classify 时，载荷没有可用的 model
+// **不是**错误，而是这类端点的规范调用形态，因此回落到 decisionEndpointModel 去选 Key，
+// 而不是让调用方必然收到 400「请求体中缺少 model 字段」。参照实现在这里一视同仁，
+// 于是那两个端点上的免 model 调用从来没能通过——这也是移植时能逐字节比对的地方，改动
+// 它会让"对齐 Python"的用例失效，因此行为差异只在这两个路径上，并由
+// TestResolveModelIDDefaultsDecisionEndpoints 单独锁定。
+//
+// 失败面随之变化：没配这条默认路由时是 404「模型 laya 未配置」而不是 400。对不接这类
+// 端点的部署没有影响（它们的请求本来都带 model），对接入方来说 404 的文案也直接指出
+// 了该建哪个模型。
 func ResolveModelID(path string, payload *canonical.Value) (string, bool) {
 	if path == "models" {
 		return "", true
@@ -232,9 +260,8 @@ func ResolveModelID(path string, payload *canonical.Value) (string, bool) {
 	if model.Truthy() {
 		return model.PyStr(), true
 	}
-	// Laya 决策模型端点透传支持 (/v1/decide 与 /v1/classify)：未指定 model 时以 laya 默认路由
-	if path == "decide" || path == "classify" {
-		return "laya", true
+	if isDecisionEndpoint(path) {
+		return decisionEndpointModel, true
 	}
 	return "", false
 }

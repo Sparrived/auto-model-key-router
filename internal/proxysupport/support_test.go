@@ -364,9 +364,46 @@ func TestResolveModelIDMatchesPython(t *testing.T) {
 		{"chat/completions", `{"model":[]}`, "", false},
 		// 非空非字符串会被 str() 化。
 		{"chat/completions", `{"model":123}`, "123", true},
-		{"decide", `{}`, "laya", true},
-		{"classify", `{}`, "laya", true},
+	}
+	for _, item := range cases {
+		got, ok := ResolveModelID(item.path, mustValue(t, item.payload))
+		if got != item.want || ok != item.wantOK {
+			t.Errorf("ResolveModelID(%q, %s) = (%q, %v)，期望 (%q, %v)",
+				item.path, item.payload, got, ok, item.want, item.wantOK)
+		}
+	}
+}
+
+// TestResolveModelIDDefaultsDecisionEndpoints 锁定 Go 侧新增的那处分叉：decide /
+// classify 没有可用的 model 时回落到默认模型名，而不是"没有模型"。
+//
+// 为什么不并进 TestResolveModelIDMatchesPython：那个表的价值就在于**逐条对齐 Python**，
+// 往里塞 Go 侧新增行为会让"对齐"这个断言失去意义——下一个人照着 Python 核对这张表时，
+// 会把这几行读成"参照实现也这样"。因此这里单独一张表，名字本身说明它是分叉。
+func TestResolveModelIDDefaultsDecisionEndpoints(t *testing.T) {
+	cases := []struct {
+		path    string
+		payload string
+		want    string
+		wantOK  bool
+	}{
+		// 规范调用：这两个端点不带 model。
+		{"decide", `{}`, decisionEndpointModel, true},
+		{"classify", `{}`, decisionEndpointModel, true},
+		// 假值（空串 / null / 0 / 空数组）与"没有 model"在 Python 语义下等价，同样回落。
+		{"decide", `{"model":""}`, decisionEndpointModel, true},
+		{"decide", `{"model":null}`, decisionEndpointModel, true},
+		{"classify", `{"model":[]}`, decisionEndpointModel, true},
+		// 显式给了 model 就按它走，默认名不参与——这是"带 model 时按指定模型路由"。
 		{"decide", `{"model":"custom-laya"}`, "custom-laya", true},
+		{"classify", `{"model":123}`, "123", true},
+		// 其它路径不受影响：仍然报"没有模型"，调用方照旧收到 400。
+		{"chat/completions", `{}`, "", false},
+		{"messages", `{"model":null}`, "", false},
+		{"embeddings", `{}`, "", false},
+		// 前缀相近但不是这两个端点：不能靠 strings.HasPrefix 之类的宽松判断放行。
+		{"decide/extra", `{}`, "", false},
+		{"v1/decide", `{}`, "", false},
 	}
 	for _, item := range cases {
 		got, ok := ResolveModelID(item.path, mustValue(t, item.payload))
