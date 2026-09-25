@@ -54,7 +54,6 @@
   "models": {
     "gpt-4o-mini": {
       "aliases": ["gpt-4o-mini-display", "fast-mini"],
-      "hidden_aliases": ["mini-latest"],
       "routing_mode": "round_robin",
       "reasoning_effort": "medium",
       "targets": [

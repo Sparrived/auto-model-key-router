@@ -46,7 +46,7 @@
 
 这是最容易误推的一点。工作空间**只**让任务名免于全局唯一，此外一律不变：
 
-- 模型 ID、别名、隐藏别名与 `unified-model` 仍然**全局唯一**，任务名也不能与它们
+- 模型 ID、别名与 `unified-model` 仍然**全局唯一**，任务名也不能与它们
   撞名。否则 `resolve_route` 的语义会取决于查表顺序——那是全局唯一的判断，工作空间
   不能用来遮蔽模型名。
 - 供应商、Key、unified_model、设置项都**没有**工作空间维度。
@@ -541,7 +541,7 @@ fragment 更宽的攻击面。如果 `X-AMKR-Workspace` 能换空间，一把泄
 - [ ] 模型清单是否在**别名解析之后**判定，且 `/v1/models` 的收窄与 proxy 的判定一致？
 - [ ] 两把 key 的占用表是否仍然**跨类型**统一检查？（面板 key 撞推理 key、以及任一者撞
       访问密钥，都必须非法）
-- [ ] 新的响应体是否泄漏了任一 key 或隐藏别名？（目录接口只给 `has_inference_key`
+- [ ] 新的响应体是否泄漏了任一 key？（目录接口只给 `has_inference_key`
       布尔，不得返回 key）
 - [ ] `webui/panel.js` 是否又碰了 `localStorage` 或发了 `X-AMKR-Workspace`？
       `webui_panel_probe.mjs` 会拦——它把存储访问做成了毒药记录器。

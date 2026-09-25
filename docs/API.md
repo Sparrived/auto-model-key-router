@@ -136,7 +136,7 @@ x-api-key: your-local-api-key
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `model` | string | 是 | 真实模型 ID、模型别名、隐藏别名（如各 target 的 `upstream_model`）、`unified-model`、任务名（`TASK_XXXXXX`）或 `模型[Key名称]` |
+| `model` | string | 是 | 模型 ID、模型别名、`unified-model`、任务名（`TASK_XXXXXX`）或 `模型[Key名称]`。上游模型名（各 target 的 `upstream_model`）**不是**可调用名 |
 | `stream` | boolean | 否 | 为 `true` 时使用流式响应，并自动向上游补充 `stream_options.include_usage=true` |
 | `stream_options` | object | 否 | 流式选项；服务会保留已有字段并强制加入 `include_usage=true` |
 | `reasoning_effort` | string | 否 | 推理强度；模型配置中的非空值优先级更高 |
@@ -201,7 +201,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 - 该头**不会**转发给上游：它是 AMKR 自己的路由状态，上游既看不懂也不该看到，因此与 `Authorization`、`X-Api-Key`、`Host` 等同属转发前剔除的请求头。
 - 未配置的工作空间名不是错误：任务查表落空后会按普通模型名继续解析，因此最终和「模型未配置」是同一个 `404`。
-- 工作空间只隔离任务：模型的 ID、别名、隐藏别名与 `unified-model` 仍然全局唯一，任务名也不能与它们撞名。
+- 工作空间只隔离任务：模型的 ID、别名与 `unified-model` 仍然全局唯一，任务名也不能与它们撞名。
 - 访问密钥不能使用任务（它根本不进任务路由），带上该头也一样。
 
 工作空间本身的管理（列出/改名/删除）走 `/api/workspaces*`，见下方「任务路由接口」一节。
@@ -321,7 +321,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `status` | string | 当前为 `ok` |
-| `models` | array | 已配置的真实模型 ID 和别名（不含隐藏别名） |
+| `models` | array | 已配置的模型 ID 与别名（可调用名的全集） |
 | `config_path` | string | 当前配置文件绝对路径；嵌入式应用可能为空 |
 | `local_auth_enabled` | boolean | 是否设置本地鉴权 |
 | `local_api_key_fingerprint` | string | 本地 key 的 SHA-256 前 12 位 |
@@ -356,9 +356,9 @@ Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或�
 
 工作空间推理 key 返回**第三份**清单：该空间配了 `models` 时就是它，没配时退化成该空间的**任务名**（那是它天然被授权调用的东西）。两份清单都必须与代理面的判定一致——列了却调不动、或调得动却不在清单里，都会让接入方以为自己配错了。`unified-model` 不出现在这份清单里（它是全局计划，作用域凭据用不了）。
 
-隐藏别名（各 target 的 `upstream_model` 自动获得的叫法，以及模型 `hidden_aliases` 中手写的名字）可以直接调用，但不会出现在这里；见 [`docs/USAGE.md`](USAGE.md) 的「同一个模型的多个名字」。
+上游模型名（target 的 `upstream_model`）不会出现在这里，也**不能**用来调用：它只是"发给那个上游的名字"，同一个模型在各上游叫法不同时各写各的，对外仍只有模型 ID 与别名。见 [`docs/USAGE.md`](USAGE.md) 的「对外名称与上游名称」。
 
-任务名（`TASK_XXXXXX`）同样不出现在这里：它是一整组路由与参数的别名，而不是某个模型的名字。如果客户端需要从 `/v1/models` 里看到可调用的名字，请改用模型的别名或隐藏别名。
+任务名（`TASK_XXXXXX`）同样不出现在这里：它是一整组路由与参数的别名，而不是某个模型的名字。如果客户端需要从 `/v1/models` 里看到可调用的名字，请给模型加一个别名。
 
 ## 调用统计
 
@@ -551,15 +551,14 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 | 字段 | 类型 | 必填 | 默认值/约束 |
 | --- | --- | --- | --- |
 | `id` | string | 是 | 非空；不能与其他 ID 或别名重复 |
-| `aliases` | string[] | 否 | `[]`；所有模型名称必须全局唯一；会出现在 `/v1/models` |
-| `hidden_aliases` | string[] | 否 | `[]`；可直接调用但不出现在 `/v1/models`；与任何模型 ID、`aliases` 或其他模型的手写隐藏别名重复时返回 `409` |
+| `aliases` | string[] | 否 | `[]`；额外的可调用名，会出现在 `/v1/models`；所有模型名称必须全局唯一 |
 | `routing_mode` | string | 否 | `round_robin`；可选 `round_robin`、`priority`、`only_first` |
 | `reasoning_effort` | string/null | 否 | 可选 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `keys` | KeyCreate[] | 否 | `[]`；兼容写法：每个 Key 会在其 `base_url` 对应的供应商下创建（不存在则自动建供应商）并绑定为模型的 target。也可先创建无 Key 的模型，再通过模型 Key 接口或 `/api/routes` 补充绑定 |
 
 #### ModelUpdate
 
-字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`hidden_aliases`、`routing_mode` 不能为 `null`；`reasoning_effort: null` 用于清除模型级覆盖，`hidden_aliases: []` 用于清空手写隐藏别名。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。
+字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`（`aliases: []` 表示清空别名）；`reasoning_effort: null` 用于清除模型级覆盖。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。
 
 #### KeyCreate
 
@@ -585,8 +584,6 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 {
   "id": "gpt-5.5",
   "aliases": ["gpt"],
-  "hidden_aliases": ["gpt-latest"],
-  "auto_hidden_aliases": ["gpt-5.5-2026-01-01"],
   "routing_mode": "round_robin",
   "reasoning_effort": "medium",
   "keys": [
@@ -623,7 +620,7 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 | --- | --- | --- | --- |
 | `provider` | string | 是 | 供应商 ID，必须已存在 |
 | `key` | string | 是 | 该供应商下已声明的 Key 名称 |
-| `upstream_model` | string | 是 | 发送给上游的真实模型名（创建模型 Key 等交互流程默认填本地模型 ID）。该名字同时会自动成为模型的隐藏别名：可直接调用，但不出现在 `/v1/models` |
+| `upstream_model` | string | 是 | 发送给上游的真实模型名（创建模型 Key 等交互流程默认填本地模型 ID）。它只是"发给这个上游的名字"，**不会**变成可调用名：同一个模型在各上游叫法不同时，就在这里各写各的 |
 
 示例：
 
@@ -665,7 +662,7 @@ provider 对象不再含顶层 `capabilities`；探测缓存按 Key 存于 `keys
 
 | 字段 | 类型 | 必填 | 默认值/约束 |
 | --- | --- | --- | --- |
-| `name` | string | 是 | 非空；即客户端传的 `model`。不能与已有任务名、任何模型 ID、`aliases`、`hidden_aliases` 或 `unified-model` 重复 |
+| `name` | string | 是 | 非空；即客户端传的 `model`。不能与已有任务名、任何模型 ID、`aliases` 或 `unified-model` 重复 |
 | `model` | string/null | 否 | 首选模型，可写模型 ID 或别名；写回时规范化为模型 ID。**省略或传 `null` 表示尚未指定模型**，任务先作为占位存在（见下） |
 | `display_name` | string/null | 否 | 给**人**看的中文显示名，只用于 WebUI 辨认任务；不影响调用，两端空白会被去掉 |
 | `fallback_model` | string/null | 否 | `null`；备选模型，与首选引用同一模型时忽略。**没有首选时不能填备选**，否则 `422` |
@@ -788,7 +785,7 @@ curl -X PUT http://127.0.0.1:8000/api/models/gpt-5.5/keys/main \
 
 ### 任务路由接口
 
-任务路由把「模型 + 固定采样参数」打包成一个可直接当 `model` 传的名字。任务名不能与模型 ID、别名、隐藏别名或 `unified-model` 撞名（否则路由语义会取决于查表顺序），也不能指定 Key。
+任务路由把「模型 + 固定采样参数」打包成一个可直接当 `model` 传的名字。任务名不能与模型 ID、别名或 `unified-model` 撞名（否则路由语义会取决于查表顺序），也不能指定 Key。
 
 这五个端点都认 `X-AMKR-Workspace` 头，语义与代理面完全一致：缺省即默认工作空间（顶层 `tasks`），带 `X-AMKR-Workspace: teamA` 即读写 `workspaces.teamA.tasks`。任务名只在工作空间内唯一，因此**同一空间内**重名报 `409`、跨空间同名合法；`GET/PUT/DELETE /api/tasks/{task_name}` 取的是该空间里的那个任务，别的空间的同名任务不会被误改。工作空间名不需要事先声明：在它下面建第一个任务即存在，删掉最后一个任务即消失。
 
@@ -1199,7 +1196,16 @@ curl -X POST http://127.0.0.1:8000/api/providers/openai/keys/main/probe \
 
 ### 路由接口
 
-`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。请求体同样支持 `aliases` 和 `hidden_aliases`（后者可直接调用但不出现在 `/v1/models`）。
+`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。请求体还认 `id`（改名，会一并改写 `unified_model` 与任务里的引用）与 `aliases`（额外的可调用名）；`hidden_aliases` 已移除，请求里带上它会被当成未知字段返回 `422`。
+
+一条路由下没有 target 就不该存在，这条不变式由服务端在各条写路径上保证：
+
+- `PUT /api/routes/{route_id}` 传 `targets: []` 会**删除该路由**并返回 `204 No Content`（没有响应体，也就没有 `config_revision`）。省略 `targets` 字段则表示不改动目标，与传空数组是两回事。
+- 解绑 Key、取消 Key 勾选、删除 Key 等路径删掉最后一条 target 时，同样会连带删除该路由。
+
+被删掉的路由会从 `models` 里消失，引用它的 `unified_model` 与任务引用会被一并清理（与 `DELETE /api/routes/{route_id}` 同一套修复）。
+
+不变式管的是「**失去**最后一个目标」：新模型仍然可以先不带 Key 建出来（`POST /api/models` 的 `keys` 可为空，见下），在它绑上第一个 Key 之前只是不可调用；`POST /api/routes` 则要求 `targets` 至少一项，不能用它建一条空路由。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/routes \
@@ -1208,7 +1214,6 @@ curl -X POST http://127.0.0.1:8000/api/routes \
   -d '{
     "id": "gpt-5.5",
     "aliases": ["gpt"],
-    "hidden_aliases": ["gpt-latest"],
     "routing_mode": "round_robin",
     "targets": [
       {"provider": "openai", "key": "main", "upstream_model": "gpt-5.5"},
@@ -1411,9 +1416,8 @@ http://127.0.0.1:8000/ui/
 - `workspace` 是这把 key 钉死的空间名，面板据此标注自己看的是谁。
 - `unattributed` **恒为零**：没有归属的请求不属于任何一个空间，给面板看既没有意义也
   泄漏了别的空间的规模。
-- `models` 是**模型 ID 与可见别名**的字符串数组（按配置顺序），供面板的任务表单选择；
-  不含隐藏别名（`upstream_model`）——那是「能直接调用但不该被展示」的名字，面板不该
-  知道上游叫什么。
+- `models` 是**模型 ID 与别名**的字符串数组（按配置顺序），与 `/v1/models` 同口径，供面板的
+  任务表单选择；上游模型名不在其中——它只是"发给那个上游的名字"，面板不需要知道。
 
 > 面板页与后台 WebUI **同源**，因此它的凭据走 URL fragment（`#k=…`）而**绝不**碰
 > `localStorage`（那里存着后台的管理 key），也**绝不**发送 `X-AMKR-Workspace`。

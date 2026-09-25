@@ -186,8 +186,8 @@ Authorization: Bearer <面板 key>
 ```
 
 也支持 `all_history=true` 替代 `hours`。响应里 `workspace` 是这把 key 钉死的空间名，
-`models` 是可选择的模型名数组（模型 ID + **可见**别名；隐藏别名刻意不含——那是"能直接
-调用但不该被展示"的名字），`links` 是流向图的连边。完整形状见
+`models` 是可选择的模型名数组（模型 ID + 别名，与 `/v1/models` 同口径；上游模型名不在其中
+——它只是"发给那个上游的名字"，不可调用），`links` 是流向图的连边。完整形状见
 [`API.md`](API.md#get-uiworkspace-paneljson)。
 
 `unattributed` 字段恒为零：没有归属的请求不属于任何空间，面板看不到也不该看到。

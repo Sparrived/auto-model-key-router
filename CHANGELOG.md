@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### 重大变更
+
+- **隐藏别名下线：可调用名就是模型 ID 与 `aliases`，上游模型名只作上游名。** 原先每个 target
+  的 `upstream_model` 会自动变成"能调用但不出现在 `/v1/models`"的隐藏别名，模型还能再写一份
+  `hidden_aliases`。这套设计把"上游叫什么"和"本地能调什么"搅在一起：同一个模型在各上游的不同
+  叫法会凭空多出一批可调用名（配置与 `/v1/models` 对不上），也没法把某个上游叫法指到另一条
+  路由上。现在只剩两件事——**对外名称**（模型 ID + `aliases`，都列在 `/v1/models`）与
+  **上游名称**（target 的 `upstream_model`，只在转发前替换 `model`，不可调用）：
+
+  - 同一个模型在各上游叫法不同时，把那些 Key 都收进同一条路由的 `targets` 即可：外部只看到
+    一个名字，轮询到哪个 Key 就用它自己的上游名。WebUI 模型路由页因此重做：每条目标的上游名
+    可就地编辑，「添加目标」按供应商 / Key + 上游名挑选（候选来自该 Key 的探测结果，不再要求
+    上游名等于路由 ID），并支持把一条目标整体「移到其它路由」。
+  - **管理 API 有破坏性变化**：`/api/models`、`/api/routes` 的请求体不再接受 `hidden_aliases`
+    ——带上它返回 `422 extra_forbidden`，而不是静默忽略（静默忽略会让一份还写着该字段的请求
+    看起来生效了，而那些名字其实已经调不通）；模型响应不再返回 `hidden_aliases` 与
+    `auto_hidden_aliases`。配置文件里的 `hidden_aliases` 不报错：`parseModels` 忽略未知键，
+    需要保留的名字请挪进 `aliases`。
+  - TUI 的模型设置菜单去掉「隐藏别名」项，CLI 配置总览去掉该列。
+  - 顺带把"路由下没有 target 就不该存在"这条不变式收到服务端统一保证：`PUT /api/routes/{id}`
+    传 `targets: []` 现在直接删除该路由并返回 `204`（原先要调用方自己先清空再 `DELETE`），
+    按索引删除最后一条目标同样连路由一起删，两条路径都会修复 `unified_model` 与任务引用。
+    这样"整理目标的归属"与"清理空路由"是同一个动作。
+
+  回归由新增的 `internal/api/routes_api_test.go`、`internal/configops/modelroutes_test.go` 与
+  重写后的 `webui/probes/webui_routing_probe.mjs`（55 项断言）守着，锁的是：上游名与路由名
+  解耦、请求体不再含 `hidden_aliases`、清空目标即删路由并修复引用，以及迁移目标时"先追加后
+  移除"的写入顺序。
+
 ### 新增
 
 - **账号资源看板：一处管理多个 CPA 实例的账号与额度。** AMKR 只知道自己上游 Key 的成功与
