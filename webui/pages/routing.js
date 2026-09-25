@@ -7,10 +7,12 @@
 //
 // 「一条路由下没有目标就不该存在」是服务端的写路径不变式（见 internal/configops），
 // 因此这里的编辑器允许把目标删到一个不剩，保存时由服务端把整条路由删掉——页面上
-// 用文案与二次确认明确这一点，而不是偷偷拦住用户。
+// 用文案与二次确认明确这一点，而不是偷偷拦住用户。二次确认里的连带影响清单由服务端
+// 预演（`dry_run=1`）算出，见 webui/model-impact.js。
 
 import { h, errorText } from "../dom.js";
 import { api } from "../api.js";
+import { writeWithImpactConfirm } from "../model-impact.js";
 import {
   card, cardHead, notice, badge, empty, loading, render, toast, buttonNode,
   input, select, confirmDialog, dialog, field,
@@ -294,7 +296,18 @@ function routeEditor(route) {
     draw();
     try {
       if (!cleaned.length) {
-        await api.deleteRoute(state.revision, route.id);
+        // 把目标删到一个不剩再保存，等于删掉这条路由（服务端的写路径不变式）。
+        // 这条路和「删除路由」按钮是同一个后果，因此同样要先把连带变动说清楚。
+        const { confirmed } = await writeWithImpactConfirm({
+          title: "删除模型路由",
+          message: `路由 ${route.id} 的目标已清空，保存会删掉这条路由。`,
+          confirmLabel: "删除路由",
+          alwaysConfirm: true,
+          preview: () => api.deleteRoute(state.revision, route.id, { dryRun: true }),
+          commit: () => api.deleteRoute(state.revision, route.id),
+        });
+        // 用户取消：停在编辑态（目标已经删空，他想反悔仍可以再加回来）。
+        if (!confirmed) { state.saving = false; draw(); return; }
         toast(`路由 ${route.id} 没有目标，已删除。`);
       } else {
         await api.updateRoute(state.revision, route.id, cleaned, aliases, mode, newID === route.id ? null : newID);
@@ -328,24 +341,33 @@ function routeEditor(route) {
       buttonNode("删除路由", {
         variant: "danger",
         disabled: state.saving,
-        onClick: () => confirmDialog({
-          title: "删除路由",
-          message: `删除模型路由 ${route.id}？绑定该模型的 Key 会一并解除。`,
-          confirmLabel: "删除",
-          danger: true,
-          onConfirm: async () => {
-            try {
-              await api.deleteRoute(state.revision, route.id);
-              await load();
-              state.editing = null;
-              toast("路由已删除。");
-              draw();
-            } catch (error) { toast(errorText(error), "error"); }
-          },
-        }),
+        onClick: () => removeRoute(route),
       }),
     ),
   );
+}
+
+// removeRoute 删路由：先让服务端预演连带变动，用户确认后再删。
+//
+// 路由就是模型本身，删它会让引用它的访问密钥少一项授权、工作空间少一个能直呼的模型、
+// 引用它的任务被删掉、unified_model 被改写。这些必须成"删之前能看见"，否则删除按钮就
+// 只是把一次配置大改藏在了"路由已删除"这句提示后面。
+async function removeRoute(route) {
+  try {
+    const { confirmed } = await writeWithImpactConfirm({
+      title: "删除模型路由",
+      message: `删除模型路由 ${route.id}？绑定该模型的 Key 会一并解除。`,
+      confirmLabel: "删除",
+      alwaysConfirm: true,
+      preview: () => api.deleteRoute(state.revision, route.id, { dryRun: true }),
+      commit: () => api.deleteRoute(state.revision, route.id),
+    });
+    if (!confirmed) return;
+    await load();
+    state.editing = null;
+    toast("路由已删除。");
+    draw();
+  } catch (error) { toast(errorText(error), "error"); }
 }
 
 export function renderRouting(context) {

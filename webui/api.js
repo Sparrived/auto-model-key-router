@@ -95,6 +95,15 @@ async function request(path, { method = "GET", body, auth = true, workspace } = 
   return payload;
 }
 
+// 干跑开关：写接口带 `dry_run=1` 时跑一遍**完全相同**的改动、回报它连带改掉哪些引用，
+// 但一个字节都不落盘。WebUI 用它做二次确认（见 webui/model-impact.js），用户点了头再
+// 发一次不带该参数的请求。
+//
+// 走查询参数而不是请求体：这几个接口的请求体只有 `config_revision` 与本次要写的字段，
+// 预演与落盘共用同一份请求体，差别只剩这一个开关——塞进请求体就得为每个接口各加一个
+// 字段，而请求体是对外契约（docs/API.md 逐个列字段）。
+const dryRunQuery = (options) => (options?.dryRun ? "?dry_run=1" : "");
+
 export const api = {
   health: () => request("/health", { auth: false }),
   metrics: (hours = 1) => request(`/metrics?hours=${hours}`),
@@ -166,8 +175,8 @@ export const api = {
       method: "PUT",
       body: { config_revision: revision, id, base_url: baseUrl, routes },
     }),
-  deleteProvider: (revision, providerId) =>
-    request(`/api/providers/${encodeURIComponent(providerId)}`, {
+  deleteProvider: (revision, providerId, options) =>
+    request(`/api/providers/${encodeURIComponent(providerId)}${dryRunQuery(options)}`, {
       method: "DELETE",
       body: { config_revision: revision },
     }),
@@ -182,16 +191,16 @@ export const api = {
       method: "PUT",
       body: { config_revision: revision, ...patch },
     }),
-  deleteProviderKey: (revision, providerId, keyName) =>
-    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}`, {
+  deleteProviderKey: (revision, providerId, keyName, options) =>
+    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}${dryRunQuery(options)}`, {
       method: "DELETE",
       body: { config_revision: revision },
     }),
 
   keyModels: (providerId, keyName) =>
     request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models`),
-  setKeyModels: (revision, providerId, keyName, models) =>
-    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models`, {
+  setKeyModels: (revision, providerId, keyName, models, options) =>
+    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models${dryRunQuery(options)}`, {
       method: "PUT",
       body: { config_revision: revision, models },
     }),
@@ -227,8 +236,8 @@ export const api = {
       method: "PUT",
       body: { config_revision: revision, id: newId, targets, aliases, routing_mode: routingMode },
     }),
-  deleteRoute: (revision, routeId) =>
-    request(`/api/routes/${encodeURIComponent(routeId)}`, {
+  deleteRoute: (revision, routeId, options) =>
+    request(`/api/routes/${encodeURIComponent(routeId)}${dryRunQuery(options)}`, {
       method: "DELETE",
       body: { config_revision: revision },
     }),

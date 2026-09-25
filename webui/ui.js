@@ -66,10 +66,15 @@ function button(spec) {
   );
 }
 
+// confirmDialog 的 message 既可以是字符串（包一层 <p>），也可以是节点。
+//
+// 节点形态是给"正文不是一句话"的场景用的：连带影响清单要分节、要列点，塞进 <p> 里
+// 会被浏览器按非法嵌套修正掉（块级元素会把段落截断）。判断用 typeof 而不是
+// instanceof Node：探针的 DOM 垫片里 Node 是另一个类。
 export function confirmDialog({ title = "请确认", message, confirmLabel = "确认", danger = false, onConfirm }) {
   const ref = dialog({
     title,
-    body: h("p", message),
+    body: typeof message === "string" ? h("p", message) : message,
     actions: [
       { label: "取消", variant: "text", onClick: () => ref.close() },
       {

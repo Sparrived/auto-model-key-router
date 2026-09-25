@@ -3,7 +3,8 @@
 import { h, errorText } from "../dom.js";
 import { api } from "../api.js";
 import { PROVIDER_PRESETS, providerIcon, brandIcon } from "../brand-icons.js";
-import { card, cardHead, notice, badge, empty, loading, table, render, toast, buttonNode, toggle, input, field, dialog, confirmDialog, kv } from "../ui.js";
+import { writeWithImpactConfirm } from "../model-impact.js";
+import { card, cardHead, notice, badge, empty, loading, table, render, toast, buttonNode, toggle, input, field, dialog, kv } from "../ui.js";
 
 const ROUTE_MODES = [
   { id: "openai", label: "OpenAI 路径" },
@@ -215,23 +216,32 @@ function providerForm(provider) {
       buttonNode("取消", { variant: "text", onClick: () => { state.editing = null; draw(); } }),
       buttonNode("删除供应商", {
         variant: "danger",
-        onClick: () => confirmDialog({
-          title: "删除供应商",
-          message: `删除供应商 ${provider.id} 及其全部 Key？`,
-          confirmLabel: "删除",
-          danger: true,
-          onConfirm: async () => {
-            try {
-              await api.deleteProvider(state.revision, provider.id);
-              await reloadProviders();
-              toast("供应商已删除。");
-              draw();
-            } catch (error) { toast(errorText(error), "error"); }
-          },
-        }),
+        onClick: () => removeProvider(provider),
       }),
     ),
   );
+}
+
+// removeProvider 删供应商：先让服务端预演连带变动，用户确认后再删。
+//
+// 删供应商会带走它所有 Key，而每个 Key 都可能撑着一批模型——模型一没，引用它的访问密钥、
+// 工作空间与任务都要跟着变。这些必须成"删之前能看见"，否则删除按钮就只是把一次配置大改
+// 藏在了"已删除"这句提示后面。
+async function removeProvider(provider) {
+  try {
+    const { confirmed } = await writeWithImpactConfirm({
+      title: "删除供应商",
+      message: `删除供应商 ${provider.id} 及其全部 Key？`,
+      confirmLabel: "删除",
+      alwaysConfirm: true,
+      preview: () => api.deleteProvider(state.revision, provider.id, { dryRun: true }),
+      commit: () => api.deleteProvider(state.revision, provider.id),
+    });
+    if (!confirmed) return;
+    await reloadProviders();
+    toast("供应商已删除。");
+    draw();
+  } catch (error) { toast(errorText(error), "error"); }
 }
 
 // —— 添加 Key（保存 + 自动探测两步）——
@@ -365,23 +375,31 @@ function keyRow(provider, key) {
       buttonNode("编辑", { small: true, variant: "text", onClick: () => { state.keyEditing = key.name; draw(); } }),
       buttonNode("删除", {
         small: true, variant: "text",
-        onClick: () => confirmDialog({
-          title: "删除 Key",
-          message: `删除 Key ${key.name}？`,
-          confirmLabel: "删除",
-          danger: true,
-          onConfirm: async () => {
-            try {
-              await api.deleteProviderKey(state.revision, provider.id, key.name);
-              await reloadProviders();
-              toast("Key 已删除。");
-              draw();
-            } catch (error) { toast(errorText(error), "error"); }
-          },
-        }),
+        onClick: () => removeKey(provider, key),
       }),
     )),
   );
+}
+
+// removeKey 删一把上游 Key：先预演连带变动，用户确认后再删。
+//
+// 这把 Key 服务过的模型会失去一个绑定；只剩这一个绑定的模型会被整个删掉，于是引用它的
+// 访问密钥、工作空间与任务都要跟着变。删除本身也要问一句，哪怕没有连带变动。
+async function removeKey(provider, key) {
+  try {
+    const { confirmed } = await writeWithImpactConfirm({
+      title: "删除 Key",
+      message: `删除 Key ${key.name}？`,
+      confirmLabel: "删除",
+      alwaysConfirm: true,
+      preview: () => api.deleteProviderKey(state.revision, provider.id, key.name, { dryRun: true }),
+      commit: () => api.deleteProviderKey(state.revision, provider.id, key.name),
+    });
+    if (!confirmed) return;
+    await reloadProviders();
+    toast("Key 已删除。");
+    draw();
+  } catch (error) { toast(errorText(error), "error"); }
 }
 
 async function patchKey(provider, key, patch) {
@@ -459,9 +477,13 @@ function modelEditor(provider, key) {
   const discovered = new Set(key.capabilities?.models || []);
   const all = [...new Set([...editor.models, ...discovered, ...editor.selected])].sort();
   const chipHost = h("div.chips");
+  const countLabel = h("span.muted");
   const errorHost = h("div", editor.error ? notice(`读取 Key 绑定失败: ${editor.error}`, "warn") : null);
 
   const drawChips = () => {
+    // 计数与勾选同步：它就写在标题旁边，落后一次点击就会在"2 个已选"下面画一个高亮卡片。
+    // 确认框里的数量取自同一个 selected，两处对不上就没有可信度。
+    render(countLabel, `${editor.selected.size} 个已选`);
     render(chipHost, ...[...new Set([...all, ...editor.selected])].sort().map((model) => {
       const selected = editor.selected.has(model);
       const missing = selected && !discovered.has(model) && !editor.models.includes(model);
@@ -502,18 +524,29 @@ function modelEditor(provider, key) {
   drawChips();
 
   return h("div", { style: { marginTop: "16px", padding: "16px", background: "#fafafa", borderRadius: "4px" } },
-    h("div.card-head", h("h4", `Key ${key.name} 的服务模型`), h("span.muted", `${editor.selected.size} 个已选`)),
+    h("div.card-head", h("h4", `Key ${key.name} 的服务模型`), countLabel),
     h("p.muted", "只显示该 Key 对外提供的模型；黄色卡片表示已启用但当前探测未发现。"),
+    h("p.muted", "取消勾选一个模型会解除本 Key 与它的绑定；若它因此失去全部绑定，模型会被删除，"
+      + "引用它的访问密钥、工作空间与任务会一并变动（保存前会先列出来）。"),
     chipHost,
     errorHost,
     h("div.btn-row", { style: { marginTop: "16px" } },
       buttonNode("保存模型", {
         onClick: async () => {
+          // 快照一份选中集合：确认框弹出期间用户仍可能改动卡片，而真写必须与预演
+          // 送的是同一份清单，否则"确认的是 A、保存的是 B"。
+          const models = [...editor.selected];
           try {
-            await api.setKeyModels(state.revision, provider.id, key.name, [...editor.selected]);
+            const { confirmed } = await writeWithImpactConfirm({
+              title: "保存 Key 服务模型",
+              message: `保存 Key ${key.name} 的 ${models.length} 个服务模型？`,
+              preview: () => api.setKeyModels(state.revision, provider.id, key.name, models, { dryRun: true }),
+              commit: () => api.setKeyModels(state.revision, provider.id, key.name, models),
+            });
+            if (!confirmed) return;
             await reloadProviders();
             state.modelEditor = null;
-            toast(`Key ${key.name} 已保存 ${editor.selected.size} 个模型。`);
+            toast(`Key ${key.name} 已保存 ${models.length} 个模型。`);
             draw();
           } catch (error) {
             render(errorHost, notice(`保存失败: ${errorText(error)}`, "error"));
