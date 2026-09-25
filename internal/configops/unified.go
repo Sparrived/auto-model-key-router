@@ -211,9 +211,18 @@ func FallbackModelID(data *canonical.Value) (string, bool, error) {
 
 // RepairModelReferences 修好所有指向已删改模型的引用。
 //
-// 对齐 config_operations.py:306。顺序不能反：repair_unified_model 要先把候选配置
-// 完整解析一遍才敢改，而残留的失效任务会让那次解析直接失败——所以必须先清任务。
+// 对齐 config_operations.py:306，并补上参照实现漏掉的两类清单（本项目自有行为）：
+// `access_keys` 与 `workspaces` 的模型/供应商清单。漏掉它们的后果不只是「清单里留了
+// 个死名字」——config 层会因此拒绝整份配置，于是删模型、删 Key、删供应商全被一句
+// 「引用了未配置的模型」挡住，而用户想删的恰恰是那个模型。
+//
+// 顺序不能反，而且现在更严格：repair_unified_model 要先把候选配置完整解析一遍才敢改，
+// 任何一处残留的失效引用（任务、访问密钥清单、工作空间清单）都会让那次解析直接失败。
+// 所以失效引用必须先全部清掉，才轮到 unified_model。
 func RepairModelReferences(data *canonical.Value) error {
+	if err := RepairReferenceLists(data); err != nil {
+		return err
+	}
 	if _, err := RepairTasks(data); err != nil {
 		return err
 	}
