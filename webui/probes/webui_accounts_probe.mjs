@@ -242,6 +242,19 @@ check("ring_marks_source_and_reset",
 
 // —— 额度细节：这些都是 CPA 已经给了、AMKR 以前丢掉的东西 ——
 check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
+
+// —— 排版：额度组一行两个，组内环也两个一行 ——
+// 垫片不算布局，所以这里只能钉结构、钉不了像素。但它挡得住"退回竖着叠"这类改动：组容器
+// 必须是 grid（两个组并排），组内的环行必须是固定两列（否则 flex-wrap 会把三四个环挤成
+// 一排，百分比与窗口名连成一串）。这正是表格行被撑到近三百像素、宽列一片空白的成因。
+const groupRows = findAll(host, (node) =>
+  String(node.style?.gridTemplateColumns || "").includes("auto-fit"));
+check("quota_groups_side_by_side",
+  groupRows.length === 1 && groupRows[0].style.display === "grid",
+  `${groupRows.length} / ${groupRows[0]?.style.display}`);
+const ringRows = findAll(host, (node) =>
+  node.style?.gridTemplateColumns === "repeat(2, minmax(0, 1fr))");
+check("rings_two_per_row", ringRows.length >= 2, String(ringRows.length));
 // 上游那句说明（"You have used some of your weekly limit…"）只进悬停提示，不占版面：
 // 旧版把它当窗口名画在进度条旁，于是看板上出现了"某个窗口叫这么长一句话"的怪状。
 check("window_description_only_in_tooltip",

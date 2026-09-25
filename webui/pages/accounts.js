@@ -133,8 +133,9 @@ function accountColumns() {
     { key: "account", label: "账号", render: accountCell },
     { key: "provider", label: "供应商", render: (account) => badge(account.provider || "未知", "info") },
     { key: "status", label: "状态", render: statusBadge },
-    // 额度列占掉近一半宽度：进度条挤在窄列里就看不出"还剩多少"了。
-    { key: "quota", label: "剩余额度", width: "44%", render: quotaCell },
+    // 额度列不钉死宽度：内容是「两组 × 两环」，本身有宽度。钉成 44% 后，宽屏上额度列
+    // 多出来的那几百像素全是空白（环挤在左端），而账号列的长文件名反被挤成两行。
+    { key: "quota", label: "剩余额度", render: quotaCell },
     {
       key: "calls", label: "成功 / 失败", numeric: true,
       render: (account) => h("div.stack.tight", { style: { alignItems: "flex-end" } },
@@ -197,7 +198,7 @@ function quotaCell(account) {
     return h("div.stack.tight", {}, h("span.muted", quotaHint(account)), ...extras);
   }
   return h("div.stack.tight", {},
-    ...groups.map((group) => h("div.stack.tight", {},
+    h("div", { style: groupGridStyle }, groups.map((group) => h("div.stack.tight", {},
       // 组名用内联样式而不是新加一个 CSS 类：这一页的样式表是公共资产，为一行小标题
       // 去改它（并让别处的改动跟着一起动）不划算。
       group.name
@@ -206,14 +207,36 @@ function quotaCell(account) {
         }, group.name)
         : null,
       h("div", { style: ringRowStyle }, ...group.windows.map((window) => quotaRing(window, offset))),
-    )),
+    ))),
     ...extras,
   );
 }
 
-// 圆环行的排版：一行放下该组的所有窗口，窄屏自动折行。列间距给得比行间距大，
-// 让"同一组里的几个环"读起来是一组，而不是连成一串。
-const ringRowStyle = { display: "flex", flexWrap: "wrap", gap: "4px 18px", alignItems: "flex-start" };
+// 额度组的排版：一行放两个（列宽不够时自动落回一个）。
+//
+// Antigravity 这类 provider 的额度天然是两组（Gemini 一组、Claude 与 GPT 一组），两组竖着
+// 叠会各占一整行：表格行被撑到近三百像素，而每组的环只占列宽的一小截，于是又高又空。
+// 并排之后组与组对齐、行高减半，宽列也不再留一大片空白。
+//
+// 用 auto-fit 而不是写死两列：写死两列在窄屏会把每个组压到环都放不下（环有 52px 的
+// min-width，压不下就溢出到表格外），auto-fit 在窄屏落回一列。
+const groupGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+  gap: "10px 20px",
+  alignItems: "start",
+};
+
+// 一组里的环固定两个一行（grid 而不是 flex-wrap）。
+//
+// flex-wrap 是按列宽走的：列一宽，三个四个窗口就挤成一排，百分比与窗口名连成一串小数；
+// 固定两列之后每组的节奏一致，读数也排得整齐。
+const ringRowStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: "8px 12px",
+  justifyItems: "start",
+};
 
 // 按「模型组」切分窗口。
 //
