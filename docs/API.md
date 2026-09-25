@@ -1299,12 +1299,23 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
       "accounts": [
         {
           "auth_index": "0", "name": "claude-1.json", "provider": "claude",
+          "account_type": "oauth", "project_id": "proj-1",
           "email": "a@example.com", "status": "active", "disabled": false, "unavailable": false,
           "success": 12, "failed": 1, "supports_quota": false,
+          "plan": "Pro", "tier_id": "pro-tier",
           "windows": [
-            {"key": "claude/5h", "label": "5 小时", "remaining": 0.58,
-             "reset_at": "2027-01-15T08:00:00Z", "source": "passive"}
+            {"key": "claude/5h", "label": "5 小时", "window": "5h", "group": "Gemini Models",
+             "remaining": 0.58, "reset_at": "2027-01-15T08:00:00Z", "source": "passive"}
           ],
+          "summary": [{"key": "credits", "label": "剩余积分", "value": 12.5, "unit": "credit"}],
+          "model_quotas": {
+            "gpt-6-luna": {
+              "observed_at": "2026-01-01T00:00:00Z",
+              "windows": [{"key": "codex/primary", "label": "5 小时", "remaining": 0.1, "source": "passive"}]
+            }
+          },
+          "recent_requests": [{"time": "13:20-13:30", "success": 3, "failed": 1}],
+          "server_time_offset_ms": -485,
           "signals": {"Anthropic-Ratelimit-Unified-5h-Utilization": "0.42"}
         }
       ]
@@ -1329,6 +1340,25 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
   两者都有时**后者覆盖前者**——它们算的是同一件事，而现场值更新，混起来会出现一半新一半旧的
   进度条。两条通道都不需要 AMKR 自己去请求上游。
 - **`remaining` 是剩余比例**（0..1），不是已用；`reset_at` 归一成 RFC3339。
+- **窗口的四个字段各管一件事**：`label` 是给人看的窗口名（`5h` / `weekly` 归一成「5 小时」/
+  「7 天」，认不出的窗口名原样保留、不猜），`window` 是上游的原始窗口名，`group` 是该窗口
+  所属的**模型组**（Antigravity 的 Gemini 与 Claude/GPT 各有一套 5 小时 + 周期额度、窗口名
+  一模一样，靠它区分），`description` 是上游附的那句说明（"You have used some of your weekly
+  limit, it will fully refresh in 5 days, 9 hours."）——它是解释而不是名字，界面上不该拿它当
+  标题，否则同一页会出现「一条写 `5h`、另一条写一整句英文」。
+- **`summary[]` 是「不成窗口的量」**：余额、积分、计费系数这类数值项，`value` 与 `unit` /
+  `currency` 一起给，AMKR 不归一也不换算（猜错单位比不显示更糟）。它可能为空而 `windows`
+  非空，反之亦然——现场探测只要成功就采纳整份结果，只回数值项、不回窗口的计费类插件也算数。
+- **`model_quotas` 与 `recent_requests` 来自 `auth-files`，不额外发请求**：前者是按模型维度的
+  被动快照（同一套头的解析口径与 `windows` 共用一份代码），后者是 CPA 维护的十分钟请求桶，
+  界面用它画迷你趋势和「谁在什么时候打的」。
+- **`server_time_offset_ms` 是对端时钟与本地时钟的差**（CPA 的 `serverTimeOffsetMs`）：
+  `reset_at` 按对端时钟写，客户端算「还有多久重置」时应当把它减掉，否则对端差几分钟、倒计时
+  就偏几分钟。
+- **没有额度时的提示**：`501` 表示对端没有额度提供者（既没装额度插件、也没给该账号配声明式
+  `quota_probe`），界面上要如实说「对端没有额度提供者」——既不能显示成 0，也不能编一条出来。
+  Antigravity 这类 provider 属于「对端配了 probe 才有」的那类，配方见
+  [`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md) 的 3.3 节。
 - **只有 `supports_quota` 的账号会被额外问一次额度**：CPA 没有额度提供者时回
   `501 no quota provider available for credential`。此时若该账号已有被动窗口，`quota_error`
   为空（不构成故障，报出来只是噪音）；一个窗口都没有时才会带上 `quota_error`。
