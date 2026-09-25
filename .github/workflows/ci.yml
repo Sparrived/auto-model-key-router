@@ -111,6 +111,14 @@ jobs:
         # ——把「全部取消勾选」折叠成「不限制」会让一条禁令静默失效。
         run: node webui/probes/webui_accesskeys_probe.mjs
 
+      - name: 账号资源探针
+        # 账号资源页是**唯一**由服务端代问第三方（CPA）管理面的地方，所以它锁的是取数
+        # 路径与额度口径：浏览器绝不直接访问 CPA、进页面不把管理密钥拉下来、一次刷新
+        # 只发一次请求（这一页不轮询），以及进度条画的是**剩余**比例（20% / 5% 两档
+        # 颜色）——画成已用会把 18% 剩余读成「还早」，整页结论反过来。另外钉住故障
+        # 隔离：一个实例连不上时，另一个实例的账号照常列出。
+        run: node webui/probes/webui_accounts_probe.mjs
+
   go:
     name: Go 静态检查与测试
     runs-on: ubuntu-latest

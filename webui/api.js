@@ -330,4 +330,16 @@ export const api = {
       method: "DELETE",
       body: { config_revision: revision },
     }),
+
+  // CPA 账号资源：实例清单（含 management_key——读写都要求完整管理权限）与账号额度。
+  //
+  // 额度那一份是**服务端扇出**的结果：浏览器绝不直接访问 CPA（不同源、没有 CORS 头，
+  // 而且 management_key 不该长期留在页面里），见 internal/api/handlers_cpa.go。
+  cpaInstances: () => request("/api/cpa-instances"),
+  saveCPAInstances: (revision, instances) =>
+    request("/api/cpa-instances", {
+      method: "PUT",
+      body: { config_revision: revision, instances },
+    }),
+  cpaAccounts: () => request("/api/cpa-accounts"),
 };

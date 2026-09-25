@@ -14,6 +14,7 @@ import { renderActivity } from "./pages/activity.js";
 import { renderWorkspaces } from "./pages/workspaces.js";
 import { renderLogs } from "./pages/logs.js";
 import { renderCost } from "./pages/cost.js";
+import { renderAccounts } from "./pages/accounts.js";
 import { renderProviders } from "./pages/providers.js";
 import { renderRouting } from "./pages/routing.js";
 import { renderUnified } from "./pages/unified.js";
@@ -26,6 +27,7 @@ export const PAGES = [
   { group: "监控", items: [
     { id: "overview", label: "概览", icon: "overview", render: renderOverview },
     { id: "activity", label: "用量统计", icon: "activity", render: renderActivity },
+    { id: "accounts", label: "账号资源", icon: "gauge", render: renderAccounts },
     { id: "workspaces", label: "工作空间", icon: "layers", render: renderWorkspaces },
     { id: "logs", label: "服务日志", icon: "logs", render: renderLogs },
     { id: "cost", label: "成本", icon: "cost", render: renderCost },

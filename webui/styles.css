@@ -497,6 +497,17 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .bar-fill.tone-bad { background: var(--md-error); }
 .bar-list-empty { padding: var(--sp-3) 0; text-align: center; color: var(--md-on-surface-variant); font-size: 13px; }
 
+/* ══ 账号资源 ══ */
+/* 账号标题：CPA 的 label 常常带邮箱、可能很长，窄列里要能折行而不是把表格撑破。 */
+.account-title { font-weight: 500; overflow-wrap: anywhere; }
+/* 实例编辑块：对话框里一行一个实例，靠边框说清"这四个字段属于同一个实例"。 */
+.instance-editor {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: 1px solid var(--md-outline);
+  border-radius: var(--radius);
+}
+
 /* ══ 环形图 ══ */
 .donut-wrap { position: relative; display: inline-grid; place-items: center; justify-self: center; }
 .donut { display: block; }
