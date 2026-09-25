@@ -56,7 +56,7 @@ import (
 
 // version 是本仓库版本号的唯一来源；发布时可用
 // `-ldflags "-X main.version=..."` 覆盖（release 工作流就是这么注入 tag 的）。
-var version = "6.1.0"
+var version = "6.2.0"
 
 // shutdownTimeout 是优雅关停的上限。
 //

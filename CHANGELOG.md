@@ -1,9 +1,42 @@
 # Changelog
 
-## [Unreleased]
+## [6.2.0] - 2026-09-25
 
 ### 新增
 
+- **版本检查与自更新在直连不可达时回退镜像。** `--check-update` / `--update` 原先只认
+  `github.com` 与 `api.github.com`，在两者都被阻断的网络里，更新只会以一句
+  `dial tcp …: connectex: …` 结束——域名被阻断是网络策略而不是抖动，重试再多次也没用。
+  现在两条链路都按「直连优先、失败后依次回退镜像前缀」取同一份发布物：内置 `gh.llkk.cc` /
+  `ghfast.top` / `gh-proxy.com` / `ghproxy.net` 四个前缀（顺序按覆盖面排，只有 `gh.llkk.cc`
+  代理 `api.github.com`），可用 `AMKR_GITHUB_MIRROR` 三态控制（不设=内置表、设为空=只用直连、
+  设为非空=替换内置表）。产物与校验和各自独立回退，可能来自不同前缀——安装判定不变：两者
+  仍必须是同一个 Release 的内容，SHA-256 对不上就拒绝安装。回退发生后错误提示会说明「已试过
+  N 个镜像」，不再只剩一句 dial timeout。
+- **账号资源看板：额度按模型组分区，并补上逐模型额度、最近请求与订阅档位。** CPA 的归一化
+  额度本来就带着「模型组」这一维（Antigravity 的 Gemini 与 Claude/GPT 各有**一套** 5 小时 +
+  周期额度，窗口名一模一样），`auth-files` 也一直随响应带回 `model_quotas`、
+  `recent_requests`、`project_id`、`account_type`——此前这些要么被拍平、要么被整块丢掉，
+  于是看板上四条窗口看起来是重名的重复项，也看不出哪个模型先吃紧。现在窗口带
+  `group` / `window` / `description`：分组做小标题，标签用窗口名归一后的话术（`5h` →
+  「5 小时」、`weekly` → 「7 天」），上游那句说明（"You have used some of your weekly limit,
+  it will fully refresh in 5 days, 9 hours."）单独呈现而不再顶替窗口名；账号行补 `plan` /
+  `tier_id` 与账号类型、项目 ID；新增 `summary[]`（余额、积分这类**不成窗口**的数值项，值与
+  单位一起显示）与逐模型额度折叠区——现场探测只要成功就采纳整份结果，只回数值项、不回窗口的
+  计费类插件也算数；重置倒计时按 CPA 报来的 `serverTimeOffsetMs` 校正。
+- **额度改用圆环 + 百分比。** 账号级四个窗口原先各占一条满宽横条，两个账号就撑满一屏；现在
+  每个窗口一个圆环、百分比写在环里、环下是窗口名与极短的「↻ 剩余时间到重置」，同一组的窗口
+  排成一行。百分比取整改用 `floor`（并加 `1e-9` 台阶避开 `0.29*100 = 28.999…` 这类浮点
+  误差）：`round` 会把「只剩 99.6%」显示成 100%，等于替上游保证一个它没说的满额。
+- **概览请求流独占整行，并补上 Token、来源与结果。** 原先 5 列小字把调用方、上游 Key、
+  供应商、状态码挤在一行，Token 只给一个合计，**来源地址根本没显示**——排障时看不出「谁从
+  哪台机器发过来的」。现在独占一整行、扩到 7 列（状态条 / 时间 / 模型路由 / 来源 / Token /
+  结果 / 成本）：来源给出调用方档位、工作空间与来源 IP（悬停补完整 `RemoteAddr`、
+  `User-Agent` 与请求 ID），Token 给出输入/输出与缓存合计，结果给出耗时与首字。来源在请求
+  处理时记入新的 `request_source` 旁挂表（取 `RemoteAddr` 而不读可被伪造的
+  `X-Forwarded-For`，与访问日志同源），`/metrics/requests` 的 items 末尾新增 workspace /
+  client_addr / user_agent 三项。用旁挂表而不是给 `request_metrics` 加列，是为了不动建表
+  原文——旧二进制还要继续读写同一个库。
 - **用量统计页按「哪把 Key 出去的」拆开。** 原先这一页只有 `模型 / Key 名` 一行名字，它答不出
   两件事：一把 Key 一共出去了多少流量（量被拆在多个模型行里，要自己加总），以及这是**哪一家**
   的 Key（`key_name` 只在同一个供应商内唯一，`/metrics` 的 `keys` 会把两家的同名 Key 并成一行）。
@@ -32,6 +65,16 @@
 
 ### 修复
 
+- **统一模型页保存一次之后就再也存不进去。** 成功保存后没有复位 `state.saving`，而它同时
+  控制整张表单的 disabled 与按钮文案——再点「编辑」拿到的是一整个禁用、按钮写着「正在保存」
+  的表单；失败原因又写进了重画前那个已脱离文档的节点，页面上不留任何痕迹。现在成功分支同样
+  复位，失败原因改由 `state.saveError` 承载并画进当前这棵 DOM；同时每次进入页面都重新取数
+  （别的页面会改掉模型与 `config_revision`，缓存下来的旧值既选不中、又会撞 409），unified
+  指向已删除的模型时回落成可用模型并丢掉挂在它上面的固定 Key。
+- **新增供应商 Key 后页面不刷新。** 新建流程只给编辑器状态写了 `{provider, key}` 两个字段，
+  而重画要读 `editor.models` / `editor.selected`，缺字段直接抛 TypeError——`draw()` 抛错的
+  后果是**整页一个字都不更新**：Key 早已写进服务端（探测跑完、提示条也弹了），界面却还停在
+  加之前的样子，只能手动刷新浏览器。现在编辑器状态的字段一次给全，建状态的入口也只留一个。
 - **面板的「上游模型用量」卡不再把 Key 名当成上游模型名。** 那张卡原先写死取第 3→4 段连边
   （供应商 → 上游模型），而流向图插入「上游 Key」层之后那段变成了「供应商 → Key」，卡片会
   安静地列出一串 Key 名。现在改为**按层名定位**（`layerIndexOf(usage, "upstream_model_id") - 1`），
@@ -40,12 +83,32 @@
 
 ### 文档
 
+- `docs/CLI.md` 说明自更新的镜像回退范围与 `AMKR_GITHUB_MIRROR` 的三态、`HTTPS_PROXY` 这条
+  替代路径，以及「校验和也走镜像时只保完整性、不保来源」这条取舍；`README.md` 补一句直连
+  优先的回退行为。
+- `docs/SUBSCRIPTION-QUOTA.md` 更正 Antigravity 的额度口径（`loadCodeAssist` 并非「只有套餐、
+  没有额度数字」——CPA 正是从 `paidTier.availableCredits` 读 Google One AI 积分，只是压成
+  布尔用于 credits fallback），写明 CPA 的被动采集白名单只有 claude/codex（main 加 devin）、
+  Antigravity 必须靠对端的额度插件或**声明式 `quota_probe`**，并附上实测可用的 probe 配方
+  （URL、body、`$TOKEN$` 注入、User-Agent，以及为何不需要 `mapping`）；`docs/USAGE.md` 的
+  账号资源一节同步补上这些读数与 501 的新文案。
+- `docs/API.md` 补上 `/api/cpa-accounts` 的字段清单（分组、说明、订阅档位、`summary` 数值项、
+  逐模型额度、最近请求、时钟偏移）。
 - `docs/API.md` 新增 `GET /ui/key-usage.json` 一节（含三份拆分的口径与"为什么不能并进
   `/metrics`"），并说明「挂在 `/api/` 还是 `/ui/`」的判据里多了一条判例；`/metrics` 一节补上
   指向该端点的说明。
 - `docs/API.md`、`docs/WORKSPACE.md`、`docs/USAGE.md` 与 `README.md` 的流向图层数由五层改为
   六层，并写明「按层名取数、不要写死下标」这条陷阱（`docs/WORKSPACE.md` 第 8 节、`README.md`
   的功能清单与 WebUI 页面清单）。
+
+### 工程
+
+- 新增 `webui/probes/webui_unified_probe.mjs`：用最小 DOM 垫片 + 假 fetch 驱动真实页面模块，
+  锁住四条都不会报错的静默故障（保存后 `saving` 未复位、失败原因画在旧节点、进页面不重新
+  取数、unified 指向已删模型），并接入 CI 与发布门禁的探针清单——那份清单自己写着「漏掉一个
+  等于发布门禁比 CI 松」。
+- 供应商页探针扩到 56 项断言，锁住「新增 Key 后整页自动刷新」；账号资源探针补上圆环与额度
+  细节的断言（每窗口一环、环角度与百分比同源、告警配色分界、上游说明只在悬停提示里）。
 
 ## [6.1.0] - 2026-09-25
 
