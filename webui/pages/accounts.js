@@ -137,7 +137,10 @@ function accountColumns() {
     { key: "quota", label: "剩余额度", width: "44%", render: quotaCell },
     {
       key: "calls", label: "成功 / 失败", numeric: true,
-      render: (account) => `${formatCount(account.success)} / ${formatCount(account.failed)}`,
+      render: (account) => h("div.stack.tight", { style: { alignItems: "flex-end" } },
+        h("span", `${formatCount(account.success)} / ${formatCount(account.failed)}`),
+        recentBars(account.recent_requests),
+      ),
     },
   ];
 }
@@ -149,7 +152,26 @@ function accountCell(account) {
   return h("div.stack.tight", {},
     h("div.account-title", title),
     detail && detail !== title ? h("span.muted", detail) : null,
+    accountMeta(account),
   );
+}
+
+// 订阅档位与账号形态。
+//
+// plan 与 tier_id 两个都显示：plan 是给人看的档位名（CPA 可能按语言的叫法不同），
+// tier_id 是上游的稳定标识（如 `free-tier`）。只留一个的话，前者对不上号、后者得去查。
+// account_type/project_id 是排查用的——额度算到哪个项目上，出问题时第一个要看的就是它。
+function accountMeta(account) {
+  const items = [];
+  if (account.plan) {
+    items.push(badge(account.plan, "info", { title: account.tier_id || null }));
+  } else if (account.tier_id) {
+    items.push(badge(account.tier_id, "info"));
+  }
+  const meta = [account.account_type, account.project_id].filter(Boolean);
+  if (meta.length) items.push(h("span.muted", meta.join(" · ")));
+  if (!items.length) return null;
+  return h("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } }, ...items);
 }
 
 // 状态徽标只解释 disabled 与 unavailable：这两个在 CPA 侧有确定的调度含义。
@@ -162,27 +184,60 @@ function statusBadge(account) {
 }
 
 function quotaCell(account) {
-  const windows = account.windows || [];
-  if (!windows.length) {
-    return h("div.stack.tight", {},
-      h("span.muted", quotaHint(account)),
-      signalDetails(account.signals),
-    );
+  const groups = groupWindows(account.windows || []);
+  // 对端时钟与本地可能差一截（CPA 会把它算在 serverTimeOffsetMs 里），倒计时按本地钟
+  // 算就会整体偏；把偏移减掉之后，"还有多久重置"才对得上上游的 resetTime。
+  const offset = Number(account.server_time_offset_ms) || 0;
+  const extras = [
+    summaryBadges(account.summary),
+    modelQuotaDetails(account, offset),
+    signalDetails(account.signals),
+  ];
+  if (!groups.length) {
+    return h("div.stack.tight", {}, h("span.muted", quotaHint(account)), ...extras);
   }
   return h("div.stack.tight", {},
-    h("div.bar-list", {}, windows.map(windowRow)),
-    signalDetails(account.signals),
+    ...groups.map((group) => h("div.bar-list", {},
+      // 组名用内联样式而不是新加一个 CSS 类：这一页的样式表是公共资产，为一行小标题
+      // 去改它（并让别处的改动跟着一起动）不划算。
+      group.name
+        ? h("div", {
+          style: { fontSize: "12px", fontWeight: "500", color: "var(--md-on-surface-variant)" },
+        }, group.name)
+        : null,
+      ...group.windows.map((window) => windowRow(window, offset)),
+    )),
+    ...extras,
   );
 }
 
-function windowRow(window) {
+// 按「模型组」切分窗口。
+//
+// Antigravity 这类 provider 的额度天然是两维的：Gemini 与 Claude/GPT **各有**一套
+// 5 小时 + 周期额度，两组的窗口名一模一样（weekly / 5h）。不分区时看板上就是四条
+// 看起来重复的条，谁也说不清哪条管哪些模型。
+//
+// 只比较相邻项而不是用 Map 归并：CPA 的 groups 按顺序给出，同组窗口必然相邻；用 Map
+// 会把两个同名但不相邻的组悄悄合成一个，那是把上游的顺序信息吃掉。
+function groupWindows(windows) {
+  const groups = [];
+  for (const window of windows) {
+    const name = (window.group || "").trim();
+    const last = groups[groups.length - 1];
+    if (last && last.name === name) last.windows.push(window);
+    else groups.push({ name, windows: [window] });
+  }
+  return groups;
+}
+
+function windowRow(window, offsetMs) {
   // clampPercent 给的是 0..1 的比例，进度条要的是百分数——先乘 100 再取整，
   // 直接 round 比例只会得到 0 或 1（本文件的第一版就这么错过）。
   const percent = Math.round(clampPercent(window.remaining) * 100);
   const notes = [
     window.source === "passive" ? "CPA 采集" : "现场查询",
     window.status === "rejected" ? "已用尽" : null,
-    countdownText(window.reset_at),
+    countdownText(window.reset_at, offsetMs),
   ].filter(Boolean);
   return h("div.bar-row", {},
     h("div.bar-head", {},
@@ -192,14 +247,92 @@ function windowRow(window) {
     h("div.bar-track", {},
       h("div.bar-fill", { class: toneClass(window.remaining), style: { width: `${percent}%` } })),
     notes.length ? h("span.bar-value", notes.join(" · ")) : null,
+    // 上游的整句说明单独一行。它是"为什么只剩这么多"的解释（"You have used some of your
+    // weekly limit, it will fully refresh in 5 days, 9 hours."），不是窗口名——以前它被
+    // 当成 label 画在进度条旁边，把窗口名与倒计时都挤掉了。
+    window.description ? h("span.muted", window.description) : null,
   );
 }
 
-// 没有窗口时说明原因。501 是最常见的一种（对端没装额度查询插件），直接说人话；
-// 其余（超时、连不上）原样给短文本——那是需要去查的故障，不该被润色掉。
+// 数值项：CPA 的 summary[] 装的是「不成窗口的量」（余额、积分、计费系数…），单位各异，
+// 所以值与单位一起原样显示，不做归一——猜错了比不显示更糟。
+function summaryBadges(summary) {
+  const metrics = (summary || []).filter((metric) => metric && (metric.label || metric.key));
+  if (!metrics.length) return null;
+  return h("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } },
+    metrics.map((metric) => badge(`${metric.label || metric.key} ${formatMetric(metric)}`, "muted",
+      { title: metric.currency ? `币种 ${metric.currency}` : null })));
+}
+
+// 值与单位拼一起：12.5 与 12.5 USD 是两件事，只显示数字等于把单位丢了。
+function formatMetric(metric) {
+  const value = Number(metric.value);
+  let text = "";
+  if (Number.isFinite(value)) {
+    text = String(Math.round(value * 100) / 100);
+  } else if (metric.value !== undefined && metric.value !== null) {
+    text = String(metric.value);
+  }
+  return [text, metric.unit].filter(Boolean).join(" ");
+}
+
+// 逐模型额度：解析口径与汇总行共用后端一份代码，因此标签、颜色、倒计时规则完全一致。
+// 这里只把它折叠起来——几十个模型全铺开会把账号行撑到屏幕外。
+function modelQuotaDetails(account, offsetMs) {
+  const models = Object.keys(account.model_quotas || {}).sort();
+  if (!models.length) return null;
+  return h("details", {},
+    h("summary.muted", `逐模型额度 · ${models.length} 个模型`),
+    h("div.stack.tight", { style: { marginTop: "8px" } },
+      models.map((model) => {
+        const windows = (account.model_quotas[model] || {}).windows || [];
+        return h("div.stack.tight", {},
+          h("div.bar-head", {},
+            h("span.bar-name", model),
+            windows.length ? null : h("span.bar-value", "无信号"),
+          ),
+          ...windows.map((window) => windowRow(window, offsetMs)),
+        );
+      })),
+  );
+}
+
+// 最近请求：CPA 自己维护的十分钟桶，随 auth-files 一起回来，不需要额外请求。
+//
+// 画成迷你柱看的是"节奏"（有没有在打、有没有连续失败），绝对值就在上面的成功/失败里，
+// 所以高度按本账号的峰值归一。失败单独着色：一眼能看出哪一段在报错。
+function recentBars(buckets) {
+  const list = (buckets || []).filter((bucket) => bucket && ((bucket.success || 0) + (bucket.failed || 0)) > 0);
+  if (!list.length) return null;
+  const totals = list.map((bucket) => (bucket.success || 0) + (bucket.failed || 0));
+  const peak = Math.max(...totals, 1);
+  return h("div", { style: { display: "flex", alignItems: "flex-end", gap: "2px", height: "16px" } },
+    list.map((bucket) => {
+      const success = bucket.success || 0;
+      const failed = bucket.failed || 0;
+      const height = Math.max(2, Math.round(((success + failed) / peak) * 16));
+      return h("div", {
+        title: `${bucket.time}：成功 ${success} / 失败 ${failed}`,
+        style: {
+          width: "5px",
+          height: `${height}px`,
+          borderRadius: "1px",
+          background: failed ? "var(--md-error)" : "var(--md-primary)",
+        },
+      });
+    }));
+}
+
+// 没有窗口时说明原因。501 是最常见的一种（对端既没装额度插件、也没给账号配声明式
+// 探测 quota_probe），直接说人话并给出下一步；其余（超时、连不上）原样给短文本——
+// 那是需要去查的故障，不该被润色掉。
 function quotaHint(account) {
-  if (!account.quota_error) return "上游未提供额度信号";
-  if (account.quota_error.includes("501")) return "对端未配置额度查询";
+  if (!account.quota_error) {
+    return account.supports_quota ? "对端没有可读的额度" : "上游未提供额度信号";
+  }
+  if (account.quota_error.includes("501")) {
+    return "对端没有额度提供者（未装额度插件，也没配 quota_probe）";
+  }
   return account.quota_error;
 }
 
@@ -241,11 +374,16 @@ function lowestRemaining(account) {
 
 // 重置倒计时。不复用 dom.js 的 formatDuration：那个是给"耗时多少毫秒"用的（"1.23s"），
 // 而这里的量级是小时到天，而且看板要回答的是"还要等多久"，绝对时间得让人自己算。
-function countdownText(resetAt) {
+//
+// offsetMs 是对端时钟与本地时钟的差（CPA 的 serverTimeOffsetMs = 对端 − 本地）：
+// resetTime 是按对端时钟写的，不把偏移减掉，倒计时就会整体偏一段——对端差几分钟，
+// 看板上就多算几分钟。
+function countdownText(resetAt, offsetMs) {
   if (!resetAt) return "";
   const at = new Date(resetAt).getTime();
   if (!Number.isFinite(at)) return "";
-  const remaining = at - Date.now();
+  const offset = Number(offsetMs) || 0;
+  const remaining = at - offset - Date.now();
   if (remaining <= 0) return "即将重置";
   const minutes = Math.round(remaining / 60000);
   if (minutes < 60) return `${minutes} 分钟后重置`;

@@ -106,6 +106,8 @@ const byClass = (root, name) => findAll(root, (n) => hasClass(n, name));
 const byTag = (root, tag) => findAll(root, (n) => n.tagName === tag);
 const findText = (root, text) => findAll(root, (n) =>
   n.tagName === "#text" && String(n.data).includes(text)).length > 0;
+const hasTitle = (root, text) => findAll(root, (n) =>
+  String(n.attrs?.title || "").includes(text)).length > 0;
 const buttonWithText = (root, text) =>
   findAll(root, (n) => n.tagName === "button" && n.textContent.includes(text))[0];
 const click = (node) => { for (const fn of node.listeners.click || []) fn({ target: node, preventDefault() {} }); };
@@ -124,12 +126,30 @@ const ACCOUNTS = {
         {
           auth_index: "0", name: "claude-1.json", provider: "claude", email: "a@example.com",
           status: "active", success: 12, failed: 1,
+          // 账号形态与订阅档位：plan 给人看，tier_id 是上游标识，两者都要出现。
+          plan: "Pro", tier_id: "pro-tier", account_type: "oauth", project_id: "proj-1",
+          // 上游钟比本地慢 1 分钟：倒计时必须据此校正（否则显示 3 小时 0 分）。
+          server_time_offset_ms: -60000,
+          // 同一组里三个窗口 + 上游给的一句说明；说明要单独成行，不能顶掉窗口名。
           windows: [
-            { key: "claude/5h", label: "5 小时", remaining: 0.18, reset_at: resetAt, source: "passive" },
-            { key: "claude/7d", label: "7 天", remaining: 0.03, source: "passive", status: "rejected" },
-            { key: "claude/7d_oi", label: "7 天（含超额）", remaining: 0.9, source: "passive" },
+            { key: "claude/5h", label: "5 小时", window: "5h", group: "Claude 与 GPT 模型", remaining: 0.18, reset_at: resetAt, source: "passive" },
+            { key: "claude/7d", label: "7 天", window: "7d", group: "Claude 与 GPT 模型", remaining: 0.03, source: "passive", status: "rejected", description: "本周额度已用去大部分" },
+            { key: "claude/7d_oi", label: "7 天（含超额）", window: "7d_oi", group: "Claude 与 GPT 模型", remaining: 0.9, source: "passive" },
           ],
           signals: { "Anthropic-Ratelimit-Unified-Representative-Claim": "five_hour" },
+          // 不成窗口的数值项（余额/积分）：值与单位一起显示。
+          summary: [{ key: "credits", label: "剩余积分", value: 12.5, unit: "credit" }],
+          // 逐模型额度与十分钟请求桶：都折叠在账号行里，但必须真的渲染出来。
+          model_quotas: {
+            "gpt-6-luna": {
+              observed_at: new Date().toISOString(),
+              windows: [{ key: "claude/5h", label: "5 小时", remaining: 0.4, source: "passive" }],
+            },
+          },
+          recent_requests: [
+            { time: "13:20-13:30", success: 3, failed: 1 },
+            { time: "13:30-13:40", success: 0, failed: 0 },
+          ],
         },
         {
           auth_index: "1", name: "gemini-1.json", provider: "gemini", status: "active",
@@ -200,8 +220,10 @@ check("kpi_low_quota_counts_drained",
   statText(3).includes("1") && statText(3).includes("其中 1 个已用尽"), statText(3));
 
 // —— 进度条画的是剩余比例，颜色随剩余走 ——
+// 4 条 = 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口：
+// 逐模型额度用的就是同一套条，条数把两处都算上，才能保证没有窗口被漏画。
 const fills = byClass(host, "bar-fill");
-check("one_bar_per_window", fills.length === 3, String(fills.length));
+check("one_bar_per_window", fills.length === 4, String(fills.length));
 check("bar_shows_remaining_18",
   fills[0]?.style.width === "18%" && hasClass(fills[0], "tone-warn"),
   `${fills[0]?.style.width} / ${fills[0]?.className}`);
@@ -214,8 +236,20 @@ check("bar_healthy_has_no_alert_tone",
 check("bar_marks_source_and_reset",
   findText(host, "CPA 采集") && findText(host, "后重置") && findText(host, "已用尽"));
 
+// —— 额度细节：这些都是 CPA 已经给了、AMKR 以前丢掉的东西 ——
+check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
+check("window_description_kept", findText(host, "本周额度已用去大部分"));
+check("countdown_uses_server_offset", findText(host, "3 小时 1 分钟后重置"));
+check("plan_tier_and_project_shown", findText(host, "Pro") && findText(host, "proj-1"));
+check("summary_metric_with_unit", findText(host, "剩余积分 12.5 credit"));
+check("model_quota_section", findText(host, "逐模型额度") && findText(host, "gpt-6-luna"));
+check("recent_request_bars", hasTitle(host, "成功 3 / 失败 1"));
+
 // —— 没有额度的账号要说清原因，而不是留白 ——
-check("quota_hint_explains_501", findText(host, "对端未配置额度查询"));
+// 501 是"对端没有额度提供者"，文案要同时点出两条补法（装额度插件 / 给账号配
+// quota_probe），否则看到这行的人不知道该去哪儿改。
+check("quota_hint_explains_501",
+  findText(host, "对端没有额度提供者") && findText(host, "quota_probe"));
 check("raw_signals_kept_as_fallback",
   findText(host, "原始信号") && findText(host, "Anthropic-Ratelimit-Unified-Representative-Claim"));
 check("disabled_account_badged", findText(host, "已停用"));
