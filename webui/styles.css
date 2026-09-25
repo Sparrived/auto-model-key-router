@@ -829,6 +829,23 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .chip.probe-missing { border-color: #f9a825; background: #fff8e1; color: var(--tone-warn); }
 .chip.probe-missing[aria-pressed="true"] { background: #f9a825; border-color: #f9a825; color: #3d2b00; }
 
+/* ══ 清单选择器（访问密钥的供应商 / 模型授权）══ */
+/* 候选可能几十项（模型 ID + 别名），因此限高滚动；关掉「不限制」之前整块是禁用的，
+   用同样的 .5 透明度与 tasks.js 的模型授权保持一致的读法。 */
+.picker {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  padding: 10px;
+  border: 1px solid var(--md-outline);
+  border-radius: var(--radius);
+}
+.picker-head { display: flex; align-items: center; gap: var(--sp-1); flex-wrap: wrap; }
+.picker-head .spacer { flex: 1; }
+.picker .input { min-width: 0; }
+.picker-list { max-height: 200px; overflow: auto; }
+/* 清单里引用了当前配置已找不到的名字：多半是模型被改名或删掉了，需要点名提醒。 */
+.chip.is-unknown { border-color: #f9a825; background: #fff8e1; color: var(--tone-warn); }
+.chip.is-unknown[aria-pressed="true"] { background: #f9a825; border-color: #f9a825; color: #3d2b00; }
+
 /* ══ 切换按钮 ══ */
 .toggle {
   padding: 5px 12px;

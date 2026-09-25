@@ -17,9 +17,9 @@ import {
 const state = {
   keys: [],
   // 可选项来源：供应商 ID 与被授权模型名。清单校验由服务端最终把关（引用不存在的
-  // 目标会被 422 拒掉），这里拉全量只是为了给出好选的候选项。
+  // 目标会被 422 拒掉），这里拉全量是为了让界面能**直接勾选**而不是让人手写名字。
   providerIds: [],
-  modelNames: [],
+  modelOptions: [],
   revision: null,
   loading: true,
   error: null,
@@ -37,14 +37,105 @@ async function load() {
   state.keys = keys.access_keys || [];
   state.revision = keys.config_revision;
   state.providerIds = (providers.providers || []).map((provider) => provider.id);
-  // 候选模型名 = 真实 ID + 别名。清单按**调用方写的名字**比对（见 config.AccessKeyConfig
-  // 的 AllowsModel），所以别名必须一起列出来，否则运维看不到自己常用的那个写法。
-  const names = new Set();
+  // 候选模型名 = 真实 ID + 别名，两者必须能**分别**勾选：清单按调用方写的原始名字逐字
+  // 比对（见 config.AccessKeyConfig 的 AllowsModel），选了真实 ID 并不等于放行别名
+  // 写法。别名分第二轮加，且撞上某个真实 ID 时不加 note——那个名字本来就指向一个模型。
+  // note 是必需的：一屏名字看不出谁是谁的别名。
+  const catalog = new Map();
+  for (const model of models.models || []) catalog.set(model.id, "");
   for (const model of models.models || []) {
-    names.add(model.id);
-    for (const alias of model.aliases || []) names.add(alias);
+    for (const alias of model.aliases || []) {
+      if (!catalog.has(alias)) catalog.set(alias, `别名 · ${model.id}`);
+    }
   }
-  state.modelNames = [...names].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  state.modelOptions = [...catalog].map(([value, note]) => ({ value, note }));
+}
+
+// —— 清单选择器 ——
+// 供应商与模型都从配置里**现有的名字**里勾选，不再让人手写逗号分隔的字符串。
+//
+// 为什么手写不可取：清单按调用方写的原始名字逐字比对，拼错一个字符就是某把已经发出去
+// 的 key 静默少一项权限，而调用方只看到 403；服务端在写盘时又会逐个校验存在性，所以
+// 手写能带来的只有 422。
+//
+// 为什么必须有一个显式的「不限制」开关：三态里 `[]`（一个都不许）与「没有这份清单」
+// （不限制）是两个**相反**的授权，而空的勾选状态同时长得像这两者。把「全部取消勾选」
+// 这个明显的收紧动作解读成放开一切，是这类界面里最危险的一种默认（工作空间的模型授权
+// 出于同一理由也用了显式开关，见 tasks.js 的 promptWorkspaceModels）。
+function scopePicker({ options, selected = [], unrestricted = true, emptyText = "配置里还没有可选项。" }) {
+  const chosen = new Set(selected);
+  // 候选 = 现有候选项 + 本行已选。已选里可能出现候选之外的名字（模型被改名或删除），
+  // 悄悄丢掉它们等于在运维没看见的情况下削减权限，所以并进来并单独标出来。
+  const catalog = new Map();
+  for (const option of options) {
+    const spec = typeof option === "string" ? { value: option } : option;
+    if (!catalog.has(spec.value)) catalog.set(spec.value, spec.note || "");
+  }
+  for (const name of selected) if (!catalog.has(name)) catalog.set(name, "");
+  const candidates = [...catalog.keys()].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const existing = new Set(options.map((option) => (typeof option === "string" ? option : option.value)));
+
+  const unrestrictedBox = h("input", { type: "checkbox", checked: unrestricted, onChange: () => drawList() });
+  const filterInput = input({
+    type: "search", placeholder: "输入关键字筛选", "aria-label": "筛选候选项",
+    onInput: () => drawList(),
+  });
+  const listHost = h("div.chips.picker-list");
+  const summary = h("span.muted");
+  const allButton = buttonNode("全选", { small: true, variant: "text", onClick: () => setAll(true) });
+  const clearButton = buttonNode("清空", { small: true, variant: "text", onClick: () => setAll(false) });
+
+  function setAll(on) {
+    if (on) for (const name of candidates) chosen.add(name);
+    else chosen.clear();
+    drawList();
+  }
+
+  function drawList() {
+    const locked = unrestrictedBox.checked;
+    const keyword = filterInput.value.trim().toLowerCase();
+    const visible = candidates.filter((name) => !keyword || name.toLowerCase().includes(keyword));
+    listHost.style.opacity = locked ? "0.5" : "1";
+    allButton.disabled = locked;
+    clearButton.disabled = locked;
+    if (!candidates.length) {
+      render(listHost, h("span.muted", emptyText));
+    } else if (!visible.length) {
+      render(listHost, h("span.muted", "没有匹配的候选项。"));
+    } else {
+      render(listHost, ...visible.map((name) => h(`button.chip${existing.has(name) ? "" : ".is-unknown"}`, {
+        type: "button",
+        disabled: locked,
+        "aria-pressed": String(chosen.has(name)),
+        title: existing.has(name) ? (catalog.get(name) || null) : "当前配置里已经没有这个名字",
+        onClick: () => {
+          if (chosen.has(name)) chosen.delete(name);
+          else chosen.add(name);
+          drawList();
+        },
+      }, name)));
+    }
+    // 摘要走 render 而不是 textContent：探针的 DOM 垫片把 textContent 做成只读的。
+    render(summary, locked ? "不限制" : chosen.size ? `已选 ${chosen.size} 项` : "一个都不许");
+  }
+  drawList();
+
+  return {
+    node: h("div.picker", {},
+      h("div.picker-head", {},
+        h("label.check", {}, unrestrictedBox, "不限制（允许全部）"),
+        h("span.spacer"),
+        summary,
+        allButton,
+        clearButton,
+      ),
+      candidates.length > 8 ? filterInput : null,
+      listHost,
+    ),
+    // 提交值：null = 清除这份清单（不限制）；数组 = 限定为这些（可能为空 = 一个都不许）。
+    // 排序只为让写盘结果稳定：这是权限清单，勾选顺序没有含义，而配置 diff 有。
+    read: () => (unrestrictedBox.checked ? null : [...chosen].sort()),
+  };
 }
 
 // scopeText 把一份清单渲染成人读的一行。
@@ -57,27 +148,21 @@ function scopeText(list) {
   return h("span.mono", { title: list.join(", ") }, truncate(list.join(", "), 48));
 }
 
-// scopeValueOf 把清单还原成提交用的值：undefined（不传）与 null（清除）必须分开。
-function scopeValueOf(list) {
-  return list === undefined ? null : list;
-}
-
 // —— 新建 ——
 function openCreate() {
   const nameInput = input({ placeholder: "例如 试用账号 A", required: true });
   const keyInput = input({ placeholder: "留空由服务端生成", autocomplete: "off" });
-  const providersInput = input({ placeholder: "逗号分隔供应商 ID，留空表示不限制" });
-  const modelsInput = input({ placeholder: "逗号分隔模型名或别名，留空表示不限制" });
+  const providerPicker = scopePicker({
+    options: state.providerIds,
+    emptyText: "还没有配置供应商，先到「供应商」页添加。",
+  });
+  const modelPicker = scopePicker({
+    options: state.modelOptions,
+    emptyText: "还没有配置模型，先到「供应商」页绑定 Key 的模型。",
+  });
   const errorHost = h("div");
   let ref = null;
   let created = null;
-
-  const parseList = (value) => {
-    const items = value.split(",").map((item) => item.trim()).filter(Boolean);
-    // 空输入 = 不传该字段 = 不限制；有输入但全是逗号也给空数组（显式「一个都不许」），
-    // 交给服务端按清单校验，不在这里替用户猜。
-    return value.trim() === "" ? undefined : items;
-  };
 
   const submit = async () => {
     const name = nameInput.value.trim();
@@ -87,8 +172,10 @@ function openCreate() {
     try {
       const result = await api.createAccessKey(state.revision, name, {
         key: keyInput.value.trim() || undefined,
-        providers: parseList(providersInput.value),
-        models: parseList(modelsInput.value),
+        // 新建时「不传」与「传 null」等价（见 specAccessKeyCreate），这里把 read() 的 null
+        // 转成 undefined，让「不限制」在请求体里干脆就是不出现这个字段。
+        providers: providerPicker.read() ?? undefined,
+        models: modelPicker.read() ?? undefined,
       });
       created = result;
       await load();
@@ -109,9 +196,10 @@ function openCreate() {
   const body = h("div.stack", {},
     field("名称", nameInput),
     field("密钥（留空自动生成）", keyInput),
-    field("允许的供应商", providersInput),
-    field("允许的模型", modelsInput),
-    h("p.muted", "两份清单都留空表示不限制。清单按调用方写的模型名比对，因此别名也可以填。"
+    h("div.field", {}, h("span", "允许的供应商"), providerPicker.node),
+    h("div.field", {}, h("span", "允许的模型"), modelPicker.node),
+    h("p.muted", "两份清单都在配置里现有的名字里勾选。模型按调用方写的原始名字逐字比对"
+      + "（别名解析之前），所以勾了模型 ID 并不等于放行它的别名——调用方会写别名时请一并勾上。"
       + "密钥只写入服务端，之后列表只显示指纹。"),
     errorHost,
   );
@@ -161,25 +249,24 @@ function showPlaintext(result, title) {
 // —— 编辑（名字 / 启停 / 两份清单）——
 function editorRow(key) {
   const nameInput = input({ value: key.name, required: true });
-  const providersInput = input({
-    value: (key.providers || []).join(", "),
-    placeholder: "逗号分隔，留空表示不限制",
-  });
-  const modelsInput = input({
-    value: (key.models || []).join(", "),
-    placeholder: "逗号分隔，留空表示不限制",
-  });
   const enabledInput = h("input", { type: "checkbox", checked: key.enabled });
   const errorHost = h("div");
 
-  // 编辑态的两个复选框：勾上=「显式写这份清单」，不勾=「清除清单回到不限制」。
-  // 这与 specAccessKeyUpdate 的必填三态一一对应——不传字段会被当成「漏传」而被拒。
-  const providerEnabled = h("input", { type: "checkbox", checked: key.providers !== undefined });
-  const modelEnabled = h("input", { type: "checkbox", checked: key.models !== undefined });
-
-  const listOf = (enabledInput2, textInput) => (enabledInput2.checked
-    ? textInput.value.split(",").map((item) => item.trim()).filter(Boolean)
-    : null);
+  // 两份清单交给选择器：字段缺席=「不限制」（选择器里的开关勾着），字段存在（哪怕是
+  // 空数组）=「显式写了清单」。这与 specAccessKeyUpdate 的必填三态一一对应——字段不传
+  // 会被当成「漏传」而被拒，所以保存时一律显式提交 read() 的结果。
+  const providerPicker = scopePicker({
+    options: state.providerIds,
+    selected: key.providers || [],
+    unrestricted: key.providers === undefined,
+    emptyText: "还没有配置供应商，先到「供应商」页添加。",
+  });
+  const modelPicker = scopePicker({
+    options: state.modelOptions,
+    selected: key.models || [],
+    unrestricted: key.models === undefined,
+    emptyText: "还没有配置模型，先到「供应商」页绑定 Key 的模型。",
+  });
 
   const save = async () => {
     state.saving = true;
@@ -188,8 +275,8 @@ function editorRow(key) {
       await api.updateAccessKey(state.revision, key.id, {
         name: nameInput.value.trim(),
         enabled: enabledInput.checked,
-        providers: listOf(providerEnabled, providersInput),
-        models: listOf(modelEnabled, modelsInput),
+        providers: providerPicker.read(),
+        models: modelPicker.read(),
       });
       await load();
       state.editing = null;
@@ -209,11 +296,11 @@ function editorRow(key) {
         field("名称", nameInput),
         field("启用", h("label.check", enabledInput, enabledInput.checked ? "已启用" : "已停用")),
       ),
-      h("div.form-grid", {},
-        field(h("label.check", providerEnabled, "限制供应商"), providersInput),
-        field(h("label.check", modelEnabled, "限制模型"), modelsInput),
-      ),
-      h("p.muted", "不勾选=清除该清单（回到不限制）；勾选但留空=一个都不许。"),
+      h("div.field", {}, h("span", "允许的供应商"), providerPicker.node),
+      h("div.field", {}, h("span", "允许的模型"), modelPicker.node),
+      h("p.muted", "开着「不限制」= 清除这份清单；关掉它再勾选 = 限定为这些"
+        + "（一个都不勾 = 一个都不许）。模型按调用方写的原始名字逐字比对"
+        + "（别名解析之前），调用方会写别名时请把别名一并勾上。"),
       errorHost,
       h("div.btn-row", {},
         buttonNode("保存", { disabled: state.saving, onClick: save }),
