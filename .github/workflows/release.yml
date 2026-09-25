@@ -70,6 +70,7 @@ jobs:
           node webui/probes/webui_layout_probe.mjs
           node webui/probes/webui_guest_probe.mjs
           node webui/probes/webui_accesskeys_probe.mjs
+          node webui/probes/webui_accounts_probe.mjs
 
   # ---- 容器镜像 ----
   #
