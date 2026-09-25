@@ -92,6 +92,7 @@ x-api-key: your-local-api-key
 | `GET` | `/ui/pricing.json` | 无 | models.dev 价格目录快照，用于 WebUI 估算成本（需 `webui_enabled`） |
 | `GET` | `/ui/workspace-usage.json` | 仅本地 | 按工作空间拆分的用量读数与请求流向，供 WebUI 的「工作空间」页（需 `webui_enabled`） |
 | `GET` | `/ui/access-key-usage.json` | 访问密钥 | 只回**这把**访问密钥自己的用量、按模型/供应商/上游模型的拆分与最近调用，供访客看板 `/ui/guest.html`（需 `webui_enabled`） |
+| `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`） |
 | `GET` | `/ui/update/status` | 无 | 报告本构建是否具备自更新能力及当前版本，供 WebUI 决定是否显示「立即更新」 |
 | `POST` | `/ui/update/apply` | 仅本地 | 执行自更新：下载并校验新版、就地替换、启动收尾助手重启服务 |
 | `GET` | `/api/logs` | 仅本地 | 读取日志文件尾部（默认最后 64 KiB） |
@@ -113,9 +114,11 @@ x-api-key: your-local-api-key
   对照，塞进那 47 条会让「这 47 条就是已发布行为」这句话失去意义。两批注册在同一棵 mux 上，
   因此错方法的 `405` / `Allow` 判定要同时看两份清单。
 - **本项目自有的读数**（价格目录 `/ui/pricing.json`、自更新入口、工作空间用量
-  `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`）挂在 `/ui/` 前缀下：
-  它们与 `/api` 面在语义上不连续，挂 `/ui/` 既落在那份已发布清单之外，也让「不开 WebUI
-  就没有这些读数」顺理成章。
+  `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`、按 Key 用量
+  `/ui/key-usage.json`）挂在 `/ui/` 前缀下：它们与 `/api` 面在语义上不连续，挂 `/ui/` 既落
+  在那份已发布清单之外，也让「不开 WebUI 就没有这些读数」顺理成章。其中「按 Key 用量」尤其
+  不能并进 `/metrics`——那份读数的形状**已经发布**，而「按供应商 + Key 名」这个组合分组不是
+  参照实现的口径（见 `/metrics` 一节）。
 
 判断标准是**它是不是管理面的正式资源**，而不是「能不能挂到 `/ui/` 躲开清单」。
 
@@ -407,6 +410,8 @@ Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或�
 | `provider_pools` | 按供应商 + 模型池拆分的嵌套统计；v4 已删除模型池概念，该维度只含 v3 及更早写入的历史行（v4 新行无 pool 归因），新部署通常为空 |
 | `upstream_models` | 按实际发送给上游的模型 ID 拆分 |
 | `unattributed` | 缺少供应商、上游模型归因字段，或只有历史模型池归因的调用汇总 |
+
+> `keys` 的 Key 只作为模型的子项出现，且不含供应商——因此它答不出「这一把 Key 一共出去了多少流量」，也分不清两家的同名 Key。要按 Key 看用量请用 [`GET /ui/key-usage.json`](#get-uikey-usagejson)；那个端点是本项目自有的读数，这里**不新增字段**（形状已发布）。
 
 每组统计包含：
 
@@ -1433,7 +1438,7 @@ http://127.0.0.1:8000/ui/
   "workspaces": [{"name": "teamA", "stats": {"…": "…"}}],
   "unattributed": {"requests": 0, "total_tokens": 0},
   "models": ["gpt-4o-mini", "fast", "claude-sonnet-4"],
-  "layers": ["workspace", "requested_model_id", "model_id", "provider_id", "upstream_model_id"],
+  "layers": ["workspace", "requested_model_id", "model_id", "provider_id", "key_name", "upstream_model_id"],
   "links": [{"source_layer": 0, "target_layer": 1, "source": "teamA", "target": "TASK_000001", "requests": 12, "total_tokens": 3400}]
 }
 ```
@@ -1469,7 +1474,7 @@ http://127.0.0.1:8000/ui/
     {"name": "teamA", "stats": {"requests": 12, "successes": 12, "total_tokens": 3400, "...": "..."}}
   ],
   "unattributed": {"requests": 3, "total_tokens": 800, "...": "..."},
-  "layers": ["workspace", "requested_model_id", "model_id", "provider_id", "upstream_model_id"],
+  "layers": ["workspace", "requested_model_id", "model_id", "provider_id", "key_name", "upstream_model_id"],
   "links": [
     {"source_layer": 0, "target_layer": 1, "source": "teamA", "target": "TASK_000001", "requests": 12, "total_tokens": 3400}
   ]
@@ -1480,12 +1485,14 @@ http://127.0.0.1:8000/ui/
 | --- | --- |
 | `workspaces[].stats` | 与 `/metrics` 的 `total` 同形（同一套聚合口径） |
 | `unattributed` | **没有**工作空间归属的请求（升级前的历史行、以及不走代理的写入路径） |
-| `layers` | 流向图的层顺序，与 `links` 的 `source_layer` / `target_layer` 对应 |
+| `layers` | 流向图的层顺序，与 `links` 的 `source_layer` / `target_layer` 对应。六层依次是：工作空间 → 请求模型 → 实际模型 → 供应商 → **上游 Key** → 上游模型 |
 | `links[].source` / `target` | 相邻两层之间的连边；`requests` 与 `total_tokens` 都给出，供前端切换宽度口径 |
 
 关于 `unattributed`：**不会**被并进 `default`。把它算到默认工作空间头上会凭空造出一段并不存在的用量。工作空间归属从记录该字段的版本起才开始写入，升级前的历史行永远落在这里，不会追溯回填。
 
-关于 `links`：某一端为空的请求（`provider_id` / `upstream_model_id` 可空）**不成边**，在图上留出缺口，而不是补一个占位节点——否则无法区分哪条是数据、哪条是兜底。
+关于 `links`：某一端为空的请求（`provider_id` / `upstream_model_id` 可空）**不成边**，在图上留出缺口，而不是补一个占位节点——否则无法区分哪条是数据、哪条是兜底。`key_name`（上游 Key 名）恒非空，因此「供应商 → 上游 Key」这一段只在 `provider_id` 为空时缺边。
+
+> 层级顺序里**必须**按层名定位而不是写死下标：Key 这一层是从「供应商 → 上游模型」中间插进去的，写死「第 4 段是上游模型」的取数会在插入新层后静默取到 Key 名（`webui_panel_probe.mjs` 有专门断言锁这条）。
 
 > 该端点挂在 `/ui/` 之下而非新增 `/api/metrics/*`：它是本项目自有的响应形状（参照实现没有工作空间，没有可比对的 oracle），不混进 `/metrics` 系列。
 
@@ -1537,6 +1544,54 @@ http://127.0.0.1:8000/ui/
 **明文 key 在任何响应里都不出现**：新建与轮换是仅有的两个例外。这把 key 的持有者本来就知道自己的凭据，服务端没有理由再回显一次——看板会被投屏、截图、随手转发。
 
 被停用的密钥回 `403`（`访问密钥已被停用`），与「凭据不认识」的 `401` 刻意区分：停用是可恢复的，认错凭据不是。
+
+### `GET /ui/key-usage.json`
+
+按**上游 Key**、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页使用。**只认完整权限**：内容反映全实例的 Key 使用情况（配置结构的投影），与 `/metrics` 同级；访问密钥与工作空间的面板 key / 推理 key 一律 `401`。
+
+要「看自己那一把」的读数各有归属：访问密钥走 `/ui/access-key-usage.json`，工作空间面板走 `/ui/workspace-panel.json`。
+
+| 参数 | 类型 | 默认 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
+| `all_history` | boolean | `false` | — | 为真时忽略 `hours`，统计全部历史（此时 `window.from` 为 `null`） |
+
+参数校验与 `/metrics` 同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。
+
+```json
+{
+  "count_semantics": "upstream_attempt",
+  "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24},
+  "upstream_keys": [
+    {"provider_id": "openai", "key_name": "main", "stats": {"requests": 12, "total_tokens": 3400, "...": "..."}}
+  ],
+  "model_keys": [
+    {"model_id": "gpt-4o-mini", "provider_id": "openai", "key_name": "main", "stats": {"...": "..."}}
+  ],
+  "access_keys": [
+    {"access_key_id": "ak1", "access_key_name": "试用账号 A", "stats": {"...": "..."}}
+  ],
+  "unattributed": {"requests": 3, "total_tokens": 800, "...": "..."}
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `upstream_keys` | 按 `(provider_id, key_name)` 拆分，即转发时**实际用的那把上游 Key** |
+| `model_keys` | 按 `(model_id, provider_id, key_name)` 拆分，给「模型 / 上游 Key」明细表用 |
+| `access_keys` | 按 `access_key_id` 拆分，即**调用方**凭据（来自 `request_access_key` 旁挂表） |
+| `access_keys[].access_key_name` | 配置里的密钥名；配置里已没有这把 key 时为 `null`（**不回填 id**——那会让「这把 key 还配着」看起来像真的） |
+| `unattributed` | `provider_id` 为空的请求汇总（升级前的历史行等），进不了上面按 Key 的行 |
+
+每组 `stats` 与 `/metrics` 的 `total` 同形（同一套聚合口径）。
+
+拆分口径上有三点是刻意的：
+
+- **三份拆分都是数组而不是嵌套对象。** 每行的身份是 2~3 个字段（供应商 + Key 名、模型 + 供应商 + Key 名），挑一个当外层键就会把另一维压成子项——那正是 `/metrics` 的 `keys`（真实模型 → Key 名）答不出「这一把 Key 一共出去了多少流量」的原因。数组顺序是身份字段的字典序，界面自己按列再排一次。
+- **上游 Key 与访问密钥互不嵌套。** 一把访问密钥的流量会打到多把上游 Key 上，反之亦然，把两者套成一层会答不出其中任何一个。
+- **`key_name` 只在同一个供应商内唯一。** 两家的同名 Key 是两把 Key，因此供应商必须进分组键；这也是本端点不能退化成「按 Key 名分组」的原因。
+
+> 该端点挂在 `/ui/` 之下而非 `/metrics` 新增字段：`/metrics` 是**对照参照实现**的读数，形状已经发布、不能加字段（见「新增能力挂在 `/api/` 还是 `/ui/`」）。
 
 ### `GET /ui/pricing.json`
 

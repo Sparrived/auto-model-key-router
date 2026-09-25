@@ -288,17 +288,29 @@ CREATE TABLE IF NOT EXISTS request_workspace (
 
 同理，流向图里某一端为空的请求（`provider_id` / `upstream_model_id` 可空）**不补占位
 节点**，而是在那个位置留出缺口。补一个占位符会让它与真实取值混在一起，看图的人分不出
-哪条是数据、哪条是兜底。
+哪条是数据、哪条是兜底。（`key_name` 恒非空，所以「供应商 → 上游 Key」这一段只在
+`provider_id` 为空时才缺边。）
 
-### 流向图的五层
+### 流向图的六层
 
 ```
-工作空间 → 请求模型 → 实际模型 → 供应商 → 上游模型
+工作空间 → 请求模型 → 实际模型 → 供应商 → 上游 Key → 上游模型
 ```
 
 粒度选在这里是因为它恰好是请求在系统里的完整流转，且每一层都已存在于指标里
-（`requested_model_id` / `model_id` / `provider_id` / `upstream_model_id`），无需额外
-埋点。宽度可切请求数或 Token：前者看调用次数，后者看实际消耗。
+（`requested_model_id` / `model_id` / `provider_id` / `key_name` / `upstream_model_id`），
+无需额外埋点。宽度可切请求数或 Token：前者看调用次数，后者看实际消耗。
+
+**上游 Key 这一层**（后补的，原先是五层、供应商直接连到上游模型）：同一家供应商可以配多把
+Key，而 v4 起「模型 → target」的选择就是**选 Key**，所以「打到哪家」与「用的哪把 Key」是
+两个不同的问题。只画到供应商时，两把 Key 承担的流量在同一段流带里并成一条，看不出是哪把
+Key 出去的。`key_name` 就是被选中的那把上游 Provider Key 名（见 `internal/proxy` 的
+`recordMetric`）。
+
+> 按层名取数，**不要写死下标**。Key 层是从「供应商 → 上游模型」中间插进去的：写死「第 4 段
+> 是上游模型」的取数在插入之后会静默取到 Key 名（面板的「上游模型用量」卡原先就是这样，
+> 已经改成 `layerIndexOf(usage, "upstream_model_id") - 1`，并由
+> `webui/probes/webui_panel_probe.mjs` 的 `upstreamCardListsUpstreamModel` 锁住）。
 
 布局上有一条容易写错、写错了却"看起来对"的地方：**纵向必须只用一把尺子**（全局
 scale），不能让每层各自缩放到满高。后者会让同一节点的入边与出边拿到不同厚度，流带

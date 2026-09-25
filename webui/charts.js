@@ -536,7 +536,8 @@ function heatCellClass(cell, max) {
 // 流向承载最多请求"，一眼可读。
 //
 // 只画 SVG 不做交互式下钻：流带本身已经带 title（悬停能看到精确数值），而真正的
-// 下钻要跳到明细页、带上五层过滤条件，那不是这张图该承担的职责。
+// 下钻要跳到明细页、带上逐层过滤条件（现在是六层，见 layers），那不是这张图该承担
+// 的职责。
 export function sankey({ links, layers, metricLabel, height = 420, formatValue: format = formatCompactNumber, ariaLabel = "请求流向桑基图" }) {
   const host = h("div.chart-host", { style: { height: `${height}px` } });
 
