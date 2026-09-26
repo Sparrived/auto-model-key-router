@@ -1360,8 +1360,9 @@ curl -X POST http://127.0.0.1:8000/api/routes \
 ### CPA 账号资源接口
 
 `/api/cpa-instances` 与 `/api/cpa-accounts` 把若干个
-[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（下称 CPA）实例的账号与额度汇总到
-一块看板上（WebUI 的「账号资源」页）。实例清单存在配置文件的顶层键 `cpa_instances` 里：
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（下称 CPA）实例的账号、以及按订阅计费的
+供应商（OpenCode Go、Command Code）的剩余额度，汇总到一块看板上（WebUI 的「账号资源」页）。
+实例清单存在配置文件的顶层键 `cpa_instances` 里：
 
 ```json
 {
@@ -1381,6 +1382,23 @@ curl -X POST http://127.0.0.1:8000/api/routes \
 ID 兜底；实例里未知的字段原样保留（与配置整体一致：旧版本写回不该丢新字段）。这个键不在
 `/api/settings` 那批已发布字段里，因此它的增删不会牵动那份逐字对齐的契约。
 
+> **CPA 为什么必须单独配管理密钥，而不能像订阅那样自动派生**（已核实到源码与实机验证，CPA
+> commit `9bdde54`）：CPA 的**推理 key 与管理密钥是两个互不相通的命名空间**。管理面鉴权
+> （`internal/api/handlers/management/handler.go` 的 `AuthenticateManagementKey`）只比对
+> `remote-management.secret-key` 的 bcrypt 哈希、`MANAGEMENT_PASSWORD` 环境变量与本地
+> `--password`，**从不查 `api-keys`**。实机验证：同一把推理 key 打 `/v1/models` 得到 200，
+> 打 `/v0/management/auth-files` 得到 `401 {"error":"invalid management key"}`。管理密钥在
+> 启动时被 bcrypt 写回 `config.yaml`，而 `api-keys` 一直是明文，存储方式也不同。
+> 另外整个推理面（`/v1/*`、`/v1beta/*`…）**没有任何**列出账号或额度的路由——账号与额度的清单
+> 只存在于管理面。所以能派生的最多是「这个 base_url 是个 CPA」（响应头带
+> `X-CPA-VERSION` 等 `X-CPA-*` 指纹），**账号清单派生不出来**，管理密钥必须由用户提供。
+> 订阅类供应商没有这层分割：它们的用量接口就用同一把 `api_key`，所以那半边才能自动派生。
+
+> **运维提醒**：CPA 的管理面对鉴权失败有 **5 次 / 30 分钟的 IP 封禁**（按 client IP 计，
+> **loopback 也照封**）。因此不要拿错误的密钥去反复试探 `/v0/management/*` —— 试满 5 次会让
+> AMKR 连着它自己的看板一起被锁在外面半小时。AMKR 只在用户显式配了实例、点开看板时才去读，
+> 不做后台轮询，也不做「猜密钥」式的探测。
+
 ```bash
 # 读实例清单：响应含 config_revision 与各实例的 management_key（要求完整权限）
 curl http://127.0.0.1:8000/api/cpa-instances -H "Authorization: Bearer your-local-api-key"
@@ -1392,7 +1410,8 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
         "cpa-a":{"label":"主力 CPA","base_url":"http://127.0.0.1:8317","management_key":"..."}}}'
 ```
 
-`GET /api/cpa-accounts` 由 AMKR 的**服务端**替调用方去问各实例，返回归一化后的账号与额度：
+`GET /api/cpa-accounts` 由 AMKR 的**服务端**替调用方去问各实例与各订阅端点，返回归一化后的账号与
+额度。`instances[]` 是 CPA 实例，`subscriptions[]` 是订阅类供应商：
 
 ```json
 {
@@ -1427,11 +1446,70 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
     },
     {"id": "cpa-b", "label": "备用 CPA", "base_url": "http://10.0.0.9:8317",
      "ok": false, "error": "无法连接 CPA: ... connection refused", "accounts": []}
+  ],
+  "subscriptions": [
+    {
+      "id": "opencode-go-a/key-1", "kind": "opencode-go", "vendor": "OpenCode Go",
+      "provider_id": "opencode-go-a", "key_name": "key-1",
+      "base_url": "https://opencode.ai/zen/go/v1",
+      "ok": true, "observed_at": "2026-01-01T00:00:00Z",
+      "plan": "Go", "tier_id": "individual-go", "account": "someone",
+      "windows": [
+        {"key": "opencode-go/rolling", "label": "5 小时", "window": "5h",
+         "remaining": 0.58, "reset_at": "2026-01-01T05:00:00Z", "source": "quota"}
+      ],
+      "summary": [{"key": "monthlyCredits", "label": "订阅积分", "value": 7.5, "unit": "credit"}],
+      "signals": {"status": "active"}
+    }
   ]
 }
 ```
 
-口径与边界：
+#### 订阅条目是**派生**出来的
+
+`subscriptions[]` 不来自任何配置键，而是从已配置的**供应商**推出来的：某个供应商的 `base_url`
+落在已知的订阅端点上时，它的**每个启用 key** 就产生一条订阅。删掉供应商，条目随之消失；不存在
+「配置里已经没有这个供应商、看板上还在读它的额度」这种漂移，也就不需要任何清理钩子。
+
+因此这一块是**只读**的——没有「新增订阅」这个写接口，也没有对应的编辑器。要加一条订阅，就是
+在供应商里加一个指向该端点的供应商（用哪把 key 由那个供应商的 `api_key` 决定）。AMKR 不为它
+额外存任何凭据。
+
+已被识别的端点（认不出就**不产生条目**，绝不猜）：
+
+| `kind` | 匹配规则 | 用量请求 |
+| --- | --- | --- |
+| `opencode-go` | 主机 `opencode.ai` 且路径以 `/zen/go` 开头 | `GET {base_url}/usage` |
+| `commandcode` | 主机 `api.commandcode.ai` | `GET /alpha/whoami`、`/alpha/billing/credits`、`/alpha/billing/subscriptions`、`/alpha/usage/summary` |
+
+路径也参与 OpenCode 的判定（不只是主机）：`/zen/v1` 是 Zen 的推理端点，拿 Zen 的 key 去问 Go
+的用量会得到 `403 subscription required`，那会被误读成「订阅过期」。这里认错就等于给出一个
+看起来像事实的错误结论。
+
+订阅条目的口径：
+
+- **与 `instances[]` 同一次扇出、同一个 `fetched_at`**：两块并发去问，谁慢都不拖累对方。页面上
+  这是一块看板，分两次取会出现两个时间戳，而用户看到的是同一屏数字。
+- **`windows[]` 与 CPA 那半边**是同一套类型与同一套含义（`remaining` 是**剩余比例** 0..1、
+  `reset_at` 是 RFC3339、`source` 为 `quota`）。上游给的是**已用**百分数，服务端翻成剩余；
+  `rate-limited` 归一成 `status: "rejected"`。
+- **认不出的窗口名原样保留**，与 CPA 侧同一个函数（`5h`/`weekly`/`monthly` → 「5 小时」/
+  「7 天」/「30 天」，其余照抄）。
+- **缺字段就不画**：上游没给比例的窗口整个跳过，cap 为 0 或缺失的窗口也跳过。少一个窗口好过替
+  上游保证一个它没说的额度。
+- **重试**：OpenCode Go 的用量端点会无规律地回 `503`（与凭据无关），所以会重试（最多 4 次，
+  退避 250ms/500ms/1s，只重试 429/5xx）。`401`/`403` 是凭据语义，不重试，并给出可操作的说明
+  （「凭据无效」/「该工作区没有 OpenCode Go 订阅」）。
+- **Command Code 逐端点容错**：四条 GET 各自独立，只有**全部**失败才把条目判为失败（`error` 里
+  逐条列出），局部失败进 `signals["读取失败"]`——这些是各自独立的内部接口，一起挂掉的概率远低于
+  其中一个漂移，把局部失败升级成整条失败会让一次无关紧要的字段改名打掉整个区块。
+- **失败是逐条目的**：某把 key 不对只让它自己的 `error` 有值，其余条目与 `instances[]` 照常返回。
+- **`signals[]` 是原始信号兜底**：订阅侧把上游那些还没被归一化的状态字段原样列出（如
+  `status`、`cancelAtPeriodEnd`），与 CPA 侧的 `signals` 同一个用途。
+- **请求只带一种凭据头**：`Authorization: Bearer <该供应商的 api_key>`。AMKR 只读，不改对端状态。
+- **只看不拦**：这些读数同样**不参与** AMKR 的 Key 冷却与失败切换，与 CPA 那半边一致。
+
+CPA 侧的口径与边界：
 
 - **为什么由服务端去问**：CPA 的管理接口与 AMKR 不同源、也没有 CORS 头，浏览器直接请求必被
   拦；而 `management_key` 是能改 CPA 配置的凭据，不该长期放进浏览器。请求只发
@@ -1459,7 +1537,7 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
   界面用它画迷你趋势和「谁在什么时候打的」。
 - **`server_time_offset_ms` 是对端时钟与本地时钟的差**（CPA 的 `serverTimeOffsetMs`）：
   `reset_at` 按对端时钟写，客户端算「还有多久重置」时应当把它减掉，否则对端差几分钟、倒计时
-  就偏几分钟。
+  就偏几分钟。订阅条目**没有**这个字段：那两家不汇报时差，凭空造一个只会让倒计时更不准。
 - **没有额度时的提示**：`501` 表示对端没有额度提供者（既没装额度插件、也没给该账号配声明式
   `quota_probe`），界面上要如实说「对端没有额度提供者」——既不能显示成 0，也不能编一条出来。
   Antigravity 这类 provider 属于「对端配了 probe 才有」的那类，配方见
@@ -1472,7 +1550,11 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
 - **只看不拦**：这些读数**不参与** AMKR 的 Key 冷却与失败切换。AMKR 路由的是它自己的上游 Key，
   与 CPA 侧的账号额度没有耦合关系；额度耗尽该由 CPA 自己的冷却机制处理。
 
-额度通道的来路与官方程度（哪些 provider 有得读、哪些只能靠本地语言服务器）见
+`subscriptions` 与 `instances` 一样**恒为数组**（没有条目时是 `[]`，不是 `null`），客户端少写一次
+判空也不会炸。
+
+额度通道的来路与官方程度（哪些 provider 有得读、哪些只能靠本地语言服务器、哪些订阅端的用量
+接口是官方文档里的、哪些是从社区实现反推的）见
 [`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md)。
 
 ## 状态码与错误格式

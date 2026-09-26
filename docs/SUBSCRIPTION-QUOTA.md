@@ -113,6 +113,33 @@ recent buckets）。
 官方文档：[管理 API](https://help.router-for.me/cn/management/api)、
 [Redis 用量队列](https://help.router-for.me/cn/management/redis-usage-queue.html)。）
 
+### 管理密钥与推理 key 是两个命名空间（AMKR 的实现前提）
+
+要判断「能不能从供应商配置自动派生出一个 CPA 账号资源条目」，答案取决于这件事，所以单独记：
+
+- **管理面鉴权只认管理密钥**：`internal/api/handlers/management/handler.go` 的
+  `AuthenticateManagementKey` 只比对 `remote-management.secret-key` 的 bcrypt 哈希、
+  `MANAGEMENT_PASSWORD` 环境变量与本地 `--password`，**从不查 `api-keys`**。管理密钥在启动时被
+  bcrypt 写回 `config.yaml`（`internal/config/config_load.go`），而 `api-keys` 一直是明文。
+- **实机验证**（本地 `go build ./cmd/server` 起服务）：同一把推理 key 打 `/v1/models` 得到
+  `200`，打 `/v0/management/auth-files` 得到 `401 {"error":"invalid management key"}`。
+- **推理面没有任何账号/额度路由**：`/v1/*`、`/v1beta/*`、`/openai/v1/*`、
+  `/backend-api/codex/*` 都不列账号；`/v1/models` 只回模型。清单只在 `/v0/management/*` 后面。
+- **能派生的是「这是个 CPA」，不是账号清单**：`/healthz` 回 `{"status":"ok"}`、`/` 回
+  `{"message":"CLI Proxy API Server"}`，而更可靠的指纹是**每个响应**都带
+  `Access-Control-Expose-Headers: …, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, …`
+  （`internal/api/server_middleware.go`），即使管理面被关掉也在。
+  `GET /v0/management/auth-files` 不带密钥会回 `401` **并带上 `X-Cpa-Version` 等头**（这些头在
+  鉴权之前就写了），可以据此确认「是 CPA 且管理面开着」；回 `404` 则说明管理面被关
+  （`secret-key` 为空时路由根本不注册——那是硬 `404`，不是「无鉴权开放」）。
+
+因此 AMKR 的取舍是：**订阅类供应商**用量接口就用同一把 `api_key`，可以自动派生；
+**CPA 则必须单独提供管理密钥**，`cpa_instances` 因此保留为一个独立的顶层键。
+
+> **运维提醒**：管理面对鉴权失败有 **5 次 / 30 分钟的 IP 封禁**（按 client IP 计，**loopback
+> 也照封**，`handler.go` 的 `maxFailures` / `banDuration`）。不要拿错误密钥反复试探
+> `/v0/management/*`——试满 5 次会把 AMKR 连着它自己的看板一起锁在外面半小时。
+
 ## 2. 官方程度分四层
 
 | 层 | 做法 | 是否官方 | 适用订阅 | 成本 |
@@ -311,9 +338,79 @@ description}`），因此**不需要写 `mapping`**。配好后 auth-files 里�
 
 阿里云百炼、火山方舟的配额查询 API：未能证实。
 
+### 3.7 OpenCode Go / Zen 与 Command Code
+
+这两家已经接进 AMKR 的账号资源看板（`subscriptions[]`，见
+[`docs/API.md`](API.md#订阅条目是派生出来的)），所以口径在这里一并记下来。
+
+**OpenCode Go**：`GET https://opencode.ai/zen/go/v1/usage`
+
+| 项 | 值 |
+| --- | --- |
+| 鉴权 | `Authorization: Bearer <OpenCode Go 的 key>` |
+| 返回 | `{"usage": {"rolling": {status, percent, resetsAt}, "weekly": {...}, "monthly": {...}}}`；`percent` 是**已用**百分数（`Math.floor(min(100, usage/limit*100))`），`status ∈ {ok, rate-limited}` |
+| 错误 | `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."／"Unauthorized"}}`；`403 EntitlementError "OpenCode Go subscription required."`（该工作区没有订阅） |
+| 端点抖动 | `503 {"message":"Go usage is unavailable"}` 会**无规律**出现（约 1/5–1/3 的调用，与 UA 和凭据都无关），必须重试 |
+| 窗口上限 | 5 小时 $12 / 每周 $30 / 每月 $60（来自 `LiteData.getLimits()`，社区实现一致） |
+| 官方程度 | **官方文档**（[opencode.ai/docs/go](https://opencode.ai/docs/go/)，$10/月）；响应字段来自客户端源码与社区实现 |
+
+要点：
+
+- **`/zen/go` 与 `/zen/v1` 必须分开**。`/zen/v1` 是 Zen 的推理端点，而 **Zen 是预付额度、没有
+  按 key 读用量的接口**（只有需要 session Cookie + workspaceId 的 Console 路由）。拿 Zen 的 key
+  去问 Go 的用量会得到 `403 subscription required`，把它当成「订阅过期」是**错的结论**。所以
+  AMKR 只从路径以 `/zen/go` 开头的供应商派生条目。
+- 已用百分数要翻成剩余比例再看板（上游 42% 已用 → 显示 58% 剩余）；`rate-limited` 归一成
+  「已用尽」。
+- 社区实现的解析器对 snake_case 别名与「0–100 还是 0–1」两种百分数写法都容错，但**不编零**：
+  字段缺失就当作没有这个窗口。
+
+**Command Code**：`https://api.commandcode.ai` 下四条**未公开文档**的 `/alpha/*` GET
+
+| 端点 | 返回 |
+| --- | --- |
+| `/alpha/whoami` | `{user: {id, name, userName}, org?: {id}}` |
+| `/alpha/billing/credits` | `{credits: {monthlyCredits, purchasedCredits, freeCredits, planId?, belowThreshold?, creditThreshold?}, windowLimits: {limited, exceeded, fiveHour: {used, cap, exceeded, resetAt}, weekly: {...}}}` |
+| `/alpha/billing/subscriptions[?orgId=…]` | `{success: true, data: {planId, status, currentPeriodStart, currentPeriodEnd, cancelAtPeriodEnd, pendingPhase}}` |
+| `/alpha/usage/summary` | `totalCount`、`totalCost`、`averageCost`、`successRate`、`completedCount`、`failedCount`、`totalTokensIn/Out`、`totalTokens`、`totalCredits`、`totalFreeCredits`、`totalMonthlyCredits`、`totalPurchasedCredits`、`periodBasis` |
+
+| 项 | 值 |
+| --- | --- |
+| 鉴权 | `Authorization: Bearer <commandcode.ai 的账号 key>`、`Accept: application/json` |
+| 档位映射 | `KNOWN_PLANS` 按**最长前缀**匹配：`individual-go` Go 10、`individual-goat` GOAT 70、`individual-pro` Pro 30、`individual-pro-v1` Pro 80、`individual-provider` Provider 15、`individual-max` Max 150、`individual-ultra` Ultra 300、`teams-pro` Teams Pro 40 |
+| 官方程度 | 社区逆向（[commandcode-usage](https://github.com/MAXeaglet/commandcode-usage)） |
+
+要点：
+
+- **档位映射只映射名字，不映射月额度**：把静态的额度数字也写进表里，就等于给同一件事留了第二个
+  真相来源（真实额度由 `billing/credits` 给）。数字只用来理解档位大小，不进读数。
+- **四条 GET 各自容错**：它们是没有文档的内部接口，一起挂掉的概率远低于其中一个字段改名，所以
+  只有**全部**失败才把整条判为失败，局部失败记录下来照常显示其余读数。
+- **`resetAt` 是毫秒时间戳**（`used`/`cap` 也是），按秒解析会得到公元五万年那种「永不重置」的
+  额度。
+- `windowLimits` 里 `cap <= 0` 或缺失时不画这个窗口：`used/cap` 会算出 +Inf 或负数，画到环上
+  不是 0% 就是 100%，两个都是编数据。
+
+**OpenCode Zen 为什么不在列表里**：它是**预付额度**（prepaid credits），没有按 key 读用量的
+接口，只有需要 session Cookie + workspaceId 的 Console 路由。用 provider 的 `api_key` 无法查询，
+接入它需要一套完全不同的凭据（浏览器会话），因此不在本次范围内。
+
 ## 4. 给 AMKR 的落地建议
 
-现状：AMKR 的按 Key 探测缓存是
+**已经落地的部分（订阅类供应商）**：OpenCode Go 与 Command Code 已接进「账号资源」看板，
+走的是本文的 L2（主动探测）。实现与口径见
+[`docs/API.md`](API.md#订阅条目是派生出来的)，几个与下面建议不同的取舍值得记下：
+
+- **条目从已配置的供应商派生，不另存清单、也不解析成 AMKR 的 Key**。`base_url` 落在已知订阅
+  端点上时，该供应商的每个启用 key 就产生一条订阅，复用它的 `api_key`。删掉供应商条目自动消失，
+  不需要清理钩子。代价是只有**经由 AMKR 路由**的订阅才看得见。
+- **没有接冷却**。这一页是「只看不拦」，读数不参与 Key 冷却与失败切换（与 CPA 侧一致）。
+- **没有落 `quota` 字段、没有缓存**。每次 `/api/cpa-accounts` 都是一次真实扇出，60 秒总预算。
+  所以同一把 key 的用量读数不会与推理 Key 的能力缓存混在一起，也就不存在两套刷新节奏。
+- **按端点识别、认不出就不猜**：宁可少一条，也不拿别家端点的 key 去问，那只会得到误导性的
+  401/403。
+
+**还没做的部分（AMKR 自己上游 Key 的额度）**：现状是 AMKR 的按 Key 探测缓存为
 `providers.<id>.keys.<key>.capabilities = {models, route_status, errors, checked_at}`，
 只解析上游 `Retry-After`，不采集任何限额信号；文档里也明确写着「统计不是配额」。
 要做「每个 Key 还剩多少」，建议按 L3 → L2 的顺序推进：
