@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/config"
 	"github.com/Sparrived/auto-model-key-router/internal/configops"
 )
 
@@ -102,9 +103,15 @@ func (s *Server) handleReplaceCPAInstances(w http.ResponseWriter, r *http.Reques
 // —— GET /api/cpa-accounts ——
 
 // cpaAccountsReport 是一次账号资源扇出的结果。
+//
+// Subscriptions 是**派生**出来的订阅条目（见 subscriptions.go）：它们不来自任何配置键，
+// 而是从已配置的供应商端点认出来的。与 Instances 并列返回而不是另开一个接口：页面上
+// 这是一块看板（KPI 与「还剩多少」的口径要一起算），分两次取就会出现两个不同的
+// fetched_at，而用户看到的是同一屏数字。
 type cpaAccountsReport struct {
-	FetchedAt string                     `json:"fetched_at"`
-	Instances []cpaInstanceAccountReport `json:"instances"`
+	FetchedAt     string                     `json:"fetched_at"`
+	Instances     []cpaInstanceAccountReport `json:"instances"`
+	Subscriptions []subscriptionEntry        `json:"subscriptions"`
 }
 
 // cpaInstanceAccountReport 是一个实例的账号清单；实例级失败只影响它自己这一块。
@@ -195,7 +202,10 @@ type cpaModelQuota struct {
 // 只会造出一个「看得到一半」的看板。
 func (s *Server) handleListCPAAccounts(w http.ResponseWriter, r *http.Request) {
 	s.run(w, http.StatusOK, func() (*canonical.Value, error) {
-		if _, err := s.authorizedConfig(r); err != nil {
+		// authorizedConfig 已经把配置解析好了，这里直接用它：订阅的派生规则要的正是
+		// 同一份 providers，再解析一次只会让「配置坏了」在两个地方各报一次。
+		cfg, err := s.authorizedConfig(r)
+		if err != nil {
 			return nil, err
 		}
 		data, err := s.managementConfigData()
@@ -206,19 +216,42 @@ func (s *Server) handleListCPAAccounts(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		return canonicalFromAny(s.collectCPAAccounts(r.Context(), instances))
+		return canonicalFromAny(s.collectAccountsReport(r.Context(), cfg, instances))
 	})
+}
+
+// collectAccountsReport 扇出整块看板：CPA 实例与派生出来的订阅**同时**开问。
+//
+// 两者并发而不是先后串行：它们是两块互不相干的上游（内网 CPA 与公网订阅），串起来等于
+// 把两边的等待相加，而 60s 的预算本来就是为整块看板设的。
+func (s *Server) collectAccountsReport(ctx context.Context, cfg *config.RouterConfig, instances []configops.CPAInstance) cpaAccountsReport {
+	report := cpaAccountsReport{}
+	var wait sync.WaitGroup
+
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		report.Instances = s.collectCPAAccounts(ctx, instances)
+	}()
+
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		report.Subscriptions = s.collectSubscriptions(ctx, cfg)
+	}()
+
+	wait.Wait()
+	// fetched_at 在最后取：它是这一屏数字的读取时刻，写在开扇之前会把等待时间漏掉。
+	report.FetchedAt = time.Now().UTC().Format(time.RFC3339)
+	return report
 }
 
 // collectCPAAccounts 并发问一遍所有实例。
 //
 // 实例之间并发、实例内部串行：实例数量是个位数，而单个实例的账号可能很多，账号那一层
 // 由 fillQuotaWindows 自己限流。
-func (s *Server) collectCPAAccounts(ctx context.Context, instances []configops.CPAInstance) cpaAccountsReport {
-	report := cpaAccountsReport{
-		FetchedAt: time.Now().UTC().Format(time.RFC3339),
-		Instances: make([]cpaInstanceAccountReport, len(instances)),
-	}
+func (s *Server) collectCPAAccounts(ctx context.Context, instances []configops.CPAInstance) []cpaInstanceAccountReport {
+	reports := make([]cpaInstanceAccountReport, len(instances))
 	ctx, cancel := context.WithTimeout(ctx, cpaAccountsBudget)
 	defer cancel()
 
@@ -227,11 +260,11 @@ func (s *Server) collectCPAAccounts(ctx context.Context, instances []configops.C
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			report.Instances[index] = s.collectCPAInstance(ctx, instance)
+			reports[index] = s.collectCPAInstance(ctx, instance)
 		}()
 	}
 	wait.Wait()
-	return report
+	return reports
 }
 
 // collectCPAInstance 读一个实例的账号清单，再按需补额度。
