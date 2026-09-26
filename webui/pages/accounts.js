@@ -157,6 +157,9 @@ function subscriptionCard(entry) {
   }
 
   const windows = entry.windows || [];
+  // 窗口的重置倒计时传 0 偏移，而不是像 CPA 那样减一个时钟差：CPA 会主动汇报它与上游的
+  // 时差（server_time_offset_ms），而这两家没有这样的字段——凭空造一个偏移只会让倒计时
+  // 更不准。剩下的偏差就是浏览器本机时钟与对端之差，正常机器上是秒级。
   const body = windows.length
     ? h("div", { style: quotaGridStyle }, windows.map((window) => quotaRing(window, 0)))
     : notice(subscriptionHint(entry), "info");
@@ -169,11 +172,6 @@ function subscriptionCard(entry) {
     signalDetails(entry.signals),
   );
 }
-
-// 订阅的窗口直接用对端给的绝对重置时刻（OpenCode 给 resetsAt、Command Code 给 resetAt），
-// 这里传 0 而不是像 CPA 那样减一个时钟偏移：CPA 会主动汇报它与上游的时差
-// （serverTimeOffsetMs），而这两家没有这样的字段，凭空造一个偏移只会让倒计时更不准。
-// 影响面也就是浏览器本机时钟与对端差多少，正常机器上是个秒级量级。
 
 // 没有窗口时说明原因。订阅这一侧的"没有窗口"不是故障：供应商没被认出来、或者上游这次
 // 只回了账号信息没回用量，都可能。这里把剩下那点信息（状态、档位）讲出来，让人知道
