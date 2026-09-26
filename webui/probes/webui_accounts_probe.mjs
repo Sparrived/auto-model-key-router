@@ -1,16 +1,18 @@
 // 账号资源页回归探针：用最小 DOM 垫片驱动真实的 webui/pages/accounts.js。
 //
-// 锁的是三件"代码里看不出来、坏了却很难发现"的事：
+// 锁的是四件"代码里看不出来、坏了却很难发现"的事：
 //
-//   1. 浏览器**不直接访问 CPA**，而且进页面时**不把管理密钥拉下来**——管理密钥只在
-//      打开实例编辑框时才取。所有请求都必须落在 AMKR 自己的 /api/ 下。
+//   1. 浏览器**不直接访问 CPA**，也**不直接访问订阅厂商**，而且进页面时**不把管理密钥
+//      拉下来**——管理密钥只在打开实例编辑框时才取。所有请求都必须落在 AMKR 自己的
+//      /api/ 下。订阅那部分的读数由服务端扇出，页面只拿结果。
 //   2. 这一页**不轮询**：进页面只发一次 /api/cpa-accounts（一次刷新要替每个实例问一遍
-//      账号、逐账号问额度，轮询会把对端与 AMKR 一起拖住）。
+//      账号、逐账号问额度，还要挨家问订阅用量，轮询会把对端与 AMKR 一起拖住）。
 //   3. 进度条画的是**剩余**比例，20% / 5% 两档颜色与读数一致——显示已用会把 18% 剩余
 //      读成"还早"，这一页的结论就全反了。
+//   4. 订阅条目**只读、按端点派生**：页面里没有"添加订阅"这种入口，删供应商就等于删条目。
 //
 // 另外钉住故障隔离：一个实例连不上时，它的错误只出现在自己那块卡片上，另一个实例的
-// 账号照常列出。
+// 账号照常列出；一条订阅读失败也不影响别的条目。
 //
 // 用法：node webui/probes/webui_accounts_probe.mjs（有失败时退出码 1）。
 
@@ -116,6 +118,55 @@ const click = (node) => { for (const fn of node.listeners.click || []) fn({ targ
 // 重置时间放在未来 3 小时，用来断言倒计时那一行真的渲染出来了。
 const resetAt = new Date(Date.now() + 3 * 3600 * 1000).toISOString();
 
+// 订阅条目：两条正常 + 一条读取失败。
+//
+// 这些是**派生**出来的（配了订阅端点就出现），所以探针里也照派生结果的形状给：
+// 没有"添加订阅"的配置面，页面只读。
+const SUBSCRIPTIONS = [
+  {
+    id: "go-a/key-1", kind: "opencode-go", vendor: "OpenCode Go",
+    provider_id: "go-a", key_name: "key-1", base_url: "https://opencode.ai/zen/go/v1",
+    ok: true, observed_at: new Date().toISOString(), account: "xiaoming",
+    plan: "Go", tier_id: "individual-go",
+    // 三个窗口：一个健康、一个告警（≤20%）、一个已用尽（rejected + 0）。
+    // percent 是上游的**已用**，这里给的 remaining 是后端翻好的剩余比例。
+    windows: [
+      { key: "opencode-go/rolling", label: "5 小时", window: "5h", remaining: 0.88, reset_at: resetAt, source: "quota" },
+      { key: "opencode-go/weekly", label: "7 天", window: "weekly", remaining: 0.12, source: "quota" },
+      { key: "opencode-go/monthly", label: "30 天", window: "monthly", remaining: 0, source: "quota", status: "rejected" },
+    ],
+    summary: [{ key: "monthlyCredits", label: "订阅积分", value: 7.5, unit: "credit" }],
+    signals: { status: "active" },
+  },
+  {
+    id: "cc-a/key-1", kind: "commandcode", vendor: "Command Code",
+    provider_id: "cc-a", key_name: "key-1", base_url: "https://api.commandcode.ai",
+    ok: true, observed_at: new Date().toISOString(), account: "xiaoming",
+    plan: "GOAT", tier_id: "individual-goat",
+    windows: [
+      { key: "commandcode/five_hour", label: "5 小时", window: "5h", remaining: 0.75, reset_at: resetAt, source: "quota" },
+    ],
+    summary: [
+      { key: "monthlyCredits", label: "订阅积分", value: 5, unit: "credit" },
+      { key: "totalCount", label: "请求数", value: 120, unit: "次" },
+    ],
+    signals: { 读取失败: "usage/summary 读取失败" },
+  },
+  {
+    // 端点通了、但上游这次没回窗口：要说明"没有可读额度"，不能留白，也不能编个 0%。
+    id: "cc-b/key-1", kind: "commandcode", vendor: "Command Code",
+    provider_id: "cc-b", key_name: "key-1", base_url: "https://api.commandcode.ai",
+    ok: true, observed_at: new Date().toISOString(),
+    plan: "Ultra", tier_id: "individual-ultra", status: "active", windows: [],
+  },
+  {
+    // 一条 key 不对的订阅：错误只落在自己这张卡片上。
+    id: "go-b/key-1", kind: "opencode-go", vendor: "OpenCode Go",
+    provider_id: "go-b", key_name: "key-1", base_url: "https://opencode.ai/zen/go/v1",
+    ok: false, error: "凭据无效（401）——这把 key 不是 OpenCode Go 的订阅 key", windows: [],
+  },
+];
+
 const ACCOUNTS = {
   fetched_at: new Date().toISOString(),
   instances: [
@@ -168,6 +219,7 @@ const ACCOUNTS = {
       accounts: [],
     },
   ],
+  subscriptions: SUBSCRIPTIONS,
 };
 
 const INSTANCES = {
@@ -208,37 +260,73 @@ check("no_instances_request_on_load",
   !calls.some((url) => url.includes("/api/cpa-instances")), calls.join(" , "));
 
 // —— KPI 四张瓦片：读数与线索都要对 ——
+// 张数同时被宽屏 4 列与 ≤1280px 的 2 列整除（5 张在 2 列下会甩出半宽孤儿，
+// 所以「可用账号」并进了「账号」的线索里）。
 const stats = byClass(host, "stat");
 const statText = (index) => stats[index]?.textContent || "";
 check("kpi_tile_count", stats.length === 4, String(stats.length));
 check("kpi_instances_counts_broken",
   statText(0).includes("2") && statText(0).includes("1 个读取失败"), statText(0));
-check("kpi_accounts_total", statText(1).includes("3"), statText(1));
-check("kpi_usable_excludes_disabled",
-  statText(2).includes("2") && statText(2).includes("1 个停用或冷却中"), statText(2));
-check("kpi_low_quota_counts_drained",
-  statText(3).includes("1") && statText(3).includes("其中 1 个已用尽"), statText(3));
+check("kpi_subscriptions_counts_readable",
+  statText(1).includes("4") && statText(1).includes("3 条可读"), statText(1));
+// 「账号」只数 CPA 账号（3 个），不把订阅并进来：订阅没有启用/停用这回事，
+// 合并之后"可用 / 总数"就减不出所以然了。可用账号（2）并进线索里。
+check("kpi_accounts_total", statText(2).includes("3") && !statText(2).includes("7"), statText(2));
+check("kpi_accounts_hint_has_usable_count",
+  statText(2).includes("2 可用") && statText(2).includes("1 停用/冷却"), statText(2));
+// 告警是 CPA 账号与订阅的**合集**：CPA 侧 1 个（claude-1 最紧的窗口 3%）+
+// 订阅侧 1 个（go-a 的 30 天窗口已归零）= 2，两个都 ≤5% 所以都已用尽。
+check("kpi_low_quota_merges_both_sides",
+  statText(3).includes("2") && statText(3).includes("其中 2 个已用尽"), statText(3));
 
 // —— 圆环画的是剩余比例：角度、颜色、环里的数字三者同源 ——
-// 4 个环 = 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口：
+// 8 个环 = 订阅 4 个窗口（OpenCode Go 3 个 + Command Code 1 个，排在前）
+//        + 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口。
 // 逐模型额度用的就是同一套环，数量把两处都算上，才能保证没有窗口被漏画。
 const rings = byClass(host, "quota-ring");
 const ringValues = byClass(host, "quota-ring-value").map((node) => node.textContent);
-check("one_ring_per_window", rings.length === 4, String(rings.length));
+check("one_ring_per_window", rings.length === 8, String(rings.length));
 check("ring_degrees_match_percent",
-  rings[0]?.style.background.includes("64.8deg") && ringValues[0] === "18%",
+  rings[0]?.style.background.includes("316.8deg") && ringValues[0] === "88%",
   `${rings[0]?.style.background} / ${ringValues[0]}`);
+// 订阅窗口的环色与 CPA 账号走同一套阈值：12% 橙、0% 红、75% 主色。
+check("subscription_rings_use_same_thresholds",
+  rings[1]?.style.background.includes("#f9a825") &&
+    rings[2]?.style.background.includes("var(--md-error)") &&
+    rings[3]?.style.background.includes("var(--md-primary)"),
+  `${rings[1]?.style.background} / ${rings[2]?.style.background} / ${rings[3]?.style.background}`);
+// 账号侧的 18% 与 3% 仍按老规矩着色（0.18 与 0.03）。
 check("ring_warn_and_drained_colors",
-  rings[0]?.style.background.includes("#f9a825") && rings[1]?.style.background.includes("var(--md-error)"),
-  `${rings[0]?.style.background} / ${rings[1]?.style.background}`);
+  rings[4]?.style.background.includes("#f9a825") && rings[5]?.style.background.includes("var(--md-error)"),
+  `${rings[4]?.style.background} / ${rings[5]?.style.background}`);
 check("ring_healthy_has_no_alert_color",
-  ringValues[2] === "90%" && rings[2]?.style.background.includes("var(--md-primary)") &&
-    !rings[2]?.style.background.includes("#f9a825") && !rings[2]?.style.background.includes("--md-error"),
-  `${ringValues[2]} / ${rings[2]?.style.background}`);
+  ringValues[6] === "90%" && rings[6]?.style.background.includes("var(--md-primary)") &&
+    !rings[6]?.style.background.includes("#f9a825") && !rings[6]?.style.background.includes("--md-error"),
+  `${ringValues[6]} / ${rings[6]?.style.background}`);
 // 来源、完整倒计时、上游那句说明都进 title；版面上只留极短的重置提示（"↻ 3 小时"）。
 check("ring_marks_source_and_reset",
   hasTitle(host, "CPA 采集") && hasTitle(host, "已用尽") &&
     hasTitle(host, "3 小时 1 分钟后重置") && findText(host, "↻ 3 小时"));
+// 订阅窗口的来源写"现场查询"（CPA 那半边才有"CPA 采集"这个来源）。
+check("subscription_ring_source_is_live_query", hasTitle(host, "现场查询"));
+
+// —— 订阅卡片：出处、档位、数值项、原始信号 ——
+// 同一家可能配了多把 key，每把是独立的额度池，所以出处（provider · key）必须显示，
+// 否则读到 12% 时没法判断是哪把快用完了。
+check("subscription_shows_vendor_and_origin",
+  findText(host, "OpenCode Go") && findText(host, "Command Code") &&
+    findText(host, "go-a · key-1") && findText(host, "cc-a · key-1"));
+check("subscription_shows_plan_and_account",
+  byClass(host, "badge").some((node) => node.textContent === "Go") &&
+    byClass(host, "badge").some((node) => node.textContent === "GOAT") &&
+    findText(host, "账号 xiaoming"));
+check("subscription_summary_metrics",
+  findText(host, "订阅积分 7.5 credit") && findText(host, "请求数 120 次"));
+check("subscription_signals_kept",
+  findText(host, "原始信号") && findText(host, "usage/summary 读取失败"));
+// 端点通了但上游这次没回窗口：要说清"没有可读额度"，不能留白，也不能编一个 0%。
+check("subscription_without_windows_explains",
+  findText(host, "上游这次没回可读的额度窗口") && findText(host, "档位 Ultra"));
 
 // —— 额度细节：这些都是 CPA 已经给了、AMKR 以前丢掉的东西 ——
 check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
@@ -247,14 +335,22 @@ check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
 // 垫片不算布局，所以这里只能钉结构、钉不了像素。但它挡得住"退回竖着叠"这类改动：组容器
 // 必须是 grid（两个组并排），组内的环行必须是固定两列（否则 flex-wrap 会把三四个环挤成
 // 一排，百分比与窗口名连成一串）。这正是表格行被撑到近三百像素、宽列一片空白的成因。
+//
+// 只按 auto-fit 认会连订阅卡片一起数进来（订阅卡片用的是 minmax(64px) 的那一份网格），
+// 所以这里连 minmax 的宽度一起匹配，钉住的才是 CPA 那个分组容器。
 const groupRows = findAll(host, (node) =>
-  String(node.style?.gridTemplateColumns || "").includes("auto-fit"));
+  node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(200px, 1fr))");
 check("quota_groups_side_by_side",
   groupRows.length === 1 && groupRows[0].style.display === "grid",
   `${groupRows.length} / ${groupRows[0]?.style.display}`);
 const ringRows = findAll(host, (node) =>
   node.style?.gridTemplateColumns === "repeat(2, minmax(0, 1fr))");
 check("rings_two_per_row", ringRows.length >= 2, String(ringRows.length));
+// 订阅卡片的窗口用另一份网格（卡片比表格行宽，三四个环一行排开更好读），
+// 但它同样得是 grid——落回 flex-wrap 就会在窄屏把环挤成一条。
+const subscriptionGrids = findAll(host, (node) =>
+  node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(64px, 1fr))");
+check("subscription_windows_use_own_grid", subscriptionGrids.length === 2, String(subscriptionGrids.length));
 // 上游那句说明（"You have used some of your weekly limit…"）只进悬停提示，不占版面：
 // 旧版把它当窗口名画在进度条旁，于是看板上出现了"某个窗口叫这么长一句话"的怪状。
 check("window_description_only_in_tooltip",
@@ -273,6 +369,15 @@ check("quota_hint_explains_501",
 check("raw_signals_kept_as_fallback",
   findText(host, "原始信号") && findText(host, "Anthropic-Ratelimit-Unified-Representative-Claim"));
 check("disabled_account_badged", findText(host, "已停用"));
+
+// —— 故障隔离：坏实例与坏订阅的错都只留在自己那块 ——
+const brokenSubCard = byClass(host, "card").find((card) =>
+  card.textContent.includes("go-b · key-1"));
+check("broken_subscription_shows_own_error",
+  brokenSubCard?.textContent.includes("不是 OpenCode Go 的订阅 key") === true,
+  brokenSubCard?.textContent);
+check("broken_subscription_has_no_rings",
+  byClass(brokenSubCard || new FakeNode("x"), "quota-ring").length === 0);
 
 // —— 故障隔离：坏实例的错只留在自己那块 ——
 const brokenCard = byClass(host, "card").find((card) => card.textContent.includes("备用 CPA"));

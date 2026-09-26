@@ -31,8 +31,12 @@ const read = (file) => readFileSync(path.join(WEBUI, file), "utf8");
 
 // —— 页面清单 ——
 // 只有这几个模块有固定列数的栅格；其余页面（设置/日志/供应商等）用的是 auto-fit。
+//
+// 账号资源没有 .grid-12（卡片顺着 host 堆叠），列进来是为了它的 KPI 瓦片数：
+// 那个张数必须同时被宽屏的 4 列与 ≤1280px 的 2 列整除，否则窄屏会甩出半宽孤儿。
 const PAGES = [
   { file: "panel.js", label: "面板" },
+  { file: "pages/accounts.js", label: "账号资源" },
   { file: "pages/guest.js", label: "访客看板" },
   { file: "pages/activity.js", label: "用量统计" },
   { file: "pages/cost.js", label: "成本" },
@@ -236,7 +240,15 @@ function gridCards(source, file) {
     const body = callBody(source, match.index, `${file} 的 .grid-12`);
     grids.push([...body.matchAll(/h\("div\.col-(\d+)"/g)].map((item) => Number(item[1])));
   }
-  if (!grids.length) throw new Error(`${file}: 找不到 .grid-12`);
+  if (!grids.length) {
+    // 有些页面（账号资源）只用堆叠卡片 + KPI 网格，没有固定列数的 .grid-12。
+    // 这类页面没有"排不满 12 轨"的风险，但仍然有 KPI 瓦片数的风险，所以返回空清单
+    // 继续跑下面那一段，而不是整个探针报错退出。
+    if (/\bh\("div\.grid-12"/.test(source)) {
+      throw new Error(`${file}: 找不到 .grid-12`);
+    }
+    return [];
+  }
   // 自检：源码里所有 h("div.col-N" 都必须落在某个 .grid-12 调用内，否则探针
   // 建模不到那段布局（例如有人嵌了第二层栅格），结论不可信。
   const declared = [...source.matchAll(/h\("div\.col-(\d+)"/g)].length;
