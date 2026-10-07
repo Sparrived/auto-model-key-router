@@ -404,4 +404,189 @@ export const api = {
       body: { config_revision: revision, instances },
     }),
   cpaAccounts: () => request("/api/cpa-accounts"),
+
+  // —— 试验场（Playground）推理接口 ——
+  v1Models: (workspace) => request("/v1/models", { workspace }),
+
+  // 对话补全（支持流式 SSE 与非流式）
+  chatCompletions: async ({ body, workspace, signal, onChunk } = {}) => {
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getKey()}`,
+    };
+    if (workspace) headers["X-AMKR-Workspace"] = workspace;
+    const now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+    const startTime = now();
+    let ttft = null;
+    let response;
+    try {
+      response = await fetch(`${apiBase()}/v1/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ApiError(`请求失败: ${error.message}`, 0, null);
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      let payload = null;
+      try { payload = JSON.parse(text); } catch { payload = text; }
+      const detail = detailText(payload, response.status);
+      if (response.status === 401 && unauthorizedHandler) unauthorizedHandler();
+      throw new ApiError(payload?.error?.message || `HTTP ${response.status}: ${detail}`, response.status, payload);
+    }
+
+    const isStream = !!body?.stream;
+    if (!isStream) {
+      const result = await response.json();
+      const duration = Math.round(now() - startTime);
+      const choice = result.choices?.[0];
+      const message = choice?.message || {};
+      return {
+        message: {
+          role: message.role || "assistant",
+          content: message.content || "",
+          reasoning_content: message.reasoning_content || message.reasoning || "",
+        },
+        usage: result.usage,
+        duration,
+        ttft: duration,
+        raw: result,
+      };
+    }
+
+    // SSE 流式解析
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let accumulatedContent = "";
+    let accumulatedReasoning = "";
+    let finalUsage = null;
+    let lastChunk = null;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunkText = decoder.decode(value, { stream: true });
+        buffer += chunkText;
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data:")) continue;
+          const dataStr = trimmed.slice(5).trim();
+          if (dataStr === "[DONE]") continue;
+
+          let parsed = null;
+          try {
+            parsed = JSON.parse(dataStr);
+          } catch {
+            continue;
+          }
+          lastChunk = parsed;
+          if (parsed.usage) finalUsage = parsed.usage;
+          const delta = parsed.choices?.[0]?.delta;
+          if (!delta) continue;
+
+          if (ttft === null && (delta.content || delta.reasoning_content || delta.reasoning)) {
+            ttft = Math.round(now() - startTime);
+          }
+
+          if (delta.reasoning_content || delta.reasoning) {
+            accumulatedReasoning += (delta.reasoning_content || delta.reasoning);
+          }
+          if (delta.content) {
+            accumulatedContent += delta.content;
+          }
+
+          if (onChunk) {
+            onChunk({
+              content: accumulatedContent,
+              reasoning: accumulatedReasoning,
+              deltaContent: delta.content || "",
+              deltaReasoning: delta.reasoning_content || delta.reasoning || "",
+              usage: finalUsage,
+              raw: parsed,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) {
+        const duration = Math.round(now() - startTime);
+        return {
+          message: {
+            role: "assistant",
+            content: accumulatedContent,
+            reasoning_content: accumulatedReasoning,
+          },
+          usage: finalUsage,
+          duration,
+          ttft: ttft ?? duration,
+          raw: lastChunk,
+          aborted: true,
+        };
+      }
+      throw err;
+    }
+
+    const duration = Math.round(now() - startTime);
+    return {
+      message: {
+        role: "assistant",
+        content: accumulatedContent,
+        reasoning_content: accumulatedReasoning,
+      },
+      usage: finalUsage,
+      duration,
+      ttft: ttft ?? duration,
+      raw: lastChunk,
+      aborted: false,
+    };
+  },
+
+  // 图像生成
+  imageGenerations: async ({ body, workspace, signal } = {}) => {
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getKey()}`,
+    };
+    if (workspace) headers["X-AMKR-Workspace"] = workspace;
+    const now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+    const startTime = now();
+    let response;
+    try {
+      response = await fetch(`${apiBase()}/v1/images/generations`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ApiError(`请求失败: ${error.message}`, 0, null);
+    }
+
+    const text = await response.text();
+    let payload = null;
+    try { payload = JSON.parse(text); } catch { payload = text; }
+    if (!response.ok) {
+      const detail = detailText(payload, response.status);
+      if (response.status === 401 && unauthorizedHandler) unauthorizedHandler();
+      throw new ApiError(payload?.error?.message || `HTTP ${response.status}: ${detail}`, response.status, payload);
+    }
+    const duration = Math.round(now() - startTime);
+    return {
+      data: payload?.data || [],
+      created: payload?.created,
+      duration,
+      raw: payload,
+    };
+  },
 };

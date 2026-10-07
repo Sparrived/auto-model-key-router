@@ -21,6 +21,7 @@ import { renderUnified } from "./pages/unified.js";
 import { renderTasks } from "./pages/tasks.js";
 import { renderAccessKeys } from "./pages/accesskeys.js";
 import { renderIntegrations } from "./pages/integrations.js";
+import { renderPlayground } from "./pages/playground.js";
 import { renderSettings } from "./pages/settings.js";
 
 export const PAGES = [
@@ -39,6 +40,9 @@ export const PAGES = [
     { id: "tasks", label: "任务路由", icon: "task", render: renderTasks },
     { id: "access-keys", label: "访问密钥", icon: "key", render: renderAccessKeys },
     { id: "integrations", label: "集成", icon: "integrations", render: renderIntegrations },
+  ]},
+  { group: "体验", items: [
+    { id: "playground", label: "试验场", icon: "flask", render: renderPlayground },
   ]},
   { group: "系统", items: [{ id: "settings", label: "设置", icon: "settings", render: renderSettings }] },
 ];

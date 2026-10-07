@@ -15,14 +15,22 @@
 //  4. **显示的是剩余额度**，不是已用。这一页回答"还能用多久"，显示已用会把 18% 剩余
 //     读成"还早"。
 
-import { h, errorText, formatCount } from "../dom.js";
+import { h, errorText, formatCount, truncate } from "../dom.js";
 import { api } from "../api.js";
+import { providerIcon } from "../brand-icons.js";
 import {
   badge, buttonNode, card, cardHead, dialog, empty, field, freshness, input, loading,
-  notice, pageHead, render, stat, statGrid, table, toast,
+  notice, pageHead, render, stat, statGrid, table, toast, copyableMono, progressBar,
 } from "../ui.js";
 
-const state = { loading: true, error: null, report: null };
+const state = {
+  loading: true,
+  error: null,
+  report: null,
+  keyword: "",
+  filterStatus: "all",
+  viewMode: "table",
+};
 
 let host = null;
 
@@ -156,6 +164,28 @@ function subscriptionCard(entry) {
     return card(head, source, notice(entry.error || "读取失败", "error"));
   }
 
+  // 结构化表单属性条：规整显示端点、账号、档位
+  const metaItems = [];
+  if (entry.base_url) {
+    metaItems.push(h("div.sub-prop-item", {},
+      h("span.sub-prop-label", "基准地址:"),
+      copyableMono(entry.base_url, "复制订阅基准地址"),
+    ));
+  }
+  if (entry.account) {
+    metaItems.push(h("div.sub-prop-item", {},
+      h("span.sub-prop-label", "绑定账号:"),
+      h("span.sub-prop-val", entry.account),
+    ));
+  }
+  if (entry.plan || entry.tier_id) {
+    metaItems.push(h("div.sub-prop-item", {},
+      h("span.sub-prop-label", "套餐级别:"),
+      h("span.sub-prop-val", [entry.plan, entry.tier_id].filter(Boolean).join(" / ")),
+    ));
+  }
+  const propsBar = metaItems.length ? h("div.subscription-props-bar", {}, ...metaItems) : null;
+
   const windows = entry.windows || [];
   // 窗口的重置倒计时传 0 偏移，而不是像 CPA 那样减一个时钟差：CPA 会主动汇报它与上游的
   // 时差（server_time_offset_ms），而这两家没有这样的字段——凭空造一个偏移只会让倒计时
@@ -167,6 +197,7 @@ function subscriptionCard(entry) {
   return card(
     head,
     source,
+    propsBar,
     body,
     summaryBadges(entry.summary),
     signalDetails(entry.signals),
@@ -208,38 +239,295 @@ function instanceCard(instance) {
   if (!accounts.length) {
     return card(head, h("p.muted", instance.base_url), empty("这个实例上还没有账号。", { icon: "key" }));
   }
+
+  // 实例维度关键读数计算
+  const usableCount = accounts.filter((a) => !a.disabled && !a.unavailable).length;
+  const totalSuccess = accounts.reduce((acc, a) => acc + (Number(a.success) || 0), 0);
+  const totalFailed = accounts.reduce((acc, a) => acc + (Number(a.failed) || 0), 0);
+  const totalCalls = totalSuccess + totalFailed;
+  const successRate = totalCalls > 0 ? ((totalSuccess / totalCalls) * 100).toFixed(1) + "%" : "-";
+  const lowQuotaAccounts = accounts.filter((a) => {
+    const low = lowestRemaining(a);
+    return low !== null && low <= 0.2;
+  }).length;
+  const offset = accounts.find((a) => a.server_time_offset_ms !== undefined)?.server_time_offset_ms;
+
+  const summaryBar = h("div.instance-summary-bar", {},
+    h("div.summary-item", {},
+      h("span.summary-label", "实例端点"),
+      copyableMono(instance.base_url || "-", "点击复制 CPA 实例地址"),
+    ),
+    h("div.summary-item", {},
+      h("span.summary-label", "账号可用率"),
+      h("span.summary-val", `${usableCount} / ${accounts.length} 可用`),
+    ),
+    h("div.summary-item", {},
+      h("span.summary-label", "调度总量"),
+      h("span.summary-val", `${formatCount(totalCalls)} 次 (${successRate} 成功)`),
+    ),
+    h("div.summary-item", {},
+      h("span.summary-label", "额度健康"),
+      h("span.summary-val", lowQuotaAccounts > 0 ? `${lowQuotaAccounts} 个账号告警` : "全部充足"),
+    ),
+    offset !== undefined
+      ? h("div.summary-item", {},
+          h("span.summary-label", "时钟同步"),
+          h("span.summary-val", `${offset}ms (${Math.abs(Number(offset)) < 2000 ? "同步良好" : "时差较大"})`),
+        )
+      : null,
+  );
+
+  const countSpan = h("span.toolbar-count");
+  const contentHost = h("div.instance-accounts-host");
+  const filtersHost = h("div.toolbar-filters");
+  const viewHost = h("div.toolbar-view");
+
+  function getFilteredAccounts() {
+    const kw = (state.keyword || "").trim().toLowerCase();
+    return accounts.filter((account) => {
+      if (state.filterStatus === "usable" && (account.disabled || account.unavailable)) return false;
+      if (state.filterStatus === "cooling" && !account.disabled && !account.unavailable) return false;
+      if (state.filterStatus === "alert") {
+        const low = lowestRemaining(account);
+        if (low === null || low > 0.2) return false;
+      }
+      if (!kw) return true;
+      const matchTarget = [
+        account.label,
+        account.name,
+        account.email,
+        account.provider,
+        account.project_id,
+        account.plan,
+        account.tier_id,
+      ].filter(Boolean).join(" ").toLowerCase();
+      return matchTarget.includes(kw);
+    });
+  }
+
+  function renderView() {
+    const filteredAccounts = getFilteredAccounts();
+    countSpan.replaceChildren(`显示 ${filteredAccounts.length} / ${accounts.length}`);
+
+    const view = state.viewMode === "grid"
+      ? accountCardsGrid(filteredAccounts, Number(offset) || 0)
+      : table(accountColumns(), filteredAccounts, "没有找到匹配的账号。");
+
+    render(contentHost, view);
+  }
+
+  function filterButton(label, key, count) {
+    const active = state.filterStatus === key;
+    return buttonNode(`${label} (${count})`, {
+      small: true,
+      variant: active ? "secondary" : "text",
+      onClick: () => {
+        state.filterStatus = key;
+        renderFilters();
+        renderView();
+      },
+    });
+  }
+
+  function renderFilters() {
+    render(filtersHost,
+      filterButton("全部", "all", accounts.length),
+      filterButton("可用", "usable", usableCount),
+      filterButton("停用/冷却", "cooling", accounts.length - usableCount),
+      filterButton("额度告警", "alert", lowQuotaAccounts),
+    );
+  }
+
+  function renderViewToggle() {
+    render(viewHost,
+      buttonNode("表格", {
+        small: true,
+        variant: state.viewMode === "table" ? "secondary" : "text",
+        iconName: "layers",
+        onClick: () => {
+          state.viewMode = "table";
+          renderViewToggle();
+          renderView();
+        },
+      }),
+      buttonNode("卡片", {
+        small: true,
+        variant: state.viewMode === "grid" ? "secondary" : "text",
+        iconName: "overview",
+        onClick: () => {
+          state.viewMode = "grid";
+          renderViewToggle();
+          renderView();
+        },
+      }),
+      countSpan,
+    );
+  }
+
+  renderFilters();
+  renderViewToggle();
+  renderView();
+
+  const searchInput = input({
+    type: "search",
+    placeholder: "搜索账号、邮箱、供应商或项目…",
+    value: state.keyword,
+    onInput: (e) => {
+      state.keyword = e.target.value;
+      renderView();
+    },
+  });
+
+  const toolbar = h("div.accounts-toolbar", {},
+    h("div.toolbar-search", {}, searchInput),
+    filtersHost,
+    viewHost,
+  );
+
   return card(
     head,
-    h("p.muted", instance.base_url),
-    table(accountColumns(), accounts, "这个实例上还没有账号。"),
+    h("p.muted", { style: { display: "none" } }, instance.base_url),
+    summaryBar,
+    toolbar,
+    contentHost,
+  );
+}
+
+function accountCardsGrid(accounts, defaultOffset) {
+  if (!accounts.length) {
+    return empty("没有找到匹配的账号。", { icon: "key" });
+  }
+  return h("div.account-cards-grid", {},
+    ...accounts.map((account) => {
+      const offset = Number(account.server_time_offset_ms) || defaultOffset || 0;
+      const title = account.label || account.name || "未命名账号";
+      const totalCalls = (Number(account.success) || 0) + (Number(account.failed) || 0);
+      const success = Number(account.success) || 0;
+      const failed = Number(account.failed) || 0;
+      const rateText = totalCalls > 0 ? `${((success / totalCalls) * 100).toFixed(1)}%` : "-";
+
+      return h("div.account-card", {},
+        h("div.card-head", {},
+          account.auth_index !== undefined && account.auth_index !== null && account.auth_index !== ""
+            ? h("span.auth-index-chip", `#${account.auth_index}`)
+            : null,
+          h("h3.account-title", title),
+          badge(account.provider || "未知", "info"),
+          statusBadge(account),
+        ),
+        h("div.account-card-meta", {},
+          account.email && account.email !== title ? h("div.account-subtext", account.email) : null,
+          account.name && account.name !== title ? h("div.account-subtext", account.name) : null,
+          accountMeta(account),
+        ),
+        h("div.account-card-quota-section", {},
+          h("span.section-label", "剩余额度:"),
+          quotaCell(account),
+        ),
+        h("div.account-card-traffic-section", {},
+          h("span.section-label", `调用统计 (${formatCount(totalCalls)} 次 · 成功率 ${rateText}):`),
+          h("div.traffic-split-counts", {},
+            h("span.count-success", `✓ ${formatCount(success)} 成功`),
+            h("span.count-sep", "/"),
+            h("span.count-failed" + (failed > 0 ? ".has-fails" : ""), `✗ ${formatCount(failed)} 失败`),
+          ),
+          totalCalls > 0
+            ? progressBar((success / totalCalls) * 100, failed > 0 ? "warn" : "good")
+            : null,
+          recentBars(account.recent_requests),
+        ),
+      );
+    }),
   );
 }
 
 function accountColumns() {
   return [
     { key: "account", label: "账号", render: accountCell },
-    { key: "provider", label: "供应商", render: (account) => badge(account.provider || "未知", "info") },
-    { key: "status", label: "状态", render: statusBadge },
+    { key: "provider", label: "供应商", render: providerCell },
+    { key: "status", label: "状态", render: statusCell },
     // 额度列不钉死宽度：内容是「两组 × 两环」，本身有宽度。钉成 44% 后，宽屏上额度列
     // 多出来的那几百像素全是空白（环挤在左端），而账号列的长文件名反被挤成两行。
     { key: "quota", label: "剩余额度", render: quotaCell },
     {
       key: "calls", label: "成功 / 失败", numeric: true,
-      render: (account) => h("div.stack.tight", { style: { alignItems: "flex-end" } },
-        h("span", `${formatCount(account.success)} / ${formatCount(account.failed)}`),
-        recentBars(account.recent_requests),
-      ),
+      render: callsCell,
     },
   ];
+}
+
+function providerCell(account) {
+  const p = account.provider || "未知";
+  return h("div.cell-stack", {},
+    h("div", { style: { display: "flex", alignItems: "center", gap: "6px" } },
+      providerIcon(p, "", { size: 16 }),
+      badge(p, "info"),
+    ),
+  );
+}
+
+function statusCell(account) {
+  const b = statusBadge(account);
+  const items = [b];
+  if (account.status_message) {
+    items.push(h("span.cell-sub", { title: account.status_message }, truncate(account.status_message, 24)));
+  } else if (account.disabled) {
+    items.push(h("span.cell-sub", "已从调度池剔除"));
+  } else if (account.unavailable) {
+    items.push(h("span.cell-sub", "对端限流冷却"));
+  }
+  return h("div.cell-stack", {}, ...items);
+}
+
+function callsCell(account) {
+  const success = Number(account.success) || 0;
+  const failed = Number(account.failed) || 0;
+  const total = success + failed;
+  const rateText = total > 0 ? `${((success / total) * 100).toFixed(1)}%` : "-";
+  const rateNum = total > 0 ? (success / total) * 100 : 0;
+  const hasFails = failed > 0;
+
+  return h("div.account-traffic-panel", {},
+    h("div.traffic-head-row", {},
+      h("span.traffic-total", `${formatCount(total)} 次调用`),
+      h("div.traffic-split-counts", {},
+        h("span.count-success", { title: "成功请求" }, `✓ ${formatCount(success)}`),
+        h("span.count-sep", "/"),
+        h("span.count-failed" + (hasFails ? ".has-fails" : ""), { title: "失败请求" }, `✗ ${formatCount(failed)}`),
+      ),
+    ),
+    h("span", { style: { display: "none" } }, `${formatCount(account.success)} / ${formatCount(account.failed)}`),
+    total > 0
+      ? h("div.traffic-rate-row", {},
+          progressBar(rateNum, hasFails && rateNum < 98 ? "warn" : "good"),
+          h("span.traffic-rate-text", `${rateText} 成功率`),
+        )
+      : h("span.cell-sub", "暂无调用采样"),
+    recentBars(account.recent_requests),
+  );
 }
 
 // 账号标题退回文件名：CPA 的 label 常常是空的，只显示 label 会出现一整列空白。
 function accountCell(account) {
   const title = account.label || account.name || "未命名账号";
-  const detail = account.label && account.email ? `${account.email} · ${account.name}` : (account.email || account.name);
-  return h("div.stack.tight", {},
-    h("div.account-title", title),
-    detail && detail !== title ? h("span.muted", detail) : null,
+  const email = account.email;
+  const filename = account.name;
+  const hasIndex = account.auth_index !== undefined && account.auth_index !== null && account.auth_index !== "";
+
+  const detailLines = [];
+  if (email && email !== title) {
+    detailLines.push(h("div.account-subtext", email));
+  }
+  if (filename && filename !== title) {
+    detailLines.push(h("div.account-subtext", { title: "CPA 凭据文件" }, filename));
+  }
+
+  return h("div.account-identity-cell", {},
+    h("div.identity-head", {},
+      hasIndex ? h("span.auth-index-chip", { title: `凭据索引 #${account.auth_index}` }, `#${account.auth_index}`) : null,
+      h("span.account-title", title),
+    ),
+    ...detailLines,
     accountMeta(account),
   );
 }
@@ -256,10 +544,20 @@ function accountMeta(account) {
   } else if (account.tier_id) {
     items.push(badge(account.tier_id, "info"));
   }
-  const meta = [account.account_type, account.project_id].filter(Boolean);
-  if (meta.length) items.push(h("span.muted", meta.join(" · ")));
+  if (account.account_type) {
+    items.push(h("span.meta-pill", {},
+      h("span.meta-k", "授权:"),
+      h("span.meta-v", account.account_type),
+    ));
+  }
+  if (account.project_id) {
+    items.push(h("span.meta-pill", {},
+      h("span.meta-k", "项目:"),
+      h("span.meta-v", account.project_id),
+    ));
+  }
   if (!items.length) return null;
-  return h("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } }, ...items);
+  return h("div.account-meta-pills", {}, ...items);
 }
 
 // 状态徽标只解释 disabled 与 unavailable：这两个在 CPA 侧有确定的调度含义。
@@ -282,19 +580,28 @@ function quotaCell(account) {
     signalDetails(account.signals),
   ];
   if (!groups.length) {
-    return h("div.stack.tight", {}, h("span.muted", quotaHint(account)), ...extras);
+    return h("div.stack.tight", {},
+      h("div.quota-empty-notice", {}, h("span.muted", quotaHint(account))),
+      ...extras,
+    );
   }
-  return h("div.stack.tight", {},
-    h("div", { style: groupGridStyle }, groups.map((group) => h("div.stack.tight", {},
-      // 组名用内联样式而不是新加一个 CSS 类：这一页的样式表是公共资产，为一行小标题
-      // 去改它（并让别处的改动跟着一起动）不划算。
-      group.name
-        ? h("div", {
-          style: { fontSize: "12px", fontWeight: "500", color: "var(--md-on-surface-variant)" },
-        }, group.name)
-        : null,
-      h("div", { style: ringRowStyle }, ...group.windows.map((window) => quotaRing(window, offset))),
-    ))),
+  return h("div.account-quota-panel", {},
+    h("div", { style: groupGridStyle }, groups.map((group) => {
+      const remainingList = group.windows.map((w) => clampPercent(w.remaining));
+      const minRemaining = remainingList.length ? Math.min(...remainingList) : 1;
+      const healthTone = minRemaining <= 0.05 ? "bad" : minRemaining <= 0.2 ? "warn" : "good";
+      const healthLabel = minRemaining <= 0.05 ? "额度耗尽" : minRemaining <= 0.2 ? `告警 ${Math.round(minRemaining * 100)}%` : `充裕 ${Math.round(minRemaining * 100)}%`;
+
+      return h("div.account-quota-group", {},
+        group.name
+          ? h("div.group-header", {},
+              h("span.group-title", group.name),
+              badge(healthLabel, healthTone),
+            )
+          : null,
+        h("div", { style: ringRowStyle }, ...group.windows.map((window) => quotaRing(window, offset))),
+      );
+    })),
     ...extras,
   );
 }
@@ -489,21 +796,28 @@ function recentBars(buckets) {
   if (!list.length) return null;
   const totals = list.map((bucket) => (bucket.success || 0) + (bucket.failed || 0));
   const peak = Math.max(...totals, 1);
-  return h("div", { style: { display: "flex", alignItems: "flex-end", gap: "2px", height: "16px" } },
-    list.map((bucket) => {
-      const success = bucket.success || 0;
-      const failed = bucket.failed || 0;
-      const height = Math.max(2, Math.round(((success + failed) / peak) * 16));
-      return h("div", {
-        title: `${bucket.time}：成功 ${success} / 失败 ${failed}`,
-        style: {
-          width: "5px",
-          height: `${height}px`,
-          borderRadius: "1px",
-          background: failed ? "var(--md-error)" : "var(--md-primary)",
-        },
-      });
-    }));
+  return h("div.traffic-activity-box", {},
+    h("div.activity-label-row", {},
+      h("span", "10分钟采样"),
+      h("span.activity-buckets-badge", `${list.length} 桶`),
+    ),
+    h("div.recent-bars-track", {},
+      list.map((bucket) => {
+        const success = bucket.success || 0;
+        const failed = bucket.failed || 0;
+        const height = Math.max(3, Math.round(((success + failed) / peak) * 18));
+        return h("div.recent-bar-item", {
+          title: `${bucket.time}：成功 ${success} / 失败 ${failed}`,
+          style: {
+            width: "6px",
+            height: `${height}px`,
+            borderRadius: "2px",
+            background: failed ? "var(--md-error)" : "var(--md-primary)",
+          },
+        });
+      }),
+    ),
+  );
 }
 
 // 没有窗口时说明原因。501 是最常见的一种（对端既没装额度插件、也没给账号配声明式

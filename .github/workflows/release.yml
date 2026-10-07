@@ -74,6 +74,7 @@ jobs:
           node webui/probes/webui_accesskeys_probe.mjs
           node webui/probes/webui_accounts_probe.mjs
           node webui/probes/webui_model_kinds_probe.mjs
+          node webui/probes/webui_playground_probe.mjs
 
   # ---- 容器镜像 ----
   #

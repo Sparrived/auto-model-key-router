@@ -143,6 +143,10 @@ jobs:
         # 隔离：一个实例连不上时，另一个实例的账号照常列出。
         run: node webui/probes/webui_accounts_probe.mjs
 
+      - name: 试验场探针
+        # 试验场页面测试：同步渲染、标签切换、对话主视图、流式响应解析与状态清理
+        run: node webui/probes/webui_playground_probe.mjs
+
   go:
     name: Go 静态检查与测试
     runs-on: ubuntu-latest
