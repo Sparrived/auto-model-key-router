@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
 )
 
 // BodyPolicy 决定畸形（非对象 / 类型错误的 JSON）请求体的处理方式。
@@ -42,13 +43,19 @@ const (
 type MultipartPolicy string
 
 const (
-	// MultipartReject 显式 415 拒绝，绝不静默改写（默认）。
+	// MultipartAuto 按端点族决定：规范请求体就是表单的端点（图像编辑/变体、语音
+	// 转写/翻译）走 MultipartPassthrough，其余路径走 MultipartReject（默认）。
 	//
-	// 之所以把「拒绝」设为默认而不是「支持」：本包只做编排，从表单里取出 model
-	// 用于路由**可以**做到（见 MultipartPassthrough），但把「image 字段是文件还是
-	// 下载 URL」「mask 是否必需」这类语义做对需要图片专用的适配层，不在本包范围内。
-	// 一个明确的 415 比一个「看起来转发成功但上游收到空 JSON」好得多——后者正是
-	// 参照实现的现状。
+	// 为什么默认不是一律拒绝：这几个端点**没有等价的 JSON 形态**——语音转写的规范
+	// 调用就是上传音频文件。「不是 JSON 就 415」等于把它们从功能上关掉，而用户看到
+	// 的只是一句「multipart 不被支持，请改用 JSON 形式」，对 /v1/audio/transcriptions
+	// 根本不成立。不透明转发恰好是安全的：AMKR 只从表单里取 model，其余字段原样送出，
+	// 不需要理解任何字段语义。
+	//
+	// 只对**规范形态确实是表单**的路径放行，是为了保住那条安全边界：未知路径上的
+	// multipart（可能是任意自有端点）仍然明确 415，而不是被悄悄改写。
+	MultipartAuto MultipartPolicy = "auto"
+	// MultipartReject 显式 415 拒绝，绝不静默改写。
 	MultipartReject MultipartPolicy = "reject"
 	// MultipartPassthrough 缓冲表单、从表单字段里取 model 用于路由，然后把
 	// **原始字节**与原始 Content-Type 一并转发给上游。
@@ -60,6 +67,20 @@ const (
 	// 400「缺少 model 字段」。保留它是为了迁移期能与参照实现逐字节比对。
 	MultipartPython MultipartPolicy = "python"
 )
+
+// multipartPolicyFor 解析本次请求实际使用的表单策略。
+//
+// 只有 MultipartAuto 需要看路径；显式配置的三档一律照办——库的使用者（宿主）若
+// 明确要求拒绝，就应该拿到 415，而不是被「自动放行」推翻。
+func (h *Handler) multipartPolicyFor(path string) MultipartPolicy {
+	if h.multipart != MultipartAuto {
+		return h.multipart
+	}
+	if endpoint.IsFormUpload(path) {
+		return MultipartPassthrough
+	}
+	return MultipartReject
+}
 
 // bodyError 是请求体校验失败，可直接折算成下游响应。
 type bodyError struct {
@@ -86,11 +107,22 @@ func nonObjectBodyError(kind string) *bodyError {
 }
 
 // unsupportedMultipartError 表示本实现拒绝 multipart/form-data。
-func unsupportedMultipartError() *bodyError {
+//
+// 文案按端点族分化：图像编辑有 JSON 形态（prompt + image 可以是 URL），可以建议改用
+// JSON；语音转写/翻译**没有** JSON 形态，对它们说「请改用 JSON」是把用户引向一条
+// 走不通的路，因此改为说明这是策略问题而不是请求写错了。
+func unsupportedMultipartError(path string) *bodyError {
+	hint := "AMKR 需要 JSON 请求体才能解析 model。请改用 JSON 形式的 /v1/images/edits。"
+	switch endpoint.FamilyOf(path) {
+	case endpoint.FamilyTranscriptions, endpoint.FamilyTranslations:
+		hint = "该端点的规范调用就是上传音频文件，没有等价的 JSON 形态。" +
+			"若这是有意的转发，请把 proxy 的表单策略放宽（MultipartPassthrough）。"
+	case endpoint.FamilyImages:
+		hint = "AMKR 需要 JSON 请求体才能解析 model。请改用 JSON 形式的 /v1/images/edits，"
+	}
 	return &bodyError{
 		statusCode: http.StatusUnsupportedMediaType,
-		message: "multipart/form-data 请求体不被支持：" +
-			"AMKR 需要 JSON 请求体才能解析 model。请改用 JSON 形式的 /v1/images/edits。",
+		message:    "multipart/form-data 请求体不被支持：" + hint,
 	}
 }
 
@@ -104,15 +136,18 @@ func bodyTooLargeError(limit int64) *bodyError {
 
 // readRequestBody 读取并校验请求体。
 //
+// path 是入站路径（`/v1/` 之后的部分），只在 MultipartAuto 策略下用到：它决定表单
+// 请求是按规范形态放行还是 415 拒绝。
+//
 // 返回 (payload, rawBody, flat, error)：
 //   - payload 是解析出的 JSON 对象；multipart 或畸形 body 时是 `{}` 形状的占位；
 //   - rawBody 是**原始字节**，转发给上游时用它（字节级透传是契约）；
 //   - flat 表示「body 不是 JSON 对象」（multipart 表单），调用方据此跳过 JSON 语义
 //     的判断（如 stream 嗅探）；
 //   - error 非 nil 时应当直接写回下游（决策 3：畸形体在 HTTP 边界被挡住）。
-func (h *Handler) readRequestBody(request *http.Request, contentType string) (*canonical.Value, []byte, bool, error) {
+func (h *Handler) readRequestBody(request *http.Request, contentType, path string) (*canonical.Value, []byte, bool, error) {
 	if isMultipartContentType(contentType) {
-		return h.readMultipartBody(request, contentType)
+		return h.readMultipartBody(request, contentType, path)
 	}
 	body, err := readAllLimited(request.Body, h.maxJSONBytes)
 	if err != nil {
@@ -150,14 +185,14 @@ func parseJSONObject(body []byte, policy BodyPolicy) (*canonical.Value, error) {
 }
 
 // readMultipartBody 按 MultipartPolicy 处理 multipart/form-data 请求体。
-func (h *Handler) readMultipartBody(request *http.Request, contentType string) (*canonical.Value, []byte, bool, error) {
+func (h *Handler) readMultipartBody(request *http.Request, contentType, path string) (*canonical.Value, []byte, bool, error) {
 	body, err := readAllLimited(request.Body, h.maxMultipart)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	switch h.multipart {
+	switch h.multipartPolicyFor(path) {
 	case MultipartReject:
-		return nil, nil, false, unsupportedMultipartError()
+		return nil, nil, false, unsupportedMultipartError(path)
 	case MultipartPython:
 		// 复刻参照实现：payload 变 {}，rawBody 保留原始字节（虽然没人会用到它）。
 		return canonical.NewObject(), body, true, nil

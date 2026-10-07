@@ -52,18 +52,20 @@ func serializePlan(plan config.RoutePlan) *canonical.Value {
 }
 
 // serializeUnified 对应 management_api.py:209 的 serialize_unified。
+//
+// 只写出**已配置**的计划，顺序取自 config.UnifiedPlanNames——解析、校验、写入与
+// 这里共用同一份清单，新增一族不会在响应里被静默漏掉（对既有配置而言键与键序
+// 完全不变：default、image、embeddings 依然按这个次序出现）。
 func serializeUnified(cfg *config.RouterConfig) *canonical.Value {
 	if cfg == nil || cfg.UnifiedModel == nil {
 		return canonical.NewNull()
 	}
 	unified := cfg.UnifiedModel
 	result := canonical.NewObject()
-	result.SetKey("default", serializePlan(unified.Default))
-	if unified.Image != nil {
-		result.SetKey("image", serializePlan(*unified.Image))
-	}
-	if unified.Embeddings != nil {
-		result.SetKey("embeddings", serializePlan(*unified.Embeddings))
+	for _, planName := range config.UnifiedPlanNames {
+		if plan := unified.Plan(planName); plan != nil {
+			result.SetKey(planName, serializePlan(*plan))
+		}
 	}
 	return result
 }

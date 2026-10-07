@@ -210,12 +210,88 @@ func (t TaskConfig) Plan() RoutePlan {
 	return plan
 }
 
-// UnifiedModelConfig 是 unified-model 伪模型的三个路由计划。
+// UnifiedModelConfig 是 unified-model 伪模型的路由计划集合。
+//
+// `unified-model` 是一个**按端点族分派**的伪模型：调用方把 model 写成它，AMKR 就
+// 按入站路径挑一条计划（`/v1/embeddings` → Embeddings，`/v1/audio/speech` → Speech，
+// 以此类推），再按该计划选真实模型与 Key（见 keypool.RequestRouteKind）。这样
+// 「嵌入请求」与「对话请求」可以各用各的模型，而不必让调用方记住每个族的真实模型名。
+//
+// Default 是**必经项**（没有它 unified_model 不成立），其余各族都是可选的：没有配置
+// 的计划会让该族的请求回落到 Default（与本次改动前的行为一致）。各族的具体分派见
+// RequestRouteKind 的映射表。
 type UnifiedModelConfig struct {
 	Default RoutePlan
 	Image   *RoutePlan
 	// Embeddings 对应 /v1/embeddings 的默认模型。
 	Embeddings *RoutePlan
+	// Speech 对应 /v1/audio/speech（语音合成）。
+	Speech *RoutePlan
+	// Transcriptions 对应 /v1/audio/transcriptions 与 /v1/audio/translations
+	// （语音转写与语音翻译：两者用的是同一类模型，因此共用一条计划）。
+	Transcriptions *RoutePlan
+	// Video 对应 /v1/videos 及其子路径（视频生成、查询、取内容）。
+	Video *RoutePlan
+	// Rerank 对应 /v1/rerank（重排）。
+	Rerank *RoutePlan
+}
+
+// UnifiedPlanNames 是 unified_model 下所有计划键名，顺序即管理界面、解析与
+// 修复逻辑的处理顺序。
+//
+// **default 必须在最前**：configops 的修复逻辑按这个顺序挑替代模型，把某一族排在
+// default 之前会让「default 坏了」时的替代候选来自一个更专用的族。新增族一律追加。
+var UnifiedPlanNames = []string{
+	"default", "image", "embeddings", "speech", "transcriptions", "video", "rerank",
+}
+
+// Plan 按名字取出计划；名字未知或未配置时返回 nil。
+//
+// 这是所有「遍历 unified 计划」的地方共用的取值入口：调用方自己写 switch 的话，
+// 新增一族就必须记住改 8 处（解析、校验、序列化、修复、切换、展示……），漏一处
+// 的表现是「配置写进去了但行为没变」。
+func (u *UnifiedModelConfig) Plan(name string) *RoutePlan {
+	if u == nil {
+		return nil
+	}
+	switch name {
+	case "default":
+		return &u.Default
+	case "image":
+		return u.Image
+	case "embeddings":
+		return u.Embeddings
+	case "speech":
+		return u.Speech
+	case "transcriptions":
+		return u.Transcriptions
+	case "video":
+		return u.Video
+	case "rerank":
+		return u.Rerank
+	}
+	return nil
+}
+
+// SetPlan 写入某个计划；plan 为 nil 表示删除该族。
+func (u *UnifiedModelConfig) SetPlan(name string, plan *RoutePlan) {
+	if u == nil {
+		return
+	}
+	switch name {
+	case "image":
+		u.Image = plan
+	case "embeddings":
+		u.Embeddings = plan
+	case "speech":
+		u.Speech = plan
+	case "transcriptions":
+		u.Transcriptions = plan
+	case "video":
+		u.Video = plan
+	case "rerank":
+		u.Rerank = plan
+	}
 }
 
 // RouterConfig 是解析并校验后的完整运行配置。
@@ -657,15 +733,21 @@ func parseUnifiedModel(raw *canonical.Value, models []ModelConfig) (*UnifiedMode
 		return nil, err
 	}
 	unified := &UnifiedModelConfig{Default: *defaultPlan}
-	if rawImage, present := rawUnified.LookupOK("image"); present && !rawImage.IsNull() {
-		if unified.Image, err = parsePlan(rawImage, "unified_model.image"); err != nil {
+	// 其余各族走同一段循环：新增一族只需往 UnifiedPlanNames 里追一个名字，
+	// 解析处不会漏（漏掉的表现是「配置里写了，但读出来是空的」）。
+	for _, planName := range UnifiedPlanNames {
+		if planName == "default" {
+			continue
+		}
+		rawPlan, present := rawUnified.LookupOK(planName)
+		if !present || rawPlan.IsNull() {
+			continue
+		}
+		plan, err := parsePlan(rawPlan, "unified_model."+planName)
+		if err != nil {
 			return nil, err
 		}
-	}
-	if rawEmbeddings, present := rawUnified.LookupOK("embeddings"); present && !rawEmbeddings.IsNull() {
-		if unified.Embeddings, err = parsePlan(rawEmbeddings, "unified_model.embeddings"); err != nil {
-			return nil, err
-		}
+		unified.SetPlan(planName, plan)
 	}
 	return unified, nil
 }
@@ -1160,13 +1242,18 @@ func (c *RouterConfig) Validate() error {
 	if modelNames[UNIFIED_MODEL_ID] {
 		return errf("启用 unified_model 时，模型 ID 和别名不能使用保留名称: %s", UNIFIED_MODEL_ID)
 	}
-	plans := []struct {
+	// 计划表从 UnifiedPlanNames 现算：每一族（文本 / 图像 / 嵌入 / 语音合成 /
+	// 语音识别 / 视频 / 重排）的引用都要在这里被校验，写死三行会让新增族的失效
+	// 引用一路留到运行时才暴露。
+	plans := make([]struct {
 		name string
 		plan *RoutePlan
-	}{
-		{"default", &c.UnifiedModel.Default},
-		{"image", c.UnifiedModel.Image},
-		{"embeddings", c.UnifiedModel.Embeddings},
+	}, 0, len(UnifiedPlanNames))
+	for _, planName := range UnifiedPlanNames {
+		plans = append(plans, struct {
+			name string
+			plan *RoutePlan
+		}{planName, c.UnifiedModel.Plan(planName)})
 	}
 	for _, entry := range plans {
 		if entry.plan == nil {

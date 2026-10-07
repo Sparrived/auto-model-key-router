@@ -332,8 +332,11 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	}
 
 	// 400 错误且与工具有关时，尝试过滤非 function 工具重试一次。
-	// embeddings 没有 tools 可言，且它的 input 会被当 Responses 的 input 改写，
-	// 所以这条重试路径对它不适用（proxy_handler.py:714）。
+	//
+	// 只对 default 路由（对话三方言与未登记路径）生效：透传端点族（embeddings、图像、
+	// 语音、视频、重排）的请求体里根本没有 tools，而它们的 input/prompt 也不该被
+	// "过滤工具"这条路重写一遍（proxy_handler.py:714 只写了 embeddings，这里推广到
+	// 全部透传族——判据是「这条路径的请求体会被方言改写吗」，而它正是 route kind）。
 	if response.StatusCode == 400 && proxysupport.RequestRouteKind(context.Path) == "default" {
 		content, _ := io.ReadAll(response.Body)
 		if proxysupport.IsToolError(content) {

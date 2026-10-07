@@ -21,6 +21,7 @@ import (
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
 	"github.com/Sparrived/auto-model-key-router/internal/keypool"
 	"github.com/Sparrived/auto-model-key-router/internal/protocol"
 )
@@ -57,23 +58,25 @@ func RequestRouteKind(path string) string {
 	return keypool.RequestRouteKind(path)
 }
 
+// upstreamFamilies 的唯一定义在 internal/endpoint（keypool 与本包共用同一份表）。
+//
+// 本包只保留两个薄封装：UpstreamMode / IsPassthroughEndpoint。之所以不直接把
+// endpoint 的类型暴露给调用方，是因为调用方拿到的一直是**模式名字符串**
+// （upstream_routes 的键），转成类型再转回来只会多一层翻译。
+
+// IsPassthroughEndpoint 报告该入站路径的请求体是否应当**原样透传**（只替换 model）。
+//
+// 对话三方言以外的已知端点族都是透传的；未知路径（decide / classify / models 等）
+// 不算透传——它们沿用「带上 model 就走对话改写」的既有行为，改动它会影响既有部署。
+func IsPassthroughEndpoint(path string) bool {
+	return endpoint.IsPassthrough(path)
+}
+
 // UpstreamMode 把代理路径映射到上游方言，返回空串表示无对应方言。
 //
-// 移植 proxy_support.py:265。
+// 移植 proxy_support.py:265，并按端点族表扩展。
 func UpstreamMode(path string) string {
-	switch path {
-	case "chat/completions":
-		return "openai"
-	case "messages":
-		return "anthropic"
-	case "responses":
-		return "responses"
-	case "images/generations", "images/edits":
-		return "images"
-	case "embeddings":
-		return "embeddings"
-	}
-	return ""
+	return string(endpoint.FamilyOf(path))
 }
 
 // UpstreamPath 选定上游路径。
@@ -81,7 +84,8 @@ func UpstreamMode(path string) string {
 // 移植 proxy_support.py:279。分支顺序不可交换，四个特例各自有原因：
 //
 //   - images/generations 无论是否 native 都按配置路径走。
-//   - embeddings 没有转换语义（请求体本就是 OpenAI 形状），直接按配置路径转发。
+//   - 透传端点族（嵌入 / 图像 / 语音 / 视频 / 重排）没有转换语义（请求体本就是
+//     OpenAI 形状），直接按配置路径转发；视频族的子路径拼在基址之后。
 //   - native 且方言已知：按该方言的配置路径走。
 //   - messages/responses 且**带 model 字段**：说明要走转换而非原生，因此上游是
 //     OpenAI 兼容端点，用 openai 的配置路径。
@@ -95,23 +99,31 @@ func UpstreamMode(path string) string {
 // 为什么不能简单地套用 images 的默认路由：`upstreamRouteDefaultPaths["images"]` 是
 // "v1/images/generations"，若照搬，未配置路由的用户会把自己的**图片编辑**请求发到
 // **图片生成**端点——那是更严重的行为变更。因此只在用户显式配置时才改道。
+// images/variations（图片变体）与 edits 同理：它同样是 multipart 进、图出，套用
+// 生成端点同样是错的目标。
 //
 // native 形态不受影响：它走上面的 `native && mode != ""` 分支，本来就是查配置的
 // （这也是参照实现里 edits 唯一会查配置的情形）。
 func UpstreamPath(path string, payload *canonical.Value, native bool, upstreamRoutes map[string]string) (string, error) {
-	mode := UpstreamMode(path)
+	family, remainder, known := endpoint.Lookup(path)
+	mode := string(family)
 	if path == "images/generations" {
 		return config.UpstreamRoutePath(upstreamRoutes, "images")
 	}
-	if path == "images/edits" && !native {
+	if (path == "images/edits" || path == "images/variations") && !native {
 		if route, ok := upstreamRoutes["images"]; ok && route != "" {
 			return route, nil
 		}
-		return "v1/images/edits", nil
+		return "v1/" + path, nil
 	}
-	// embeddings 没有转换语义：请求体本来就是 OpenAI 形状，直接按配置路径转发。
-	if path == "embeddings" {
-		return config.UpstreamRoutePath(upstreamRoutes, "embeddings")
+	if known && IsPassthroughEndpoint(path) {
+		// 基址 + 子路径：默认基址是 "v1/videos"，而 /v1/videos/abc/content 必须
+		// 落在 "v1/videos/abc/content"，不能只回基址（否则轮询任务状态会拿到列表）。
+		base, err := config.UpstreamRoutePath(upstreamRoutes, mode)
+		if err != nil {
+			return "", err
+		}
+		return base + remainder, nil
 	}
 	if native && mode != "" {
 		return config.UpstreamRoutePath(upstreamRoutes, mode)
@@ -236,20 +248,48 @@ func isDecisionEndpoint(path string) bool {
 	return path == "decide" || path == "classify"
 }
 
+// videoDefaultModel 是"不带 model 的视频族请求"回落到的默认模型名。
+//
+// 为什么需要：视频族的规范调用里有**一半没有请求体**——`GET /v1/videos/{id}` 轮询任务、
+// `GET /v1/videos/{id}/content` 取内容、`GET /v1/videos` 列任务，都不带 model。而
+// AMKR 必须先有模型名才能选 Key，否则这些请求必然 400「请求体中缺少 model 字段」，
+// 也就是"创建得了任务、查不了结果"。
+//
+// 用 unified-model（而不是像 decide 那样另立一个固定名字）是因为它的语义正好对上：
+// 运维已经在 unified_model.video 里为视频族指定了模型与 Key，免 model 的轮询请求
+// 就该用那份计划。代价是必须配置 unified_model.video（否则 404「模型 unified-model
+// 未配置」），而这条错误本身指出了该配哪里。
+const videoDefaultModel = config.UNIFIED_MODEL_ID
+
+// defaultModelForPath 返回「该路径在载荷没有 model 时可用的默认模型名」。
+//
+// 只有两类路径有默认模型：结构化决策端点（decide / classify）与视频族。其余路径仍
+// 返回不存在，保持参照实现的 400 文案。
+func defaultModelForPath(path string) (string, bool) {
+	if isDecisionEndpoint(path) {
+		return decisionEndpointModel, true
+	}
+	if endpoint.FamilyOf(path) == endpoint.FamilyVideo {
+		return videoDefaultModel, true
+	}
+	return "", false
+}
+
 // ResolveModelID 从路径与载荷里取出请求的模型 ID。
 //
 // 移植 proxy_support.py:66。返回 (值, 是否存在)：`models` 路径返回空串但**存在**
 // （表示"列出模型"，不需要模型）；载荷里 model 为假值时返回**不存在**。这个区分很
 // 关键——空串意味着"无需模型"，不存在意味着"没有模型，走默认路由"。
 //
-// 与参照实现的差异（Go 侧新增）：路径为 decide / classify 时，载荷没有可用的 model
-// **不是**错误，而是这类端点的规范调用形态，因此回落到 decisionEndpointModel 去选 Key，
+// 与参照实现的差异（Go 侧新增）：路径为 decide / classify 或属于视频族时，载荷没有
+// 可用的 model **不是**错误，而是这类端点的规范调用形态，因此回落到约定模型去选 Key，
 // 而不是让调用方必然收到 400「请求体中缺少 model 字段」。参照实现在这里一视同仁，
-// 于是那两个端点上的免 model 调用从来没能通过——这也是移植时能逐字节比对的地方，改动
-// 它会让"对齐 Python"的用例失效，因此行为差异只在这两个路径上，并由
-// TestResolveModelIDDefaultsDecisionEndpoints 单独锁定。
+// 于是那两个端点与视频轮询上的免 model 调用从来没能通过——这也是移植时能逐字节比对的
+// 地方，改动它会让"对齐 Python"的用例失效，因此行为差异只在这些路径上，并由
+// TestResolveModelIDDefaultsDecisionEndpoints 与
+// TestResolveModelIDDefaultsVideoFamily 单独锁定。
 //
-// 失败面随之变化：没配这条默认路由时是 404「模型 laya 未配置」而不是 400。对不接这类
+// 失败面随之变化：没配这条默认路由时是 404「模型 ... 未配置」而不是 400。对不接这类
 // 端点的部署没有影响（它们的请求本来都带 model），对接入方来说 404 的文案也直接指出
 // 了该建哪个模型。
 func ResolveModelID(path string, payload *canonical.Value) (string, bool) {
@@ -260,10 +300,7 @@ func ResolveModelID(path string, payload *canonical.Value) (string, bool) {
 	if model.Truthy() {
 		return model.PyStr(), true
 	}
-	if isDecisionEndpoint(path) {
-		return decisionEndpointModel, true
-	}
-	return "", false
+	return defaultModelForPath(path)
 }
 
 // requestedModelKeyPattern 对应 Python 的 `(.+)\[([^\[\]]+)\]` 全匹配。
@@ -465,10 +502,15 @@ func UpstreamBody(
 		return []byte(canonical.DumpsOrdered(upstreamPayload)), nil
 	}
 
-	if RequestRouteKind(path) == "embeddings" {
-		// embeddings 体本来就是 OpenAI 形状（model/input/encoding_format 等），走
-		// AdaptMessagePayload 会把 input 当成 Responses 的 input 改写成 messages，
-		// 上游于是收到一个没有 input 的 chat 请求。这里只替换 model。
+	// 透传端点族（嵌入 / 图像 / 语音 / 视频 / 重排）：请求体是它们自己的规范形态，
+	// AMKR 只替换 model，其余一个字节都不动。
+	//
+	// 这是本文件最要紧的一处分支：`AdaptMessagePayload` 靠**键存在性**嗅探方言，
+	// 任何带 `input` 的体都会被当成 Responses 请求改写成 messages——语音合成的
+	// `input` 是待朗读的文本，改完上游就收到一个没有 input 的 chat 请求。同理，
+	// chat 兼容参数归一化会删掉 `metadata`/`store`/`include` 这类字段，而它们在
+	// 图像/视频/重排请求里可能是上游要的。
+	if IsPassthroughEndpoint(path) {
 		return []byte(canonical.DumpsOrdered(upstreamPayload)), nil
 	}
 

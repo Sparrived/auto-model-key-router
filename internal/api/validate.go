@@ -173,6 +173,11 @@ var specModelUpdate = newModelSpec("ModelUpdate",
 )
 
 // specUnifiedModelUpdate 对应 UnifiedModelUpdate。
+//
+// 计划字典的字段名与 config.UnifiedPlanNames 一一对应（default 兼作「整段替换」的
+// 开关：非 null 时按整段替换处理）。新增一族必须在这里加一个 nul(...) 条目，否则
+// 请求会被 extra_forbidden 挡掉——而 WebUI 保存的是整段，漏一个族就等于那一族
+// 永远存不进去。
 var specUnifiedModelUpdate = newModelSpec("UnifiedModelUpdate",
 	nul("config_revision", kindStr).minLenOf(1),
 	nul("model", kindStr).minLenOf(1),
@@ -182,6 +187,10 @@ var specUnifiedModelUpdate = newModelSpec("UnifiedModelUpdate",
 	nul("default", kindAnyDict),
 	nul("image", kindAnyDict),
 	nul("embeddings", kindAnyDict),
+	nul("speech", kindAnyDict),
+	nul("transcriptions", kindAnyDict),
+	nul("video", kindAnyDict),
+	nul("rerank", kindAnyDict),
 )
 
 // specProbeKeysRequest 对应 ProbeKeysRequest。

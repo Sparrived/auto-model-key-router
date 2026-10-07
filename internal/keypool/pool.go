@@ -7,6 +7,7 @@ import (
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
 )
 
 // accessKeyProviders 返回某把访问密钥允许的供应商集合；nil 表示不限制。
@@ -96,9 +97,14 @@ type KeyPool struct {
 	failureThreshold int
 	cooldownSeconds  float64
 
-	unifiedDefault    *config.RoutePlan
-	unifiedImage      *config.RoutePlan
-	unifiedEmbeddings *config.RoutePlan
+	// unifiedPlans 是 unified-model 伪模型的分族计划，键即
+	// config.UnifiedPlanNames 里的名字（default / image / embeddings / speech /
+	// transcriptions / video / rerank）。
+	//
+	// 用 map 而不是一组具名字段：族数从 3 涨到 7 之后，每加一族都要在结构体、
+	// applyConfig、计划选择、展示四处各加一行，而漏掉任何一处的表现都是「配置写了，
+	// 但请求仍落到 default」。键集合由 config.UnifiedPlanNames 定义，未知键查不到。
+	unifiedPlans map[string]*config.RoutePlan
 	// taskPlans / taskParams 的键是 (工作空间, 任务名)：任务名只在工作空间内唯一，
 	// 用单个字符串当键会让两个空间里的同名任务互相覆盖。
 	taskPlans  map[[2]string]config.RoutePlan
@@ -145,15 +151,17 @@ func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 		}
 	}
 
-	p.unifiedDefault = p.canonicalPlan(cfg.UnifiedModel, func(u *config.UnifiedModelConfig) *config.RoutePlan {
-		return &u.Default
-	})
-	p.unifiedImage = p.canonicalPlan(cfg.UnifiedModel, func(u *config.UnifiedModelConfig) *config.RoutePlan {
-		return u.Image
-	})
-	p.unifiedEmbeddings = p.canonicalPlan(cfg.UnifiedModel, func(u *config.UnifiedModelConfig) *config.RoutePlan {
-		return u.Embeddings
-	})
+	// unified 的分族计划：只收**已配置**的族（nil 表示该族没配，请求会回落到
+	// default）。default 缺席即整个 unified-model 不可用（resolveUnifiedPlanLocked
+	// 报 noUnifiedModelError）。
+	p.unifiedPlans = map[string]*config.RoutePlan{}
+	for _, planName := range config.UnifiedPlanNames {
+		if plan := p.canonicalPlan(cfg.UnifiedModel, func(u *config.UnifiedModelConfig) *config.RoutePlan {
+			return u.Plan(planName)
+		}); plan != nil {
+			p.unifiedPlans[planName] = plan
+		}
+	}
 
 	p.taskPlans = map[[2]string]config.RoutePlan{}
 	p.taskParams = map[[2]string]*canonical.Value{}
@@ -265,7 +273,7 @@ func (p *KeyPool) AvailableModelIDs(accessKey *config.AccessKeyConfig) []string 
 		}
 	}
 	slices.Sort(result)
-	if p.unifiedDefault != nil {
+	if p.unifiedPlans["default"] != nil {
 		// 追加到末尾（参照实现用 append，不参与排序）。
 		result = append(result, config.UNIFIED_MODEL_ID)
 	}
@@ -380,15 +388,12 @@ func (p *KeyPool) ResolveUnifiedPlan(routeKind string, keyName *string) (config.
 // 保留计划原值；非 nil 时空串也会替换（`unified-model[ ]` 可产出空串，
 // proxy_support.py:77 的 strip() 是来源）。
 func (p *KeyPool) resolveUnifiedPlanLocked(routeKind string, keyName *string) (config.RoutePlan, error) {
-	var plan *config.RoutePlan
-	switch routeKind {
-	case "image":
-		plan = p.unifiedImage
-	case "embeddings":
-		plan = p.unifiedEmbeddings
-	}
+	// 按端点族挑计划；该族没配时回落到 default（该族请求仍可用，只是用对话模型，
+	// 与本次改动前「非 image/embeddings 一律 default」的行为一致）。routeKind 的取值
+	// 由 RequestRouteKind 给出，不在表里的名字自然落到 default。
+	plan := p.unifiedPlans[routeKind]
 	if plan == nil {
-		plan = p.unifiedDefault
+		plan = p.unifiedPlans["default"]
 	}
 	// 计划缺失时参照实现抛 KeyError(UNIFIED_MODEL_ID)，其文本是 repr（带引号）。
 	if plan == nil {
@@ -404,10 +409,13 @@ func (p *KeyPool) resolveUnifiedPlanLocked(routeKind string, keyName *string) (c
 }
 
 // UnifiedRoute 返回 unified 路由的展示结构；未启用 unified_model 时返回 nil。
+//
+// 键集合与顺序取自 config.UnifiedPlanNames，且**只列出已配置的族**：没配的族不出现在
+// /health 里，界面据此能分清「这族没配」与「这族配了空值」。
 func (p *KeyPool) UnifiedRoute() *canonical.Value {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.unifiedDefault == nil {
+	if p.unifiedPlans["default"] == nil {
 		return nil
 	}
 	serialize := func(plan *config.RoutePlan) *canonical.Value {
@@ -427,12 +435,10 @@ func (p *KeyPool) UnifiedRoute() *canonical.Value {
 		return result
 	}
 	result := canonical.NewObject()
-	result.SetKey("default", serialize(p.unifiedDefault))
-	if p.unifiedImage != nil {
-		result.SetKey("image", serialize(p.unifiedImage))
-	}
-	if p.unifiedEmbeddings != nil {
-		result.SetKey("embeddings", serialize(p.unifiedEmbeddings))
+	for _, planName := range config.UnifiedPlanNames {
+		if plan := p.unifiedPlans[planName]; plan != nil {
+			result.SetKey(planName, serialize(plan))
+		}
 	}
 	return result
 }
@@ -726,16 +732,33 @@ func (p *KeyPool) UpdateNativeEndpoint(baseURL string, supported bool, routePath
 	return store.Save(persisted)
 }
 
+// routeKindByFamily 把端点族映射成 unified_model 的计划键。
+//
+// 两者名字**不**一一对应，因此需要这张表：
+//   - 族的模式名是 `images`（upstream_routes 的键），而计划键是 `image`（历史形状，
+//     不能改：已有配置里写的是 unified_model.image）；
+//   - 语音转写与语音翻译共用一条计划：它们用的是同一类模型（whisper 一族），
+//     分成两条只会让用户配两遍、忘一遍。
+//
+// 不在表里的族（对话三方言）与未知路径都落到 default。
+var routeKindByFamily = map[endpoint.Family]string{
+	endpoint.FamilyImages:         "image",
+	endpoint.FamilyEmbeddings:     "embeddings",
+	endpoint.FamilySpeech:         "speech",
+	endpoint.FamilyTranscriptions: "transcriptions",
+	endpoint.FamilyTranslations:   "transcriptions",
+	endpoint.FamilyVideo:          "video",
+	endpoint.FamilyRerank:         "rerank",
+}
+
 // RequestRouteKind 把代理路径归类为 unified 路由类型。
 //
 // 对齐 proxy_support.py:252——AMKR 只此一份路径分类，KeyPool 与 proxy_handler
-// 共用它。新增一类独立目标只需改这里。
+// 共用它。分类表本身在 internal/endpoint（proxysupport 也从那里派生上游路径），
+// 这里只负责把它翻译成 unified_model 的计划键。
 func RequestRouteKind(path string) string {
-	switch path {
-	case "images/generations", "images/edits":
-		return "image"
-	case "embeddings":
-		return "embeddings"
+	if kind, ok := routeKindByFamily[endpoint.FamilyOf(path)]; ok {
+		return kind
 	}
 	return "default"
 }

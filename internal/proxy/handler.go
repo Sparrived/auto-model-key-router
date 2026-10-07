@@ -203,7 +203,7 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		callerType = "workspace"
 	}
 
-	payload, body, flat, bodyErr := h.readRequestBody(request, request.Header.Get("Content-Type"))
+	payload, body, flat, bodyErr := h.readRequestBody(request, request.Header.Get("Content-Type"), path)
 	if bodyErr != nil {
 		if coded, ok := bodyErr.(*bodyError); ok {
 			writeJSON(w, coded.statusCode, jsonErrorResponse(coded.message))

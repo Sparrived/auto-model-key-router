@@ -30,8 +30,10 @@ func migratedUnified(data *canonical.Value) (*canonical.Value, error) {
 
 // unifiedTargets 按固定顺序展开 unified_model 里的所有目标对象。
 //
-// 对齐 config_operations.py:174：只认 default/image/embeddings 三个计划，每个
-// 只看 primary/fallback，且只有值是对象才算数（非对象静默跳过）。
+// 对齐 config_operations.py:174：按 UNIFIEDPlanNames 遍历每个计划，每个只看
+// primary/fallback，且只有值是对象才算数（非对象静默跳过）。计划集合随
+// UNIFIEDPlanNames 扩展，这里不需要改——否则清理失效引用时会漏掉新族里的目标，
+// 表现为「删了模型，但 unified 还引用着它」。
 func unifiedTargets(unified *canonical.Value) []*canonical.Value {
 	result := []*canonical.Value{}
 	for _, planName := range UNIFIEDPlanNames {
@@ -353,11 +355,15 @@ func SetUnifiedModel(data *canonical.Value, unified *canonical.Value) error {
 	serialized := canonical.NewObjectOf(
 		canonical.ObjectPair{Key: "default", Value: serializePlan(parsed.UnifiedModel.Default)},
 	)
-	if parsed.UnifiedModel.Image != nil {
-		serialized.SetKey("image", serializePlan(*parsed.UnifiedModel.Image))
-	}
-	if parsed.UnifiedModel.Embeddings != nil {
-		serialized.SetKey("embeddings", serializePlan(*parsed.UnifiedModel.Embeddings))
+	// 其余各族按 UNIFIEDPlanNames 顺序写出**已配置**的那些：与解析、校验、修复
+	// 共用同一份清单，新增一族不会在这里被静默丢掉。
+	for _, planName := range UNIFIEDPlanNames {
+		if planName == "default" {
+			continue
+		}
+		if plan := parsed.UnifiedModel.Plan(planName); plan != nil {
+			serialized.SetKey(planName, serializePlan(*plan))
+		}
 	}
 	data.SetKey("unified_model", serialized)
 	return nil
@@ -435,14 +441,14 @@ func SwitchUnifiedTarget(data *canonical.Value, target string, modelName, keyNam
 
 	var currentPlan *config.RoutePlan
 	if routerConfig.UnifiedModel != nil {
-		switch planName {
-		case "default":
+		// default 要取**副本的地址**（下面会写回），其余族用 UnifiedModelConfig.Plan
+		// 取指针——switch 写死族名的写法每加一族都要改，漏掉的表现是「切换接口报
+		// 422 无效目标」，而目标在 UnifiedTargets 里明明是合法的。
+		if planName == "default" {
 			plan := routerConfig.UnifiedModel.Default
 			currentPlan = &plan
-		case "image":
-			currentPlan = routerConfig.UnifiedModel.Image
-		case "embeddings":
-			currentPlan = routerConfig.UnifiedModel.Embeddings
+		} else {
+			currentPlan = routerConfig.UnifiedModel.Plan(planName)
 		}
 	}
 	var currentTarget *config.RouteTarget

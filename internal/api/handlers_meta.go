@@ -194,10 +194,16 @@ func (s *Server) handleUpdateUnifiedModel(w http.ResponseWriter, r *http.Request
 		revision := optString(payload, "config_revision")
 
 		// 分支一：整段替换 unified_model（default 非 null 时）。
+		//
+		// 计划名表取自 config.UnifiedPlanNames：整段替换是 WebUI 的保存路径，漏掉
+		// 任一族的后果是「那一族保存后被静默清空」，因此不能手写一遍族名。
 		if nonNull(payload, "default") {
 			unifiedData := canonical.NewObject()
 			unifiedData.SetKey("default", payload.Lookup("default"))
-			for _, planName := range []string{"image", "embeddings"} {
+			for _, planName := range config.UnifiedPlanNames {
+				if planName == "default" {
+					continue
+				}
 				if nonNull(payload, planName) {
 					unifiedData.SetKey(planName, payload.Lookup(planName))
 				}

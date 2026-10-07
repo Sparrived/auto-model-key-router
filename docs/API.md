@@ -91,6 +91,7 @@ x-api-key: your-local-api-key
 | `POST` | `/api/config/export`、`/api/config/import` | 仅本地 | 导出或导入可迁移配置 |
 | `GET` | `/ui/` | 无 | 内置 WebUI（需 `webui_enabled`，未启用或资产缺失时返回 `404`） |
 | `GET` | `/ui/pricing.json` | 无 | models.dev 价格目录快照，用于 WebUI 估算成本（需 `webui_enabled`） |
+| `GET` | `/ui/model-kinds.json` | 无 | 逐个模型回答「它是什么类型」（文本/图像/视频/语音/嵌入/重排），供 WebUI 把服务模型卡片分组（需 `webui_enabled`） |
 | `GET` | `/ui/workspace-usage.json` | 仅本地 | 按工作空间拆分的用量读数与请求流向，供 WebUI 的「工作空间」页（需 `webui_enabled`） |
 | `GET` | `/ui/access-key-usage.json` | 访问密钥 | 只回**这把**访问密钥自己的用量、按模型/供应商/上游模型的拆分与最近调用，供访客看板 `/ui/guest.html`（需 `webui_enabled`） |
 | `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`） |
@@ -114,7 +115,8 @@ x-api-key: your-local-api-key
   注册在 `/api` 之下，但列在**另一份**清单（`workspacePatterns()`）里。它们没有历史版本可
   对照，塞进那 47 条会让「这 47 条就是已发布行为」这句话失去意义。两批注册在同一棵 mux 上，
   因此错方法的 `405` / `Allow` 判定要同时看两份清单。
-- **本项目自有的读数**（价格目录 `/ui/pricing.json`、自更新入口、工作空间用量
+- **本项目自有的读数**（价格目录 `/ui/pricing.json`、模型类型 `/ui/model-kinds.json`、自更新入口、
+  工作空间用量
   `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`、按 Key 用量
   `/ui/key-usage.json`）挂在 `/ui/` 前缀下：它们与 `/api` 面在语义上不连续，挂 `/ui/` 既落
   在那份已发布清单之外，也让「不开 WebUI 就没有这些读数」顺理成章。其中「按 Key 用量」尤其
@@ -140,7 +142,7 @@ x-api-key: your-local-api-key
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `model` | string | 是（`/v1/decide` 与 `/v1/classify` 除外） | 模型 ID、模型别名、`unified-model`、任务名（`TASK_XXXXXX`）或 `模型[Key名称]`。上游模型名（各 target 的 `upstream_model`）**不是**可调用名 |
+| `model` | string | 是（`/v1/decide`、`/v1/classify` 与视频族各路径除外） | 模型 ID、模型别名、`unified-model`、任务名（`TASK_XXXXXX`）或 `模型[Key名称]`。上游模型名（各 target 的 `upstream_model`）**不是**可调用名。表单请求（`audio/transcriptions` 等）从表单字段 `model` 取值 |
 | `stream` | boolean | 否 | 为 `true` 时使用流式响应，并自动向上游补充 `stream_options.include_usage=true` |
 | `stream_options` | object | 否 | 流式选项；服务会保留已有字段并强制加入 `include_usage=true` |
 | `reasoning_effort` | string | 否 | 推理强度；模型配置中的非空值优先级更高 |
@@ -315,9 +317,37 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `/v1/{path}` 支持 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`。除上述特殊转换接口外，请求路径、方法、查询参数和响应主体会尽量保持上游兼容格式。
 
-所有通用代理请求仍需在 JSON 请求体中提供 `model`。缺少该字段会返回 `400`。
+代理请求从 JSON 请求体（或表单字段，见下）里的 `model` 选择模型与上游 Key。缺少该字段会返回 `400`，只有三处例外：`/v1/decide`、`/v1/classify`（见上一节）与**视频族的读取端点**（`GET /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`——它们的规范调用没有请求体），后者按 `unified-model` 路由，因此会用到 `unified_model.video` 计划；未配置该计划时按 unified 的回落规则用 `unified_model.default` 的模型与 Key 发出去（上游会用自己的错误说明问题，比 AMKR 凭空报「请求体中缺少 model 字段」更好排查）。
 
-`POST /v1/embeddings` 不做协议转换：请求体本来就是 OpenAI 形状（`model`、`input`、`encoding_format` 等），AMKR 只替换 `model` 为上游真实模型名后原样转发，因此 `input` 不会被改写成 chat 的 `messages`。上游路径默认 `v1/embeddings`，可按上游 URL 配置 `upstream_routes[base_url].embeddings` 覆盖（别名 `embedding` / `embed`），例如 `"embeddings": "gateway/embed"` 会转发到 `base_url/gateway/embed/v1/embeddings`。请求 `unified-model` 时使用 `unified_model.embeddings` 计划；未配置该计划则继承 `default.primary`。
+#### 端点族与请求体改写
+
+入站路径分成两类。**对话三方言**（`chat/completions`、`messages`、`responses`）的请求体是同一件事的三种写法，AMKR 会做方言转换；**其余端点族**的请求体是它们自己的规范形态，AMKR **只替换 `model`**，其余字节原样转发（遥测字段如 `metadata`、`store` 也不会被删掉）。
+
+| 入站路径 | 上游路由模式 | 说明 |
+| --- | --- | --- |
+| `chat/completions` | `openai` | 对话补全，见「Chat Completions」 |
+| `messages` | `anthropic` | Anthropic Messages，见该节 |
+| `responses` | `responses` | Responses，见该节 |
+| `embeddings` | `embeddings` | 文本嵌入。`input` 不会被改写成 chat 的 `messages`。别名 `embedding` / `embed` |
+| `images/generations` | `images` | 图像生成 |
+| `images/edits` | `images` | 图像编辑。**表单请求**默认原样转发；显式配置了 `images` 路由时用它，否则用字面 `v1/images/edits`（**不会**套用 `images` 的默认路径 `v1/images/generations`——那会把「编辑」发到「生成」端点） |
+| `images/variations` | `images` | 图像变体，与 `images/edits` 同规则 |
+| `audio/speech` | `speech` | 语音合成（TTS）。`input` 是待朗读文本，不会被改写 |
+| `audio/transcriptions` | `transcriptions` | 语音转写（STT），**表单请求**（见下） |
+| `audio/translations` | `translations` | 语音翻译，**表单请求**。与转写是两条上游路由，但共用 `unified_model.transcriptions` 计划 |
+| `videos` 及其子路径 | `video` | 视频生成与任务读取。子路径（`/{id}`、`/{id}/content`、`/{id}/remix`）拼在配置路由之后：配了 `video: "gateway/video"` 时 `POST /v1/videos/vid_1/remix` 会转发到 `base_url/gateway/video/vid_1/remix` |
+| `rerank` | `rerank` | 重排 |
+| 其它任意路径 | 无（`v1/` + 原路径） | 例如 `decide` / `classify`，见「结构化决策端点」 |
+
+上游路径默认取该族的默认值，可按上游 URL 配置 `upstream_routes[base_url].<模式>` 覆盖，例如 `"embeddings": "gateway/embed"` 会转发到 `base_url/gateway/embed/v1/embeddings`；`"video": "gateway/video"` 会把视频族（含子路径）整体移到该前缀下。别名（如 `tts` / `stt` / `whisper` / `videos` / `reranking`）在配置里会被规范化成上表的模式名。
+
+请求 `unified-model` 时使用对应族的计划（`unified_model.embeddings`、`.speech`、`.video`…）；未配置该族计划则继承 `default.primary`。
+
+#### 表单请求（multipart/form-data）
+
+图像编辑、图像变体、语音转写、语音翻译的上游规范形态就是表单（文件 + 字段）。这几条路径上默认**原样转发**：AMKR 只从表单字段 `model` 取值用于路由，其余字节与 `Content-Type` 一并送出（文件内容对 AMKR 不透明，不做任何改写）。请求体上限 64 MiB，超过返回 `413`。
+
+其它路径上的表单请求返回 `415`，而不是被悄悄改写成空 JSON——未知端点的表单没法保证改对，明确拒绝比「看起来转发成功、上游却收到空体」好得多。语音转写/翻译这类没有等价 JSON 形态的端点上，`415` 的文案会说明这是策略问题。
 
 ### WebSocket
 
@@ -340,7 +370,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `config_path` | string | 当前配置文件绝对路径；嵌入式应用可能为空 |
 | `local_auth_enabled` | boolean | 是否设置本地鉴权 |
 | `local_api_key_fingerprint` | string | 本地 key 的 SHA-256 前 12 位 |
-| `unified_model` | object/null | 当前真实模型和可选固定 Key；含 `default` 与可选的 `image` / `embeddings` 计划 |
+| `unified_model` | object/null | 当前真实模型和可选固定 Key；含 `default` 与可选的 `image` / `embeddings` / `speech` / `transcriptions` / `video` / `rerank` 计划。**只列出已配置的计划**——没配的族不出现，界面据此能分清「这族没配」与「这族配了空值」 |
 | `native_endpoint_states` | object | 上游原生端点能力缓存 |
 | `ops_enabled` | boolean | 运维接口是否注册（见 `--no-ops` / `enable_ops`） |
 
@@ -1858,6 +1888,81 @@ http://127.0.0.1:8000/ui/
 | `404` | `webui_enabled` 未启用时，该路由与 `/ui/` 一起不存在 |
 
 > 价格目录挂在 `/ui/` 前缀下，因此与 WebUI 同生共死：`webui_enabled` 为假时它也不可达。成本估算是 WebUI 的读数，没有界面时无人消费。
+
+### `GET /ui/model-kinds.json`
+
+按名字回答「这个模型是什么类型」（文本 / 图像 / 视频 / 语音合成 / 语音识别 / 嵌入 / 重排），供 WebUI 把供应商页的服务模型卡片按类型分组。**不需要鉴权**：证据来自 models.dev 的公开数据，与价格目录同级。
+
+分类是**派生读数**（与价格同类）：它只用于显示，**不参与鉴权或路由判定**——`/v1/models` 的成员、某个模型能不能被调用，都由配置与绑定决定，与这里答什么无关。上游也不会告诉我们答案：OpenAI 兼容的 `/v1/models` 只有 `id` / `object` / `created` / `owned_by`，Anthropic 的 `type` 恒为 `"model"`（那是对象类型，不是模型类型）。因此这里给出的每一档都必须能指出**证据**。
+
+判定分两层取**并集**（不是后者覆盖前者）：
+
+| 层 | 依据 |
+| --- | --- |
+| 1 | models.dev 目录里该模型的 `modalities`（与价格来自同一份 `api.json`、同一次取回） |
+| 2 | 名字规则（`-image` / `-tts` / `whisper` / `embedding` / `rerank` 等），**按固定顺序匹配，先命中者先算** |
+| 3 | 都没有 → **未分类**：`kinds` 为空、`primary` 为 `"unknown"` |
+
+第 3 层是**合法结果**而不是失败：自建网关、中转站改名的模型必然落到这里（上游从来没有告诉过我们它们是什么）。界面必须把它显示成「未分类」，而不是默认当成文本模型——那是在猜。
+
+`endpoints` 是**推导值**：类型 → 端点族（`text→chat`、`image→images`、`tts→speech`、`stt→transcriptions`、`embedding→embeddings`、`video→video`、`rerank→rerank`）。它回答的是「这一档类型通常走哪个端点」，**不是可用性结论**：例如 models.dev 把 `gpt-4o` 的输入模态标为含 `audio`，于是它带上 `stt`（它确实能处理语音输入），但 `/v1/audio/transcriptions` 并不一定接受它。要判断某个模型走哪个端点，仍然以探测结果与配置里的绑定为准。
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `model` | 字符串 | 是 | 要查询的模型名，可重复（`?model=a&model=b`）。空值被忽略、重复值只算一次；单次最多 200 个，单个名字上限 512 字节 |
+
+响应（`Content-Type: application/json`）：
+
+```json
+{
+  "version": 1,
+  "source": "https://models.dev/api.json",
+  "catalog_available": true,
+  "models": {
+    "gpt-image-1": {
+      "kinds": ["image"],
+      "primary": "image",
+      "endpoints": ["images"],
+      "modalities": { "input": ["text"], "output": ["image"] },
+      "grounds": [
+        { "source": "catalog", "detail": "gpt-image-1", "kinds": ["image"] },
+        { "source": "rule", "detail": "image", "kinds": ["image"] }
+      ]
+    },
+    "my-gateway-renamed": { "kinds": [], "primary": "unknown", "endpoints": [], "grounds": [] }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `version` | 整数 | 载荷版本，字段形状有破坏性变化时递增 |
+| `source` | 字符串 | 证据来源，与 `/ui/pricing.json` 是同一份 models.dev `api.json` |
+| `catalog_available` | 布尔 | 服务端是否已持有 models.dev 目录；为 `false` 时结论只来自名字规则 |
+| `models` | 对象 | **请求里的原始模型名** → 判定。键带前缀/日期后缀也照原样回，去前缀与去日期是服务端内部的匹配手段 |
+
+每个判定的字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `kinds` | 字符串数组 | 该模型的全部类型，顺序固定（text / image / video / tts / stt / embedding / rerank）；空数组表示未分类 |
+| `primary` | 字符串 | 供**分组显示**用的单一类型。多能力模型（如 `gpt-4o-audio-preview` 同时是 tts 与 stt）也只归一类，否则同一个模型会在列表里出现两次，而它们背后是同一个绑定 |
+| `endpoints` | 字符串数组 | 由类型推导的端点族 |
+| `modalities` | 对象 \| 缺失 | 目录记录的输入/输出模态；**没有证据时不出现**（而不是空数组——空数组会被读成"上游说它没有模态"） |
+| `grounds` | 数组 | 每条证据的 `source`（`catalog` / `rule`）与它给出的类型。界面据此解释「这个标签是谁给的」：只有名字规则命中的结论该让用户有机会改 |
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `200` | 返回判定。**目录不可用时也是 `200`**（`catalog_available: false`） |
+| `400` | 超过 200 个名字，或单个名字超过 512 字节 |
+| `405` | 非 `GET` / `HEAD` |
+| `404` | `webui_enabled` 未启用时，该路由与 `/ui/` 一起不存在 |
+
+> 与 `/ui/pricing.json` 的 `503` **刻意不同**：没有价格时算出来的成本是错的（会把一切算成免费），必须响亮失败；而没有目录时名字规则仍然给出有价值的判定，只是精度下降。把"精度下降"报成 503 会让界面在服务刚启动的那几秒里完全没有类型可用。
+
+> 单次查询上限 200 个名字，是因为它服务的是「渲染前问一句」这个用法；WebUI 自己按 100 个一批发（见 `webui/model-kinds.js` 的 `chunkModelIDs`），留出三倍余量给 URL 编码后的长度。
 
 ### 成本估算口径
 

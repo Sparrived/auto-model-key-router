@@ -159,7 +159,8 @@ func hasWorkspaceCredential(entry *canonical.Value) bool {
    已发布行为」这句话失去意义。两批都注册在同一棵 mux 上，因此错方法的
    `405` / `Allow` 判定必须同时看两份清单（`internal/api/server.go` 的 `patterns`）。
 
-   反过来说，**其余新增能力**（价格目录 `/ui/pricing.json`、自更新入口、工作空间用量
+   反过来说，**其余新增能力**（价格目录 `/ui/pricing.json`、模型类型
+   `/ui/model-kinds.json`、自更新入口、工作空间用量
    `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`）仍然挂 `/ui/`：
    那些是本项目自有的读数，与 `/api` 面在语义上不连续，挂 `/ui/` 既落在那份已发布清单
    之外，也让「不开 WebUI 就没有这些读数」这件事顺理成章。判断标准是**它是不是管理面的

@@ -500,6 +500,20 @@ const publicWarningText = "[bold red]⚠ 当前监听地址为 0.0.0.0，服务�
 // 该模块按决策 7 砍掉，这里用**等价纯文本**（迁移方案的既定降级策略）保留同名信息：
 // 请求模型、目标模型、使用 Key，以及熔断/图像/嵌入三个附加计划。
 
+// unifiedPlanLabels 是各分族计划在 CLI 摘要里的中文名。
+//
+// 键即 config.UnifiedPlanNames 里的计划名；default 由摘要里的「目标模型/熔断模型」
+// 单独渲染，因此不在表内。缺名字的计划按原名渲染（不静默跳过）——新增一族却忘记
+// 取中文名时，运维至少能看到 `speech模型: xxx`，而不是以为这族没配。
+var unifiedPlanLabels = map[string]string{
+	"image":          "图像",
+	"embeddings":     "嵌入",
+	"speech":         "语音合成",
+	"transcriptions": "语音识别",
+	"video":          "视频",
+	"rerank":         "重排",
+}
+
 // unifiedModelSummaryLines 产出统一模型摘要的纯文本行。
 func unifiedModelSummaryLines(cfg *config.RouterConfig) []string {
 	if cfg.UnifiedModel == nil {
@@ -520,19 +534,22 @@ func unifiedModelSummaryLines(cfg *config.RouterConfig) []string {
 			fmt.Sprintf("熔断 Key: [bold green]%s[/bold green]", orAutoRoute(plan.Default.Fallback.Key)),
 		)
 	}
-	for _, entry := range []struct {
-		label string
-		plan  *config.RoutePlan
-	}{
-		{"图像", plan.Image},
-		{"嵌入", plan.Embeddings},
-	} {
-		if entry.plan == nil {
+	// 分族计划按 UnifiedPlanNames 的顺序逐个列出：新增一族不必再改这里。
+	for _, planName := range config.UnifiedPlanNames {
+		if planName == "default" {
 			continue
 		}
+		family := plan.Plan(planName)
+		if family == nil {
+			continue
+		}
+		label := unifiedPlanLabels[planName]
+		if label == "" {
+			label = planName
+		}
 		lines = append(lines,
-			fmt.Sprintf("%s模型: [bold]%s[/bold]", entry.label, entry.plan.Primary.Model),
-			fmt.Sprintf("%s Key: [bold green]%s[/bold green]", entry.label, orAutoRoute(entry.plan.Primary.Key)),
+			fmt.Sprintf("%s模型: [bold]%s[/bold]", label, family.Primary.Model),
+			fmt.Sprintf("%s Key: [bold green]%s[/bold green]", label, orAutoRoute(family.Primary.Key)),
 		)
 	}
 	return lines

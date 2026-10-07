@@ -212,7 +212,7 @@ type Options struct {
 	MaxUpstreamCallsPerRequest int
 	// BodyPolicy 决定畸形请求体的处理方式（默认 BodyPolicyStrict）。
 	BodyPolicy BodyPolicy
-	// Multipart 是 multipart/form-data 的处理方式（默认 MultipartReject）。
+	// Multipart 是 multipart/form-data 的处理方式（默认 MultipartAuto）。
 	Multipart MultipartPolicy
 	// MaxMultipartBytes 是 multipart 请求体的缓冲上限；<=0 时用
 	// DefaultMaxMultipartBytes。
@@ -294,7 +294,7 @@ func New(manager *runtime.RuntimeManager, metrics MetricsSink, options Options) 
 	}
 	multipart := options.Multipart
 	if multipart == "" {
-		multipart = MultipartReject
+		multipart = MultipartAuto
 	}
 	now := options.Clock
 	if now == nil {

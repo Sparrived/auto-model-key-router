@@ -38,12 +38,20 @@ func pythonConfig(t *testing.T) *config.RouterConfig {
 // TestRequestRouteKindMatchesPython 锁定路径分类。
 func TestRequestRouteKindMatchesPython(t *testing.T) {
 	cases := map[string]string{
-		"chat/completions":   "default",
-		"messages":           "default",
-		"responses":          "default",
-		"images/generations": "image",
-		"images/edits":       "image",
-		"embeddings":         "embeddings",
+		"chat/completions":     "default",
+		"messages":             "default",
+		"responses":            "default",
+		"images/generations":   "image",
+		"images/edits":         "image",
+		"images/variations":    "image",
+		"embeddings":           "embeddings",
+		"audio/speech":         "speech",
+		"audio/transcriptions": "transcriptions",
+		// 语音翻译与转写共用一条 unified 计划：同类模型，分成两条只会让用户配两遍。
+		"audio/translations": "transcriptions",
+		"videos":             "video",
+		"videos/vid_123":     "video",
+		"rerank":             "rerank",
 		"models":             "default",
 		"":                   "default",
 		"foo":                "default",
@@ -60,14 +68,24 @@ func TestRequestRouteKindMatchesPython(t *testing.T) {
 // TestUpstreamModeMatchesPython 锁定路径到上游方言的映射。
 func TestUpstreamModeMatchesPython(t *testing.T) {
 	cases := map[string]string{
-		"chat/completions":   "openai",
-		"messages":           "anthropic",
-		"responses":          "responses",
-		"images/generations": "images",
-		"images/edits":       "images",
-		"embeddings":         "embeddings",
-		"models":             "",
-		"":                   "",
+		"chat/completions":     "openai",
+		"messages":             "anthropic",
+		"responses":            "responses",
+		"images/generations":   "images",
+		"images/edits":         "images",
+		"images/variations":    "images",
+		"embeddings":           "embeddings",
+		"audio/speech":         "speech",
+		"audio/transcriptions": "transcriptions",
+		"audio/translations":   "translations",
+		"videos":               "video",
+		"videos/vid_123":       "video",
+		"rerank":               "rerank",
+		// `messages/count_tokens` 是 AMKR 本地实现的端点，不能被前缀匹配成
+		// Anthropic 方言（分类表里只有视频族允许子路径）。
+		"messages/count_tokens": "",
+		"models":                "",
+		"":                      "",
 	}
 	for path, want := range cases {
 		if got := UpstreamMode(path); got != want {
@@ -106,6 +124,16 @@ func TestUpstreamPathMatchesPython(t *testing.T) {
 		{"images/edits", true, true, "v1/images/generations"},
 		{"embeddings", false, true, "v1/embeddings"},
 		{"embeddings", true, true, "v1/embeddings"},
+		{"audio/speech", false, true, "v1/audio/speech"},
+		{"audio/speech", true, true, "v1/audio/speech"},
+		{"audio/transcriptions", false, true, "v1/audio/transcriptions"},
+		{"audio/translations", false, true, "v1/audio/translations"},
+		{"videos", false, true, "v1/videos"},
+		// 视频子路径挂在族基址之后：轮询任务状态、取内容、重制都靠它。
+		{"videos/vid_123", false, true, "v1/videos/vid_123"},
+		{"videos/vid_123/content", false, true, "v1/videos/vid_123/content"},
+		{"rerank", false, true, "v1/rerank"},
+		{"images/variations", false, true, "v1/images/variations"},
 		{"models", false, false, "v1/models"},
 		{"models", true, true, "v1/models"},
 	}
@@ -128,11 +156,16 @@ func TestUpstreamPathMatchesPython(t *testing.T) {
 // TestUpstreamPathUsesConfiguredRoutes 对齐配置了自定义路由时的结果。
 func TestUpstreamPathUsesConfiguredRoutes(t *testing.T) {
 	routes := map[string]string{
-		"openai":     "v1/custom/chat",
-		"anthropic":  "v1/custom/msg",
-		"responses":  "v1/custom/resp",
-		"images":     "v1/custom/img",
-		"embeddings": "v1/custom/emb",
+		"openai":         "v1/custom/chat",
+		"anthropic":      "v1/custom/msg",
+		"responses":      "v1/custom/resp",
+		"images":         "v1/custom/img",
+		"embeddings":     "v1/custom/emb",
+		"speech":         "v1/custom/tts",
+		"transcriptions": "v1/custom/stt",
+		"translations":   "v1/custom/tr",
+		"video":          "v1/custom/vid",
+		"rerank":         "v1/custom/rank",
 	}
 	cases := []struct {
 		path     string
@@ -149,6 +182,15 @@ func TestUpstreamPathUsesConfiguredRoutes(t *testing.T) {
 		{"responses", true, false, "v1/custom/resp"},
 		{"images/generations", false, true, "v1/custom/img"},
 		{"embeddings", false, true, "v1/custom/emb"},
+		// 新增族一律走配置路径；视频的子路径拼在配置基址之后，这样自定义前缀
+		// （中转站常把 /v1/videos 挂在别处）对轮询与取内容同样生效。
+		{"audio/speech", false, true, "v1/custom/tts"},
+		{"audio/transcriptions", false, true, "v1/custom/stt"},
+		{"audio/translations", false, true, "v1/custom/tr"},
+		{"videos", false, true, "v1/custom/vid"},
+		{"videos/vid_123", false, true, "v1/custom/vid/vid_123"},
+		{"videos/vid_123/content", false, true, "v1/custom/vid/vid_123/content"},
+		{"rerank", false, true, "v1/custom/rank"},
 	}
 	for _, item := range cases {
 		payload := mustValue(t, `{}`)
@@ -404,6 +446,16 @@ func TestResolveModelIDDefaultsDecisionEndpoints(t *testing.T) {
 		// 前缀相近但不是这两个端点：不能靠 strings.HasPrefix 之类的宽松判断放行。
 		{"decide/extra", `{}`, "", false},
 		{"v1/decide", `{}`, "", false},
+		// 视频族：轮询 / 取内容 / 列任务都没有请求体，回落到 unified-model
+		// （运维在 unified_model.video 里指定了模型与 Key），否则"创建得了任务、
+		// 查不了结果"。带 model 时仍然按指定模型走。
+		{"videos/vid_1", `{}`, config.UNIFIED_MODEL_ID, true},
+		{"videos/vid_1/content", `{}`, config.UNIFIED_MODEL_ID, true},
+		{"videos", `{}`, config.UNIFIED_MODEL_ID, true},
+		{"videos", `{"model":"sora-2"}`, "sora-2", true},
+		// 视频族之外的透传端点没有默认模型：图像生成/嵌入必须显式给 model。
+		{"images/generations", `{}`, "", false},
+		{"rerank", `{}`, "", false},
 	}
 	for _, item := range cases {
 		got, ok := ResolveModelID(item.path, mustValue(t, item.payload))

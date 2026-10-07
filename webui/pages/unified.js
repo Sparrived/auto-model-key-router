@@ -1,8 +1,34 @@
-// 统一模型：主/回退/图像映射与推理强度。
+// 统一模型：主/回退/分族映射与推理强度。
+//
+// `unified-model` 是一个**按入站端点族分派**的伪模型：对话走 default，图像、嵌入、
+// 语音合成、语音识别、视频、重排各有一条可选计划；没配的族回落到 default（见
+// internal/config 的 UnifiedModelConfig 与 UnifiedPlanNames）。
 
 import { h, mount, errorText } from "../dom.js";
 import { api } from "../api.js";
+import { UNKNOWN_KIND, kindOf, normalizeModelKinds } from "../model-kinds.js";
 import { card, cardHead, notice, badge, empty, loading, render, toast, buttonNode, select, confirmDialog, kv } from "../ui.js";
+
+// FAMILIES 是 default 之外的分族计划；顺序即界面顺序，与服务端
+// config.UnifiedPlanNames 去掉 default 之后逐字一致（default 永远在最前）。
+//
+// kind 只用于给这个族的下拉排序（见 webui/model-kinds.js）；endpoints 是这条计划
+// 服务的入站端点族，写在编辑器顶部的说明里——「语音识别」一条计划同时服务
+// /v1/audio/transcriptions 与 /v1/audio/translations，这在界面上必须说清楚，
+// 否则用户会以为漏配了一条。
+const FAMILIES = [
+  { id: "image", label: "图像模型", keyLabel: "图像 Key", kind: "image", endpoints: "/v1/images/generations" },
+  { id: "embeddings", label: "嵌入模型", keyLabel: "嵌入 Key", kind: "embedding", endpoints: "/v1/embeddings" },
+  { id: "speech", label: "语音合成模型", keyLabel: "语音合成 Key", kind: "tts", endpoints: "/v1/audio/speech" },
+  { id: "transcriptions", label: "语音识别模型", keyLabel: "语音识别 Key", kind: "stt", endpoints: "/v1/audio/transcriptions 与 /v1/audio/translations" },
+  { id: "video", label: "视频模型", keyLabel: "视频 Key", kind: "video", endpoints: "/v1/videos" },
+  { id: "rerank", label: "重排模型", keyLabel: "重排 Key", kind: "rerank", endpoints: "/v1/rerank" },
+];
+
+// ESTABLISHED_FAMILIES 是本次改动**之前**就有的两族：它们的模型与 Key 是两行固定
+// 的只读摘要（未配置时也显示"未配置"），其余族只在配置了才出现。保留这条界线是为了
+// 让只用了老三种计划的配置，页面与改动前逐字一致。
+const ESTABLISHED_FAMILY_IDS = ["image", "embeddings"];
 
 const EFFORTS = [
   { value: "", label: "默认" },
@@ -15,7 +41,7 @@ const EFFORTS = [
   { value: "max", label: "max" },
 ];
 
-const state = { unified: null, models: [], revision: null, loading: true, error: null, editing: false, saving: false, saveError: null };
+const state = { unified: null, models: [], revision: null, loading: true, error: null, editing: false, saving: false, saveError: null, kinds: null };
 
 let host = null;
 
@@ -27,6 +53,20 @@ async function load() {
   state.unified = unified.unified_model || null;
   state.revision = unified.config_revision ?? models.config_revision;
   state.models = models.models || [];
+  state.kinds = await loadModelKinds();
+}
+
+// loadModelKinds 读一次模型类型，用来给各分族下拉排序（文本族在前、未分类在后）。
+//
+// 与模型清单**分开失败**：类型只影响下拉里的排序，问不到就按配置顺序平铺，绝不能让
+// 整页读不出来——/ui 不可达时用户连主模型都选不了，那比"下拉没排序"糟得多。
+async function loadModelKinds() {
+  try {
+    const data = await api.modelKinds(state.models.map((model) => model.id));
+    return normalizeModelKinds(data);
+  } catch {
+    return null;
+  }
 }
 
 function statusText(unified) {
@@ -49,8 +89,6 @@ function editor() {
   const storedDefault = state.unified?.default || {};
   const storedPrimary = knownModel(storedDefault.primary?.model || "");
   const storedFallback = knownModel(storedDefault.fallback?.model || "");
-  const storedImage = knownModel(state.unified?.image?.primary?.model || "");
-  const storedEmbedding = knownModel(state.unified?.embeddings?.primary?.model || "");
   // 模型被折成空串时，挂在它上面的固定 Key 也必须一起丢掉：Key 是模型级的，
   // 留着它只会让保存继续被拒。
   const primaryModel = storedPrimary || state.models[0]?.id || "";
@@ -58,11 +96,17 @@ function editor() {
   let routing = primaryKey ? "key" : "auto";
   let fallbackModel = storedFallback;
   let fallbackKey = storedFallback ? storedDefault.fallback?.key || "" : "";
-  let imageModel = storedImage;
-  let imageKey = storedImage ? state.unified?.image?.primary?.key || "" : "";
-  let embeddingModel = storedEmbedding;
-  let embeddingKey = storedEmbedding ? state.unified?.embeddings?.primary?.key || "" : "";
   let effort = state.models.find((model) => model.id === primaryModel)?.reasoning_effort || "";
+
+  // families：每个分族就地改的内存状态（模型 + 固定 Key），与上面 default 的三个变量
+  // 同一套写法。knownModel 折空串的规则对每个族都适用：引用了已消失的模型时当作
+  // "没选"，否则下拉显示空值、保存却仍把那个名字发出去，被服务端顶回来。
+  const families = {};
+  for (const family of FAMILIES) {
+    const plan = state.unified?.[family.id];
+    const model = knownModel(plan?.primary?.model || "");
+    families[family.id] = { model, key: model ? plan?.primary?.key || "" : "" };
+  }
 
   // 错误必须画在**当前**这棵 DOM 里：保存失败时会重画整个表单，写进旧节点的提示
   // 早已脱离文档，用户看到的就是「按钮点了没反应」。
@@ -75,6 +119,60 @@ function editor() {
     return options.concat(enabledKeys(modelId).map((name) => ({ value: name, label: name })));
   };
 
+  // modelGroups 把一个族的候选模型按类型分成「本族 / 其它类型 / 未分类」三组。
+  //
+  // 三条不变量：
+  //   1. **任何模型都不会被筛掉**：判据只是排序与分组。自定义模型名在服务端没有任何
+  //      档案（未分类），把它们挡在下拉之外，用户就再也选不回自己的模型；
+  //   2. 类型读数取不到时平铺：给一个"全都是未分类"的下拉加分组标题，只会让人以为
+  //      这些模型有问题；
+  //   3. 一个已分类的模型都没有时同样平铺（同上一条）。
+  const modelGroups = (kind) => {
+    const names = () => state.models.map((model) => model.id);
+    const classified = state.kinds
+      ? names().filter((name) => kindOf(state.kinds, name) !== UNKNOWN_KIND)
+      : [];
+    if (!classified.length) return [{ label: "", names: names() }];
+    const buckets = [
+      { label: "", names: [] },
+      { label: "其它类型", names: [] },
+      { label: "未分类", names: [] },
+    ];
+    for (const name of names()) {
+      const actual = kindOf(state.kinds, name);
+      buckets[actual === kind ? 0 : actual === UNKNOWN_KIND ? 2 : 1].names.push(name);
+    }
+    return buckets.filter((bucket) => bucket.names.length);
+  };
+
+  // modelSelectFor 生成一个按类型排序的模型下拉（optgroup 分组，见 modelGroups）。
+  //
+  // 不用 ui.js 的 select()：它只吃平铺的 {value,label}，表达不出分组。select 的取值、
+  // disabled 与 onChange 语义与它完全一致。
+  //
+  // emptyLabel 非空时在最前面插一个空值选项（分族的「不配置映射」）；它**不在**任何
+  // optgroup 里，否则"清空这一族"会长得像某一类模型。
+  const modelSelectFor = (kind, value, onChange, emptyLabel = "") => {
+    const node = h("select.select", { value, disabled: state.saving, onChange });
+    if (emptyLabel) node.append(h("option", { value: "", selected: !value }, emptyLabel));
+    for (const group of modelGroups(kind)) {
+      const options = group.names.map((name) => h("option", {
+        value: name,
+        selected: String(value ?? "") === name,
+      }, name));
+      node.append(group.label ? h("optgroup", { label: group.label }, options) : options);
+    }
+    return node;
+  };
+
+  // familyPlan 把某个族折成提交体里的那条计划：没选模型 = null（清空该族）。
+  //
+  // 与既有 image/embeddings 的写法一字不差：Key 空串折成 null（= 自动路由）。
+  const familyPlan = (family) => {
+    const picked = families[family.id];
+    return picked.model ? { primary: { model: picked.model, key: picked.key || null } } : null;
+  };
+
   const drawForm = () => {
     const primaryKeys = enabledKeys(primaryModel);
     if (routing === "key" && primaryKey && !primaryKeys.includes(primaryKey)) {
@@ -83,24 +181,20 @@ function editor() {
     }
     const model = state.models.find((item) => item.id === primaryModel);
 
-    const modelSelect = select(modelOptions(), {
-      value: primaryModel,
-      disabled: state.saving,
-      onChange: (event) => {
-        const next = event.target.value;
-        // 选中的模型正好是当前回退时，两者互换。
-        if (fallbackModel && next === fallbackModel) {
-          fallbackModel = primaryModel;
-          fallbackKey = routing === "key" ? primaryKey : "";
-        }
-        state.unified = state.unified || { default: { primary: {} }, image: null };
-        state.unified.default.primary = { model: next, key: routing === "key" ? primaryKey : null };
-        effort = state.models.find((item) => item.id === next)?.reasoning_effort || "";
-        const keys = enabledKeys(next);
-        primaryKey = keys.includes(primaryKey) ? primaryKey : keys[0] || "";
-        if (routing === "key" && !keys.length) routing = "auto";
-        render(host, editor());
-      },
+    const modelSelect = modelSelectFor("text", primaryModel, (event) => {
+      const next = event.target.value;
+      // 选中的模型正好是当前回退时，两者互换。
+      if (fallbackModel && next === fallbackModel) {
+        fallbackModel = primaryModel;
+        fallbackKey = routing === "key" ? primaryKey : "";
+      }
+      state.unified = state.unified || { default: { primary: {} }, image: null };
+      state.unified.default.primary = { model: next, key: routing === "key" ? primaryKey : null };
+      effort = state.models.find((item) => item.id === next)?.reasoning_effort || "";
+      const keys = enabledKeys(next);
+      primaryKey = keys.includes(primaryKey) ? primaryKey : keys[0] || "";
+      if (routing === "key" && !keys.length) routing = "auto";
+      render(host, editor());
     });
 
     const routingRadios = h("div.inline", {},
@@ -145,32 +239,38 @@ function editor() {
           onChange: (event) => { fallbackKey = event.target.value; },
         })),
       ),
-      h("div.form-grid", {},
-        h("label.field", h("span", "图像模型"), select([{ value: "", label: "不配置映射" }].concat(modelOptions()), {
-          value: imageModel, disabled: state.saving,
-          onChange: (event) => { imageModel = event.target.value; imageKey = ""; drawForm(); },
-        })),
-        h("label.field", h("span", "图像 Key"), select(keyOptions(imageModel, true), {
-          value: imageKey, disabled: state.saving || !imageModel,
-          onChange: (event) => { imageKey = event.target.value; },
-        })),
-      ),
-      h("div.form-grid", {},
-        h("label.field", h("span", "嵌入模型"), select([{ value: "", label: "不配置映射" }].concat(modelOptions()), {
-          value: embeddingModel, disabled: state.saving,
-          onChange: (event) => { embeddingModel = event.target.value; embeddingKey = ""; drawForm(); },
-        })),
-        h("label.field", h("span", "嵌入 Key"), select(keyOptions(embeddingModel, true), {
-          value: embeddingKey, disabled: state.saving || !embeddingModel,
-          onChange: (event) => { embeddingKey = event.target.value; },
-        })),
-      ),
+      // 分族计划：每族一行（模型 + Key），与既有 image/embeddings 两行完全同构。
+      // 清空某一族的模型 = 该族不配置（提交体里是 null），请求回落到 default。
+      h("p.muted", "上面的默认模型（文本族）服务对话端点；以下各族按入站端点分派，"
+        + "没有配置的族会回落到它。这些端点族的请求体对 AMKR 不透明（只替换模型名后原样转发），"
+        + "因此所选模型必须绑定到确实提供该端点的上游 Key。"),
+      ...FAMILIES.map((family) => {
+        const picked = families[family.id];
+        return h("div.form-grid", {},
+          h("label.field", h("span", family.label), modelSelectFor(family.kind, picked.model, (event) => {
+            picked.model = event.target.value;
+            // 换模型即丢掉旧 Key：Key 是模型级的，留着它会以"引用了未配置的模型"被拒。
+            picked.key = "";
+            drawForm();
+          }, "不配置映射")),
+          h("label.field", h("span", family.keyLabel), select(keyOptions(picked.model, true), {
+            value: picked.key, disabled: state.saving || !picked.model,
+            onChange: (event) => { picked.key = event.target.value; },
+          })),
+        );
+      }),
     );
 
     const validate = () => {
       if (!primaryModel) return "请先选择模型。";
       if (routing === "key" && !primaryKey) return "当前模型没有可用的启用 Key。";
       if (fallbackModel && fallbackModel === primaryModel) return "回退模型不能与主模型相同。";
+      // 分族的 Key 是模型级的：只留 Key 不留模型，服务端只会以"引用了未配置的模型"
+      // 拒绝，而用户看到的是一个填好的 Key 框——必须在这里就说清楚。
+      for (const family of FAMILIES) {
+        const picked = families[family.id];
+        if (picked.key && !picked.model) return `${family.label}不能只指定 Key 而不指定模型。`;
+      }
       return null;
     };
 
@@ -195,13 +295,12 @@ function editor() {
                 primary: { model: primaryModel, key: routing === "key" ? primaryKey : null },
                 fallback: fallbackModel ? { model: fallbackModel, key: fallbackKey || null } : null,
               },
-              image: imageModel
-                ? { primary: { model: imageModel, key: imageKey || null } }
-                : null,
-              embeddings: embeddingModel
-                ? { primary: { model: embeddingModel, key: embeddingKey || null } }
-                : null,
             };
+            // 七个计划键**每次都写全**：没配置的族是 null（= 清空该族）。这与既有
+            // image/embeddings 的写法一致——"这一族不存在"与"这一族是空的"在配置里
+            // 本来就是同一件事，而少写一个键在服务端是"这次不动它"，会留下用户以为
+            // 已经清掉的旧计划。
+            for (const family of FAMILIES) payload[family.id] = familyPlan(family);
             await api.updateUnified(revision, payload);
             // saving 必须在成功路径上复位：它同时控制着下拉/单选的 disabled 与保存
             // 按钮的文案。漏掉这一步，下一次点「编辑」拿到的是一整个禁用、按钮写着
@@ -271,15 +370,23 @@ function draw() {
     children.push(card(cardHead("当前配置"), editor()));
   } else {
     const unified = state.unified;
+    const rows = [
+      ["文本模型", unified?.default?.primary?.model || "未配置"],
+      ["路由方式", statusText(unified)],
+      ["回退模型", unified?.default?.fallback?.model || "未配置"],
+      ["图像模型", unified?.image?.primary?.model || "未配置"],
+      ["嵌入模型", unified?.embeddings?.primary?.model || "未配置"],
+    ];
+    // 新增的四族**只在配置了才出现**：服务端的响应也只返回已配置的计划，给它补一行
+    // "未配置"会让人以为这些族占着什么位置。既有两族保持原样（那也是改动前的渲染）。
+    for (const family of FAMILIES) {
+      if (ESTABLISHED_FAMILY_IDS.includes(family.id)) continue;
+      const model = unified?.[family.id]?.primary?.model;
+      if (model) rows.push([family.label, model]);
+    }
     children.push(card(
       cardHead("当前配置", buttonNode("编辑", { small: true, variant: "text", onClick: () => { state.saveError = null; state.editing = true; draw(); } })),
-      kv([
-        ["文本模型", unified?.default?.primary?.model || "未配置"],
-        ["路由方式", statusText(unified)],
-        ["回退模型", unified?.default?.fallback?.model || "未配置"],
-        ["图像模型", unified?.image?.primary?.model || "未配置"],
-        ["嵌入模型", unified?.embeddings?.primary?.model || "未配置"],
-      ]),
+      kv(rows),
     ));
     if (unified) {
       children.push(h("div.btn-row", {},

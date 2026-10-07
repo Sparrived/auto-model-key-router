@@ -115,7 +115,7 @@ WebUI 的「用量统计」与「服务日志」页。
 | --- | --- | --- |
 | `--switch-model MODEL` | 模型 ID 或别名 | 把 `unified_model` 指向已有模型；写回时规范化为真实模型 ID |
 | `--switch-key KEY` | Key 名称或 `auto` | 固定使用已有且启用的 Key；`auto` 恢复自动路由 |
-| `--unified-target TARGET` | `default.primary` / `default.fallback` / `image.primary` / `image.fallback` / `embeddings.primary` / `embeddings.fallback` | 选择 `--switch-model` / `--switch-key` 要修改的目标，默认 `default.primary` |
+| `--unified-target TARGET` | `default.primary` / `default.fallback`，以及 `image`、`embeddings`、`speech`、`transcriptions`、`video`、`rerank` 各自的 `.primary` / `.fallback` | 选择 `--switch-model` / `--switch-key` 要修改的目标，默认 `default.primary` |
 | `--show-unified-model` | 无 | 查看当前指向 |
 
 示例：
@@ -132,7 +132,7 @@ amkr --config router-config.json --show-unified-model
 行为说明：
 
 - `--switch-key` 单独使用时，配置中必须已经存在 `unified_model`。
-- 非 `default` 目标（`image`、`embeddings`）必须先配置 `primary` 才能配置 `fallback`；未配置该目标的 `primary` 时，对应请求继承 `default.primary`，且不继承 `default.fallback`。
+- 非 `default` 目标（`image`、`embeddings`、`speech`、`transcriptions`、`video`、`rerank`）必须先配置 `primary` 才能配置 `fallback`；未配置该目标的 `primary` 时，对应请求继承 `default.primary`，且不继承 `default.fallback`。各目标服务的入站路径见 [`docs/USAGE.md`](USAGE.md#8-统一模型-unified-model)。`transcriptions` 同时服务 `/v1/audio/transcriptions` 与 `/v1/audio/translations`；`video` 还负责没有请求体的视频读取端点（轮询任务、取内容），因此轮询要指向**创建任务那个供应商**的模型与 Key。
 - 切换到另一模型且没有同时提供 `--switch-key` 时，会清除原固定 Key，恢复自动路由。
 - MODEL 不存在、Key 不存在或 Key 已禁用时，命令返回失败且不写入无效配置。
 - 修改会原子写回配置文件；运行中的服务会在后续请求时热重载。

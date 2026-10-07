@@ -281,18 +281,109 @@ func TestCapabilityCacheKeyNormalization(t *testing.T) {
 // TestRequestRouteKind 验证路径归类。
 func TestRequestRouteKind(t *testing.T) {
 	cases := map[string]string{
-		"images/generations": "image",
-		"images/edits":       "image",
-		"embeddings":         "embeddings",
-		"chat/completions":   "default",
-		"messages":           "default",
-		"":                   "default",
-		"images":             "default",
+		"images/generations":   "image",
+		"images/edits":         "image",
+		"images/variations":    "image",
+		"embeddings":           "embeddings",
+		"audio/speech":         "speech",
+		"audio/transcriptions": "transcriptions",
+		// 转写与翻译共用一条计划（同一类模型）。
+		"audio/translations":     "transcriptions",
+		"videos":                 "video",
+		"videos/vid_123":         "video",
+		"videos/vid_123/content": "video",
+		"rerank":                 "rerank",
+		"chat/completions":       "default",
+		"messages":               "default",
+		"":                       "default",
+		"images":                 "default",
+		// 自有端点不能被误判成上游族：count_tokens 是本地的。
+		"messages/count_tokens": "default",
 	}
 	for path, want := range cases {
 		if got := RequestRouteKind(path); got != want {
 			t.Fatalf("路径 %q: 期望 %q，实际 %q", path, want, got)
 		}
+	}
+}
+
+// TestUnifiedPlanPerEndpointFamily 验证 unified-model 的分族计划选择。
+//
+// 这是「用户能正确为不同模型配端点」的另一半：嵌入 / 图像 / 语音 / 视频 / 重排
+// 请求必须落到各自配置的模型上，没配的族回落到 default，而不是让所有端点都用
+// 对话模型。
+func TestUnifiedPlanPerEndpointFamily(t *testing.T) {
+	cfg := mustConfig(t, `{
+		"config_version": 4, "local_api_key": "local",
+		"providers": {"p": {"base_url": "https://a.example", "keys": {
+			"kc": {"api_key": "c"}, "ke": {"api_key": "e"}, "kt": {"api_key": "t"},
+			"kv": {"api_key": "v"}, "kr": {"api_key": "r"}}}},
+		"models": {
+			"chat-model":  {"targets": [{"provider": "p", "key": "kc"}]},
+			"embed-model": {"targets": [{"provider": "p", "key": "ke"}]},
+			"tts-model":   {"targets": [{"provider": "p", "key": "kt"}]},
+			"video-model": {"targets": [{"provider": "p", "key": "kv"}]},
+			"rank-model":  {"targets": [{"provider": "p", "key": "kr"}]}
+		},
+		"unified_model": {
+			"default":    {"primary": {"model": "chat-model"}},
+			"embeddings": {"primary": {"model": "embed-model"}},
+			"speech":     {"primary": {"model": "tts-model"}},
+			"video":      {"primary": {"model": "video-model"}}
+		}
+	}`)
+	pool := New(cfg, nil, nil)
+
+	cases := []struct {
+		path      string
+		wantModel string
+	}{
+		{"chat/completions", "chat-model"},
+		{"embeddings", "embed-model"},
+		{"audio/speech", "tts-model"},
+		{"videos", "video-model"},
+		{"videos/vid_1/content", "video-model"},
+		// 配了族的请求走族计划；没配的族（图像 / 重排 / 语音翻译）回落 default。
+		{"images/generations", "chat-model"},
+		{"rerank", "chat-model"},
+		{"audio/translations", "chat-model"},
+	}
+	for _, item := range cases {
+		got, _, err := pool.ResolveRoute(config.UNIFIED_MODEL_ID, nil, item.path)
+		if err != nil {
+			t.Fatalf("路径 %q: 解析失败: %v", item.path, err)
+		}
+		if got != item.wantModel {
+			t.Errorf("路径 %q: 期望模型 %q，实际 %q", item.path, item.wantModel, got)
+		}
+	}
+}
+
+// TestUnifiedRouteListsEveryConfiguredFamily 验证展示结构只列出已配置的族。
+func TestUnifiedRouteListsEveryConfiguredFamily(t *testing.T) {
+	cfg := mustConfig(t, `{
+		"config_version": 4, "local_api_key": "local",
+		"providers": {"p": {"base_url": "https://a.example", "keys": {
+			"kc": {"api_key": "c"}, "kr": {"api_key": "r"}}}},
+		"models": {
+			"chat-model": {"targets": [{"provider": "p", "key": "kc"}]},
+			"rank-model": {"targets": [{"provider": "p", "key": "kr"}]}
+		},
+		"unified_model": {
+			"default": {"primary": {"model": "chat-model"}},
+			"rerank":  {"primary": {"model": "rank-model"}}
+		}
+	}`)
+	pool := New(cfg, nil, nil)
+	route := pool.UnifiedRoute()
+	if route == nil {
+		t.Fatal("unified 已配置，UnifiedRoute 不应为 nil")
+	}
+	if route.Lookup("rerank").Lookup("primary").Lookup("model").StringValue() != "rank-model" {
+		t.Errorf("rerank 计划未出现在展示结构里: %s", mustDump(t, route))
+	}
+	if _, found := route.LookupOK("image"); found {
+		t.Errorf("未配置的图像计划不应出现: %s", mustDump(t, route))
 	}
 }
 

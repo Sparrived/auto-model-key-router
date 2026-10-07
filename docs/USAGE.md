@@ -506,11 +506,41 @@ auto-model-key-router --config router-config.json --switch-key auto
 - 如果切换到另一个模型且未传 `--switch-key`，旧的固定 Key 会自动清空，避免误用。
 - `unified_model` 只引用现有模型和 Key，不会复制或新增上游 Key。
 - 配置中不能把真实模型 ID 或 alias 命名为保留名 `unified-model`。
-- `unified_model` 下可选的 `image` 与 `embeddings` 计划把图像、嵌入请求指向各自的模型：`/v1/images/*` 用 `image`，`/v1/embeddings` 用 `embeddings`，其余请求用 `default`。未配置对应计划时该路径继承 `default.primary`（不继承 `default.fallback`）。用 `--unified-target` 指定要改的计划，例如把嵌入切到另一个模型：
+- `unified_model` 下可选的分族计划把各端点族的请求指向各自的模型。请求路径决定用哪个计划：
+
+  | 计划 | 服务的入站路径 | 说明 |
+  | --- | --- | --- |
+  | `default` | 对话、Responses、Anthropic、以及未配分族计划的路径 | 必需项 |
+  | `image` | `/v1/images/generations`、`/v1/images/edits`、`/v1/images/variations` | |
+  | `embeddings` | `/v1/embeddings` | |
+  | `speech` | `/v1/audio/speech` | 语音合成 |
+  | `transcriptions` | `/v1/audio/transcriptions`、`/v1/audio/translations` | 语音识别；转写与翻译共用一条计划（同类模型） |
+  | `video` | `/v1/videos` 及其子路径 | 视频生成；**免 model 的任务轮询也走它** |
+  | `rerank` | `/v1/rerank` | 重排 |
+
+  未配置对应分族计划时该路径继承 `default.primary`（不继承 `default.fallback`）。用 `--unified-target` 指定要改的计划，例如把嵌入切到另一个模型：
 
 ```bash
 auto-model-key-router --config router-config.json --switch-model text-embedding-3-small --unified-target embeddings.primary
 ```
+
+  分族计划也可以直接写进配置：
+
+```json
+"unified_model": {
+  "default":    {"primary": {"model": "gpt-4o-mini"}},
+  "image":      {"primary": {"model": "gpt-image-1"}},
+  "embeddings": {"primary": {"model": "text-embedding-3-small"}},
+  "speech":     {"primary": {"model": "gpt-4o-mini-tts"}},
+  "transcriptions": {"primary": {"model": "whisper-1"}},
+  "video":      {"primary": {"model": "sora-2"}},
+  "rerank":     {"primary": {"model": "rerank-v3"}}
+}
+```
+
+  一个只在少数端点上被用到的模型（例如 `whisper-1`）因此不需要在客户端写具体名字：客户端照旧请求 `unified-model`，AMKR 按路径把它送到 `transcriptions` 计划里的模型上。各族的模型必须显式绑定各自的供应商 Key——同一件事是靠「该模型路由里有哪些 Key」表达的，见「对外名称与上游名称」。
+
+  视频是一个需要留意的例外：`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content` 这类**读取端点没有请求体**，因此没有 `model` 字段。它们按 `unified-model` 路由，也就是用 `video` 计划里的模型与 Key。轮询任务必须用**创建任务那个供应商**的 Key，否则上游会答「找不到该任务」——所以 `video` 计划要指向创建任务时用的同一个供应商。未配置 `video` 计划时这些请求会改用 `default` 计划的 Key 发出去（同样大概率查不到任务），这是 unified 的通用回落规则，不是静默成功。
 
 ---
 

@@ -35,24 +35,49 @@ var taskSamplingParams = []string{
 var TaskParamKeys = append(append([]string{}, taskSamplingParams...), "reasoning_effort")
 
 // upstreamRouteModes 是允许的上游路由模式。
-var upstreamRouteModes = []string{"openai", "anthropic", "responses", "images", "embeddings"}
+//
+// 前 5 个是**对话方言**（openai / anthropic / responses 会在 AMKR 侧做请求体改写）
+// 与两条最早支持的独立端点族（images / embeddings）；后 5 个是**透传端点族**：
+// 它们的请求体对 AMKR 不透明，只替换 model 后原样转发（见
+// proxysupport.IsPassthroughEndpoint），否则 tts 的 `input`、视频的 `prompt` 会被
+// 当场改写成 chat 形态。
+//
+// 顺序即管理界面的展示顺序：先对话，再按「图像 → 嵌入 → 语音 → 视频 → 重排」排。
+var upstreamRouteModes = []string{
+	"openai", "anthropic", "responses",
+	"images", "embeddings",
+	"speech", "transcriptions", "translations", "video", "rerank",
+}
 
 // upstreamRouteLabels 是模式的可读名称（管理界面用）。
 var upstreamRouteLabels = map[string]string{
-	"openai":     "OpenAI Chat",
-	"anthropic":  "Anthropic Messages",
-	"responses":  "OpenAI Responses",
-	"images":     "OpenAI Images",
-	"embeddings": "OpenAI Embeddings",
+	"openai":         "OpenAI Chat",
+	"anthropic":      "Anthropic Messages",
+	"responses":      "OpenAI Responses",
+	"images":         "OpenAI Images",
+	"embeddings":     "OpenAI Embeddings",
+	"speech":         "OpenAI Speech（语音合成）",
+	"transcriptions": "OpenAI Transcriptions（语音转写）",
+	"translations":   "OpenAI Translations（语音翻译）",
+	"video":          "OpenAI Videos（视频生成）",
+	"rerank":         "Rerank（重排）",
 }
 
 // upstreamRouteDefaultPaths 是各模式的标准相对路径。
+//
+// 语音三兄弟与视频走的都是 OpenAI 现行路径；重排没有跨家标准路径，`v1/rerank`
+// 是社区（Cohere/Jina/vLLM 等）最通用的一种写法，用户可在路由里改。
 var upstreamRouteDefaultPaths = map[string]string{
-	"openai":     "v1/chat/completions",
-	"anthropic":  "v1/messages",
-	"responses":  "v1/responses",
-	"images":     "v1/images/generations",
-	"embeddings": "v1/embeddings",
+	"openai":         "v1/chat/completions",
+	"anthropic":      "v1/messages",
+	"responses":      "v1/responses",
+	"images":         "v1/images/generations",
+	"embeddings":     "v1/embeddings",
+	"speech":         "v1/audio/speech",
+	"transcriptions": "v1/audio/transcriptions",
+	"translations":   "v1/audio/translations",
+	"video":          "v1/videos",
+	"rerank":         "v1/rerank",
 }
 
 // upstreamRouteModeAliases 把用户写法折叠到标准模式名。
@@ -76,6 +101,39 @@ var upstreamRouteModeAliases = map[string]string{
 	"embedding":          "embeddings",
 	"embed":              "embeddings",
 	"embeddings":         "embeddings",
+	// 语音合成：tts / speech 是同一条端点的两种叫法。
+	"tts":            "speech",
+	"audio_speech":   "speech",
+	"audio-speech":   "speech",
+	"audio/speech":   "speech",
+	"speech":         "speech",
+	"voice":          "speech",
+	"text_to_speech": "speech",
+	// 语音转写：whisper / stt / asr 都是它。
+	"stt":                  "transcriptions",
+	"asr":                  "transcriptions",
+	"whisper":              "transcriptions",
+	"transcribe":           "transcriptions",
+	"audio_transcriptions": "transcriptions",
+	"audio-transcriptions": "transcriptions",
+	"audio/transcriptions": "transcriptions",
+	// 语音翻译：与转写同形（multipart 进、JSON 出），但是独立端点。
+	"translation":        "translations",
+	"translate":          "translations",
+	"audio_translations": "translations",
+	"audio-translations": "translations",
+	"audio/translations": "translations",
+	// 视频生成。
+	"videos":             "video",
+	"sora":               "video",
+	"video_generation":   "video",
+	"video-generation":   "video",
+	"video/generations":  "video",
+	"videos/generations": "video",
+	// 重排。
+	"reranking": "rerank",
+	"rerank_v1": "rerank",
+	"rerank/v1": "rerank",
 }
 
 // UpstreamRouteModes 返回允许的路由模式列表（只读副本）。
@@ -101,7 +159,22 @@ func NormalizeUpstreamRouteMode(value *canonical.Value) (string, error) {
 			return mode, nil
 		}
 	}
-	return "", errf("upstream_routes 模式必须是 openai、anthropic、responses、images 或 embeddings")
+	// 模式清单从 upstreamRouteModes 现算：手写一遍枚举文案的写法在新增端点族时
+	// 必然漂移（用户看到的可选值与实际接受的集合不一致），而这条错误是运维唯一
+	// 的线索。
+	return "", errf("upstream_routes 模式必须是 %s", joinModeChoices())
+}
+
+// joinModeChoices 把模式清单渲染成「a、b 或 c」。
+func joinModeChoices() string {
+	if len(upstreamRouteModes) == 0 {
+		return ""
+	}
+	if len(upstreamRouteModes) == 1 {
+		return upstreamRouteModes[0]
+	}
+	return strings.Join(upstreamRouteModes[:len(upstreamRouteModes)-1], "、") +
+		" 或 " + upstreamRouteModes[len(upstreamRouteModes)-1]
 }
 
 // NormalizeUpstreamRoutePath 规范化单个路由路径。

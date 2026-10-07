@@ -148,11 +148,43 @@ func upstreamBodyCases() []upBodyCase {
 			want: `{"model":"m1","input":"hi"}`,
 		},
 
-		// --- images：非 embeddings 路径，仍会应用 reasoning_effort ---
+		// --- 透传端点族：只换 model，字节不动 ---
 		{
-			name: "images 也应用模型级 reasoning_effort", body: `{"model":"o","prompt":"cat"}`,
+			// 图像、语音、视频、重排的请求体是它们自己的规范形态，AMKR 只替换 model。
+			// 这里**与本次改动前有意分叉**：旧实现把 images/generations 当对话路径处理，
+			// 会凭空注入模型级的 reasoning_effort，并删掉 metadata/store/include 这类
+			// 字段。图像端点不认识 reasoning_effort，上游可能直接 400。
+			name: "images 只换 model 不注入 reasoning_effort", body: `{"model":"o","prompt":"cat"}`,
 			payload: `{"model":"o","prompt":"cat"}`, modelID: "m1", path: "images/generations",
-			want: `{"model":"m1","prompt":"cat","reasoning_effort":"medium"}`,
+			want: `{"model":"m1","prompt":"cat"}`,
+		},
+		{
+			// 语音合成（TTS）：`input` 是待朗读的文本。旧实现会把带 input 的体当成
+			// Responses 请求改写成 messages，上游于是收到一个没有 input 的 chat 请求，
+			// 用户看到的是「明明调 tts 却像在调对话」。这条用例就是那个缺陷的回归锁。
+			name: "audio/speech 保留 input 不做方言转换", body: `{"model":"o","input":"hello","voice":"alloy"}`,
+			payload: `{"model":"o","input":"hello","voice":"alloy","response_format":"mp3"}`,
+			modelID: "m1", path: "audio/speech",
+			want: `{"model":"m1","input":"hello","voice":"alloy","response_format":"mp3"}`,
+		},
+		{
+			// 视频生成：prompt 与对话无关，且要保留 metadata 这类上游偶有使用的字段。
+			name: "videos 保留 metadata", body: `{"model":"o","prompt":"a cat"}`,
+			payload: `{"model":"o","prompt":"a cat","metadata":{"trace":"t1"}}`,
+			modelID: "m1", path: "videos",
+			want: `{"model":"m1","prompt":"a cat","metadata":{"trace":"t1"}}`,
+		},
+		{
+			name: "rerank 保留 query/documents", body: `{"model":"o","query":"q"}`,
+			payload: `{"model":"o","query":"q","documents":["a","b"]}`, modelID: "m1", path: "rerank",
+			want: `{"model":"m1","query":"q","documents":["a","b"]}`,
+		},
+		{
+			// 未登记的路径不算透传：decide / classify 这类自有端点沿用既有改写行为
+			// （含模型级 reasoning_effort 注入）。
+			name: "未登记路径仍按对话处理", body: `{"model":"o","input":"x"}`,
+			payload: `{"model":"o","input":"x"}`, modelID: "m1", path: "decide",
+			want: `{"model":"m1","reasoning_effort":"medium","messages":[{"role":"user","content":"x"}]}`,
 		},
 	}
 }

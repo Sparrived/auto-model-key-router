@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/config"
 )
 
 // StringPtr 返回字符串指针，便于填写可选的 *string 参数（nil 表示 Python None）。
@@ -230,10 +231,13 @@ func isSchemeChar(c byte) bool {
 	return isASCIIAlpha(c) || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
 }
 
-// UNIFIEDPlanNames 是 unified_model 的三个计划名。
+// UNIFIEDPlanNames 是 unified_model 的全部计划名。
 //
-// 移植 config_operations.py:166。顺序即 repair_unified_model 的处理顺序，不能改。
-var UNIFIEDPlanNames = []string{"default", "image", "embeddings"}
+// 顺序即 repair_unified_model 的处理顺序，不能改（default 必须最前，见
+// config.UnifiedPlanNames 的说明）。这里**从 config 包取**而不是自己再写一份：
+// 计划名同时驱动解析、校验、切换、修复与展示，两份清单漂移的后果是「某个族的
+// unified 配置被静默丢掉」——升级时会丢用户数据，比崩溃更难查。
+var UNIFIEDPlanNames = config.UnifiedPlanNames
 
 // UnifiedTargets 是 unified_model 的全部「计划.角色」目标名。
 //
