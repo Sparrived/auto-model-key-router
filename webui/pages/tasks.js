@@ -788,10 +788,12 @@ function draw() {
         task.display_name || task.name,
         task.display_name ? badge(task.name, "muted") : null,
         task.model ? null : badge("尚未指定模型", "warn"),
-        buttonNode("编辑", { small: true, variant: "text", disabled: state.saving, onClick: () => { state.editing = task.name; draw(); } }),
+        buttonNode("编辑", { small: true, variant: "secondary", iconName: "edit", disabled: state.saving, onClick: () => { state.editing = task.name; draw(); } }),
         buttonNode("删除", {
           small: true,
           variant: "text",
+          class: "btn-action-danger",
+          iconName: "trash",
           disabled: state.saving,
           onClick: () => confirmDialog({
             title: "删除任务路由",

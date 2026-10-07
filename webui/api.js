@@ -1,6 +1,8 @@
 // amkr WebUI —— 与路由服务通信的唯一入口。
 // 除 /health 外，所有管理接口都需要本地鉴权 Key（Authorization: Bearer）。
 
+import { chunkModelIDs } from "./model-kinds.js";
+
 const KEY_STORAGE = "amkr.apiKey";
 
 export function getKey() {
@@ -104,6 +106,14 @@ async function request(path, { method = "GET", body, auth = true, workspace } = 
 // 字段，而请求体是对外契约（docs/API.md 逐个列字段）。
 const dryRunQuery = (options) => (options?.dryRun ? "?dry_run=1" : "");
 
+// UNIFIED_PLAN_KEYS 是 GET/PUT /api/unified-model 的七个计划键，顺序与服务端
+// config.UnifiedPlanNames 一致（default 必填，其余可选，未配置的族不出现/传 null）。
+const UNIFIED_PLAN_KEYS = ["default", "image", "embeddings", "speech", "transcriptions", "video", "rerank"];
+
+// UNIFIED_LEGACY_KEYS 是 PUT 的第二条分支（只切换目标、不动其它族）用的旧字段，
+// 仍然原样透传：它们是已发布的请求形状，删掉会打断既有调用方。
+const UNIFIED_LEGACY_KEYS = ["model", "key", "image_model", "image_key"];
+
 export const api = {
   health: () => request("/health", { auth: false }),
   metrics: (hours = 1) => request(`/metrics?hours=${hours}`),
@@ -138,6 +148,25 @@ export const api = {
   // **不鉴权**——内容是 models.dev 的公开数据，静态资源本身也是公开的。
   // 服务端还没取到目录时回 503，由 webui/pricing.js 吞掉并降级成"无定价"。
   pricing: () => request("/ui/pricing.json", { auth: false }),
+
+  // 模型类型读数（文本 / 图像 / 视频 / 语音 / 嵌入 / 重排）：与价格目录同源（同一份
+  // models.dev 文档 + 名字规则），同样不鉴权。
+  //
+  // **判定在服务端做**（internal/modelkind），这里只负责把名字分块问回来再合并：
+  // 一次问几百个名字会把请求行撑到几 KB，而服务端单次上限是 200。目录还没取回来时
+  // 服务端仍然回 200（只有名字规则的结论），因此这里不把 catalog_available 为假
+  // 当成失败——界面用 false 提示"分类依据仅名字规则"。
+  modelKinds: async (names) => {
+    const wanted = [...new Set((names || []).map((name) => String(name).trim()).filter(Boolean))];
+    if (!wanted.length) return { catalog_available: false, models: {} };
+    const pages = await Promise.all(chunkModelIDs(wanted).map((chunk) =>
+      request(`/ui/model-kinds.json?${chunk.map((name) => `model=${encodeURIComponent(name)}`).join("&")}`,
+        { auth: false })));
+    return {
+      catalog_available: pages.every((page) => page?.catalog_available === true),
+      models: Object.assign({}, ...pages.map((page) => page?.models || {})),
+    };
+  },
 
   tool: () => request("/api/tool"),
   setWebui: (enabled) => request("/api/tool/webui", { method: "POST", body: { enabled } }),
@@ -251,8 +280,22 @@ export const api = {
     }),
 
   unified: () => request("/api/unified-model"),
-  updateUnified: (revision, unified) =>
-    request("/api/unified-model", { method: "PUT", body: { config_revision: revision, default: unified.default, image: unified.image ?? null, embeddings: unified.embeddings ?? null } }),
+  // 七个计划键 + 四个遗留字段（model/key/image_model/image_key 是「只切换目标」那条
+  // 分支用的旧形状，仍要能用）。
+  //
+  // 这里**只透传调用方真正给了的键**：给什么发什么，没给的不发。这样老的调用方
+  // （只传 default/image/embeddings）发出去的请求体与改动前逐字节相同，而统一模型页
+  // 会把七个键写全（未配置的族是 null，表示清空该族）。
+  updateUnified: (revision, unified = {}) => {
+    const body = { config_revision: revision };
+    for (const key of UNIFIED_PLAN_KEYS) {
+      if (key in unified) body[key] = unified[key] ?? null;
+    }
+    for (const key of UNIFIED_LEGACY_KEYS) {
+      if (key in unified) body[key] = unified[key];
+    }
+    return request("/api/unified-model", { method: "PUT", body });
+  },
   deleteUnified: (revision) =>
     request("/api/unified-model", { method: "DELETE", body: { config_revision: revision } }),
 

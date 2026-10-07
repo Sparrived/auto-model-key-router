@@ -6,21 +6,21 @@ import { card, cardHead, notice, badge, loading, render, toast, buttonNode, inpu
 
 const SERVICE_GROUPS = [
   { title: "服务控制", actions: [
-    { id: "start_amkr", label: "启动服务", running: true },
-    { id: "stop_amkr", label: "停止服务" },
-    { id: "restart_amkr", label: "重启服务", running: true },
-    { id: "status_amkr", label: "查询任务" },
+    { id: "start_amkr", label: "启动服务", icon: "play", running: true },
+    { id: "stop_amkr", label: "停止服务", icon: "stop" },
+    { id: "restart_amkr", label: "重启服务", icon: "refresh", running: true },
+    { id: "status_amkr", label: "查询任务", icon: "activity" },
   ]},
   { title: "登录自启（当前用户）", actions: [
-    { id: "install_user_amkr", label: "注册登录启动" },
-    { id: "uninstall_amkr", label: "取消注册", confirm: "取消登录启动任务？正在运行的服务也会停止。", danger: true },
+    { id: "install_user_amkr", label: "注册登录启动", icon: "shield" },
+    { id: "uninstall_amkr", label: "取消注册", icon: "trash", confirm: "取消登录启动任务？正在运行的服务也会停止。", danger: true },
   ]},
   { title: "系统服务（需要管理员授权）", actions: [
-    { id: "install_system_amkr", label: "注册开机服务", confirm: "注册系统级开机服务？Windows 将请求管理员授权。" },
-    { id: "start_system_amkr", label: "启动" },
-    { id: "stop_system_amkr", label: "停止" },
-    { id: "restart_system_amkr", label: "重启" },
-    { id: "uninstall_system_amkr", label: "取消系统服务", confirm: "取消系统级服务？Windows 将请求管理员授权。", danger: true },
+    { id: "install_system_amkr", label: "注册开机服务", icon: "shield", confirm: "注册系统级开机服务？Windows 将请求管理员授权。" },
+    { id: "start_system_amkr", label: "启动", icon: "play" },
+    { id: "stop_system_amkr", label: "停止", icon: "stop" },
+    { id: "restart_system_amkr", label: "重启", icon: "refresh" },
+    { id: "uninstall_system_amkr", label: "取消系统服务", icon: "trash", confirm: "取消系统级服务？Windows 将请求管理员授权。", danger: true },
   ]},
 ];
 
@@ -117,9 +117,10 @@ function runtimeCard() {
     ])),
     errorHost,
     h("div.btn-row", { style: { marginTop: "16px" } },
-      buttonNode(state.action === "settings" ? "正在保存" : "保存运行设置", { disabled: state.action === "settings", onClick: save }),
+      buttonNode(state.action === "settings" ? "正在保存" : "保存运行设置", { iconName: "check", disabled: state.action === "settings", onClick: save }),
       buttonNode("重置本地鉴权 Key", {
         variant: "secondary",
+        iconName: "refresh",
         disabled: state.action === "settings",
         onClick: () => confirmDialog({
           title: "重置本地鉴权 Key",
@@ -197,6 +198,7 @@ function serviceCard() {
         {
           variant: action.danger ? "danger" : "secondary",
           small: true,
+          iconName: action.icon,
           disabled: !!state.action,
           onClick: () => action.confirm
             ? confirmDialog({ title: action.label, message: action.confirm, confirmLabel: action.label, danger: !!action.danger, onConfirm: () => run(action) })
@@ -222,6 +224,7 @@ function transferCard() {
     errorHost,
     h("div.btn-row", { style: { marginTop: "16px" } },
       buttonNode(state.transfer === "export" ? "正在导出" : "导出", {
+        iconName: "download",
         disabled: busy,
         onClick: async () => {
           state.transfer = "export";
@@ -237,6 +240,7 @@ function transferCard() {
       }),
       buttonNode(state.transfer === "import" ? "正在导入" : "导入配置", {
         variant: "secondary",
+        iconName: "bolt",
         disabled: busy || !state.exportText.trim(),
         onClick: () => confirmDialog({
           title: "导入配置",

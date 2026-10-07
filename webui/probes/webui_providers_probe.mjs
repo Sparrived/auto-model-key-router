@@ -105,6 +105,9 @@ const ROUTES = [
 
 // 请求流水：新增 Key 那一节要断言"真的写到了服务端"，而不只是"页面重画了一下"。
 const requests = [];
+// catalogAvailable 模拟"models.dev 目录取不回来"：此时类型只由名字规则给出，端点提示
+// 必须整体消失（末尾那一节锁这件事）。
+let catalogAvailable = true;
 global.fetch = async (url, options = {}) => {
   const target = String(url);
   const method = (options.method || "GET").toUpperCase();
@@ -113,11 +116,25 @@ global.fetch = async (url, options = {}) => {
   // 新建 Key：像服务端一样把这把 Key 真的加进配置，后续的重新取数必须能拿到它。
   if (method === "POST" && /\/api\/providers\/[^/]+\/keys$/.test(target)) {
     const provider = PROVIDERS.find((item) => target.includes(`/providers/${item.id}/keys`));
-    provider.keys = [...(provider.keys || []), { name: payload.name, enabled: true, capabilities: { models: ["gpt-5.5"], errors: {} } }];
+    // 探测结果给三个不同类型（文本 / 图像 / 未分类）：这一节的末尾用它们锁模型分组。
+    provider.keys = [...(provider.keys || []), { name: payload.name, enabled: true, capabilities: { models: ["gpt-5.5", "gpt-image-1", "gateway-renamed-model"], errors: {} } }];
     return { ok: true, status: 201, async text() { return JSON.stringify({ key: { name: payload.name }, config_revision: "rev-000000000001" }); } };
   }
   if (method === "POST" && target.endsWith("/probe")) {
     return { ok: true, status: 200, async text() { return JSON.stringify({ config_revision: "rev-000000000001" }); } };
+  }
+  // 模型类型读数：判定在服务端（internal/modelkind），这里按请求回来的名字照抄一份结论。
+  // 刻意让三条读数覆盖三种情形——单能力、只有目录认识、以及完全没有证据。
+  if (target.includes("/model-kinds.json")) {
+    const table = {
+      "gpt-5.5": { kinds: ["text"], primary: "text", endpoints: ["chat"] },
+      "gpt-image-1": { kinds: ["image"], primary: "image", endpoints: ["images"] },
+    };
+    const models = {};
+    for (const name of new URL(target, "http://probe.invalid").searchParams.getAll("model")) {
+      models[name] = table[name] || { kinds: [], primary: "unknown", endpoints: [] };
+    }
+    return { ok: true, status: 200, async text() { return JSON.stringify({ version: 1, catalog_available: catalogAvailable, models }); } };
   }
   // 新建的 Key 还没有任何绑定，所以这份清单是空的。
   if (/\/keys\/[^/]+\/models$/.test(target)) {
@@ -192,6 +209,40 @@ const brandSvg = byClass(host, "brand-icon")[0];
 check("brand_icon_fills_currentcolor", brandSvg?.attrs.fill === "currentColor", brandSvg?.attrs.fill);
 check("brand_icon_viewbox_24", brandSvg?.attrs.viewBox === "0 0 24 24", brandSvg?.attrs.viewBox);
 check("brand_icon_has_path", byTag(brandSvg || new FakeNode("x"), "path").length > 0);
+
+// —— 上游路由模式：10 条（5 个既有族 + 5 个透传端点族：语音三兄弟、视频、重排）——
+// 少一条的表现是"某个端点族永远走默认路径"，而页面看起来完全正常——直到上游不认这条
+// 路径、调用全失败。顺序与标签都锁住：标签与服务端 upstreamRouteLabels 逐字一致。
+const pills = byClass(host, "route-pill");
+const pillNames = pills.map((pill) => pill.textContent);
+check("route_modes_all_rendered", pills.length === 10, `${pills.length} 个：${pillNames.join(" | ")}`);
+check("route_mode_pills_have_new_families",
+  ["OpenAI Speech（语音合成）", "OpenAI Transcriptions（语音转写）", "OpenAI Translations（语音翻译）",
+   "OpenAI Videos（视频生成）", "Rerank（重排）"].every((label) => pillNames.some((text) => text.includes(label))),
+  pillNames.join(" | "));
+check("route_mode_pill_order",
+  ["OpenAI Chat", "Anthropic Messages", "OpenAI Responses", "OpenAI Images", "OpenAI Embeddings"]
+    .every((label, index) => pillNames[index]?.includes(label)),
+  pillNames.join(" | "));
+check("route_pills_show_default_when_unset", pills.every((pill) => pill.textContent.includes("默认")),
+  pillNames.join(" | "));
+
+// —— 高级路径设置：留空即标准路径，新增族是透传端点 ——
+// 这两句是这次改动里"用户唯一能看到的说明"：空输入框看起来像"没配"，而实际是
+// "用标准路径"；透传那句则解释了为什么语音/视频/重排调不通时不是路径的问题。
+click(buttonWithText(host, "编辑"));
+const routeInputs = byTag(host, "input").filter((node) => String(node.attrs.placeholder || "").startsWith("留空使用默认："));
+check("route_inputs_render_for_all_modes", routeInputs.length === 10, `${routeInputs.length} 个路径输入框`);
+check("route_inputs_show_default_paths",
+  routeInputs.some((node) => node.attrs.placeholder.includes("v1/audio/speech"))
+  && routeInputs.some((node) => node.attrs.placeholder.includes("v1/videos"))
+  && routeInputs.some((node) => node.attrs.placeholder.includes("v1/rerank")),
+  routeInputs.map((node) => node.attrs.placeholder).join(" | "));
+const formText = host.textContent;
+check("route_hint_explains_blank_means_default", formText.includes("路径留空即使用该模式的标准路径"), formText.slice(0, 120));
+check("route_hint_explains_passthrough",
+  formText.includes("透传端点") && formText.includes("上游 Key"), formText.slice(0, 200));
+click(buttonWithText(host, "取消"));
 
 // —— 切换供应商：详情必须跟着换 ——
 click(items[1]);
@@ -303,6 +354,108 @@ check("add_key_opens_model_editor", findText(host, "Key secondary 的服务模�
 check("add_key_editor_reads_bindings",
   requests.includes("GET /api/providers/openai/keys/secondary/models") && host.textContent.includes("0 个已选"),
   host.textContent.includes("0 个已选") ? "" : "编辑器仍停在读取中");
+
+// —— 模型类型分组与筛选 ——
+//
+// 这一节锁的是"类型只影响显示"这条边界，以及三件容易静默错掉的事：
+//   1. 分组用**主标签**：一个模型只出现在一个组里。用 kinds 全集的话，多能力模型会在
+//      两个组里各出现一次，而它们背后是同一个绑定——用户会对着同一个模型勾两次（其中
+//      一次是反的）。
+//   2. 筛选（分段控件）只改显示，**绝不动勾选**：筛选期间点掉的卡片在切回「全部」后
+//      必须还在。这条错了的表现是"筛一下发现自己的勾选没了"，而用户只会以为是自己点错了。
+//   3. 卡片的文本仍然**恰好是模型名**：accesskeys 页的探针靠精确文本找卡片，类型若要
+//      显示在卡片里也得是属性/子节点之外的东西，否则那边的判据会一起失效。
+const chipNamed = (root, name) => byClass(root, "chip").find((node) => node.textContent.trim() === name);
+const groupLabels = () => byClass(host, "chips-group").map((group) => group.textContent.trim());
+const segmentNamed = (needle) => byClass(host, "segment").find((node) => node.textContent.includes(needle));
+
+check("kind_request_sent", requests.includes("GET /model-kinds.json"), requests.join(" | "));
+check("kind_groups_rendered", ["文本 · 1", "图像 · 1", "未分类 · 1"].every((label) => findText(host, label)),
+  groupLabels().join(" || "));
+check("kind_one_group_per_model", byClass(host, "chips-group").length === 3, String(byClass(host, "chips-group").length));
+check("kind_chip_text_stays_exact_name",
+  chipNamed(host, "gateway-renamed-model")?.textContent.trim() === "gateway-renamed-model",
+  chipNamed(host, "gateway-renamed-model")?.textContent);
+check("kind_filter_present", Boolean(segmentNamed("全部 · 3")), byClass(host, "segment").map((n) => n.textContent).join(","));
+check("kind_filter_defaults_to_all", segmentNamed("全部 · 3")?.attrs["aria-pressed"] === "true");
+
+// 勾一个图像模型，然后筛到「图像」，再切回「全部」：勾选必须活过整轮筛选。
+click(chipNamed(host, "gpt-image-1"));
+check("kind_selection_counted", host.textContent.includes("1 个已选"), "计数没跟上");
+click(segmentNamed("图像"));
+check("kind_filter_marks_active", segmentNamed("图像")?.attrs["aria-pressed"] === "true");
+// 判据落在**分组**上而不是 findText：筛选条自己也会列出每种类型与数量，用文本找会把
+// 筛选条上的那一份当成"这个组还在显示"。
+check("kind_filter_hides_other_groups",
+  groupLabels().length === 1 && groupLabels()[0].includes("图像 · 1"),
+  groupLabels().join(" || "));
+check("kind_filter_bar_keeps_every_kind", Boolean(segmentNamed("文本 · 1")) && Boolean(segmentNamed("未分类 · 1")));
+click(segmentNamed("全部"));
+check("kind_filter_restores_all_groups", byClass(host, "chips-group").length === 3, groupLabels().join(" || "));
+check("kind_selection_survives_filter",
+  chipNamed(host, "gpt-image-1")?.attrs["aria-pressed"] === "true" && host.textContent.includes("1 个已选"),
+  `${chipNamed(host, "gpt-image-1")?.attrs["aria-pressed"]} / ${host.textContent.includes("1 个已选")}`);
+// 取消勾选也要照常生效（筛选没把点击语义换掉）。
+click(chipNamed(host, "gpt-image-1"));
+check("kind_deselection_still_works",
+  chipNamed(host, "gpt-image-1")?.attrs["aria-pressed"] === "false" && host.textContent.includes("0 个已选"),
+  chipNamed(host, "gpt-image-1")?.attrs["aria-pressed"]);
+
+// —— 端点提示：这个模型该走哪条路径 ——
+//
+// 端点读数来自 /ui/model-kinds.json 的 endpoints（服务端按类型推出）。三件事必须对：
+//   1. 卡片悬停里给出**这个模型**的端点与标准路径；
+//   2. 分组小标题旁给出该组的端点族与上游模式（类型 → upstream_routes 的 mode）；
+//   3. 没有证据（未分类）时**什么都不画**——画一行 "undefined" 比不画更糟：用户会
+//      拿着它去配上游。
+// 卡片的可见文本必须仍是模型名（上一节已锁），提示只进 title 属性。
+const chipTitle = (name) => chipNamed(host, name)?.attrs.title || "";
+check("endpoint_title_on_chat_chip", chipTitle("gpt-5.5").includes("对话 · /v1/chat/completions"), chipTitle("gpt-5.5"));
+check("endpoint_title_on_image_chip",
+  chipTitle("gpt-image-1").includes("图像生成 · /v1/images/generations"), chipTitle("gpt-image-1"));
+check("endpoint_title_absent_for_unknown", chipTitle("gateway-renamed-model") === "", chipTitle("gateway-renamed-model"));
+
+const groupNotes = byClass(host, "chips-group-note").map((node) => node.textContent);
+check("endpoint_note_for_image_group",
+  groupNotes.some((text) => text.includes("图像生成 · /v1/images/generations") && text.includes("上游模式 images")),
+  groupNotes.join(" || "));
+check("endpoint_note_for_text_group",
+  groupNotes.some((text) => text.includes("对话 · /v1/chat/completions") && text.includes("上游模式 openai/anthropic/responses")),
+  groupNotes.join(" || "));
+// 只有"有端点证据"的组才有提示：文本与图像各一条，未分类那条为空。
+check("endpoint_note_only_for_classified_groups", groupNotes.length === 2, groupNotes.join(" || "));
+check("endpoint_hints_never_render_undefined",
+  !groupNotes.some((text) => text.includes("undefined"))
+  && !chipTitle("gpt-5.5").includes("undefined") && !chipTitle("gpt-image-1").includes("undefined"),
+  groupNotes.join(" || "));
+// 分组小标题的文本不能被提示改写（别处的判据按整段文本定位分组）。
+check("endpoint_note_does_not_rewrite_group_label",
+  ["文本 · 1", "图像 · 1", "未分类 · 1"].every((label) => findText(host, label)),
+  groupLabels().join(" || "));
+
+// —— 目录取不回来（catalog_available=false）时端点提示必须整体消失 ——
+//
+// 此时类型只由名字规则给出，而端点提示会直接引导用户去改上游路径：标错分组的代价是
+// 分错组，标错端点的代价是改错配置。这里锁的是"退化"本身——不画提示、不抛错、不写
+// undefined，而类型分组照常（那是既有行为，与目录状态无关）。
+catalogAvailable = false;
+const hostNoCatalog = renderProviders({});
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+click(buttonWithText(hostNoCatalog, "管理模型"));
+await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 0));
+check("no_endpoint_notes_without_catalog", byClass(hostNoCatalog, "chips-group-note").length === 0,
+  byClass(hostNoCatalog, "chips-group-note").map((node) => node.textContent).join(" || "));
+check("no_endpoint_titles_without_catalog",
+  byClass(hostNoCatalog, "chip").every((chip) => !String(chip.attrs.title || "").includes("端点")),
+  byClass(hostNoCatalog, "chip").map((chip) => chip.attrs.title).join(" || "));
+check("kind_groups_survive_missing_catalog", byClass(hostNoCatalog, "chips-group").length > 0,
+  String(byClass(hostNoCatalog, "chips-group").length));
+check("no_undefined_without_catalog", !hostNoCatalog.textContent.includes("undefined"),
+  hostNoCatalog.textContent.slice(0, 160));
+check("kind_hint_explains_missing_endpoint_hint",
+  hostNoCatalog.textContent.includes("端点提示只在目录可用时显示"));
 
 const failed = Object.entries(checks).filter(([, value]) => value !== true);
 console.log(JSON.stringify({ checks, failed: failed.length }, null, 2));

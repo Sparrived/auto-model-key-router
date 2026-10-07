@@ -103,12 +103,13 @@ function allKeyOptions() {
 // —— 只读详情 ——
 
 function targetRow(route, target, index) {
-  return h("div.inline", { style: { padding: "8px 12px", background: "#fafafa", borderRadius: "4px" } },
-    h("span.mono", targetText(target)),
+  return h("div.target-item-row", {},
+    h("span.mono.target-text", targetText(target)),
     h("span", { style: { flex: "1" } }),
     buttonNode("移到其它路由…", {
       small: true,
-      variant: "text",
+      variant: "secondary",
+      iconName: "external",
       disabled: state.saving || state.routes.length < 2,
       onClick: () => moveDialog(route, index),
     }),
@@ -214,13 +215,17 @@ function routeEditor(route) {
   const drawTargets = () => {
     render(listHost,
       targets.length
-        ? targets.map((target, index) => h("div.inline", { style: { padding: "8px 12px", background: "#fafafa", borderRadius: "4px" } },
-            h("span.mono", `${target.provider} / ${target.key} /`),
-            upstreamInput(target),
+        ? targets.map((target, index) => h("div.target-item-row", {},
+            h("div.target-info-wrap", {},
+              h("span.target-provider-key", `${target.provider} / ${target.key} /`),
+              upstreamInput(target),
+            ),
             h("span", { style: { flex: "1" } }),
-            buttonNode("上移", { small: true, variant: "text", disabled: index === 0, onClick: () => { [targets[index - 1], targets[index]] = [targets[index], targets[index - 1]]; drawTargets(); } }),
-            buttonNode("下移", { small: true, variant: "text", disabled: index === targets.length - 1, onClick: () => { [targets[index + 1], targets[index]] = [targets[index], targets[index + 1]]; drawTargets(); } }),
-            buttonNode("移除", { small: true, variant: "text", onClick: () => { targets.splice(index, 1); drawTargets(); } }),
+            h("div.action-button-group", {},
+              buttonNode("上移", { small: true, variant: "secondary", iconName: "arrowUp", disabled: index === 0, onClick: () => { [targets[index - 1], targets[index]] = [targets[index], targets[index - 1]]; drawTargets(); } }),
+              buttonNode("下移", { small: true, variant: "secondary", iconName: "arrowDown", disabled: index === targets.length - 1, onClick: () => { [targets[index + 1], targets[index]] = [targets[index], targets[index + 1]]; drawTargets(); } }),
+              buttonNode("移除", { small: true, variant: "text", class: "btn-action-danger", iconName: "trash", onClick: () => { targets.splice(index, 1); drawTargets(); } }),
+            ),
           ))
         : h("p.muted", "此路由没有任何目标。保存后它会连同路由一起被删除——空路由不会出现在 /v1/models 里。"),
     );

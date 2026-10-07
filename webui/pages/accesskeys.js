@@ -11,7 +11,7 @@ import { h, errorText, copyText, truncate } from "../dom.js";
 import { api } from "../api.js";
 import {
   card, cardHead, notice, badge, empty, loading, render, toast, buttonNode,
-  input, field, dialog, confirmDialog, kv,
+  input, field, dialog, confirmDialog, kv, copyableMono,
 } from "../ui.js";
 
 const state = {
@@ -315,16 +315,16 @@ function editorRow(key) {
 // table() 的列渲染是逐单元格的，给不出跨列的行。手写这点代价换来的是一处结构清晰。
 function keyRow(key) {
   if (state.editing === key.id) return editorRow(key);
-  return h("tr", {},
+  return h("tr.key-row-item", {},
     h("td", {},
       h("div.stack.tight", {},
         h("strong", key.name),
         h("code.mono", { title: key.id }, truncate(key.id, 16)),
       ),
     ),
-    h("td", {}, h("span.inline", {},
+    h("td", {}, h("div.key-cap-stack", {},
       badge(key.enabled ? "已启用" : "已停用", key.enabled ? "good" : "muted"),
-      h("code.mono", key.key_fingerprint || "-"),
+      copyableMono(key.key_fingerprint || "-"),
     )),
     h("td", {}, scopeText(key.providers)),
     h("td", {}, scopeText(key.models)),
@@ -333,13 +333,17 @@ function keyRow(key) {
 }
 
 function actionButtons(key) {
-  return h("div.btn-row", {},
+  return h("div.action-button-group", {},
     buttonNode("编辑", {
-      small: true, variant: "secondary",
+      small: true,
+      variant: "secondary",
+      iconName: "edit",
       onClick: () => { state.editing = key.id; draw(); },
     }),
     buttonNode("轮换", {
-      small: true, variant: "secondary",
+      small: true,
+      variant: "secondary",
+      iconName: "refresh",
       onClick: () => confirmDialog({
         title: "轮换访问密钥",
         message: `将换掉「${key.name}」的密钥，旧密钥立刻失效。请准备把新密钥交给使用者。`,
@@ -348,7 +352,10 @@ function actionButtons(key) {
       }),
     }),
     buttonNode("删除", {
-      small: true, variant: "danger",
+      small: true,
+      variant: "text",
+      class: "btn-action-danger",
+      iconName: "trash",
       onClick: () => confirmDialog({
         title: "删除访问密钥",
         message: `将删除「${key.name}」，使用它的调用方会立刻收到 401。此操作不可撤销。`,

@@ -3,15 +3,32 @@
 import { h, errorText } from "../dom.js";
 import { api } from "../api.js";
 import { PROVIDER_PRESETS, providerIcon, brandIcon } from "../brand-icons.js";
+import {
+  ENDPOINT_FAMILY, ENDPOINT_ORDER, endpointLabel, endpointPath, endpointsOf, groupByKind, normalizeModelKinds,
+} from "../model-kinds.js";
 import { writeWithImpactConfirm } from "../model-impact.js";
-import { card, cardHead, notice, badge, empty, loading, table, render, toast, buttonNode, toggle, input, field, dialog, kv } from "../ui.js";
+import { card, cardHead, notice, badge, empty, loading, table, render, toast, buttonNode, toggle, input, field, dialog, kv, segmented, copyableMono } from "../ui.js";
+import { icon } from "../icons.js";
 
+// ROUTE_MODES 是 upstream_routes 支持的全部模式：mode → 该模式的上游路径。
+//
+// 前 5 个是既有族，后 5 个是透传端点族（语音三兄弟、视频、重排）。顺序、id 与 label
+// 都与服务端 internal/config 的 upstreamRouteModes / upstreamRouteLabels 逐字一致：
+// 同一模式在这里和错误文案里显示成两个名字，排障的人会以为它们是两回事。
+//
+// path 只用于输入框的占位提示，**不是**前端在决定默认值——真正的默认路径在服务端，
+// 这里写错只会让提示不准（供应商的探测请求仍会打到服务端的默认路径上）。
 const ROUTE_MODES = [
-  { id: "openai", label: "OpenAI 路径" },
-  { id: "anthropic", label: "Anthropic 路径" },
-  { id: "responses", label: "Responses 路径" },
-  { id: "images", label: "Images 路径" },
-  { id: "embeddings", label: "Embeddings 路径" },
+  { id: "openai", label: "OpenAI Chat", path: "v1/chat/completions" },
+  { id: "anthropic", label: "Anthropic Messages", path: "v1/messages" },
+  { id: "responses", label: "OpenAI Responses", path: "v1/responses" },
+  { id: "images", label: "OpenAI Images", path: "v1/images/generations" },
+  { id: "embeddings", label: "OpenAI Embeddings", path: "v1/embeddings" },
+  { id: "speech", label: "OpenAI Speech（语音合成）", path: "v1/audio/speech" },
+  { id: "transcriptions", label: "OpenAI Transcriptions（语音转写）", path: "v1/audio/transcriptions" },
+  { id: "translations", label: "OpenAI Translations（语音翻译）", path: "v1/audio/translations" },
+  { id: "video", label: "OpenAI Videos（视频生成）", path: "v1/videos" },
+  { id: "rerank", label: "Rerank（重排）", path: "v1/rerank" },
 ];
 
 const state = {
@@ -87,9 +104,13 @@ function capabilityDetail(provider, key) {
   const models = state.boundModels.get(`${provider.id}|${key.name}`) || [];
   const errors = Object.entries(key.capabilities?.errors || {}).filter(([, message]) => message);
   if (!models.length && !errors.length) return null;
-  return h("div.stack.tight",
-    models.length ? h("div.mono", models.join(", ")) : null,
-    errors.length ? h("div.muted", errors.map(([mode, message]) => `${mode}: ${message}`).join(" · ")) : null,
+  return h("div.key-models-wrap",
+    models.length
+      ? h("div.key-model-tags",
+          ...models.map((model) => h("span.key-model-tag", { title: model }, model)),
+        )
+      : null,
+    errors.length ? h("div.key-error-line", errors.map(([mode, message]) => `${mode}: ${message}`).join(" · ")) : null,
   );
 }
 
@@ -203,9 +224,27 @@ function providerForm(provider) {
     ),
     h("p.muted", "改名称会同时改写模型目标与访问密钥的供应商清单里指向它的引用。"),
     h("details", {}, h("summary.muted", "高级路径设置"),
+      // 留空语义必须写明：一个空的输入框看起来像"这里没配"，而实际是"用标准路径"。
+      // 填前缀的合并规则也要写明——服务端的 NormalizeUpstreamRoutePath 会把该模式的
+      // **标准尾部**接在填写值后面（填 `gateway/embed` 得到 `gateway/embed/v1/embeddings`），
+      // 光说"按填写值拼地址"会让人以为请求正好落在 `gateway/embed` 上。
+      //
+      // 后半句是新增端点族带来的真风险：语音 / 视频 / 重排的请求体对 AMKR 不透明
+      // （只替换 model 后原样转发），所以能不能调通**只取决于上游 Key 是否真的提供
+      // 这条端点**。不说这一句，用户会以为是路径没配好而反复改这里。
+      h("p.muted", { style: { marginTop: "8px" } },
+        "路径留空即使用该模式的标准路径（占位符里就是它）。填前缀时 AMKR 会把标准路径接在后面："
+        + "填 gateway/embed 会转发到 <供应商地址>/gateway/embed/v1/embeddings；"
+        + "填以标准路径结尾的完整路径则原样使用。"
+        + "语音、视频与重排是透传端点：AMKR 只替换请求体里的模型名，其余原样转发，"
+        + "因此所选模型必须绑定到确实提供该端点的上游 Key。"),
       h("div.form-grid", { style: { marginTop: "8px" } },
         ROUTE_MODES.map((mode) => {
-          const control = input({ value: provider.routes?.[mode.id] || "", placeholder: "留空使用默认路径" });
+          const control = input({
+            value: provider.routes?.[mode.id] || "",
+            placeholder: `留空使用默认：${mode.path}`,
+            title: `${mode.label} 默认路径 ${mode.path}`,
+          });
           routeInputs[mode.id] = control;
           return field(mode.label, control);
         }),
@@ -350,35 +389,57 @@ function keyRow(provider, key) {
   }
 
   const probeState = state.keyProbeState[key.name] || "idle";
-  const probeLabel = probeState === "pending" ? "探测中" : probeState === "success" ? "已探测" : "探测";
-  return h("tr", {},
-    h("td", {},
-      h("div.stack.tight", {},
-        h("strong", key.name),
+  const probeLabel = probeState === "pending" ? "探测中…" : probeState === "success" ? "已探测" : "探测";
+  const isEditingModel = state.modelEditor && state.modelEditor.key === key.name && state.modelEditor.provider === provider.id;
+
+  return h("tr.key-row-item", {},
+    h("td.key-cell-main", {},
+      h("div.key-info-stack", {},
+        h("div.key-name-bar", {},
+          h("span.key-name", key.name),
+        ),
         capabilityDetail(provider, key),
       ),
     ),
-    h("td", {}, h("div.stack.tight", {}, capabilityBadge(key),
-      h("code.mono", key.api_key_fingerprint || "-"))),
-    h("td", {}, h("div.btn-row", {},
-      toggle(key.enabled ? "已启用" : "已停用", key.enabled, () => patchKey(provider, key, { enabled: !key.enabled })),
-    )),
-    h("td", {}, h("div.btn-row", {},
-      buttonNode(probeLabel, {
-        small: true, variant: "secondary",
-        disabled: probeState === "pending" || probeState === "success",
-        onClick: () => probeOne(provider, key),
-      }),
-      buttonNode(
-        state.modelEditor && state.modelEditor.key === key.name && state.modelEditor.provider === provider.id ? "收起" : "管理模型",
-        { small: true, variant: "text", onClick: () => toggleModelEditor(provider, key) },
+    h("td.key-cell-cap", {},
+      h("div.key-cap-stack", {},
+        capabilityBadge(key),
+        copyableMono(key.api_key_fingerprint || "-"),
       ),
-      buttonNode("编辑", { small: true, variant: "text", onClick: () => { state.keyEditing = key.name; draw(); } }),
-      buttonNode("删除", {
-        small: true, variant: "text",
-        onClick: () => removeKey(provider, key),
-      }),
-    )),
+    ),
+    h("td.key-cell-status", {},
+      toggle(key.enabled ? "已启用" : "已停用", key.enabled, () => patchKey(provider, key, { enabled: !key.enabled })),
+    ),
+    h("td.key-cell-actions", {},
+      h("div.action-button-group", {},
+        buttonNode(probeLabel, {
+          small: true,
+          variant: "secondary",
+          iconName: probeState === "pending" ? undefined : "radar",
+          disabled: probeState === "pending" || probeState === "success",
+          onClick: () => probeOne(provider, key),
+        }, probeState === "pending" ? h("span.spinner") : null),
+        buttonNode(isEditingModel ? "收起" : "管理模型", {
+          small: true,
+          variant: isEditingModel ? "primary" : "secondary",
+          iconName: "cpu",
+          onClick: () => toggleModelEditor(provider, key),
+        }),
+        buttonNode("编辑", {
+          small: true,
+          variant: "text",
+          iconName: "edit",
+          onClick: () => { state.keyEditing = key.name; draw(); },
+        }),
+        buttonNode("删除", {
+          small: true,
+          variant: "text",
+          class: "btn-action-danger",
+          iconName: "trash",
+          onClick: () => removeKey(provider, key),
+        }),
+      ),
+    ),
   );
 }
 
@@ -444,8 +505,23 @@ async function probeOne(provider, key) {
 // 抛 TypeError，而 draw() 抛错的后果是整页不更新（新增 Key 之后界面不刷新就是这个原因）。
 // 建状态的入口只留这一个，避免以后再有人漏掉字段。
 function modelEditorState(providerId, keyName) {
-  return { provider: providerId, key: keyName, loading: true, models: [], selected: new Set(), error: null };
+  return {
+    provider: providerId,
+    key: keyName,
+    loading: true,
+    models: [],
+    selected: new Set(),
+    error: null,
+    // 类型读数（见 webui/model-kinds.js）：kinds 为 null 表示还没问到或问失败，
+    // 此时界面**不分组也不筛选**，只按老样子平铺卡片。
+    kinds: null,
+    kindsAvailable: false,
+    kindFilter: MODEL_KIND_ALL,
+  };
 }
+
+// MODEL_KIND_ALL 是筛选条上「全部」的取值（不筛选）。
+const MODEL_KIND_ALL = "all";
 
 function toggleModelEditor(provider, key) {
   const same = state.modelEditor && state.modelEditor.provider === provider.id && state.modelEditor.key === key.name;
@@ -468,6 +544,33 @@ async function loadKeyModels(providerId, keyName) {
     editor.error = errorText(error);
   }
   draw();
+  await loadModelKinds(providerId, keyName);
+}
+
+// loadModelKinds 读一次模型类型（文本 / 图像 / 视频 / 语音 / 嵌入 / 重排）。
+//
+// 与绑定清单**分开取、分开失败**：类型只是分组显示用的，取不到就当没有，绝不能让
+// 整个编辑器报错——否则 /ui 不可达或目录还没就绪时，用户连模型都勾不了。
+//
+// 问的范围是"已绑定 +（这个 Key 探测到的）全部"：用户打开编辑器是为了**挑**模型，
+// 只给已绑定的那些标类型，等于把最需要判断的那批留在未分类里。
+async function loadModelKinds(providerId, keyName) {
+  const editor = state.modelEditor;
+  if (!editor || editor.provider !== providerId || editor.key !== keyName) return;
+  const provider = state.providers.find((item) => item.id === providerId);
+  const key = (provider?.keys || []).find((item) => item.name === keyName);
+  const names = [...new Set([...(key?.capabilities?.models || []), ...editor.models, ...editor.selected])];
+  let data = null;
+  try {
+    data = await api.modelKinds(names);
+  } catch {
+    data = null;
+  }
+  // 等待期间用户可能已经切到别的 Key：那份状态不能再写（写了会把 A 的类型画到 B 上）。
+  if (state.modelEditor !== editor) return;
+  editor.kinds = data ? normalizeModelKinds(data) : null;
+  editor.kindsAvailable = Boolean(data?.catalog_available);
+  draw();
 }
 
 function modelEditor(provider, key) {
@@ -477,58 +580,154 @@ function modelEditor(provider, key) {
 
   const discovered = new Set(key.capabilities?.models || []);
   const all = [...new Set([...editor.models, ...discovered, ...editor.selected])].sort();
-  const chipHost = h("div.chips");
+  const chipHost = h("div.stack.tight");
+  const filterHost = h("div");
   const countLabel = h("span.muted");
   const errorHost = h("div", editor.error ? notice(`读取 Key 绑定失败: ${editor.error}`, "warn") : null);
+
+  // endpointHint 把「这个模型走哪些端点」写成一行提示：`端点 语音合成 · /v1/audio/speech`。
+  //
+  // 端点读数来自 /ui/model-kinds.json 的 endpoints（服务端按类型推出），因此这里
+  // 只做展示、不做推断。**没有读数就回空串**：调用方据此不画提示，而不是画一行
+  // "undefined"——未分类的模型（自建网关、中转站改名）走的端点无从得知，编一个出来
+  // 会让用户按错误的路径去配上游。
+  //
+  // 目录不可用（catalog_available 为假）时同样不画：此时类型只由名字规则给出，而这条
+  // 提示会直接引导用户去改上游路径——标错分组的代价是分错组，标错端点的代价是改错
+  // 配置。这一处刻意比类型分组更保守（分组仍然照常显示，那是既有行为）。
+  const endpointHint = (models) => {
+    if (!editor.kindsAvailable) return "";
+    const ids = [...new Set(models.flatMap((model) => endpointsOf(editor.kinds, model)))].sort(
+      (left, right) => ENDPOINT_ORDER.indexOf(left) - ENDPOINT_ORDER.indexOf(right) || left.localeCompare(right),
+    );
+    if (!ids.length) return "";
+    return `端点 ${ids.map((id) => {
+      const path = endpointPath(id);
+      // 生词端点原样显示（同 kindLabel 的取舍）。
+      return path ? `${endpointLabel(id)} · ${path}` : endpointLabel(id);
+    }).join("、")}`;
+  };
+
+  // groupHint 是分组小标题旁的那行：这一组的端点族 + 该类型要走的上游模式。
+  //
+  // 上游模式那一半来自 ENDPOINT_FAMILY（类型 → 模式）：它回答的是"要让这类模型可用，
+  // 供应商的路径设置里至少要配哪几条"，与端点提示互补——端点说用什么路径调，
+  // 模式说 AMKR 拿哪条配置去拼这条路径。
+  //
+  // 目录不可用时整条提示都不画：只留"上游模式"半句反而更糟，它看起来像一条结论，
+  // 却少了"该走哪条路径"这个前提。开关集中在两处调用上都判一次，行为才对得上。
+  const groupHint = (kind, names) => {
+    if (!editor.kindsAvailable) return "";
+    const parts = [];
+    const endpoints = endpointHint(names);
+    if (endpoints) parts.push(endpoints);
+    const modes = ENDPOINT_FAMILY[kind] || [];
+    if (modes.length) parts.push(`上游模式 ${modes.join("/")}`);
+    return parts.join(" · ");
+  };
+
+  // selectionChip 是单个模型卡片：勾选语义原样保留（这一处刻意不动）。
+  //
+  // 卡片的**可见文本仍然恰好是模型名**：类型与端点只进 title 属性。这不是洁癖——
+  // 卡片的文本被别处的探针当作定位依据（精确匹配模型名），往卡片里塞可见字符会
+  // 让那些判据一起失效。
+  const selectionChip = (model) => {
+    const selected = editor.selected.has(model);
+    const missing = selected && !discovered.has(model) && !editor.models.includes(model);
+    const title = [
+      missing ? "黄色卡片表示已启用但当前探测未发现" : "",
+      endpointHint([model]),
+    ].filter(Boolean).join("\n") || null;
+    return h(`button.chip${missing ? ".probe-missing" : ""}`, {
+      type: "button",
+      "aria-pressed": String(selected),
+      "aria-label": `${selected ? "关闭" : "打开"}模型 ${model}`,
+      title,
+      onClick: () => {
+        if (editor.selected.has(model)) editor.selected.delete(model);
+        else editor.selected.add(model);
+        drawChips();
+      },
+    }, model);
+  };
+
+  const customChip = () => h("button.chip", {
+    type: "button",
+    onClick: () => {
+      const custom = input({ placeholder: "自定义模型名称" });
+      const ref = dialog({
+        title: "添加自定义模型",
+        body: field("模型名称", custom),
+        actions: [
+          { label: "取消", variant: "text", onClick: () => ref.close() },
+          { label: "添加", onClick: () => {
+            const value = custom.value.trim();
+            if (!value) return;
+            editor.selected.add(value);
+            if (!all.includes(value)) all.push(value);
+            ref.close();
+            drawChips();
+          }},
+        ],
+      });
+    },
+  }, "+ 自定义");
 
   const drawChips = () => {
     // 计数与勾选同步：它就写在标题旁边，落后一次点击就会在"2 个已选"下面画一个高亮卡片。
     // 确认框里的数量取自同一个 selected，两处对不上就没有可信度。
     render(countLabel, `${editor.selected.size} 个已选`);
-    render(chipHost, ...[...new Set([...all, ...editor.selected])].sort().map((model) => {
-      const selected = editor.selected.has(model);
-      const missing = selected && !discovered.has(model) && !editor.models.includes(model);
-      return h(`button.chip${missing ? ".probe-missing" : ""}`, {
-        type: "button",
-        "aria-pressed": String(selected),
-        "aria-label": `${selected ? "关闭" : "打开"}模型 ${model}`,
-        title: missing ? "黄色卡片表示已启用但当前探测未发现" : null,
-        onClick: () => {
-          if (editor.selected.has(model)) editor.selected.delete(model);
-          else editor.selected.add(model);
-          drawChips();
-        },
-      }, model);
-    }),
-    h("button.chip", {
-      type: "button",
-      onClick: () => {
-        const custom = input({ placeholder: "自定义模型名称" });
-        const ref = dialog({
-          title: "添加自定义模型",
-          body: field("模型名称", custom),
-          actions: [
-            { label: "取消", variant: "text", onClick: () => ref.close() },
-            { label: "添加", onClick: () => {
-              const value = custom.value.trim();
-              if (!value) return;
-              editor.selected.add(value);
-              if (!all.includes(value)) all.push(value);
-              ref.close();
-              drawChips();
-            }},
-          ],
-        });
-      },
-    }, "+ 自定义"));
+    const names = [...new Set([...all, ...editor.selected])].sort();
+    // 分组与筛选**只影响显示**：勾选状态始终在 editor.selected 里，筛选不改它一个字节。
+    const groups = editor.kinds ? groupByKind(names, editor.kinds) : null;
+    const showFilter = Boolean(groups) && groups.length > 1;
+    render(filterHost, showFilter
+      ? segmented(
+          [{ id: MODEL_KIND_ALL, label: `全部 · ${names.length}` },
+            ...groups.map((group) => ({ id: group.kind, label: `${group.label} · ${group.names.length}` }))],
+          editor.kindFilter,
+          (id) => { editor.kindFilter = id; drawChips(); },
+        )
+      : null);
+    const visible = !groups
+      ? [h("div.chips", ...names.map(selectionChip))]
+      : groups
+          .filter((group) => editor.kindFilter === MODEL_KIND_ALL || group.kind === editor.kindFilter)
+          .map((group) => {
+            const hint = groupHint(group.kind, group.names);
+            return h("div.chips-group", {},
+              // 小标题与提示**并列**而不是拼进同一个节点：小标题的文本（`图像 · 1`）
+              // 被探针精确匹配，拼进去会让那条判据失去意义。
+              h("div.chips-group-head", {},
+                h("div.toolbar-label", `${group.label} · ${group.names.length}`),
+                hint ? h("span.chips-group-note", hint) : null,
+              ),
+              h("div.chips", ...group.names.map(selectionChip)),
+            );
+          });
+    render(chipHost, ...visible, h("div.chips", customChip()));
   };
   drawChips();
+
+  // 类型提示只在真有读数时出现。未分类那句是必须的：自建网关与中转站改名的模型都在
+  // 那一组里，不解释的话它看起来像"这些模型有问题"，而它们通常完全可用。
+  // 端点提示用的是同一份读数，因此出处也一并说明——它是"该往哪条路径调用"的依据，
+  // 用户要能判断这条结论有多可信。
+  const kindHint = !editor.kinds ? null
+    : h("p.muted", `${editor.kindsAvailable ? "类型来自 models.dev 目录与名字规则"
+        : "价格目录尚未就绪，类型依据仅名字规则"}；`
+      + "「未分类」表示没有任何证据（自建网关、中转站改名等），不影响能否调用；"
+      + (editor.kindsAvailable
+        ? "端点提示（分组标题旁与卡片悬停）出自同一份读数，取不到时不显示。"
+        : "端点提示只在目录可用时显示：名字规则给出的端点可能不准，宁可不显示。"));
 
   return h("div", { style: { marginTop: "16px", padding: "16px", background: "#fafafa", borderRadius: "4px" } },
     h("div.card-head", h("h4", `Key ${key.name} 的服务模型`), countLabel),
     h("p.muted", "只显示该 Key 对外提供的模型；黄色卡片表示已启用但当前探测未发现。"),
     h("p.muted", "取消勾选一个模型会解除本 Key 与它的绑定；若它因此失去全部绑定，模型会被删除，"
       + "引用它的访问密钥、工作空间与任务会一并变动（保存前会先列出来）。"),
+    kindHint,
+    filterHost,
     chipHost,
     errorHost,
     h("div.btn-row", { style: { marginTop: "16px" } },
@@ -578,17 +777,27 @@ function probePanel(provider) {
       ], probe.results)
     : null;
 
-  return h("div.card", {},
+  return h("div.card.probe-panel-card", {},
     cardHead("批量探测",
       probe ? badge(statusLabels[probe.status] || probe.status, statusTone) : badge("未运行", "muted"),
       state.probeBusy ? h("span.spinner") : null,
     ),
-    h("div.inline", {},
-      h("label.field", { style: { maxWidth: "200px" } }, h("span", "探测超时（秒）"), timeoutInput),
-      buttonNode("探测全部 Key", { disabled: state.probeBusy || !(provider.keys || []).length, onClick: () => startProbe(provider, timeoutInput, messageHost) }),
-      probe && state.probeBusy ? buttonNode("取消探测", { variant: "danger", onClick: () => cancelProbe() }) : null,
+    h("div.probe-toolbar", {},
+      h("label.field.probe-timeout-field", {},
+        h("span", "探测超时（秒）"),
+        timeoutInput,
+      ),
+      buttonNode("探测全部 Key", {
+        iconName: "radar",
+        disabled: state.probeBusy || !(provider.keys || []).length,
+        onClick: () => startProbe(provider, timeoutInput, messageHost),
+      }),
+      probe && state.probeBusy ? buttonNode("取消探测", { variant: "danger", iconName: "close", onClick: () => cancelProbe() }) : null,
     ),
-    h("p.muted", "批量探测只做展示，不会写回 Key 的能力缓存。"),
+    h("p.muted.probe-note", {},
+      icon("info", { size: 14 }),
+      h("span", "批量探测只做展示，不会写回 Key 的能力缓存。"),
+    ),
     state.probeError ? h("div", { style: { marginTop: "16px" } }, notice(`探测失败: ${state.probeError}`, "error")) : null,
     messageHost,
     resultTable ? h("div", { style: { marginTop: "16px" } }, resultTable) : null,
@@ -724,7 +933,7 @@ function draw() {
       h("div", {}, h("h1", "供应商"), h("p.sub", "管理上游供应商、Key 与它们的模型能力。")),
       h("div.spacer"),
       state.revision ? badge(`版本 ${String(state.revision).slice(0, 12)}`, "muted") : null,
-      buttonNode("添加供应商", { onClick: openCreateProvider }),
+      buttonNode("添加供应商", { iconName: "plus", onClick: openCreateProvider }),
     ),
   ];
 
@@ -735,7 +944,7 @@ function draw() {
     children.push(empty("尚未配置供应商。", {
       icon: "providers",
       hint: "点右上角「添加供应商」，从常见供应商里挑一个，或手动填名称与地址。",
-      action: buttonNode("添加供应商", { onClick: openCreateProvider }),
+      action: buttonNode("添加供应商", { iconName: "plus", onClick: openCreateProvider }),
     }));
     render(host, children);
     return;
@@ -748,22 +957,46 @@ function draw() {
     ? card(providerForm(provider))
     : card(
         cardHead(provider.id,
-          badge(provider.base_url, "muted"),
+          copyableMono(provider.base_url, "复制供应商基准地址"),
           buttonNode(state.editing === provider.id ? "收起" : "编辑", {
-            small: true, variant: "text",
+            small: true,
+            variant: "secondary",
+            iconName: "edit",
             onClick: () => { state.editing = state.editing === provider.id ? null : provider.id; draw(); },
           }),
         ),
-        kv([["路由路径", ROUTE_MODES.map((mode) => `${mode.label}: ${provider.routes?.[mode.id] || "默认"}`).join(" · ")]]),
+        h("div.provider-routes-summary", {},
+          h("span.routes-summary-label", "路由路径:"),
+          h("div.route-pills", {},
+            ROUTE_MODES.map((mode) => {
+              const custom = provider.routes?.[mode.id];
+              return h("span.route-pill" + (custom ? ".is-custom" : ""), {},
+                h("span.route-pill-name", mode.label),
+                h("span.route-pill-val", custom || "默认"),
+              );
+            }),
+          ),
+        ),
       ));
 
   const keys = provider.keys || [];
-  detail.push(h("div.card", {},
-    cardHead(`Key（${keys.length}）`, buttonNode("添加 Key", { small: true, onClick: () => openCreateKey(provider) })),
+  detail.push(h("div.card.keys-card", {},
+    cardHead(`Key（${keys.length}）`, buttonNode("添加 Key", {
+      small: true,
+      iconName: "plus",
+      onClick: () => openCreateKey(provider),
+    })),
     keys.length
-      ? h("table.table", {},
-          h("thead", h("tr", {}, ["Key", "能力 / 指纹", "状态", "操作"].map((label) => h("th", label)))),
-          h("tbody", {}, keys.map((key) => keyRow(provider, key))),
+      ? h("div.table-scroll", {},
+          h("table.table.key-table", {},
+            h("thead", h("tr", {}, [
+              h("th", { style: { minWidth: "200px" } }, "Key"),
+              h("th", { style: { minWidth: "140px" } }, "能力 / 指纹"),
+              h("th", { style: { width: "120px" } }, "状态"),
+              h("th", { style: { minWidth: "260px", textAlign: "right" } }, "操作"),
+            ])),
+            h("tbody", {}, keys.map((key) => keyRow(provider, key))),
+          )
         )
       : empty("尚无 Key。"),
   ));

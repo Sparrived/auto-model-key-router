@@ -65,7 +65,28 @@ const API_FORMAT_LABELS = {
   embeddings: "Embeddings",
   "images/generations": "Images",
   "images/edits": "Images 编辑",
+  "images/variations": "Images 变体",
+  // 语音三兄弟与视频、重排是新增的透传端点族：它们各自的请求体形态不同，看板上
+  // 混成一个 "Audio" 会看不出是哪条端点出的量。
+  "audio/speech": "语音合成",
+  "audio/transcriptions": "语音转写",
+  "audio/translations": "语音翻译",
+  videos: "视频生成",
+  rerank: "重排",
 };
+
+// UNIFIED_FAMILY_ROWS 是统一模型的「计划键 → 中文名」，顺序与服务端
+// config.UnifiedPlanNames 一致（default 不在表里，它由卡片顶部的主模型行承担）。
+//
+// 标签与统一模型页逐字一致：同一个计划在两个页面上叫两个名字，用户会以为是两回事。
+const UNIFIED_FAMILY_ROWS = [
+  ["image", "图像模型"],
+  ["embeddings", "嵌入模型"],
+  ["speech", "语音合成模型"],
+  ["transcriptions", "语音识别模型"],
+  ["video", "视频模型"],
+  ["rerank", "重排模型"],
+];
 
 // 页面级状态：时间范围与主图指标是用户选择，需在轮询重绘间保持。
 const state = {
@@ -493,12 +514,11 @@ function unifiedCard() {
       unified?.default?.fallback?.model
         ? h("div", {}, h("span.muted", "回退模型："), h("span.mono", unified.default.fallback.model))
         : h("div.muted", "未配置回退模型"),
-      unified?.image?.primary?.model
-        ? h("div", {}, h("span.muted", "图像模型："), h("span.mono", unified.image.primary.model))
-        : null,
-      unified?.embeddings?.primary?.model
-        ? h("div", {}, h("span.muted", "嵌入模型："), h("span.mono", unified.embeddings.primary.model))
-        : null,
+      // 分族计划逐个列出，**只在配置了才出现**（与统一模型页同一条取舍：给没配的族补
+      // 一行"未配置"会让人以为它占着什么位置）。既有的图像/嵌入两行因此渲染结果不变。
+      ...UNIFIED_FAMILY_ROWS.map(([planId, label]) => (unified?.[planId]?.primary?.model
+        ? h("div", {}, h("span.muted", `${label}：`), h("span.mono", unified[planId].primary.model))
+        : null)).filter(Boolean),
     ),
     h("div.card-foot", {},
       h("span", `可用模型 ${(store.health?.models || []).length} 个`),

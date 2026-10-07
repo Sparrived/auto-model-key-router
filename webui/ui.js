@@ -1,7 +1,7 @@
 // 共享 UI 组件：卡片、KPI 瓦片、数据表、分段控件、对话框、提示条。
 // 全部为无状态工厂函数，调用方负责重新渲染。
 
-import { h, mount, formatRelative, formatCount } from "./dom.js";
+import { h, mount, formatRelative, formatCount, copyText } from "./dom.js";
 import { icon } from "./icons.js";
 import { sparkline } from "./charts.js";
 
@@ -201,7 +201,32 @@ export function buttonNode(label, props = {}, ...children) {
 }
 
 export function toggle(label, pressed, onClick, props = {}) {
-  return h("button.toggle", { type: "button", "aria-pressed": String(!!pressed), onClick, ...props }, label);
+  const isPressed = !!pressed;
+  return h("button.toggle", { type: "button", "aria-pressed": String(isPressed), onClick, ...props },
+    h("span.toggle-track", {}, h("span.toggle-thumb")),
+    h("span.toggle-label", label),
+  );
+}
+
+// 可点击复制的等宽文本芯片
+export function copyableMono(text, title = "点击复制") {
+  if (!text || text === "-") return h("span.mono.muted", "-");
+  return h("button.mono-copy", {
+    type: "button",
+    title,
+    onClick: async (event) => {
+      event.stopPropagation();
+      try {
+        await copyText(text);
+        toast(`已复制: ${text}`);
+      } catch {
+        toast("复制失败", "error");
+      }
+    },
+  },
+    h("span.mono-text", text),
+    icon("copy", { size: 12, class: "copy-icon" }),
+  );
 }
 
 // 分段控件（Material segmented button）：用于时间范围/指标切换。
