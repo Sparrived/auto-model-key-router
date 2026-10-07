@@ -1,4 +1,12 @@
-// Package pricing 维护 models.dev 的价格目录，供 WebUI 做成本估算。
+// Package pricing 维护 models.dev 目录的两份派生索引，供 WebUI 使用：
+//
+//   - **价格**（Build / Payload）：成本估算的唯一数据源；
+//   - **模型类型**（ModelKinds）：文本 / 图像 / 视频 / 语音 / 嵌入 / 重排的分类证据。
+//
+// 两份索引刻意由**同一次取回**构建：它们读的是同一份 4.7 MB 文档、共享同一个保鲜期
+// 与同一套失败语义（取回失败一律保留旧数据，见 recordFailure）。若各自维护一份取回
+// 循环，目录会被下载两遍，而两条路径的失败时机不同还会让"价格是新的、类型是旧的"
+// 这种状态凭空出现。
 //
 // 指标库只记录 **token 用量**，从不记录金额——参照实现也是如此（metrics.py 的表结构
 // 里没有任何价格列）。成本因此是**派生读数**：token 用量 × 目录单价，现算不落库。
@@ -23,6 +31,7 @@ import (
 	"time"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/modelkind"
 )
 
 const (
@@ -225,6 +234,7 @@ func selectCheapest(candidate, current Entry) bool {
 // snapshot 是一次成功取回后的只读状态。
 type snapshot struct {
 	index     map[string]Entry
+	kinds     modelkind.Catalog
 	updatedAt time.Time
 	payload   []byte
 }
@@ -284,6 +294,28 @@ func (c *Catalog) Payload() ([]byte, bool) {
 		go func() { _ = c.refreshOnce(context.Background()) }()
 	}
 	return payload, payload != nil
+}
+
+// ModelKinds 返回 models.dev 目录里的**模型类型索引**（与价格同一次取回构建）。
+//
+// 第二个返回值报告"目录是否可用"：false 表示从未成功取回过（首次启动、或一直连不上
+// models.dev），此时调用方应当退回名字规则而不是放弃判定——规则层不需要网络。
+//
+// 返回的索引由多个请求共享，**调用方不得改写**（BuildCatalog 之后就再没有别人写过它）。
+// 与 Payload 一样，本方法不会阻塞在网络上：过期时只踢一个后台刷新。
+func (c *Catalog) ModelKinds() (modelkind.Catalog, bool) {
+	c.mu.Lock()
+	stale := !c.now().Before(c.nextAt)
+	var kinds modelkind.Catalog
+	if c.snap != nil {
+		kinds = c.snap.kinds
+	}
+	c.mu.Unlock()
+
+	if stale {
+		go func() { _ = c.refreshOnce(context.Background()) }()
+	}
+	return kinds, kinds != nil
 }
 
 // refreshOnce 是**唯一**的取回入口，并保证一次过期只触发一次真实取回。
@@ -368,6 +400,7 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 	c.etag = result.ETag
 	c.snap = &snapshot{
 		index:     index,
+		kinds:     modelkind.BuildCatalog(parsed),
 		updatedAt: now,
 		payload:   render(index, now, ""),
 	}
@@ -388,6 +421,7 @@ func (c *Catalog) recordFailure(err error) {
 	// 保留旧价格，只在载荷里挂上错误说明，让界面能表达"这是旧数据"。
 	c.snap = &snapshot{
 		index:     c.snap.index,
+		kinds:     c.snap.kinds,
 		updatedAt: c.snap.updatedAt,
 		payload:   render(c.snap.index, c.snap.updatedAt, err.Error()),
 	}

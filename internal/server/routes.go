@@ -63,6 +63,9 @@ func (a *App) buildHandler() http.Handler {
 		// 它比 "/ui/" 更精确，因此 ServeMux 优先选中它，不会落到静态文件处理器上
 		// 去找一个磁盘上并不存在的 pricing.json。
 		mux.HandleFunc(path+pricingPath, a.handlePricing)
+		// 模型分类读数（理由见 modelkinds.go）：与价格目录**同源**——同一份 models.dev
+		// 文档、同一次取回、同一套"失败保留旧数据"的语义，因此也挂在同一个前缀下。
+		mux.HandleFunc(path+modelKindsPath, a.handleModelKinds)
 		// 自更新入口（理由见 update.go）：同样挂在 /ui/ 之下，避开那 47+7 条
 		// 已发布 /api 路由。
 		mux.HandleFunc(path+updateStatusPath, a.handleUpdateStatus)

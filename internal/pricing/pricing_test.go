@@ -599,3 +599,81 @@ func TestPayloadTriggersBackgroundRefreshOnce(t *testing.T) {
 		t.Errorf("取回次数 = %d，期望 2（预热 1 次 + 过期后台刷新 1 次）", calls)
 	}
 }
+
+// —— 模型类型索引 ——
+
+// kindFixture 是一份同时带价格与 modalities 的目录（价格是必需的：没有价格条目的
+// 目录会被 Refresh 判成取回失败）。
+const kindFixture = `{
+  "p": {"models": {
+    "gpt-image-1": {"cost": {"input": 1, "output": 2}, "modalities": {"input": ["text"], "output": ["image"]}},
+    "whisper-1": {"cost": {"input": 1, "output": 2}, "modalities": {"input": ["audio"], "output": ["text"]}}
+  }}
+}`
+
+// TestModelKindsUnavailableBeforeFirstFetch 断言首次取回前是"不可用"。
+//
+// 与 Payload 的语义一致，但调用方的处理**刻意不同**：没有价格时必须响亮失败，
+// 而没有类型目录时可以退回名字规则（见 internal/server 的 model-kinds.json）。
+func TestModelKindsUnavailableBeforeFirstFetch(t *testing.T) {
+	fake := &fakeFetcher{result: []FetchResult{{Body: []byte(kindFixture), ETag: `W/"a"`}}}
+	catalog := newTestCatalog(fake.fetch)
+
+	if kinds, ok := catalog.ModelKinds(); ok || kinds != nil {
+		t.Errorf("取回前 ModelKinds = (%v, %v)，期望 (nil, false)", kinds, ok)
+	}
+}
+
+// TestRefreshBuildsModelKinds 断言类型索引与价格由**同一次取回**构建出来。
+func TestRefreshBuildsModelKinds(t *testing.T) {
+	fake := &fakeFetcher{result: []FetchResult{{Body: []byte(kindFixture), ETag: `W/"a"`}}}
+	catalog := newTestCatalog(fake.fetch)
+
+	if err := catalog.Refresh(t.Context()); err != nil {
+		t.Fatalf("Refresh 失败: %v", err)
+	}
+	kinds, ok := catalog.ModelKinds()
+	if !ok {
+		t.Fatal("取回后 ModelKinds 应当可用")
+	}
+	if len(fake.calls) != 1 {
+		t.Errorf("取回次数 = %d，期望 1（类型索引不该另起一次取回）", len(fake.calls))
+	}
+	image, present := kinds["gpt-image-1"]
+	if !present {
+		t.Fatal("gpt-image-1 未进类型索引")
+	}
+	if len(image.Kinds) != 1 || string(image.Kinds[0]) != "image" {
+		t.Errorf("gpt-image-1 的类型 = %v，期望 [image]", image.Kinds)
+	}
+	if got := kinds["whisper-1"]; len(got.Kinds) != 1 || string(got.Kinds[0]) != "stt" {
+		t.Errorf("whisper-1 的类型 = %v，期望 [stt]", got.Kinds)
+	}
+}
+
+// TestModelKindsKeptStaleOnError 断言刷新失败时类型索引与价格一起保留。
+//
+// 两份索引共享快照，因此这条与 TestRefreshKeepsStaleOnError 是同一件事的两面：
+// 若哪次重构让类型索引单独重建，失败后模型分组会凭空消失，而价格还在——那种
+// "一半新一半旧"的状态没有任何界面能解释。
+func TestModelKindsKeptStaleOnError(t *testing.T) {
+	fake := &fakeFetcher{
+		result: []FetchResult{{Body: []byte(kindFixture), ETag: `W/"first"`}},
+		errs:   []error{nil, errors.New("网络不通")},
+	}
+	catalog := newTestCatalog(fake.fetch)
+
+	if err := catalog.Refresh(t.Context()); err != nil {
+		t.Fatalf("第一次 Refresh 失败: %v", err)
+	}
+	if err := catalog.Refresh(t.Context()); err == nil {
+		t.Fatal("第二次 Refresh 应当报错")
+	}
+	kinds, ok := catalog.ModelKinds()
+	if !ok {
+		t.Fatal("刷新失败后类型索引应当仍然可用")
+	}
+	if _, present := kinds["gpt-image-1"]; !present {
+		t.Error("刷新失败后类型索引不该丢内容")
+	}
+}
