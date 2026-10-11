@@ -30,7 +30,7 @@ const PREVIEW = {
   },
 };
 
-const state = { items: [], loading: true, error: null, busy: null, modes: {}, errors: {} };
+const state = { items: [], settings: null, loading: true, refreshing: false, error: null, busy: null, modes: {}, errors: {} };
 
 let host = null;
 let xtxRef = null;
@@ -70,40 +70,92 @@ async function apply(agent) {
 }
 
 async function reload() {
-  const data = await api.integrations();
+  const [data, settings] = await Promise.all([api.integrations(), api.settings()]);
   state.items = data.integrations || [];
+  state.settings = settings.settings || null;
+  state.error = null;
+}
+
+// /health 的公开契约没有 base_url，不能以一个不存在的字段判断连接是否成功。
+function connected() {
+  return xtxRef?.store?.health?.status === "ok" && !xtxRef?.store?.connectionError;
+}
+
+// 集成由服务端写入本机客户端，目标地址与 agentconfig.RouterOrigin 的规则保持一致。
+// 不能用浏览器地址代替：WebUI 可能经过反向代理或挂在宿主的子路径下。
+function routerOrigin() {
+  const settings = state.settings;
+  if (!settings?.host || !settings?.port) return null;
+  let host = settings.host;
+  if (["0.0.0.0", "::", "[::]"].includes(host)) host = "127.0.0.1";
+  if (host.includes(":") && !host.startsWith("[")) host = `[${host}]`;
+  return `http://${host}:${settings.port}`;
+}
+
+async function refreshStatus(refreshHealth = false) {
+  if (state.refreshing || state.busy) return;
+  state.refreshing = true;
+  draw();
+  try {
+    if (refreshHealth) await xtxRef?.refreshHealth?.();
+    await reload();
+  } catch (error) {
+    state.error = errorText(error);
+  }
+  state.loading = false;
+  state.refreshing = false;
+  draw();
 }
 
 export function renderIntegrations(context) {
   xtxRef = context;
   host = h("div.stack");
-  if (state.loading) {
-    render(host, h("div.page-head", h("h1", "集成")), loading("正在读取集成状态。"));
-    (async () => {
-      try { await reload(); state.error = null; } catch (error) { state.error = errorText(error); }
-      state.loading = false;
-      draw();
-    })();
-    return host;
-  }
+  // 只在会影响操作的健康状态变化时重绘，正常轮询不打断模式选择或折叠详情。
+  const healthState = () => JSON.stringify([
+    context.store.health?.status, context.store.health?.local_auth_enabled,
+    context.store.health?.ops_enabled, context.store.connectionError,
+  ]);
+  let previousHealth = healthState();
+  let wasConnected = connected();
+  context.onTick?.(() => {
+    const nextHealth = healthState();
+    if (previousHealth === nextHealth) return;
+    previousHealth = nextHealth;
+    const recovered = !wasConnected && connected();
+    wasConnected = connected();
+    if (recovered) void refreshStatus();
+    else if (!state.loading) draw();
+  });
   draw();
+  // 每次进入都重新读取运行设置与客户端状态；强制重绘重入时复用在途刷新。
+  void refreshStatus();
   return host;
 }
 
 function draw() {
   if (!host) return;
+  if (state.loading) {
+    render(host, h("div.page-head", h("h1", "集成")), loading("正在读取集成状态。"));
+    return;
+  }
   const health = xtxRef?.store?.health;
-  const baseUrl = health?.base_url;
+  const isConnected = connected();
+  const baseUrl = routerOrigin();
   const authEnabled = health?.local_auth_enabled;
+  const opsDisabled = health?.ops_enabled === false;
+  const unavailable = !isConnected || opsDisabled || !!state.error;
   const children = [
     h("div.page-head", {},
       h("div", {}, h("h1", "集成"), h("p.sub", "让本机的 CLI 客户端通过 AMKR 统一入口发请求。")),
       h("div.spacer"),
-      buttonNode("刷新状态", { small: true, variant: "secondary", onClick: async () => { try { await reload(); draw(); } catch (error) { state.error = errorText(error); draw(); } } }),
+      buttonNode(state.refreshing ? "正在刷新" : "刷新状态", {
+        small: true, variant: "secondary", disabled: state.refreshing || !!state.busy, onClick: () => refreshStatus(true),
+      }),
     ),
   ];
   if (state.error) children.push(notice(`读取集成状态失败: ${state.error}`, "error"));
-  if (!baseUrl) children.push(notice("尚未连接到 AMKR 服务，无法应用集成。", "warn"));
+  if (!isConnected) children.push(notice("尚未连接到 AMKR 服务，无法应用集成。", "warn"));
+  else if (opsDisabled) children.push(notice("运维接口已关闭，无法应用或回退集成。", "warn"));
   else if (!authEnabled) children.push(notice("本地鉴权未启用：集成需要本地鉴权 Key 才能写入客户端配置。", "warn"));
 
   for (const agent of AGENTS) {
@@ -132,12 +184,12 @@ function draw() {
       ),
       h("div.btn-row", { style: { marginTop: "16px" } },
         buttonNode(busy ? "正在处理" : "应用", {
-          disabled: !!state.busy || !baseUrl,
+          disabled: !!state.busy || state.refreshing || unavailable || !authEnabled,
           onClick: () => apply(agent.id),
         }),
         buttonNode("回退", {
           variant: "secondary",
-          disabled: !!state.busy || !item?.backup_available,
+          disabled: !!state.busy || state.refreshing || unavailable || !item?.backup_available,
           onClick: () => confirmDialog({
             title: "回退集成",
             message: `回退 ${item?.display_name || agent.name} 的原配置？`,

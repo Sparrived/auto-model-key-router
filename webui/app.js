@@ -49,8 +49,9 @@ export const PAGES = [
 
 // 指标轮询节奏（毫秒）：概览/用量统计要看趋势，日志页自己管轮询，其余放慢。
 const METRICS_INTERVAL = { overview: 10000, activity: 15000, workspaces: 20000, default: 30000 };
-// 订阅了 onTick、需要被主动通知重新取数的页面。不在这里的页面只在强制刷新时整块重绘。
-const TICK_PAGES = new Set(["overview", "activity", "workspaces"]);
+// 订阅 onTick 的页面：监控页重新取数，集成页只同步连接与鉴权状态。
+// 不在这里的页面只在强制刷新时整块重绘。
+const TICK_PAGES = new Set(["overview", "activity", "workspaces", "integrations"]);
 const HEALTH_INTERVAL = 5000;
 
 export const store = {
