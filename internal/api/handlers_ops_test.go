@@ -193,7 +193,7 @@ func (e *opsFakeError) PyErrorName() string {
 // TestOpsIntegrationsSeam 覆盖接线后三条集成路由的形状与错误隔离。
 func TestOpsIntegrationsSeam(t *testing.T) {
 	statuses := map[string]OpsAgentStatus{
-		"claude-code": {TargetPath: "/tmp/claude.json", BackupAvailable: true, CurrentIsApplied: true, Mode: strPtr("unified-model")},
+		"claude-code": {TargetPath: "/tmp/claude.json", BackupAvailable: true, CurrentIsApplied: true},
 		"codex":       {TargetPath: "/tmp/codex.toml"},
 		// pi-agent 探测失败：只应影响它自己那一条。
 	}
@@ -206,8 +206,8 @@ func TestOpsIntegrationsSeam(t *testing.T) {
 			}
 			return statuses[agent], nil
 		},
-		Configure: func(agent string, cfg *config.RouterConfig, mode string) (OpsAgentConfigResult, error) {
-			if mode == "native" && agent == "codex" {
+		Configure: func(agent string, cfg *config.RouterConfig) (OpsAgentConfigResult, error) {
+			if agent == "codex" {
 				return OpsAgentConfigResult{}, &opsFakeError{name: "AgentConfigError", message: "写不了"}
 			}
 			return OpsAgentConfigResult{
@@ -229,11 +229,11 @@ func TestOpsIntegrationsSeam(t *testing.T) {
 	}
 	want := `{"integrations":[` +
 		`{"agent":"claude-code","display_name":"显示名:claude-code","target_path":"/tmp/claude.json","target_exists":false,` +
-		`"backup_available":true,"current_is_applied":true,"mode":"unified-model","error":null},` +
+		`"backup_available":true,"current_is_applied":true,"error":null},` +
 		`{"agent":"codex","display_name":"显示名:codex","target_path":"/tmp/codex.toml","target_exists":false,` +
-		`"backup_available":false,"current_is_applied":false,"mode":null,"error":null},` +
+		`"backup_available":false,"current_is_applied":false,"error":null},` +
 		`{"agent":"pi-agent","display_name":"显示名:pi-agent","target_path":"","target_exists":false,` +
-		`"backup_available":false,"current_is_applied":false,"mode":null,"error":"AgentConfigError: 探测失败"}]}`
+		`"backup_available":false,"current_is_applied":false,"error":"AgentConfigError: 探测失败"}]}`
 	if got := recorder.Body.String(); got != want {
 		t.Errorf("列表响应体不一致:\n got=%s\nwant=%s", got, want)
 	}
@@ -244,7 +244,7 @@ func TestOpsIntegrationsSeam(t *testing.T) {
 		t.Fatalf("状态码: %d %s", got, recorder.Body.String())
 	}
 	want = `{"integration":{"agent":"claude-code","display_name":"显示名:claude-code","target_path":"/tmp/claude.json",` +
-		`"target_exists":false,"backup_available":true,"current_is_applied":true,"mode":"unified-model","error":null},` +
+		`"target_exists":false,"backup_available":true,"current_is_applied":true,"error":null},` +
 		`"target_path":"/tmp/claude-code","backup_path":"/tmp/claude-code.bak","router_url":"http://127.0.0.1:8000",` +
 		`"extra_target_paths":["/tmp/extra"]}`
 	if got := recorder.Body.String(); got != want {
@@ -260,10 +260,10 @@ func TestOpsIntegrationsSeam(t *testing.T) {
 		t.Errorf("失败响应体不一致:\n got=%s\nwant=%s", recorder.Body.String(), want)
 	}
 
-	// 模式默认值：不传 mode 等价于 unified-model。
-	recorder = opsRequest(t, server, "POST", "/api/integrations/claude-code", []byte(`{}`), "full")
+	// 旧请求体的兼容：`mode` 字段仍被接受（值被忽略），不会 422。
+	recorder = opsRequest(t, server, "POST", "/api/integrations/claude-code", []byte(`{"mode":"native"}`), "full")
 	if got := recorder.Result().StatusCode; got != http.StatusOK {
-		t.Fatalf("缺省 mode 应 200，实际 %d：%s", got, recorder.Body.String())
+		t.Fatalf("旧请求体应 200（mode 被忽略），实际 %d：%s", got, recorder.Body.String())
 	}
 
 	recorder = opsRequest(t, server, "POST", "/api/integrations/codex/rollback", nil, "full")

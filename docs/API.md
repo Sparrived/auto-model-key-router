@@ -102,7 +102,7 @@ x-api-key: your-local-api-key
 | `POST` | `/api/tool/webui` | 仅本地 | 启用或关闭 WebUI（写入配置，需重启服务生效） |
 | `POST` | `/api/service/{action}` | 仅本地 | 执行服务的启动/停止/重启/注册/注销 |
 | `GET` | `/api/integrations` | 仅本地 | 查询 Claude Code / Codex / Pi Agent 的集成状态 |
-| `POST` | `/api/integrations/{agent}` | 仅本地 | 以 `unified-model` 或 `native` 模式接管该 Agent 配置 |
+| `POST` | `/api/integrations/{agent}` | 仅本地 | 接管该 Agent 配置：写入路由、本地鉴权与 AMKR 当前可用的全部模型（含已配置的 `unified-model`） |
 | `POST` | `/api/integrations/{agent}/rollback` | 仅本地 | 回退该 Agent 到备份配置 |
 
 ### 新增能力挂在 `/api/` 还是 `/ui/`
@@ -2068,7 +2068,6 @@ http://127.0.0.1:8000/ui/
       "target_exists": true,
       "backup_available": false,
       "current_is_applied": true,
-      "mode": "unified-model",
       "error": null
     }
   ]
@@ -2078,10 +2077,18 @@ http://127.0.0.1:8000/ui/
 ### `POST /api/integrations/{agent}`
 
 ```json
-{"mode": "unified-model"}
+{}
 ```
 
-`agent` 取 `claude-code`、`codex`、`pi-agent`；`mode` 取 `unified-model` 或 `native`（Pi Agent 固定使用 `unified-model`）。写入前会先备份原配置，未启用本地鉴权时返回 `409`。
+`agent` 取 `claude-code`、`codex`、`pi-agent`。接管时会写入该客户端的路由地址、本地鉴权
+key，以及 AMKR **当前可用的全部模型**（至少有一把启用 Key 的模型 ID 与别名，外加已配置
+的 `unified-model`）。请求体可省略。
+
+历史上这里用 `{"mode": "unified-model"}` / `{"mode": "native"}` 选择路由模式；该字段
+**已废弃且被忽略**（仍被接受，旧脚本不会报错），集成不再有模式之分。
+
+写入前会先备份原配置，未启用本地鉴权时返回 `409`。Codex 在没有任何可用模型时返回 `409`
+（它的模型目录文件不允许为空，空目录会让 Codex 启动失败）。
 
 ### `POST /api/integrations/{agent}/rollback`
 

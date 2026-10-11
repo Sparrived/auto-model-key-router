@@ -127,42 +127,14 @@ func TestDivergenceHomeIsInjected(t *testing.T) {
 	}
 }
 
-// TestDivergenceStatusModeEmptyMeansNone 固定 D2：Status.Mode 用空串表示 None。
-func TestDivergenceStatusModeEmptyMeansNone(t *testing.T) {
-	root := t.TempDir()
-	pinBaseEnv(t, root)
-	target := filepath.Join(root, "config.toml")
-	writeFile(t, target, "# 只有注释\n")
-	opts := Options{BaseDir: root, TargetPath: target, BackupPath: filepath.Join(root, "backup.json")}
-
-	// 还没有备份：Python 的 mode 是 None，Go 侧必须是空串而不是 "native" 之类。
-	status, err := GetStatus(Codex, opts)
-	if err != nil {
-		t.Fatalf("GetStatus 失败: %v", err)
-	}
-	if status.Mode != "" {
-		t.Errorf("没有备份时 Mode 应为空串（对应 Python 的 None），实际 %q", status.Mode)
-	}
-	if _, err := Configure(Codex, routerConfig(t, "alpha"), ModeUnifiedModel, opts); err != nil {
-		t.Fatalf("Configure 失败: %v", err)
-	}
-	status, err = GetStatus(Codex, opts)
-	if err != nil {
-		t.Fatalf("GetStatus 失败: %v", err)
-	}
-	if status.Mode != ModeUnifiedModel {
-		t.Errorf("已应用时 Mode 期望 %q，实际 %q", ModeUnifiedModel, status.Mode)
-	}
-	// 空串不会与任何合法模式撞车：合法值只有 native / unified-model。
-	for _, mode := range []string{ModeNative, ModeUnifiedModel} {
-		if mode == "" {
-			t.Fatal("空串被当成了合法模式")
-		}
-	}
-}
+// D2（Status.Mode 用空串表示 None）已随「路由模式」的取消而失效：Status 不再有
+// Mode 字段，三个客户端一律注入全部可用模型。
 
 // TestDivergenceErrorTexts 固定 D3：模块自身的错误文本逐字一致；底层解析器的
 // 错误只保证前缀一致（不同解析器的措辞必然不同）。
+//
+// 与模式相关的两条错误（不支持的 Agent 路由模式 / Pi Agent 仅支持 unified-model
+// 模式）以及「请先配置 unified-model」已随模式一并移除，不再有用例。
 func TestDivergenceErrorTexts(t *testing.T) {
 	exact := []struct {
 		name string
@@ -178,42 +150,9 @@ func TestDivergenceErrorTexts(t *testing.T) {
 			want: "不支持的 Agent: nope",
 		},
 		{
-			name: "unsupported_mode",
-			run: func(root string) error {
-				_, err := Configure(Codex, routerConfig(t, "alpha"), "bogus", Options{
-					BaseDir: root, TargetPath: filepath.Join(root, "c.toml"),
-					BackupPath: filepath.Join(root, "b.json"),
-				})
-				return err
-			},
-			want: "不支持的 Agent 路由模式: bogus",
-		},
-		{
-			name: "pi_requires_unified",
-			run: func(root string) error {
-				_, err := Configure(PiAgent, routerConfig(t, "alpha"), ModeNative, Options{
-					BaseDir: root, TargetPath: filepath.Join(root, "m.json"),
-					BackupPath: filepath.Join(root, "b.json"),
-				})
-				return err
-			},
-			want: "Pi Agent 仅支持 unified-model 模式",
-		},
-		{
-			name: "missing_unified_model",
-			run: func(root string) error {
-				_, err := Configure(Codex, routerConfig(t, "no_unified"), ModeUnifiedModel, Options{
-					BaseDir: root, TargetPath: filepath.Join(root, "c.toml"),
-					BackupPath: filepath.Join(root, "b.json"),
-				})
-				return err
-			},
-			want: "请先配置 unified-model，再应用 Codex 路由配置",
-		},
-		{
 			name: "empty_local_key",
 			run: func(root string) error {
-				_, err := Configure(ClaudeCode, routerConfig(t, "empty_key"), ModeUnifiedModel, Options{
+				_, err := Configure(ClaudeCode, routerConfig(t, "empty_key"), Options{
 					BaseDir: root, TargetPath: filepath.Join(root, "s.json"),
 					BackupPath: filepath.Join(root, "b.json"),
 				})
@@ -260,7 +199,7 @@ func TestDivergenceErrorTexts(t *testing.T) {
 			pinBaseEnv(t, root)
 			target := filepath.Join(root, c.path)
 			writeFile(t, target, c.init)
-			_, err := Configure(c.agent, routerConfig(t, "alpha"), ModeUnifiedModel, Options{
+			_, err := Configure(c.agent, routerConfig(t, "alpha"), Options{
 				BaseDir: root, TargetPath: target, BackupPath: filepath.Join(root, "b.json"),
 			})
 			var configErr *ConfigError
@@ -284,7 +223,7 @@ func TestDivergenceBackupJSONUsesEnsureASCII(t *testing.T) {
 	target := filepath.Join(root, "中文目录", "config.toml")
 	backup := filepath.Join(root, "备份", "codex.json")
 	writeFile(t, target, "model = \"gpt-5\"\n")
-	if _, err := Configure(Codex, routerConfig(t, "alpha"), ModeUnifiedModel, Options{
+	if _, err := Configure(Codex, routerConfig(t, "alpha"), Options{
 		BaseDir: root, TargetPath: target, BackupPath: backup,
 	}); err != nil {
 		t.Fatalf("Configure 失败: %v", err)
@@ -296,13 +235,17 @@ func TestDivergenceBackupJSONUsesEnsureASCII(t *testing.T) {
 	if !strings.HasSuffix(raw, "}\n") {
 		t.Error("备份缺少末尾换行")
 	}
-	if !strings.Contains(raw, "\n  \"version\": 2,\n") {
+	// version 3 起不再写 mode（集成没有路由模式），键序仍是插入顺序、indent=2。
+	if !strings.Contains(raw, "\n  \"version\": 3,\n") {
 		t.Error("备份不是 indent=2 且键序为插入顺序")
+	}
+	if strings.Contains(raw, `"mode"`) {
+		t.Error("备份不应再写 mode 字段")
 	}
 
 	// 对照：写 Agent 配置时是 ensure_ascii=False，中文必须原样出现。
 	piTarget := filepath.Join(root, "models.json")
-	if _, err := Configure(PiAgent, routerConfig(t, "alpha"), ModeUnifiedModel, Options{
+	if _, err := Configure(PiAgent, routerConfig(t, "alpha"), Options{
 		BaseDir: root, TargetPath: piTarget, BackupPath: filepath.Join(root, "b2.json"),
 	}); err != nil {
 		t.Fatalf("Configure(Pi) 失败: %v", err)
@@ -321,6 +264,7 @@ func TestDivergenceBackupFieldsAreZeroValued(t *testing.T) {
 	backup := filepath.Join(root, "backup.json")
 	writeFile(t, target, "model = \"gpt-5\"\n")
 	// 一份「结构合法但字段残缺」的备份：缺 original_exists / original_content。
+	// 它同时是一份**旧格式**备份（version 2 + mode），用来锁定「旧备份仍能读」。
 	writeFile(t, backup, `{
   "version": 2,
   "agent": "codex",
@@ -378,7 +322,7 @@ func TestDivergenceUnsupportedTomlShapesError(t *testing.T) {
 			backup := filepath.Join(root, "backup.json")
 			writeFile(t, target, c.input)
 
-			_, err := Configure(Codex, routerConfig(t, "alpha"), ModeUnifiedModel, Options{
+			_, err := Configure(Codex, routerConfig(t, "alpha"), Options{
 				BaseDir: root, TargetPath: target, BackupPath: backup,
 			})
 			var configErr *ConfigError

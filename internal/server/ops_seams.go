@@ -51,14 +51,10 @@ func opsIntegrations() *api.OpsIntegrations {
 				TargetPath:       status.TargetPath,
 				BackupAvailable:  status.BackupAvailable,
 				CurrentIsApplied: status.CurrentIsApplied,
-				// agentconfig 用空串表示 Python 的 None（合法模式只有 native /
-				// unified-model，空串无歧义），而接缝用 nil 表示 None——两者语义相同，
-				// 只是表达不同，故在此收窄。
-				Mode: emptyToNil(status.Mode),
 			}, nil
 		},
-		Configure: func(agent string, cfg *config.RouterConfig, mode string) (api.OpsAgentConfigResult, error) {
-			result, err := agentconfig.Configure(agent, cfg, mode, options)
+		Configure: func(agent string, cfg *config.RouterConfig) (api.OpsAgentConfigResult, error) {
+			result, err := agentconfig.Configure(agent, cfg, options)
 			if err != nil {
 				return api.OpsAgentConfigResult{}, err
 			}
@@ -80,14 +76,6 @@ func opsIntegrations() *api.OpsIntegrations {
 			}, nil
 		},
 	}
-}
-
-// emptyToNil 把空串折成 nil，用于接缝上"空串代表 None"的字段。
-func emptyToNil(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
 }
 
 // 编译期断言：接缝字段能直接吃下这些方法值，签名一旦漂移就在这里报错，而不是等到接线处

@@ -1121,13 +1121,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 AMKR 支持 Anthropic Messages 风格入口 `/v1/messages`，可供 Claude Code 使用。
 
-在 **集成 → Claude Code** 中可选择三种状态：
+在 **集成 → Claude Code** 中只需点「应用」：AMKR 写入路由与本地鉴权，并把**当前可用的全部模型**注入 Claude Code 的模型选择器；点「回退」恢复首次应用前的完整文件内容。没有「路由模式」需要选择。
 
-- **AMKR unified-model 模式**：先设置 `unified-model`，再由 AMKR 写入路由、本地鉴权和 `unified-model` 的 Claude 模型环境变量。
-- **AMKR 原生模式**：只写入路由和本地鉴权；首次接管会保留已有的 Claude 模型配置。从 unified-model 模式切换时会移除 AMKR 写入的模型变量，由用户手动配置 Claude Code 默认模型。
-- **未接管**：选择回退原配置，AMKR 会恢复首次应用前的完整文件内容。
-
-两种 AMKR 接管模式都要求 `local_api_key` 不为空。原生模式不要求设置 `unified-model`，但 Claude Code 使用的每个模型名必须先在 AMKR 的**模型路由**页配置；否则请求会明确提示缺失的模型名。
+要求 `local_api_key` 不为空。应用前请先在 AMKR 的**模型路由**页配置好模型——注入的清单就是它，未配置的模型名调不动。
 
 AMKR 会更新：
 
@@ -1136,22 +1132,36 @@ AMKR 会更新：
 # 或 CLAUDE_CONFIG_DIR/settings.json
 ```
 
-unified-model 模式写入的核心环境变量包括：
+写入的核心内容：
 
 ```json
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000",
     "ANTHROPIC_AUTH_TOKEN": "amkr_your-local-api-key",
-    "ANTHROPIC_MODEL": "unified-model",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "unified-model",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "unified-model",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "unified-model"
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "false"
+  },
+  "modelPicker": {
+    "replaceBuiltInOptions": true,
+    "options": [
+      { "model": "gpt-5.5" },
+      { "model": "my-gpt" },
+      { "model": "unified-model", "description": "AMKR 统一模型：按路径与任务自动路由" }
+    ]
   }
 }
 ```
 
-原生模式保留 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 和 AMKR 流量控制变量，但不会注入模型名。应用前的原始配置会备份到 AMKR 缓存目录，可在 WebUI 的集成页回退。
+几点必须知道：
+
+- **旧版本写入的 `ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL` 会被删除**：它们把每次会话（含 haiku 后台任务）钉在同一个模型上，留着会让选择器形同虚设。
+- `modelPicker` 需要 **Claude Code ≥ 2.1.242**；更老的版本不认这个字段（只会看到默认模型）。`replaceBuiltInOptions: true` 表示选择器只列 AMKR 的模型：`ANTHROPIC_BASE_URL` 已经指向 AMKR，内置的 Anthropic 行在这里必然调不通。
+- 顶层的 `model` 只在缺失或指向 AMKR 不认识的名字时才被改写成 `unified-model`（或清单里的第一个模型）：它是**新会话的默认模型**，指向一个不存在的模型会让新会话直接失败；你在 `/model` 里的选择优先于它。
+- 如果同名环境变量是你在 shell 里 `export` 的，AMKR 不会去动系统环境；请自己取消，并**重启 Claude Code** 后再验证。
+- 客户端会对不在它内置清单里的模型名打一行非致命提示（无头 `-p` 下是 `[claude-code:unrecognized_model] {"model":"…"}`），但**请求照常发出**：实测 `--model mini`（别名）、`--model claude-sonnet-4-5`（模型 ID）与不带 `--model`（走顶层默认 `unified-model`）都能正常完成，AMKR 侧收到的是**逐字原样的名字**。这句话只是客户端的提示，不是错误。
+
+应用前的原始配置会备份到 AMKR 缓存目录，可在 WebUI 的集成页回退。
 
 ---
 
@@ -1159,25 +1169,22 @@ unified-model 模式写入的核心环境变量包括：
 
 AMKR 支持 OpenAI Responses 风格入口 `/v1/responses`，可供 Codex 使用。
 
-在 **集成 → Codex** 中可选择 unified-model 模式、原生模式或回退原配置。两种接管模式都写入 AMKR OpenAI Provider 和 `auth.json` 的本地鉴权 key；只有 unified-model 模式需要预先设置 `unified-model`。
-
-原生模式不会注入模型：首次接管会保留用户已有的 `model`、`review_model` 和 `model_reasoning_effort`；从 unified-model 模式切换时会移除这些 AMKR 写入字段。用户需要手动配置 Codex 的 `model`、`review_model` 等模型名，并先将每个名称添加到 AMKR 的**模型路由**页；模型不存在时路由器会返回包含该名称的配置提示。
+在 **集成 → Codex** 中只需点「应用」：AMKR 写入 AMKR Provider 与 `auth.json` 的本地鉴权 key，并生成一份模型目录文件，把**当前可用的全部模型**交给 Codex 的 `/model` 选择器。没有「路由模式」需要选择。
 
 AMKR 会更新：
 
 ```text
 ~/.codex/config.toml
 ~/.codex/auth.json
-# 或 CODEX_HOME/config.toml 与 CODEX_HOME/auth.json
+~/.codex/amkr-models.json          （新增：AMKR 独占的模型目录）
+# 或 CODEX_HOME/config.toml 等
 ```
 
-unified-model 模式写入的核心配置类似：
+`config.toml` 里写入的核心配置类似：
 
 ```toml
 model_provider = "OpenAI"
-model = "unified-model"
-review_model = "unified-model"
-model_reasoning_effort = "max"
+model_catalog_json = "C:/Users/me/.codex/amkr-models.json"
 
 [model_providers.OpenAI]
 name = "OpenAI"
@@ -1194,15 +1201,20 @@ requires_openai_auth = true
 }
 ```
 
-集成应用只会更新上述模型调用字段，以及 `auth.json` 中的 `OPENAI_API_KEY`。原生模式始终保留 Provider 与本地鉴权配置。现有的其他 Codex 设置、注释、OpenAI Provider 自定义字段和其他鉴权字段都会保留；旧版本已经写入的非模型字段也不会被主动删除。
+几点必须知道：
 
-应用前的原始配置同样会备份，可在 WebUI 的集成页回退。
+- **需要 Codex ≥ 0.105.0**（`model_catalog_json` 从该版本开始支持），推荐直接升级到最新版；升级后用 `codex debug models` 自查目录是否被读到。配置只在启动时加载，改完模型名单要**重启 Codex**。
+- `model` / `review_model` 只在缺失、或指向 AMKR 不认识的名字时才被改写（新会话的默认模型不能指向不存在的名字）；你自己选的、AMKR 也能提供的模型原样保留，连同行尾注释与排版。`model_reasoning_effort` **完全不动**。
+- 目录文件由 AMKR 独占，重新应用集成会覆盖它；目录里的 `models` 为空会让 Codex **启动失败**，因此 AMKR 在没有可用模型时会直接报错、不会写出空目录。
+- 用户手写的注释、空行、行尾注释与空白排版原样保留：只动上面那几个键。唯一的例外是 **TOML 表顺序**——写入 `[model_providers.OpenAI]` 时同属 `model_providers` 的表会被归并到一起，自定义表可能挪到它后面；语义等价，回退恢复的是原始文件本身。
+
+应用前的原始配置（含目录文件与 `auth.json`）同样会备份，可在 WebUI 的集成页回退。
 
 ---
 
 ## 18. 接入 Pi Agent
 
-在 **集成 → Pi Agent** 中，AMKR 只提供 `unified-model` 模式，不提供原生模型模式。应用前需要先设置 `unified-model` 和本地鉴权 key；回退会恢复首次应用前的完整配置文件。
+在 **集成 → Pi Agent** 中只需点「应用」：AMKR 写入 `amkr` 提供商，并把**当前可用的全部模型**（含配置了 `unified-model` 时的它）交给 Pi 的 `/model` 选择器。没有「路由模式」需要选择。
 
 AMKR 会更新：
 
@@ -1211,7 +1223,7 @@ AMKR 会更新：
 # 或 PI_CODING_AGENT_DIR/models.json
 ```
 
-它会保留其他自定义提供商，并写入 `amkr` 提供商，其中包含 `unified-model` 以及当前有启用 Key 的 AMKR 模型和别名：
+它会保留其他自定义提供商，并写入 `amkr` 提供商：
 
 ```json
 {
@@ -1231,7 +1243,7 @@ AMKR 会更新：
 }
 ```
 
-Pi 的 `/model` 会继续显示其内置及其他自定义提供商的模型；选择 `amkr/unified-model` 会经由 AMKR 的统一路由，选择其他 `amkr/<模型或别名>` 则直接请求对应的 AMKR 模型。重新在集成页应用即可同步新增或删除的模型。
+清单口径对所有客户端一致：**至少有一把启用 Key** 的模型 ID 与别名，加上已配置的 `unified-model`（没配 `unified-model` 时不会列出一个必然失败的名字）。Pi 的 `/model` 会继续显示其内置及其他自定义提供商的模型；选择 `amkr/unified-model` 会经由 AMKR 的统一路由，选择其他 `amkr/<模型或别名>` 则直接请求对应的 AMKR 模型。模型增删或禁用后，重新在集成页应用即可同步。
 
 ---
 

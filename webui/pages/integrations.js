@@ -2,7 +2,7 @@
 
 import { h, errorText } from "../dom.js";
 import { api } from "../api.js";
-import { card, cardHead, notice, badge, loading, render, toast, buttonNode, select, confirmDialog } from "../ui.js";
+import { card, cardHead, notice, badge, loading, render, toast, buttonNode, confirmDialog } from "../ui.js";
 
 const AGENTS = [
   { id: "claude-code", name: "Claude Code" },
@@ -10,27 +10,35 @@ const AGENTS = [
   { id: "pi-agent", name: "Pi Agent" },
 ];
 
-const MODES = [
-  { value: "unified-model", label: "统一模型" },
-  { value: "native", label: "原生模型" },
-];
-
 // 变更字段预览：与各 Agent 的目标文件结构一一对应。
+//
+// 集成不再有「统一模型 / 原生模型」之分，三个客户端一律写入 AMKR 当前可用的全部
+// 模型（模型 ID、别名，以及配置了统一模型时的 unified-model），并清理旧实现写入的
+// 单模型覆盖键——留着会把客户端钉死在一个模型上。清理只针对 AMKR 自己写过的键：
+// 集成前就存在的键会恢复用户原值，不是无条件删除。
 const PREVIEW = {
-  "claude-code": {
-    "unified-model": ["env.ANTHROPIC_BASE_URL", "env.ANTHROPIC_AUTH_TOKEN", "env.ANTHROPIC_MODEL"],
-    native: ["env.ANTHROPIC_BASE_URL", "env.ANTHROPIC_AUTH_TOKEN"],
-  },
-  codex: {
-    "unified-model": ["model_provider", "model", "model_providers.OpenAI", "auth.json"],
-    native: ["model_provider", "model_providers.OpenAI", "auth.json"],
-  },
-  "pi-agent": {
-    "unified-model": ["providers.amkr", "providers.amkr.baseUrl", "providers.amkr.apiKey", "providers.amkr.models"],
-  },
+  "claude-code": [
+    "env.ANTHROPIC_BASE_URL",
+    "env.ANTHROPIC_AUTH_TOKEN",
+    "清理旧版写入的 env.ANTHROPIC_MODEL 等单模型覆盖",
+    "modelPicker.options（全部可用模型）",
+  ],
+  codex: [
+    "model_provider",
+    "清理旧版写入的 model / review_model / model_reasoning_effort",
+    "model_catalog_json（全部可用模型）",
+    "model_providers.OpenAI",
+    "auth.json",
+  ],
+  "pi-agent": [
+    "providers.amkr",
+    "providers.amkr.baseUrl",
+    "providers.amkr.apiKey",
+    "providers.amkr.models（全部可用模型）",
+  ],
 };
 
-const state = { items: [], settings: null, loading: true, refreshing: false, error: null, busy: null, modes: {}, errors: {} };
+const state = { items: [], settings: null, loading: true, refreshing: false, error: null, busy: null, errors: {} };
 
 let host = null;
 let xtxRef = null;
@@ -42,16 +50,10 @@ function itemFor(agent) {
 function statusBadge(item) {
   if (!item) return badge("正在读取", "muted");
   if (item.error) return badge("操作失败", "bad");
-  if (item.current_is_applied) return badge(`已接管 · ${item.mode || "未知模式"}`, "good");
+  if (item.current_is_applied) return badge("已接管", "good");
   if (item.backup_available) return badge("配置已变更 · 可回退", "warn");
   if (item.target_exists) return badge("检测到配置", "muted");
   return badge("未找到配置", "muted");
-}
-
-function modeOf(agent) {
-  if (state.modes[agent]) return state.modes[agent];
-  const item = itemFor(agent);
-  return item && MODES.some((mode) => mode.value === item.mode) ? item.mode : "unified-model";
 }
 
 async function apply(agent) {
@@ -59,7 +61,7 @@ async function apply(agent) {
   state.errors[agent] = null;
   draw();
   try {
-    await api.applyIntegration(agent, modeOf(agent));
+    await api.applyIntegration(agent);
     await reload();
     toast(`${itemFor(agent)?.display_name || agent} 已接管配置。`);
   } catch (error) {
@@ -110,7 +112,7 @@ async function refreshStatus(refreshHealth = false) {
 export function renderIntegrations(context) {
   xtxRef = context;
   host = h("div.stack");
-  // 只在会影响操作的健康状态变化时重绘，正常轮询不打断模式选择或折叠详情。
+  // 只在会影响操作的健康状态变化时重绘，正常轮询不打断折叠详情。
   const healthState = () => JSON.stringify([
     context.store.health?.status, context.store.health?.local_auth_enabled,
     context.store.health?.ops_enabled, context.store.connectionError,
@@ -160,27 +162,20 @@ function draw() {
 
   for (const agent of AGENTS) {
     const item = itemFor(agent.id);
-    const fixedMode = agent.id === "pi-agent";
     const busy = state.busy === agent.id;
+    const preview = PREVIEW[agent.id] || [];
     children.push(card(
       cardHead(item?.display_name || agent.name,
         statusBadge(item),
         busy ? h("span.spinner") : null,
       ),
       h("p.muted", item?.target_path ? `目标文件 ${item.target_path}` : "正在读取配置状态。"),
+      h("p.muted", "模型：写入 AMKR 当前可用的全部模型（至少有一把启用 Key 的模型与别名，含已配置的 unified-model），在客户端自己的模型选择器里切换。"),
       state.errors[agent.id] ? notice(state.errors[agent.id], "error") : null,
       item?.error ? notice(item.error, "error") : null,
-      fixedMode
-        ? h("div.inline", {}, h("span.muted", "路由模式"), badge("统一模型", "muted"))
-        : h("label.field", { style: { maxWidth: "240px" } }, h("span", "路由模式"),
-            select(MODES, {
-              value: modeOf(agent.id),
-              disabled: busy,
-              onChange: (event) => { state.modes[agent.id] = event.target.value; draw(); },
-            })),
-      h("details", {}, h("summary.muted", `变更字段 · ${(PREVIEW[agent.id]?.[modeOf(agent.id)] || []).length} 项`),
+      h("details", {}, h("summary.muted", `变更字段 · ${preview.length} 项`),
         h("div.stack.tight", { style: { marginTop: "8px" } },
-          (PREVIEW[agent.id]?.[modeOf(agent.id)] || []).map((name) => h("div.mono", name))),
+          preview.map((name) => h("div.mono", name))),
       ),
       h("div.btn-row", { style: { marginTop: "16px" } },
         buttonNode(busy ? "正在处理" : "应用", {

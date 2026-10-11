@@ -24,8 +24,11 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // newBackupBytes 生成备份文件内容（含末尾换行）。
+//
+// version 3 起不再写 `mode` 字段：集成没有「路由模式」了，三个客户端一律注入全部
+// 可用模型。旧备份（v1/v2，含 mode）仍能被读取与回退——多出来的键不影响解析。
 func newBackupBytes(
-	agent, mode, targetPath string,
+	agent, targetPath string,
 	originalExists bool,
 	originalContent string,
 	appliedSHA256 string,
@@ -34,7 +37,6 @@ func newBackupBytes(
 	pairs := []canonical.ObjectPair{
 		{Key: "version", Value: canonical.NewIntValue(backupStateVersion)},
 		{Key: "agent", Value: canonical.NewString(agent)},
-		{Key: "mode", Value: canonical.NewString(mode)},
 		{Key: "target_path", Value: canonical.NewString(targetPath)},
 		{Key: "original_exists", Value: canonical.NewBool(originalExists)},
 		{Key: "original_content", Value: canonical.NewString(originalContent)},

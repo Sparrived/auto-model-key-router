@@ -78,16 +78,10 @@ var OpsServiceTargets = map[string]OpsServiceTarget{
 // opsSupportedAgents 对应 agent_config.py:27 的 SUPPORTED_AGENTS。
 //
 // 它必须与 internal/agentconfig 手工同步：agent_config.py 才是新 Agent 的唯一来源，
-// 而这里要在没有装配 agentconfig 的情况下也能给出参照实现的 404/422——合法 Agent
-// 配非法 mode 是 422、非法 Agent 是 404，两面都得对。
-// OpsIntegrations.SupportedAgents 非空时以接缝为准，见 opsAgentSupportedAt。
+// 而这里要在没有装配 agentconfig 的情况下也能给出参照实现的 404/422——非法 Agent
+// 是 404（与参照实现一致）。OpsIntegrations.SupportedAgents 非空时以接缝为准，
+// 见 opsAgentSupportedAt。
 var opsSupportedAgents = []string{"claude-code", "codex", "pi-agent"}
-
-// opsSupportedAgentModes 对应 agent_config.py:30 的 SUPPORTED_AGENT_MODES。
-var opsSupportedAgentModes = map[string]struct{}{
-	"native":        {},
-	"unified-model": {},
-}
 
 // specOpsWebUIRequest 对应 ops_api.py:69 的 WebUIRequest（继承 APIModel，因此带
 // config_revision；运维面并不用它做乐观并发校验）。
@@ -97,6 +91,10 @@ var specOpsWebUIRequest = newModelSpec("WebUIRequest",
 )
 
 // specOpsIntegrationRequest 对应 ops_api.py:65 的 IntegrationRequest。
+//
+// 历史上它带一个枚举字段 `mode`（native / unified-model）。路由模式取消后该字段
+// **不再有语义**，但仍然接受：请求体里带着它的旧客户端/脚本不会被拒，值被忽略——
+// 集成现在一律注入 AMKR 当前可用的全部模型。
 var specOpsIntegrationRequest = newModelSpec("IntegrationRequest",
 	nul("config_revision", kindStr).minLenOf(1),
 	def("mode", kindStr),
@@ -110,8 +108,6 @@ type OpsAgentStatus struct {
 	BackupAvailable bool
 	// CurrentIsApplied 表示当前文件就是本工具写入的那份。
 	CurrentIsApplied bool
-	// Mode 为 nil 表示 Python 的 None（未应用或备份里没有模式）。
-	Mode *string
 }
 
 // OpsAgentConfigResult 对应 agent_config.AgentConfigResult 的字段子集。
@@ -145,8 +141,8 @@ type OpsIntegrations struct {
 	// Status 对应 get_agent_config_status。返回的 error 按「单个 Agent 隔离」
 	// 处理（ops_api.py:253-266）。
 	Status func(agent string) (OpsAgentStatus, error)
-	// Configure 对应 configure_agent；mode 已由路由校验过。
-	Configure func(agent string, cfg *config.RouterConfig, mode string) (OpsAgentConfigResult, error)
+	// Configure 对应 configure_agent：把 AMKR 当前可用的全部模型写进该 Agent 的配置。
+	Configure func(agent string, cfg *config.RouterConfig) (OpsAgentConfigResult, error)
 	// Rollback 对应 rollback_agent。
 	Rollback func(agent string) (OpsAgentRollbackResult, error)
 }
@@ -502,24 +498,20 @@ func (s *Server) handleOpsListIntegrations(w http.ResponseWriter, r *http.Reques
 
 // handleOpsApplyIntegration 对应 ops_api.py:206 的 apply_integration。
 //
-// 顺序：请求体校验 -> Agent 白名单（404）-> 模式白名单（422）-> 鉴权 -> 执行。
-// 前两步都在鉴权之前，因此无凭据请求一个未知 Agent 得到 404 而不是 401。
+// 顺序：请求体校验 -> Agent 白名单（404）-> 鉴权 -> 执行。前两步都在鉴权之前，
+// 因此无凭据请求一个未知 Agent 得到 404 而不是 401。
+//
+// 请求体里的 `mode` 已被忽略（见 specOpsIntegrationRequest）：集成不再有路由模式。
+// 请求体因此整体可省（`optional=true`）：空体与 `{}` 等价，只有给旧客户端保留的
+// `mode` 字段仍然被接受。
 func (s *Server) handleOpsApplyIntegration(w http.ResponseWriter, r *http.Request) {
 	s.run(w, http.StatusOK, func() (*canonical.Value, error) {
 		agent := r.PathValue("agent")
-		payload, _, err := decodePayload(r, specOpsIntegrationRequest, false)
-		if err != nil {
+		if _, _, err := decodePayload(r, specOpsIntegrationRequest, true); err != nil {
 			return nil, err
 		}
 		if !s.opsAgentSupportedAt(agent) {
 			return nil, httpErrorf(http.StatusNotFound, "不支持的集成: %s", agent)
-		}
-		mode := "unified-model" // AGENT_MODE_UNIFIED_MODEL（agent_config.py:29 的默认值）
-		if value := payload.Lookup("mode"); value != nil && !value.IsNull() {
-			mode = value.PyStr()
-		}
-		if _, supported := opsSupportedAgentModes[mode]; !supported {
-			return nil, httpErrorf(http.StatusUnprocessableEntity, "集成模式必须是 native 或 unified-model")
 		}
 		cfg, err := s.authorizedConfig(r)
 		if err != nil {
@@ -529,7 +521,7 @@ func (s *Server) handleOpsApplyIntegration(w http.ResponseWriter, r *http.Reques
 		if src == nil || src.Configure == nil {
 			return nil, opsIntegrationsNotWired()
 		}
-		result, err := src.Configure(agent, cfg, mode)
+		result, err := src.Configure(agent, cfg)
 		if err != nil {
 			// ops_api.py:221-222：OSError / AgentConfigError / ValueError -> 409，
 			// 错误文本原样交给前端。
@@ -620,13 +612,8 @@ func opsIntegrationEntry(agent string, src *OpsIntegrations) *canonical.Value {
 			canonical.ObjectPair{Key: "target_exists", Value: canonical.NewBool(false)},
 			canonical.ObjectPair{Key: "backup_available", Value: canonical.NewBool(false)},
 			canonical.ObjectPair{Key: "current_is_applied", Value: canonical.NewBool(false)},
-			canonical.ObjectPair{Key: "mode", Value: canonical.NewNull()},
 			canonical.ObjectPair{Key: "error", Value: canonical.NewString(opsErrorText(err))},
 		)
-	}
-	mode := canonical.NewNull()
-	if status.Mode != nil {
-		mode = canonical.NewString(*status.Mode)
 	}
 	return objectOf(
 		canonical.ObjectPair{Key: "agent", Value: canonical.NewString(agent)},
@@ -637,7 +624,6 @@ func opsIntegrationEntry(agent string, src *OpsIntegrations) *canonical.Value {
 		canonical.ObjectPair{Key: "target_exists", Value: canonical.NewBool(pathExists(status.TargetPath))},
 		canonical.ObjectPair{Key: "backup_available", Value: canonical.NewBool(status.BackupAvailable)},
 		canonical.ObjectPair{Key: "current_is_applied", Value: canonical.NewBool(status.CurrentIsApplied)},
-		canonical.ObjectPair{Key: "mode", Value: mode},
 		canonical.ObjectPair{Key: "error", Value: canonical.NewNull()},
 	)
 }

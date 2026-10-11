@@ -4,8 +4,8 @@ Package agentconfig 把 AMKR 的路由信息写进第三方 AI Agent CLI 的本�
 
 迁移自 auto_model_key_router/agent_config.py（541 行）。它负责三件事：
 
- 1. **写**：把 router origin、本地鉴权 key、unified-model 等写进
-    ~/.claude/settings.json、~/.codex/config.toml（+ auth.json）、
+ 1. **写**：把 router origin、本地鉴权 key 与 AMKR 当前可用的**全部模型**写进
+    ~/.claude/settings.json、~/.codex/config.toml（+ auth.json + 模型目录）、
     ~/.pi/agent/models.json（agent_config.py:114 configure_agent）；
  2. **备份**：写入前把原文件内容 base64 存进缓存目录的备份 JSON，
     从而支持回退（agent_config.py:209 rollback_agent）；
@@ -117,12 +117,15 @@ D1. home 目录是注入参数。参照实现从 Path.home() 推导三个目标�
 ~/.claude、~/.codex、~/.pi**。环境变量覆盖（CLAUDE_CONFIG_DIR /
 PI_CODING_AGENT_DIR / CODEX_HOME）的优先级与参照实现一致。
 
-D2. Status.Mode 用空串表示 None。合法模式只有 native / unified-model，空串不会
-与合法值撞车。
+D2. **「路由模式」已取消**（参照实现里的 native / unified-model 与 Status.Mode
+字段在 Go 侧不存在）：每次应用都注入 AMKR 当前可用的全部模型，由用户在客户端自己的
+模型选择器里切换。旧备份（v1/v2）里的 `mode` 字段不再被读取，仍能正常回退。
 
 D3. 错误文本。AgentConfigError 的前缀与措辞逐字保留（例如
-`不支持的 Agent: x`、`Pi Agent 仅支持 unified-model 模式`、
-`Codex 配置中的 model_providers 必须是 TOML 表`、`Agent 配置备份内容已损坏`）。
+`不支持的 Agent: x`、`Codex 配置中的 model_providers 必须是 TOML 表`、
+`Agent 配置备份内容已损坏`）。参照实现里与模式相关的三条错误
+（`不支持的 Agent 路由模式: x`、`Pi Agent 仅支持 unified-model 模式`、
+`请先配置 unified-model，再应用 X 路由配置`）随模式一并移除。
 两类必然不同，Go 侧只保证前缀一致：
   - 底层解析器错误：Python 是 json.JSONDecodeError / tomlkit 错误的自身文本
     （如 `Expecting value: line 1 column 1 (char 0)`），Go 侧是 canonical /

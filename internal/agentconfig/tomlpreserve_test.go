@@ -1,6 +1,7 @@
 package agentconfig
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,14 +46,23 @@ trust_level = "trusted"
 
 // codexCommentPreserveOracle 是真实 tomlkit 对上面这份输入的输出。
 //
-// 生成方式（tomlkit 0.15.0，与参照实现 _configure_codex 同样的 7 次赋值）：
+// 生成方式（tomlkit 0.15.0，与 Go 侧 configureCodex 完全相同的写入序列）：
 //
-//	tomlkit.parse(input) → 设 model_provider/model/review_model/
-//	model_reasoning_effort + model_providers.OpenAI.* → tomlkit.dumps()
+//	tomlkit.parse(input) → 设 model_provider /
+//	model_catalog_json → model、review_model（仅当缺失或不在可用清单里时改写）
+//	→ 建 model_providers.OpenAI 并设 name/base_url/wire_api/requires_openai_auth
+//	→ tomlkit.dumps()
 //
 // 注意它是**参照实现的真实输出**，不是人手推演的期望值：注释、空行、行尾注释
 // 全部保留；新键按 tomlkit 的插入规则落位（顶层新键插到「最后一个非表项之后」，
 // 新的 [model_providers.OpenAI] 挂到 model_providers 这张隐式父表的末尾）。
+//
+// 取消路由模式后 `model` 不再被无条件删掉或改写：输入里的 "gpt-5-codex" 不在
+// AMKR 的可用清单里（清单为 alpha / alpha-alias / alpha-alias-dupe / beta /
+// beta-alias / unified-model，升序且 unified-model 居末），因此它在**原位**被替换成
+// unified-model，用户的行尾注释与对齐空白一起保留——这正是「不得丢失用户数据」的关键断言。
+//
+// {{CATALOG_PATH}} 是目录文件路径的占位符：它由 t.TempDir() 决定，测试里替换。
 const codexCommentPreserveOracle = `# ~/.codex/config.toml — 由我手工维护，请勿删除注释
 # 第二行注释
 
@@ -60,8 +70,8 @@ model = "unified-model"            # 我平时用的模型
 model_provider = "OpenAI"
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
+model_catalog_json = "{{CATALOG_PATH}}"
 review_model = "unified-model"
-model_reasoning_effort = "high"
 
 [model_providers.openai]
 name = "OpenAI"
@@ -94,7 +104,7 @@ func TestCodexWriteMatchesTomlkitOracleForCommentedConfig(t *testing.T) {
 	target := t.TempDir() + "/config.toml"
 	writeFile(t, target, codexCommentPreserveInput)
 
-	if _, err := Configure(Codex, cfg, ModeUnifiedModel, Options{
+	if _, err := Configure(Codex, cfg, Options{
 		BaseDir:    t.TempDir(),
 		TargetPath: target,
 		BackupPath: t.TempDir() + "/backup.json",
@@ -102,8 +112,10 @@ func TestCodexWriteMatchesTomlkitOracleForCommentedConfig(t *testing.T) {
 		t.Fatalf("Configure 失败: %v", err)
 	}
 	got := readFile(t, target)
-	if got != codexCommentPreserveOracle {
-		t.Errorf("输出与 tomlkit oracle 不一致\n--- 期望 ---\n%s\n--- 实际 ---\n%s", codexCommentPreserveOracle, got)
+	catalogPath := filepath.ToSlash(filepath.Join(filepath.Dir(target), codexCatalogFileName))
+	wantOracle := strings.ReplaceAll(codexCommentPreserveOracle, "{{CATALOG_PATH}}", catalogPath)
+	if got != wantOracle {
+		t.Errorf("输出与 tomlkit oracle 不一致\n--- 期望 ---\n%s\n--- 实际 ---\n%s", wantOracle, got)
 	}
 
 	// 直白的可读性断言：这几条最能说明「数据没丢」。

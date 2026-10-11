@@ -173,8 +173,8 @@ export const api = {
   runService: (action) => request(`/api/service/${action}`, { method: "POST" }),
 
   integrations: () => request("/api/integrations"),
-  applyIntegration: (agent, mode) =>
-    request(`/api/integrations/${agent}`, { method: "POST", body: { mode } }),
+  // 集成没有「路由模式」参数：服务端一律写入 AMKR 当前可用的全部模型。
+  applyIntegration: (agent) => request(`/api/integrations/${agent}`, { method: "POST" }),
   rollbackIntegration: (agent) =>
     request(`/api/integrations/${agent}/rollback`, { method: "POST" }),
 

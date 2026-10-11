@@ -4,6 +4,7 @@
 package agentconfig
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,6 +20,91 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 )
 
+// AgentLegacyKey 是「旧实现写入过的单模型钉死键」及其应恢复的取值。
+type AgentLegacyKey struct {
+	Name  string
+	Value string
+}
+
+// AgentLegacyPlan 描述旧实现（按 unified-model / native 模式写入）留下的单模型
+// 钉死键在新一轮集成里该怎么处置。
+//
+// 判据只有一个：**集成前的原始内容**（备份里的 original_content，或首次集成时的
+// 当前文件）。原始内容里没有这个键 ⇒ 它是 AMKR 自己写进去的，删除；原始内容里有
+// ⇒ 按原值恢复——绝不因为「取消路由模式」就丢掉用户自己的取值。两份清单都按固定
+// 键序，保证写出的文件逐字节可预期。
+type AgentLegacyPlan struct {
+	Restore []AgentLegacyKey
+	Remove  []string
+}
+
+// claudeLegacyModelKeys 是旧实现按「统一模型」模式写进 Claude Code 的四个变量。
+var claudeLegacyModelKeys = []string{
+	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL",
+}
+
+// codexLegacyModelKeys 是旧实现按「统一模型」模式写进 Codex 的三个键。
+var codexLegacyModelKeys = []string{"model", "review_model", "model_reasoning_effort"}
+
+// planClaudeLegacy 按 Claude Code 的 env 段计算遗留键处置计划。
+func planClaudeLegacy(known bool, original *canonical.Value) AgentLegacyPlan {
+	return planLegacyKeys(known, original, claudeLegacyModelKeys, func(doc *canonical.Value, key string) (string, bool) {
+		return doc.Lookup("env").Lookup(key).StringValue(), doc.Lookup("env").Lookup(key) != nil
+	})
+}
+
+// planCodexLegacy 按 Codex 的顶层键计算遗留键处置计划。
+func planCodexLegacy(known bool, original *canonical.Value) AgentLegacyPlan {
+	return planLegacyKeys(known, original, codexLegacyModelKeys, func(doc *canonical.Value, key string) (string, bool) {
+		return doc.Lookup(key).StringValue(), doc.Lookup(key) != nil
+	})
+}
+
+// planLegacyKeys 是两种 Agent 共用的判定：快照里有的恢复、没有的删除、不知道的
+// （备份损坏 / 原始内容不是合法 JSON）什么都不动。
+func planLegacyKeys(
+	known bool,
+	original *canonical.Value,
+	keys []string,
+	read func(doc *canonical.Value, key string) (string, bool),
+) AgentLegacyPlan {
+	if !known || original == nil || !original.IsObject() {
+		return AgentLegacyPlan{}
+	}
+	plan := AgentLegacyPlan{}
+	for _, name := range keys {
+		if value, present := read(original, name); present {
+			plan.Restore = append(plan.Restore, AgentLegacyKey{Name: name, Value: value})
+			continue
+		}
+		plan.Remove = append(plan.Remove, name)
+	}
+	return plan
+}
+
+// legacyOriginalDoc 解析「集成前的原始内容」，供遗留键判定使用。
+//
+// 返回 (文档, 是否知道原始内容)：备份内容损坏或原始内容不是合法 JSON 对象时
+// known 为 false，调用方据此**什么都不动**（保守优先于猜测）。
+func legacyOriginalDoc(known bool, content []byte) (*canonical.Value, bool) {
+	if !known {
+		return nil, false
+	}
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		// 集成前文件不存在：所有遗留键都是 AMKR 写进去的。
+		return canonical.NewObject(), true
+	}
+	parsed, err := canonical.Parse(trimmed)
+	if err != nil || !parsed.IsObject() {
+		return nil, false
+	}
+	return parsed, true
+}
+
 // 支持的 Agent 标识（agent_config.py:24-27）。
 const (
 	// ClaudeCode 是 Claude Code CLI。
@@ -29,25 +115,28 @@ const (
 	PiAgent = "pi-agent"
 )
 
-// 支持的 Agent 路由模式（agent_config.py:28-30）。
-const (
-	// ModeNative 表示只改 base_url / 鉴权，模型名交还给 Agent 原生配置。
-	ModeNative = "native"
-	// ModeUnifiedModel 表示把 Agent 的模型全部指向 AMKR 的 unified-model。
-	ModeUnifiedModel = "unified-model"
-)
+// 路由模式（native / unified-model）已取消：集成一律把 AMKR 当前可用的全部模型
+// 注入客户端，由用户在客户端自己的模型选择器里切换。参照实现里的
+// SUPPORTED_AGENT_MODES（agent_config.py:28-30）因此在 Go 侧没有对应常量。
 
 const (
 	// codexProviderID 是 AMKR 在 Codex 配置里占用的 provider 名
 	// （agent_config.py:31 的 CODEX_PROVIDER_ID）。注意大小写：它与用户自带的
 	// `[model_providers.openai]` 是**两个不同的表**，参照实现刻意不覆盖后者。
 	codexProviderID = "OpenAI"
+	// codexCatalogFileName 是 AMKR 写在 ~/.codex/ 下的模型目录文件名。
+	//
+	// Codex 的 config.toml 用 model_catalog_json 指向它，模型选择器从这里读取
+	// AMKR 当前可用的全部模型；它由 AMKR 独占，备份与回退都和 auth.json 一起处理。
+	codexCatalogFileName = "amkr-models.json"
 	// piProviderID 是 AMKR 在 Pi agent 配置里占用的 provider 名。
 	piProviderID = "amkr"
 	// piContextWindow 是写进 Pi agent 的上下文窗口（agent_config.py:33）。
 	piContextWindow = 262144
 	// backupStateVersion 是备份文件格式版本（agent_config.py:170）。
-	backupStateVersion = 2
+	//
+	// 3 = 不再记录 `mode`：集成不再有路由模式，一律注入全部可用模型。
+	backupStateVersion = 3
 	// backupDirName 是默认备份目录名（agent_config.py:83）。
 	backupDirName = "agent-config-backups"
 )
@@ -102,15 +191,14 @@ type Options struct {
 
 // Status 对应 agent_config.py:40 的 AgentConfigStatus。
 //
-// 注意 Mode 用空串表示 Python 侧的 None：合法模式只有 native / unified-model，
-// 因此空串不产生歧义（详见 doc.go 的差异清单）。
+// 取消路由模式后不再有 Mode 字段：「当前配置是否就是 AMKR 写入的那份」只由
+// CurrentIsApplied 表达。
 type Status struct {
 	Agent            string
 	TargetPath       string
 	BackupPath       string
 	BackupAvailable  bool
 	CurrentIsApplied bool
-	Mode             string
 }
 
 // Result 对应 agent_config.py:50 的 AgentConfigResult。
@@ -120,10 +208,9 @@ type Result struct {
 	BackupPath string
 	// RouterURL 是写入 Agent 的 AMKR 地址；回退时为空串（agent_config.py:248）。
 	RouterURL string
-	// ExtraTargetPaths 是除主目标外一并改写的文件（Codex 的 auth.json）。
+	// ExtraTargetPaths 是除主目标外一并改写的文件（Codex 的 auth.json 与模型目录）。
 	ExtraTargetPaths []string
 	Restored         bool
-	Mode             string
 }
 
 // TargetPath 按 Agent 推导目标配置文件路径（agent_config.py:69）。
@@ -218,37 +305,31 @@ func GetStatus(agent string, opts Options) (Status, error) {
 				extraTargetsAreApplied(state)
 		}
 	}
-	mode := ""
-	if currentIsApplied {
-		mode = backupMode(state)
-	}
 	return Status{
 		Agent:            agent,
 		TargetPath:       target,
 		BackupPath:       backup,
 		BackupAvailable:  backupAvailable,
 		CurrentIsApplied: currentIsApplied,
-		Mode:             mode,
 	}, nil
 }
 
-// Configure 按 mode 改写 Agent 配置，并备份改写前的内容（agent_config.py:114）。
-func Configure(agent string, cfg *config.RouterConfig, mode string, opts Options) (Result, error) {
+// Configure 把 Agent 接到本机 AMKR，并备份改写前的内容（agent_config.py:114）。
+//
+// 没有「路由模式」参数：三个客户端一律写入 AMKR 当前可用的全部模型（模型 ID、别名，
+// 以及配置了统一模型时的 unified-model），用户在客户端自己的模型选择器里切换。
+func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, error) {
 	if err := validateAgent(agent); err != nil {
 		return Result{}, err
 	}
-	if err := validateMode(mode); err != nil {
-		return Result{}, err
-	}
-	// Pi agent 的配置模型里没有「原生模型」概念，只支持统一模型模式。
-	if agent == PiAgent && mode != ModeUnifiedModel {
-		return Result{}, errf("Pi Agent 仅支持 unified-model 模式")
-	}
-	if mode == ModeUnifiedModel && cfg.UnifiedModel == nil {
-		return Result{}, errf("请先配置 %s，再应用 %s 路由配置", config.UNIFIED_MODEL_ID, DisplayName(agent))
-	}
 	if cfg.LocalAPIKey == "" {
 		return Result{}, errf("本地鉴权 key 为空，无法配置 Agent")
+	}
+	// 没有任何可用模型时直接拒绝：集成的内容就是模型清单，空清单在各客户端上要么
+	// 是空选择器（Claude Code）、要么是**启动失败**（Codex 的目录文件不允许为空），
+	// 写出去只会让用户更难看出问题所在。
+	if len(availableModelNames(cfg)) == 0 {
+		return Result{}, errf("没有可用的模型，无法配置 %s：请先在模型路由里配置至少一个带启用 Key 的模型", DisplayName(agent))
 	}
 
 	target, backup, err := resolveTargets(agent, opts)
@@ -278,16 +359,27 @@ func Configure(agent string, cfg *config.RouterConfig, mode string, opts Options
 		originalExists = fileExists(target)
 		originalContent = base64.StdEncoding.EncodeToString(current)
 	}
-	removeUnifiedModelOverrides := mode == ModeNative &&
-		preserveExistingBackup &&
-		backupMode(state) == ModeUnifiedModel
 
+	// 「集成前」的原始内容：遗留单模型键判定的唯一依据（见 AgentLegacyPlan）。
+	// 备份里的原始内容损坏时 legacyKnown 为 false，两个计划都空——保守不动用户数据。
+	legacyKnown := true
+	legacyContent := current
+	if preserveExistingBackup {
+		if decoded, decodeErr := decodeBackupContent(state); decodeErr == nil {
+			legacyContent = decoded
+		} else {
+			legacyKnown = false
+		}
+	}
+	legacyDoc, legacyKnown := legacyOriginalDoc(legacyKnown, legacyContent)
+	claudeLegacy := planClaudeLegacy(legacyKnown, legacyDoc)
+	codexLegacy := planCodexLegacy(legacyKnown, legacyDoc)
 	var updated []byte
 	var routeURL string
 	var extraTargets []extraTarget
 	switch agent {
 	case ClaudeCode:
-		if updated, err = configureClaudeCode(current, cfg, mode, removeUnifiedModelOverrides); err != nil {
+		if updated, err = configureClaudeCode(current, cfg, claudeLegacy); err != nil {
 			return Result{}, err
 		}
 		routeURL = RouterOrigin(cfg)
@@ -297,7 +389,11 @@ func Configure(agent string, cfg *config.RouterConfig, mode string, opts Options
 		}
 		routeURL = RouterOrigin(cfg) + "/v1"
 	default:
-		if updated, err = configureCodex(current, cfg, mode, removeUnifiedModelOverrides); err != nil {
+		// Codex 的模型清单落在单独一份目录文件里（config.toml 的
+		// model_catalog_json 指向它）。它和 auth.json 一样是「附加目标」：一起
+		// 备份、一起回退，绝不写进客户端会自行刷新的缓存文件。
+		catalogTarget := filepath.Join(filepath.Dir(target), codexCatalogFileName)
+		if updated, err = configureCodex(current, cfg, catalogTarget, codexLegacy); err != nil {
 			return Result{}, err
 		}
 		authTarget := filepath.Join(filepath.Dir(target), "auth.json")
@@ -309,7 +405,10 @@ func Configure(agent string, cfg *config.RouterConfig, mode string, opts Options
 		if err != nil {
 			return Result{}, err
 		}
-		extraTargets = []extraTarget{{Path: authTarget, Content: authContent}}
+		extraTargets = []extraTarget{
+			{Path: authTarget, Content: authContent},
+			{Path: catalogTarget, Content: codexCatalogJSON(cfg)},
+		}
 		routeURL = RouterOrigin(cfg) + "/v1"
 	}
 
@@ -324,7 +423,7 @@ func Configure(agent string, cfg *config.RouterConfig, mode string, opts Options
 		return Result{}, err
 	}
 	snapshots := fileSnapshots(append([]string{target}, extraTargetPaths(extraTargets)...))
-	if err := writeAtomic(backup, newBackupBytes(agent, mode, target, originalExists, originalContent, sha256Hex(updated), extraBackup)); err != nil {
+	if err := writeAtomic(backup, newBackupBytes(agent, target, originalExists, originalContent, sha256Hex(updated), extraBackup)); err != nil {
 		return Result{}, err
 	}
 	if err := writeOutputs(target, updated, extraTargets); err != nil {
@@ -344,7 +443,6 @@ func Configure(agent string, cfg *config.RouterConfig, mode string, opts Options
 		BackupPath:       backup,
 		RouterURL:        routeURL,
 		ExtraTargetPaths: extraTargetPaths(extraTargets),
-		Mode:             mode,
 	}, nil
 }
 
@@ -431,7 +529,6 @@ func Rollback(agent string, opts Options) (Result, error) {
 		RouterURL:        "",
 		ExtraTargetPaths: extraPaths,
 		Restored:         true,
-		Mode:             backupMode(state),
 	}, nil
 }
 
@@ -499,14 +596,8 @@ func validateAgent(agent string) error {
 	return errf("不支持的 Agent: %s", agent)
 }
 
-// validateMode 校验路由模式（agent_config.py:539）。
-func validateMode(mode string) error {
-	switch mode {
-	case ModeNative, ModeUnifiedModel:
-		return nil
-	}
-	return errf("不支持的 Agent 路由模式: %s", mode)
-}
+// validateMode 已随「路由模式」一并移除：集成不再有 native / unified-model 之分，
+// 一律注入全部可用模型。旧备份里的 mode 字段（v1/v2）现在只是一个被忽略的键。
 
 // extraTarget 是一个需要一并改写的附加文件。
 type extraTarget struct {
@@ -719,23 +810,8 @@ func loadBackupState(path string) *backupState {
 	return &backupState{raw: value}
 }
 
-// backupMode 从备份里恢复模式（agent_config.py:504）。
-//
-// version 1 的旧备份没有 mode 字段，参照实现按 unified-model 处理。
-func backupMode(state *backupState) string {
-	if state == nil {
-		return ""
-	}
-	mode := state.str("mode")
-	switch mode {
-	case ModeNative, ModeUnifiedModel:
-		return mode
-	}
-	if state.str("version") == "1" {
-		return ModeUnifiedModel
-	}
-	return ""
-}
+// backupMode 已随「路由模式」一并移除。旧备份（v1/v2）里的 mode 字段不再被读取：
+// 集成写出的内容与模式无关，回退只需要 original_content。
 
 // extraBackupStates 取出备份里的附加目标条目（agent_config.py:413）。
 func extraBackupStates(state *backupState) []*backupState {
