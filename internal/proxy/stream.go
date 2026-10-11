@@ -87,6 +87,12 @@ func (h *Handler) bufferedResponse(
 		// 响应体读到一半断开：参照实现会抛 httpx.RequestError 并冒泡，这里折算成
 		// 502——与「上游无响应」时的形状一致。
 		h.recordUpstreamFailure(context, key, durationMS, false)
+		if response.StatusCode != http.StatusOK {
+			// 状态码已经拿到了、只是体没读完：非 200 的口径仍要留痕。原因只能是读
+			// 失败本身——上游原文已经不可用（这就是本分支的处境）。
+			h.logUpstreamNotOK(context, key, response.StatusCode,
+				readableReason("读取上游响应体失败: "+readErr.Error()), durationMS, false)
+		}
 		return jsonResult(http.StatusBadGateway,
 			jsonErrorResponse("上游请求失败: RemoteProtocolError"))
 	}

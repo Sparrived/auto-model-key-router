@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/formatting"
 	"github.com/Sparrived/auto-model-key-router/internal/keypool"
 	"github.com/Sparrived/auto-model-key-router/internal/proxysupport"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
@@ -392,6 +394,14 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	}
 
 	if context.IsStream {
+		if response.StatusCode != http.StatusOK {
+			// 流式分支里的非 200：只有 2xx-非-200 与 3xx 能走到这里（>=400 在上面早退，
+			// 可重试状态码在更上面就返回了），而它们**读不得体**——这段响应体正是要转发
+			// 给下游的流。判据是「非 200 一律留痕」，所以这里单独补一条，原因只能来自
+			// 响应头（见 streamingNonOKReason）。
+			h.logUpstreamNotOK(context, key, response.StatusCode,
+				streamingNonOKReason(response), durationMS, false)
+		}
 		return attemptOutcome{stream: h.streamingResponse(
 			context, key, response, upstreamURL, started, useNative)}
 	}
@@ -640,10 +650,16 @@ func errorResponseFromContent(statusCode int, content []byte, anthropic bool) *a
 		proxysupport.JSONErrorResponseFromContent(statusCode, content, anthropic))
 }
 
-// recordUpstreamResponse 写一条带上游响应的指标行，并按状态码回写 key 健康。
+// recordUpstreamResponse 写一条带上游响应的指标行，按状态码回写 key 健康，并把非
+// 200 的响应记录成日志里的一条 WARNING。
 //
 // 移植 proxy_handler.py:1040。顺序固定：先写指标、再回写健康。状态码 <400 记成功
 // （**删除**冷却状态）；可重试状态码记失败（可能进入冷却）。
+//
+// 这里是上游响应体的汇合点：非流式的 bufferedResponse、流式的 >=400 分支、可重试
+// 分支、工具重试分支都经这里，所以非 200 的告警挂在这里不会漏掉它们。两处**不**经
+// 这里，各有原因：流式且状态码 <400 的响应（体要转发给下游，在 executeAttempt 的
+// 流式分支单独记），以及能力探测（probe.go 有自己的日志，状态码就在里面）。
 func (h *Handler) recordUpstreamResponse(
 	context *RequestContext,
 	key config.KeyConfig,
@@ -663,6 +679,10 @@ func (h *Handler) recordUpstreamResponse(
 		DurationMS:   durationMS,
 		FirstTokenMS: durationMS,
 	})
+	if statusCode != http.StatusOK {
+		h.logUpstreamNotOK(context, key, statusCode,
+			upstreamReasonText(content), durationMS, retried)
+	}
 	if statusCode < 400 {
 		context.pool().MarkSuccess(context.ModelID, key.Name)
 		return
@@ -671,6 +691,119 @@ func (h *Handler) recordUpstreamResponse(
 		retryAfter := runtime.RetryAfterSeconds(headers.Get("retry-after"), context.now())
 		context.pool().MarkFailure(context.ModelID, key.Name, &status, retryAfter)
 	}
+}
+
+// upstreamReasonLimit 是日志里「原因」字段的最大码点数。
+//
+// 上限不是可选项：这条日志要进 WebUI 的「服务日志」面板，而面板只取最近 64 KiB
+// （/api/logs）。上游的 HTML 错误页动辄几十 KB，一条就能把面板里其它行冲掉。
+// 300 个码点足够装下各类上游的标准错误文案。
+const upstreamReasonLimit = 300
+
+// logUpstreamNotOK 把一次非 200 的上游响应记成 WARNING，并带上可读的原因。
+//
+// **有意增补**：参照实现只在「原生端点回退」那一条分支上记日志，其余非 200 响应
+// 只进指标库。于是上游为什么拒绝（429 的限流说明、401 的密钥提示、网关的错误页）
+// 在日志里一个字都查不到，运维能看到的只有调用方那边报错。
+//
+// 三点刻意的取舍：
+//   - **判据是 `!= 200` 而不是 `>= 400`**。本服务不跟随重定向（internal/upstream 的
+//     noRedirect 复刻 httpx 的 follow_redirects=False），3xx 会原样回来：非流式从
+//     bufferedResponse 汇进来，流式在 executeAttempt 的流式分支单独记。只要不是 200，
+//     对调用方而言就是一次没有结果的推理，不能静默。
+//   - **级别一律是 Warn**，不按 5xx 提升到 Error。既有的 logNativeFallback 对 5xx 用
+//     Error 是照参照实现对齐的历史行为，而本告警的口径是「非 200 一律 warning」：
+//     按状态码分叉只会让同一件事在日志里占两个级别。
+//   - **retried 只描述这一轮**：true 表示 AMKR 还会在**同一个目标**上继续重试；false
+//     不代表这是整次下游请求的最终结果——首选失败后仍可能切到统一模型/任务的备选
+//     （handler.go 的 runFallback），那时日志里会出现第二条。
+//
+// reason 取自上游响应体原文（与调用方拿到的错误体同源，见 upstreamReasonText），
+// **不做脱敏**：改写上游原话的风险大于收益，而这份日志落在本机、与配置里的上游
+// key 同属一个信任域。
+func (h *Handler) logUpstreamNotOK(
+	context *RequestContext,
+	key config.KeyConfig,
+	statusCode int,
+	reason string,
+	durationMS int64,
+	retried bool,
+) {
+	h.logger.Warn("上游返回非 200 响应",
+		"status", statusCode,
+		"reason", reason,
+		"model_id", context.ModelID,
+		"requested_model_id", context.RequestedModelID,
+		"key_name", key.Name,
+		"provider", key.Provider,
+		"base_url", key.BaseURL,
+		"upstream_model", upstreamModelOr(context.ModelID, key.UpstreamModel),
+		"workspace", context.Workspace,
+		"path", "/v1/"+context.Path,
+		"stream", context.IsStream,
+		"retried", retried,
+		"duration_ms", durationMS)
+}
+
+// upstreamReasonText 从上游响应体里抽出一句可读的原因。
+//
+// 候选顺序与 proxysupport.AnthropicErrorResponse 相同（error.message → error 字符串
+// → 顶层 message），因为两者面对的是同一批上游错误体。但**接受规则不同，不能互相
+// 替代**：这里只认非空字符串（message 是数字/布尔/数组时视作「不是一句话」，退到
+// 原文），error 没有有效 message 时还会继续看顶层 message，而且完全不做协议转换——
+// 调用方看到的错误体仍由 JSONErrorResponseFromContent 产出，它的兜底文案是「上游
+// 请求失败」，拿它当原因会把「上游到底说了什么」抹掉，而那正是本次要补的东西。
+//
+// 空体给出明确文案而不是空串：日志里只剩一个 status 时，读的人分不清「上游什么都
+// 没说」与「AMKR 没去读」。非 JSON（网关 HTML、纯文本）按 UTF-8 宽容解码后截断。
+func upstreamReasonText(content []byte) string {
+	if len(content) == 0 {
+		return "响应体为空"
+	}
+	if data, err := canonical.Parse(content); err == nil {
+		for _, candidate := range []*canonical.Value{
+			data.Lookup("error").Lookup("message"),
+			data.Lookup("error"),
+			data.Lookup("message"),
+		} {
+			if !candidate.IsString() {
+				continue
+			}
+			if text := readableReason(candidate.Str); text != "" {
+				return text
+			}
+		}
+	}
+	text := readableReason(strings.ToValidUTF8(string(content), "\uFFFD"))
+	if text == "" {
+		return "响应体为空"
+	}
+	return text
+}
+
+// streamingNonOKReason 给「读不得体的流式非 200 响应」凑一句原因。
+//
+// 这类响应（2xx-非-200、3xx）的体是**下游要用的流**，读了就等于把它吞掉，因此原因
+// 只能来自响应头：3xx 给出 Location——AMKR 不跟随重定向，得让人看见上游把请求指到
+// 哪儿去了；其余只能说明体没有被读。
+func streamingNonOKReason(response *http.Response) string {
+	if location := response.Header.Get("location"); location != "" {
+		return readableReason("上游要求重定向到 " + location + "（AMKR 不跟随重定向）")
+	}
+	return "流式响应未读取响应体，无法给出上游原文"
+}
+
+// readableReason 归一化一句写进日志的原因：折叠空白 + 按码点截断。
+//
+// 折叠不负责「防止日志被拆成多行」——那由 logfiles 的 handler 对属性值做转义保证
+// （见 internal/logfiles/handler.go），这里只是让换行与缩进在 64 KiB 的面板里更好读。
+func readableReason(text string) string {
+	return formatting.ShortText(collapseWhitespace(text), upstreamReasonLimit)
+}
+
+// collapseWhitespace 把连续空白折成一个空格并去掉首尾空白。
+func collapseWhitespace(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 // extractUsage 解析响应体并抽取 usage。
