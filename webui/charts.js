@@ -20,15 +20,18 @@ const PAD = { top: 16, right: 16, bottom: 30, left: 60 };
 
 // 统一的描边宽度与配色语义色名。
 const TONE_VAR = {
-  primary: "var(--md-primary)",
-  secondary: "var(--md-secondary-variant)",
-  error: "var(--md-error)",
-  neutral: "var(--md-on-surface-variant)",
+  primary: "var(--chart-primary)",
+  secondary: "var(--chart-secondary)",
+  good: "var(--tone-good)",
+  warn: "var(--tone-warn)",
+  bad: "var(--tone-bad)",
+  error: "var(--tone-bad)",
+  neutral: "var(--chart-neutral)",
 };
 
 // 轴标签字体走 CSS（.chart .axis-label），不在这里写内联样式：
 // SVG 表现属性不支持 var()，写成 font-family="var(--font)" 会被当作字面字族名而失效。
-const AXIS_TEXT = { "font-size": "10" };
+const AXIS_TEXT = { "font-size": "11" };
 
 function sizing(host, draw) {
   const render = () => {
@@ -370,7 +373,7 @@ export function donut({ ratio, label, caption, size = 168, tone = "primary", emp
 
   const track = svg("circle", {
     cx: center, cy: center, r: radius, fill: "none",
-    stroke: "var(--md-outline)", "stroke-width": stroke,
+    stroke: "var(--ui-divider)", "stroke-width": stroke,
   });
   const arc = svg("circle", {
     cx: center, cy: center, r: radius, fill: "none",
@@ -571,7 +574,7 @@ export function sankey({ links, layers, metricLabel, height = 420, formatValue: 
     // 颜色按**起点节点名**分配：同一个工作空间/模型的流出保持同色，方便顺着
     // 一条流看下去。色板只用 styles.css 里真实定义的变量——写一个不存在的
     // var() 会让 fill 变成 none（流带整片消失），而不是回退到某个默认色。
-    const palette = ["var(--md-primary)", "var(--md-secondary-variant)", "var(--md-error)", "var(--md-on-surface-variant)", "var(--md-primary-variant)"];
+    const palette = ["var(--chart-primary)", "var(--chart-secondary)", "var(--chart-tertiary)", "var(--chart-neutral)", "var(--chart-fourth)", "var(--chart-fifth)"];
     const colorOf = new Map();
     const colorFor = (name) => {
       if (!colorOf.has(name)) colorOf.set(name, palette[colorOf.size % palette.length]);

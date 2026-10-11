@@ -12,7 +12,7 @@ import {
 } from "../dom.js";
 import { api } from "../api.js";
 import {
-  card, cardHead, stat, statGrid5, statSkeleton, notice, badge, empty, skeleton, render,
+  card, cardHead, stat, statSkeleton, notice, badge, empty, skeleton, render,
   buttonNode, segmented, freshness, progressBar, toast,
 } from "../ui.js";
 import { icon } from "../icons.js";
@@ -201,7 +201,7 @@ function kpiTiles(metrics, points, bucketSeconds) {
   const statusTone = metrics.router_status === "red" ? "bad"
     : metrics.router_status === "yellow" ? "warn" : null;
 
-  return statGrid5(
+  const tiles = [
     stat("当前 RPM", formatCount(currentRpm), `近 ${metrics.rate_window_seconds || 60} 秒窗口`, {
       unit: "次/分", iconName: "bolt", tone: statusTone,
     }),
@@ -248,7 +248,12 @@ function kpiTiles(metrics, points, bucketSeconds) {
         iconName: "activity",
       }),
     costTile(metrics),
-  );
+  ];
+  tiles[0].classList.add("is-featured");
+  return {
+    primary: h("div.overview-primary", {}, tiles[0], tiles[1], tiles[3], tiles[9]),
+    secondary: h("div.overview-secondary", {}, tiles[2], tiles[4], tiles[5], tiles[6], tiles[7], tiles[8]),
+  };
 }
 
 // costTile 是"估算成本"KPI。
@@ -975,44 +980,31 @@ function draw(firstPaint = false) {
   }
 
   if (!metrics) {
-    // 10 张 / 5 列，与 kpiTiles 的真实网格对齐。
-    children.push(statSkeleton(10, 5));
+    const primary = statSkeleton(4);
+    primary.classList.add("overview-primary");
+    children.push(primary);
     children.push(card(cardHead("流量趋势"), skeleton("chart")));
     render(host, children);
     return;
   }
 
-  children.push(kpiTiles(metrics, points, bucketSeconds));
-  // 所有看板卡放进同一个栅格，而不是每排一个 .grid-12：
-  // 分开写时排内间距是 16px、排间却是 .content 的 24px，横向纵向对不上，
-  // 整体节奏显得松散。合成一个栅格后，所有间隙统一为 gap。
-  // 每排仍按最高卡等高（见 styles.css 的说明），因此排内底边平齐。
-  //
-  // 排序按"从实时到历史"：脉搏 → 热力图 → 趋势 → 请求流 → 构成与排行。
+  const kpis = kpiTiles(metrics, points, bucketSeconds);
+  children.push(kpis.primary);
+  // 主图优先：8:4 的视觉比例只在足够宽时出现，窄屏两张同时成为整行。
+  children.push(h("div.overview-focus", {}, trendCard(), compositionCard(metrics)));
+  children.push(kpis.secondary, streamCard());
+  // 深入分析仍保留，按实时、周期、配置入口与明细组织，不删除任何原有读数。
   children.push(h("div.grid-12", {},
-    // 实时脉搏紧跟在 KPI 下方并占满整行：它和 KPI 是同一个时间尺度上的两种读法。
     h("div.col-12", {}, pulseCard(points, bucketSeconds)),
-    // 趋势与统一视图固定 6+6：<=1024px 时 col-7/col-8 会变成整行，若这里是
-    // 8+4，窄档会把 unifiedCard 剩成半行；6+6 在半宽档仍然是 6+6，四档都排满。
-    h("div.col-6", {}, trendCard()),
-    h("div.col-6", {}, unifiedCard()),
-    // 热力图是"一眼看节律"的图，占满整行；24 个小时列塞进 col-4 每格只剩十几像素。
     h("div.col-12", {}, heatmapCard()),
-    // 请求流独占一整行：它要一列一组地给出「谁从哪儿来 / 走了哪条路 / 花了多少
-    // Token / 结果如何」四组读数，半宽（col-6）会把模型名、来源与 Token 挤成省略号。
-    // 之前它与右边那列的「结果构成 + Token 构成」两张图同排，图表看不出受损，
-    // 受损的正是请求流这一侧。
-    h("div.col-12", {}, streamCard()),
+    h("div.col-12", {}, unifiedCard()),
     // 两张堆叠柱各占半宽并排：它们画的是同一份 points、同一个桶宽，列宽相等，
     // 横轴因此仍然完全对齐，并排看"结果结构"与"Token 结构"才读得出同步异动。
     h("div.col-6", {}, outcomeCard(points, bucketSeconds)),
     h("div.col-6", {}, tokenBreakdownCard(points, bucketSeconds)),
-    h("div.col-4", {}, compositionCard(metrics)),
-    h("div.col-4", {}, statusCard(metrics)),
-    h("div.col-4", {}, statusCodeCard(metrics)),
-    h("div.col-4", {}, waterfallCard(metrics)),
-    h("div.col-4", {}, rankingCard("模型调用排行", metrics.models, "模型")),
-    h("div.col-4", {}, rankingCard("调用方排行", metrics.caller_types, "调用方")),
+    h("div.col-12", {}, h("div.overview-distribution", {}, statusCard(metrics), statusCodeCard(metrics), waterfallCard(metrics))),
+    h("div.col-6", {}, rankingCard("模型调用排行", metrics.models, "模型")),
+    h("div.col-6", {}, rankingCard("调用方排行", metrics.caller_types, "调用方")),
     h("div.col-6", {}, rankingCard("上游 Token 排行", metrics.upstream_models, "上游模型的 Token", {
       value: (stats) => stats.total_tokens,
       tone: "secondary",
