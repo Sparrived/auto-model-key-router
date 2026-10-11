@@ -16,6 +16,9 @@
 //     普通路径由 defer 承担。
 //  3. **冷却过滤是软的**：可用集合为空时回退到「只排除 excluded」的集合，
 //     冷却中的 key 仍可能被再次选中（key_pool.py:214）。这是刻意的降级。
+//     唯一的例外是**余额不足**：欠费账号不参与这条软回退，宁可回 503 也不再打它一次
+//     （放行一次就等于每个请求都试一次，自动限流也就无从谈起）。这一条是产品决策，
+//     见 keypool 的「余额不足的自动限流」与 docs/USAGE.md。
 //  4. **`payload` 为空或没有 model 键时字节级透传**，不做任何适配、不注入
 //     stream_options（proxy_support.py:95）。
 //
@@ -23,6 +26,11 @@
 // multipart 处理、畸形请求体显式 400。三者都可通过 Options 关掉以回到逐字一致
 // 的参照行为（见 BodyPolicy / MultipartPolicy / DefaultMaxUpstreamCallsPerRequest），
 // 与参照实现比对时走的正是「关掉」档。
+//
+// 此外还有一项**参照实现没有的能力**：余额不足的自动限流与恢复（判定在 keypool，
+// 接入点在 retry.go 的 recordUpstreamResponse）。它没有 Options 开关，只能由配置的
+// `key_balance_cooldown_seconds` 关掉（写 0 = 逐字一致的参照行为）；之所以不做成
+// Options，是因为它要在**配置热重载**后也保持一致——开关散在两个地方迟早对不上。
 package proxy
 
 import (
@@ -35,6 +43,7 @@ import (
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/keypool"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 	"github.com/Sparrived/auto-model-key-router/internal/upstream"
 )
@@ -103,6 +112,20 @@ type KeyPool interface {
 	ReleaseKey(modelID, keyName string)
 	MarkSuccess(modelID, keyName string)
 	MarkFailure(modelID, keyName string, statusCode *int, retryAfter *float64)
+	// MarkBalanceExhausted 按 (模型, key) 记一次「余额不足」，返回限流窗口（秒）与
+	// 连续命中次数；IsBalanceExhausted 回答该 key 所属**账号**是否仍在窗口内。
+	//
+	// 用两个方法而不是把欠费塞进 MarkFailure 的入参：欠费的窗口、退避与清除时机都与
+	// 普通失败不同（见 keypool.BalanceState），混在一起会让「429 冷却 300 秒」和
+	// 「欠费退避 30 分钟」共用一条分支。
+	MarkBalanceExhausted(modelID, keyName, reason string) (float64, int)
+	IsBalanceExhausted(modelID, keyName string) bool
+	// BalanceState 返回欠费记录本身（不看窗口是否到期），只用于日志与诊断：恢复日志
+	// 要记在「窗口刚过、半开试成功」这一刻，那时 IsBalanceExhausted 已经是假了。
+	BalanceState(modelID, keyName string) (keypool.BalanceState, bool)
+	// BalanceLimitedKeys 返回模型的候选 key 总数与其中因欠费被限流的数量，只用于
+	// 选路失败时的诊断（不参与决策）。
+	BalanceLimitedKeys(modelID string, accessKey *config.AccessKeyConfig) (limited, total int)
 	SupportsNativeEndpoint(baseURL, routePath string) *bool
 	UpdateNativeEndpoint(baseURL string, supported bool, routePath, reason string) error
 }

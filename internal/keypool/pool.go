@@ -8,6 +8,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
+	"github.com/Sparrived/auto-model-key-router/internal/formatting"
 )
 
 // accessKeyProviders 返回某把访问密钥允许的供应商集合；nil 表示不限制。
@@ -94,8 +95,17 @@ type KeyPool struct {
 	reasoningEffort map[string]string
 	aliases         map[string]string
 
+	// credentials 是 (模型真实 ID, key 名) → 上游账号标识，见 credentialID。
+	//
+	// 之所以预先算好而不是在选路时现算：选路在每次请求的关键路径上，而账号标识是
+	// sha256；配置里的 key 数量固定，算一次就够，配置热重载时自然重建。
+	credentials map[[2]string]string
+
 	failureThreshold int
 	cooldownSeconds  float64
+	// balanceCooldownSeconds 是「余额不足」的**首次**限流窗口；后续命中按次数翻倍，
+	// 上限 MaxBalanceCooldownSeconds。0 表示关闭这项机制。
+	balanceCooldownSeconds float64
 
 	// unifiedPlans 是 unified-model 伪模型的分族计划，键即
 	// config.UnifiedPlanNames 里的名字（default / image / embeddings / speech /
@@ -142,6 +152,14 @@ func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 	}
 	p.failureThreshold = cfg.KeyFailureThreshold
 	p.cooldownSeconds = cfg.KeyCooldownSeconds
+	p.balanceCooldownSeconds = cfg.KeyBalanceCooldownSeconds
+
+	p.credentials = map[[2]string]string{}
+	for _, model := range cfg.Models {
+		for _, key := range model.Keys {
+			p.credentials[[2]string{model.ID, key.Name}] = credentialID(key)
+		}
+	}
 
 	p.aliases = map[string]string{}
 	for _, model := range cfg.Models {
@@ -539,6 +557,12 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 //
 // 冷却过滤是**软**的：可用集合为空时会回退到「仅排除 excluded」的集合，因此
 // 冷却中的 key 仍可能被选中。这是刻意的降级策略，避免全部冷却时彻底不可用。
+//
+// **欠费是这条降级的唯一例外**：余额不足的账号在软回退里也不放行（剩下的候选仍会
+// 借用冷却中的 key）。两条理由：冷却（429/5xx）是「暂时」，欠费是「现在一定不行」，
+// 放它进来只会把同一个 402 原样转给调用方；而且放行一次就等于每来一个请求都试一次，
+// 「自动限流」也就无从谈起。全部账号都欠费时返回「没有可用 key」（503），由调用方
+// 决定怎么处理——这正是它比一个上游欠费错误更好处理的情形。
 func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.AccessKeyConfig, affinityKey string) (config.KeyConfig, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -567,15 +591,21 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 
 	available := make([]config.KeyConfig, 0, len(keys))
 	for _, key := range keys {
-		if !excludedSet[key.Name] && !p.health.IsCoolingDown(modelID, key.Name) {
-			available = append(available, key)
+		if excludedSet[key.Name] || p.health.IsCoolingDown(modelID, key.Name) {
+			continue
 		}
+		if p.balanceExhaustedLocked(modelID, key) {
+			continue
+		}
+		available = append(available, key)
 	}
 	if len(available) == 0 {
+		// 软回退：冷却中的 key 可以放行（既定降级），欠费的账号不行——见函数顶部说明。
 		for _, key := range keys {
-			if !excludedSet[key.Name] {
-				available = append(available, key)
+			if excludedSet[key.Name] || p.balanceExhaustedLocked(modelID, key) {
+				continue
 			}
+			available = append(available, key)
 		}
 	}
 	if len(available) == 0 {
@@ -678,10 +708,16 @@ func (p *KeyPool) ActiveCount(modelID, keyName string) int {
 }
 
 // MarkSuccess 记录成功。
+//
+// 成功同时清掉该账号的**欠费状态**：一次成功的上游调用就是「这个账号现在有钱」唯一
+// 可信的证据，比等退避窗口到期更准也更快。这是「在可用时自动恢复」的落点，也是为什么
+// 欠费状态不必单独做后台探测——试探用的就是真实流量。
 func (p *KeyPool) MarkSuccess(modelID, keyName string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.health.MarkSuccess(p.resolveModelID(modelID), keyName)
+	resolved := p.resolveModelID(modelID)
+	p.health.MarkSuccess(resolved, keyName)
+	p.health.ClearBalanceExhausted(p.credentials[[2]string{resolved, keyName}])
 }
 
 // MarkFailure 记录失败。
@@ -699,6 +735,85 @@ func (p *KeyPool) IsCoolingDown(modelID, keyName string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.health.IsCoolingDown(p.resolveModelID(modelID), keyName)
+}
+
+// MarkBalanceExhausted 记一次「余额不足」，返回本次限流窗口（秒）与连续命中次数。
+//
+// 记账落在**账号**上（见 credentialID），因此在 A 模型上发现的欠费会同时把该账号在
+// B 模型上挡掉——欠费说的就是账号，不是某一条路由。
+func (p *KeyPool) MarkBalanceExhausted(modelID, keyName, reason string) (float64, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	resolved := p.resolveModelID(modelID)
+	return p.health.MarkBalanceExhausted(
+		p.credentials[[2]string{resolved, keyName}], reason, p.balanceCooldownSeconds)
+}
+
+// IsBalanceExhausted 报告某 key 所属账号是否仍在欠费限流窗口内。
+//
+// 选路用的是这个判据（窗口内不放行）。要看「这个账号有没有欠费记录」得用 BalanceState：
+// 窗口一过它就为假，而恢复日志恰恰要记在窗口刚过的那次成功上。
+func (p *KeyPool) IsBalanceExhausted(modelID, keyName string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	resolved := p.resolveModelID(modelID)
+	return p.health.IsBalanceExhausted(p.credentials[[2]string{resolved, keyName}])
+}
+
+// BalanceState 返回某 key 所属账号的欠费记录，与窗口是否到期无关。
+//
+// 与 IsBalanceExhausted 的分工是刻意的：
+//   - 选路只在窗口内排除（IsBalanceExhausted）；
+//   - 日志与诊断要看**有没有这条记录**，否则窗口一过就再也看不出这个账号曾经欠费，
+//     「账号余额恢复」这条日志也就永远不会出现在最主要的恢复路径（半开试成功）上。
+func (p *KeyPool) BalanceState(modelID, keyName string) (BalanceState, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	resolved := p.resolveModelID(modelID)
+	return p.health.BalanceExhausted(p.credentials[[2]string{resolved, keyName}])
+}
+
+// BalanceLimitedKeys 返回模型下的候选 key 总数与其中因欠费被限流的数量。
+//
+// 只给选路失败时的诊断用（回答「为什么没有可用 key」），不参与任何决策：排除逻辑
+// 在 NextKey 里，两处各算一份迟早会漂移。访问密钥的作用域与选路一致（用同一个
+// keysForModelLocked），否则诊断会把作用域外的 key 也算进去。
+func (p *KeyPool) BalanceLimitedKeys(modelID string, accessKey *config.AccessKeyConfig) (limited, total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	resolved := p.resolveModelID(modelID)
+	keys := p.keysForModelLocked(resolved, accessKey)
+	for _, key := range keys {
+		if p.health.IsBalanceExhausted(p.credentials[[2]string{resolved, key.Name}]) {
+			limited++
+		}
+	}
+	return limited, len(keys)
+}
+
+// balanceExhaustedLocked 报告该 key 所属账号是否被欠费限流。调用方须持锁，且 modelID
+// 必须已经过 resolveModelID 归一（credentialID 的键用的是配置里的模型 ID）。
+func (p *KeyPool) balanceExhaustedLocked(modelID string, key config.KeyConfig) bool {
+	return p.health.IsBalanceExhausted(p.credentials[[2]string{modelID, key.Name}])
+}
+
+// credentialID 返回一个 key 对应的**上游账号**标识。
+//
+// 用凭据指纹而不是 (模型, key 名)：key 名只在单个模型内唯一（config 的去重闭包按模型
+// 作用域），「同名不同账号」与「同账号不同名」两种情况都存在，而欠费说的是账号。指纹
+// 与 /api 的凭据指纹同一口径（sha256 前 12 位），日志里对得上人。
+//
+// 没有 api_key 的 key（本地网关、免鉴权上游）退回「供应商 + 基址」：这类部署里账号就是
+// 那个端点；退回 key 名则会让同一端点上的一堆 key 各自记账，等于失去了账号级语义。
+// 两者都空时返回空串，调用方（健康状态表）会拒绝记账。
+func credentialID(key config.KeyConfig) string {
+	if key.APIKey != "" {
+		return formatting.KeyFingerprint(key.APIKey)
+	}
+	if key.Provider == "" && key.BaseURL == "" {
+		return ""
+	}
+	return key.Provider + "@" + key.BaseURL
 }
 
 // EndpointCapabilityStates 返回所有 URL 的探测状态（供管理 API）。

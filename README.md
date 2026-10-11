@@ -8,6 +8,7 @@ AMKR 是单个 Go 二进制：配置、WebUI 静态资产（`//go:embed`）与 S
 
 - **按模型管理 Key**：Key 属于供应商（`providers.*.keys`），模型通过 `targets[]`（`{provider, key, upstream_model}`）绑定一个或多个 Key；同一 Key 可服务多个模型，支持 `round_robin`、`priority`、`only_first`。
 - **失败切换与冷却**：遇到 `401/403/429/5xx` 等可重试错误时自动重试或切换 Key，并在进程内临时冷却异常 Key。
+- **余额不足自动限流**：上游回「欠费」（`402`，或响应体里写明 `Insufficient Balance` / `insufficient_quota` / `credit balance is too low` / `欠费` 等）时，把该**账号**按更长的窗口自动限流（首次 300 秒、按连续确认翻倍，上限 30 分钟），有别的 Key 就换别的、候选全都被限流时直接回 503 而不再打上游；窗口到期自动半开重试，任意一次成功立刻恢复（发现欠费的那一次请求仍如实返回上游错误）。见 [冷却规则](docs/USAGE.md#7-路由模式与失败切换)。
 - **统一模型名**：客户端固定请求 `unified-model`，真实模型和固定 Key 可在路由器侧随时切换。
 - **任务路由**：把任务名（`TASK_XXXXXX`）直接当模型名传，由路由器决定用哪个模型（首选 + 备选）和哪组采样参数；调用方改不了这些参数。任务名只在工作空间内唯一，用 `X-AMKR-Workspace` 头隔离不同团队的任务集合。
 - **每个 Key 独立探测**：模型清单按 Key 缓存（同一供应商不同 Key 可见模型可能不同），添加 Key 时自动探测该 Key，也可在 WebUI 的供应商页或管理 API 手动刷新。
@@ -285,6 +286,7 @@ amkr --version
   "max_retries": 2,
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
+  "key_balance_cooldown_seconds": 300,
   "local_api_key": "amkr_your-local-api-key",
   "providers": {
     "openai": {

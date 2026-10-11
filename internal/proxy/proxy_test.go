@@ -91,6 +91,11 @@ func newTestEnvRaw(t *testing.T, cfg *config.RouterConfig, options Options) *tes
 	if cfg.KeyCooldownSeconds == 0 {
 		cfg.KeyCooldownSeconds = 60
 	}
+	// 与生产同口径：配置解析给了 300 秒的默认值，测试里手搓的 RouterConfig 若留 0
+	// 就等于「关闭余额限流」，会让相关用例静默变成空转。
+	if cfg.KeyBalanceCooldownSeconds == 0 {
+		cfg.KeyBalanceCooldownSeconds = 300
+	}
 	if cfg.ReasoningEffortByModel == nil {
 		cfg.ReasoningEffortByModel = map[string]string{}
 	}

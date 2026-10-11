@@ -49,6 +49,19 @@ func (h *Handler) handleSingleTarget(context *RequestContext) attempt {
 	for attemptIndex := 0; attemptIndex < context.Attempts; attemptIndex++ {
 		selected, selectionError := h.selectKey(context, excluded)
 		if selectionError != nil {
+			// 候选全被「余额不足」限流，而这次请求**已经拿到过上游的真实响应**
+			// （429/403 这类可重试状态码 + 欠费文案）：如实把它交给调用方。
+			//
+			// 否则会出这样一条链：单 key 部署 + OpenAI 的 429 insufficient_quota →
+			// 第 0 轮记下限流并返回可重试错误 → 第 1 轮候选集合为空 → 503「模型 X 没有
+			// 可用 key」。调用方与按状态码告警的监控同时失去上游原文与重试语义，而这
+			// 恰恰是我们自己造成的、并非上游的事实。
+			//
+			// 只在「候选全是欠费限流」时走这条路：候选因 excluded/冷却而空是既有语义
+			// （重试预算用完时回 503），不在本次改动范围内。
+			if lastError != nil && h.allCandidatesBalanceLimited(context) {
+				return lastError
+			}
 			return selectionError
 		}
 		key := *selected // 每轮独立副本，避免闭包捕获到下一轮的值
@@ -461,6 +474,11 @@ func (h *Handler) selectKey(context *RequestContext, excluded map[string]bool) (
 // `KeyError(model_id)`（⇒ 404「模型未配置」），`ErrNoUsableKey` 对应
 // `RuntimeError("模型 X 没有可用 key")`（⇒ 503，文本原样回给调用方）。用哨兵错误
 // 而不是 Python 的异常类做分支，因为后者是实现细节。
+//
+// 503 的分支多记一条日志（**有意增补**）：余额不足的账号被全部限流之后，这里就是
+// 调用方看到 503 的唯一原因，「模型 X 没有可用 key」这句话本身指不出该去充值——而
+// 对外文案是既定契约，不能为了塞进原因就改它。计数取自 keypool 的同一份判定，因此
+// 日志里的数字与真正被排除的候选恒等。
 func (h *Handler) keySelectionFailure(context *RequestContext, err error) attempt {
 	if errors.Is(err, keypool.ErrUnknownModel) || errors.Is(err, keypool.ErrNoUnifiedModel) {
 		h.logModelNotConfigured(context.Path, context.RequestedModelID, context.ModelID,
@@ -473,7 +491,34 @@ func (h *Handler) keySelectionFailure(context *RequestContext, err error) attemp
 			"访问密钥 "+context.AccessKey.Name+" 无权访问模型 key: "+context.RequestedModelName+
 				"["+*context.RequestedKeyName+"]"))
 	}
+	if limited, total := context.pool().BalanceLimitedKeys(context.ModelID, context.AccessKey); limited > 0 {
+		// 分两种说法：全都被限流时原因就是余额；只有一部分时，余额只是「候选少了」
+		// 的原因之一，把它说成唯一原因会让人查错方向。
+		reason := "部分候选 Key 因账号余额不足被限流，其余候选也不可用"
+		if limited == total {
+			reason = "全部候选 Key 的账号余额不足，已被自动限流"
+		}
+		h.logger.Warn("没有可用 key",
+			"model_id", context.ModelID,
+			"requested_model_id", context.RequestedModelID,
+			"key_count", total,
+			"balance_limited", limited,
+			"path", "/v1/"+context.Path,
+			"workspace", context.Workspace,
+			"reason", reason)
+	}
 	return jsonResult(http.StatusServiceUnavailable, jsonErrorResponse(err.Error()))
+}
+
+// allCandidatesBalanceLimited 报告该模型的候选是否**全部**处于欠费限流中。
+//
+// 判据与 keySelectionFailure 的日志同源（都问 keypool 要一份计数），因此日志里那句
+// 「全部候选 Key 的账号余额不足」与这里的返回恒等——两处各算一份迟早会漂移。
+// 无候选（total == 0）时为假：那是别的失败（未知模型、作用域过滤后为空），不该被
+// 说成余额问题。
+func (h *Handler) allCandidatesBalanceLimited(context *RequestContext) bool {
+	limited, total := context.pool().BalanceLimitedKeys(context.ModelID, context.AccessKey)
+	return total > 0 && limited == total
 }
 
 // hasRoute 报告显式配置了某个方言的上游路由。
@@ -684,13 +729,82 @@ func (h *Handler) recordUpstreamResponse(
 			upstreamReasonText(content), durationMS, retried)
 	}
 	if statusCode < 400 {
+		// 成功时先看是不是「欠费刚恢复」。顺序不可交换：MarkSuccess 会清掉欠费状态，
+		// 清完再问就永远问不出「它刚刚还是欠费的」。
+		//
+		// 判据必须是**有没有欠费记录**，而不是「窗口还没到期」：最主要的恢复路径是
+		// 「窗口到期 → 半开放行 → 这次成功」，那时窗口早就过了，用窗口判定的话这条
+		// 恢复日志永远不会出现，而它是「自动恢复」唯一的对外观测面。
+		if state, found := context.pool().BalanceState(context.ModelID, key.Name); found {
+			h.logBalanceRecovered(context, key, state)
+		}
 		context.pool().MarkSuccess(context.ModelID, key.Name)
 		return
+	}
+	if keypool.InsufficientBalance(statusCode, content) {
+		// 余额不足**不**走普通失败计数：它不是「这次不巧」，而是「这个账号现在一定
+		// 不行」。走那条路会让一次欠费既占掉失败名额，又只拿到普通冷却（上限 300 秒），
+		// 然后每 5 分钟重来一遍——这正是要修的行为。
+		reason := balanceReason(statusCode, content)
+		window, attempts := context.pool().MarkBalanceExhausted(context.ModelID, key.Name, reason)
+		if window > 0 {
+			h.logBalanceExhausted(context, key, statusCode, reason, window, attempts)
+			return
+		}
+		// 窗口为 0 有两种来路：`key_balance_cooldown_seconds` 取 0（用户显式关掉这项
+		// 机制），或是这个 key 连账号标识都算不出来。两种情况下都必须**接着往下走**，
+		// 不能因为「认出了欠费」反而比改动前更宽松——一个带欠费文案的 429 至少还该进
+		// 普通冷却，这与「关掉机制 = 回到旧行为」的约定一致。
 	}
 	if IsRetryableStatus(statusCode) {
 		retryAfter := runtime.RetryAfterSeconds(headers.Get("retry-after"), context.now())
 		context.pool().MarkFailure(context.ModelID, key.Name, &status, retryAfter)
 	}
+}
+
+// logBalanceExhausted 记录一次「账号余额不足，已自动限流」。
+//
+// 这条日志是这项机制唯一的对外观测面——Key 健康状态不通过 /health 或管理 API 暴露
+// （见 docs/API.md）——因此判据必须写在里面：状态码、上游原话、限流窗口、第几次命中。
+// 少了上游原话，读日志的人只能看到一个账号被挡在门外，却分不清是上游真欠费还是
+// AMKR 认错了（判定是保守的字符串匹配，误伤概率不为零）。
+func (h *Handler) logBalanceExhausted(
+	context *RequestContext,
+	key config.KeyConfig,
+	statusCode int,
+	reason string,
+	window float64,
+	attempts int,
+) {
+	h.logger.Warn("账号余额不足，已自动限流",
+		"status", statusCode,
+		"reason", reason,
+		"key_name", key.Name,
+		"provider", key.Provider,
+		"base_url", key.BaseURL,
+		"api_key_fingerprint", formatting.KeyFingerprint(key.APIKey),
+		"model_id", context.ModelID,
+		"requested_model_id", context.RequestedModelID,
+		"workspace", context.Workspace,
+		"cooldown_seconds", window,
+		"attempts", attempts)
+}
+
+// logBalanceRecovered 记录「账号余额恢复，已重新参与路由」。
+//
+// 与上一条成对：一次成功请求就是「这个账号有钱了」的证据，这里如实报告它回到了路由里。
+// 没有这条，日志上只会留下限流那一条，读的人会以为账号一直没恢复。带上欠费记录本身
+// （命中的信号与累计次数），是为了让恢复日志与限流日志能对上号。
+func (h *Handler) logBalanceRecovered(context *RequestContext, key config.KeyConfig, state keypool.BalanceState) {
+	h.logger.Info("账号余额恢复，已重新参与路由",
+		"reason", state.Reason,
+		"attempts", state.Attempts,
+		"key_name", key.Name,
+		"provider", key.Provider,
+		"base_url", key.BaseURL,
+		"api_key_fingerprint", formatting.KeyFingerprint(key.APIKey),
+		"model_id", context.ModelID,
+		"workspace", context.Workspace)
 }
 
 // upstreamReasonLimit 是日志里「原因」字段的最大码点数。

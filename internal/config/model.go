@@ -296,20 +296,26 @@ func (u *UnifiedModelConfig) SetPlan(name string, plan *RoutePlan) {
 
 // RouterConfig 是解析并校验后的完整运行配置。
 type RouterConfig struct {
-	Host                     string
-	Port                     int
-	RequestTimeout           float64
-	MaxRetries               int
-	KeyFailureThreshold      int
-	KeyCooldownSeconds       float64
-	EndpointCapabilitiesPath string
-	MetricsDBPath            string
-	LogFilePath              string
-	LocalAPIKey              string
-	Models                   []ModelConfig
-	StreamFirstByteTimeout   float64
-	StreamIdleTimeout        float64
-	Providers                []ProviderConfig
+	Host                string
+	Port                int
+	RequestTimeout      float64
+	MaxRetries          int
+	KeyFailureThreshold int
+	KeyCooldownSeconds  float64
+	// KeyBalanceCooldownSeconds 是「余额不足」的首次限流窗口（秒）。
+	//
+	// 与 KeyCooldownSeconds 分开：冷却表达「先躲一会儿」，余额不足表达「这个账号现在
+	// 一定不行」，后者的窗口要长得多、而且按命中次数翻倍（上限 keypool 的
+	// MaxBalanceCooldownSeconds）。取 0 表示关闭这项机制。
+	KeyBalanceCooldownSeconds float64
+	EndpointCapabilitiesPath  string
+	MetricsDBPath             string
+	LogFilePath               string
+	LocalAPIKey               string
+	Models                    []ModelConfig
+	StreamFirstByteTimeout    float64
+	StreamIdleTimeout         float64
+	Providers                 []ProviderConfig
 	// UpstreamRoutes 是「上游 URL -> {模式: 路径}」。
 	//
 	// 重要：它**只**由 providers[].routes 汇总而来。配置文件顶层的
@@ -403,6 +409,18 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 		cooldown = 0
 	}
 	config.KeyCooldownSeconds = cooldown
+
+	// 默认 300 秒：普通冷却上限也是 300 秒，第一次判定的窗口与它对齐，之后按命中次数
+	// 翻倍（5 → 10 → 20 → 30 分钟）。默认值刻意**不是** 0：欠费账号被反复选中正是这项
+	// 配置要修的行为，想关掉它得显式写 0。
+	balanceCooldown, err := floatOr(raw.Lookup("key_balance_cooldown_seconds"), 300)
+	if err != nil {
+		return nil, err
+	}
+	if balanceCooldown < 0 {
+		balanceCooldown = 0
+	}
+	config.KeyBalanceCooldownSeconds = balanceCooldown
 
 	config.EndpointCapabilitiesPath = pathOr(raw, "endpoint_capabilities_path", "key_state_path", "")
 	if config.EndpointCapabilitiesPath == "" {

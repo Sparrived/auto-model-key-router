@@ -8,6 +8,7 @@
   "max_retries": 2,
   "key_failure_threshold": 2,
   "key_cooldown_seconds": 60,
+  "key_balance_cooldown_seconds": 300,
   "endpoint_capabilities_path": "",
   "metrics_db_path": "",
   "log_file_path": "",
