@@ -15,12 +15,11 @@
 //  4. **显示的是剩余额度**，不是已用。这一页回答"还能用多久"，显示已用会把 18% 剩余
 //     读成"还早"。
 
-import { h, errorText, formatCount, truncate } from "../dom.js";
+import { h, errorText, formatCount } from "../dom.js";
 import { api } from "../api.js";
-import { providerIcon } from "../brand-icons.js";
 import {
   badge, buttonNode, card, cardHead, dialog, empty, field, freshness, input, loading,
-  notice, pageHead, render, stat, statGrid, table, toast, copyableMono, progressBar,
+  notice, pageHead, render, stat, statGrid, toast, copyableMono, progressBar,
 } from "../ui.js";
 
 const state = {
@@ -29,7 +28,6 @@ const state = {
   report: null,
   keyword: "",
   filterStatus: "all",
-  viewMode: "table",
 };
 
 let host = null;
@@ -191,7 +189,7 @@ function subscriptionCard(entry) {
   // 时差（server_time_offset_ms），而这两家没有这样的字段——凭空造一个偏移只会让倒计时
   // 更不准。剩下的偏差就是浏览器本机时钟与对端之差，正常机器上是秒级。
   const body = windows.length
-    ? h("div", { style: quotaGridStyle }, windows.map((window) => quotaRing(window, 0)))
+    ? h("div", { style: quotaBarGridStyle }, windows.map((window) => quotaBar(window, 0)))
     : notice(subscriptionHint(entry), "info");
 
   return card(
@@ -214,14 +212,16 @@ function subscriptionHint(entry) {
   return `${parts.join("，")}。`;
 }
 
-// 订阅卡片里的环用 grid 而不是 CPA 表格行的 ringRowStyle（固定两列）：卡片比表格行宽，
-// 三个窗口（OpenCode Go 的 5 小时/7 天/30 天）用 auto-fit 一行排开更好读，窄屏也会
-// 自己落回两列、一列。
-const quotaGridStyle = {
+// 额度横条的统一栅格：订阅卡片、账号额度组、逐模型额度三处共用同一份。
+//
+// 圆环时代这里有两份网格（订阅卡片一份 auto-fit、账号组内固定两列），理由是"环"近方形、
+// 宽容器里能多排几列；换成长条之后三处的诉求就一致了——条得够宽才放得下「窗口名 +
+// 倒计时 + 百分比」那一行头部，同时不该被拉成整行高，所以合并成一份，靠 auto-fit 折行。
+const quotaBarGridStyle = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(64px, 1fr))",
-  gap: "10px 12px",
-  justifyItems: "start",
+  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+  gap: "10px 16px",
+  alignItems: "start",
 };
 
 function instanceCard(instance) {
@@ -280,7 +280,6 @@ function instanceCard(instance) {
   const countSpan = h("span.toolbar-count");
   const contentHost = h("div.instance-accounts-host");
   const filtersHost = h("div.toolbar-filters");
-  const viewHost = h("div.toolbar-view");
 
   function getFilteredAccounts() {
     const kw = (state.keyword || "").trim().toLowerCase();
@@ -305,15 +304,13 @@ function instanceCard(instance) {
     });
   }
 
+  // 账号只以卡片一种形态列出：这一页的读数（额度横条 + 调用统计 + 十分钟采样）在卡片里
+  // 才排得开，表格行把四个窗口塞进一格之后又高又空。少一种视图就少一份要跟着改的排版，
+  // 所以这里没有视图切换，"显示 N / M" 只跟着搜索与筛选走。
   function renderView() {
     const filteredAccounts = getFilteredAccounts();
     countSpan.replaceChildren(`显示 ${filteredAccounts.length} / ${accounts.length}`);
-
-    const view = state.viewMode === "grid"
-      ? accountCardsGrid(filteredAccounts, Number(offset) || 0)
-      : table(accountColumns(), filteredAccounts, "没有找到匹配的账号。");
-
-    render(contentHost, view);
+    render(contentHost, accountCardsGrid(filteredAccounts, Number(offset) || 0));
   }
 
   function filterButton(label, key, count) {
@@ -338,34 +335,7 @@ function instanceCard(instance) {
     );
   }
 
-  function renderViewToggle() {
-    render(viewHost,
-      buttonNode("表格", {
-        small: true,
-        variant: state.viewMode === "table" ? "secondary" : "text",
-        iconName: "layers",
-        onClick: () => {
-          state.viewMode = "table";
-          renderViewToggle();
-          renderView();
-        },
-      }),
-      buttonNode("卡片", {
-        small: true,
-        variant: state.viewMode === "grid" ? "secondary" : "text",
-        iconName: "overview",
-        onClick: () => {
-          state.viewMode = "grid";
-          renderViewToggle();
-          renderView();
-        },
-      }),
-      countSpan,
-    );
-  }
-
   renderFilters();
-  renderViewToggle();
   renderView();
 
   const searchInput = input({
@@ -378,10 +348,12 @@ function instanceCard(instance) {
     },
   });
 
+  // 计数挂在 toolbar-meta 上（margin-left: auto 把它推到右端）：视图切换取消之后，
+  // 它成了这条工具栏唯一右对齐的元素，仍要能一眼看出筛选后还剩几条。
   const toolbar = h("div.accounts-toolbar", {},
     h("div.toolbar-search", {}, searchInput),
     filtersHost,
-    viewHost,
+    h("div.toolbar-meta", {}, countSpan),
   );
 
   return card(
@@ -438,97 +410,6 @@ function accountCardsGrid(accounts, defaultOffset) {
         ),
       );
     }),
-  );
-}
-
-function accountColumns() {
-  return [
-    { key: "account", label: "账号", render: accountCell },
-    { key: "provider", label: "供应商", render: providerCell },
-    { key: "status", label: "状态", render: statusCell },
-    // 额度列不钉死宽度：内容是「两组 × 两环」，本身有宽度。钉成 44% 后，宽屏上额度列
-    // 多出来的那几百像素全是空白（环挤在左端），而账号列的长文件名反被挤成两行。
-    { key: "quota", label: "剩余额度", render: quotaCell },
-    {
-      key: "calls", label: "成功 / 失败", numeric: true,
-      render: callsCell,
-    },
-  ];
-}
-
-function providerCell(account) {
-  const p = account.provider || "未知";
-  return h("div.cell-stack", {},
-    h("div", { style: { display: "flex", alignItems: "center", gap: "6px" } },
-      providerIcon(p, "", { size: 16 }),
-      badge(p, "info"),
-    ),
-  );
-}
-
-function statusCell(account) {
-  const b = statusBadge(account);
-  const items = [b];
-  if (account.status_message) {
-    items.push(h("span.cell-sub", { title: account.status_message }, truncate(account.status_message, 24)));
-  } else if (account.disabled) {
-    items.push(h("span.cell-sub", "已从调度池剔除"));
-  } else if (account.unavailable) {
-    items.push(h("span.cell-sub", "对端限流冷却"));
-  }
-  return h("div.cell-stack", {}, ...items);
-}
-
-function callsCell(account) {
-  const success = Number(account.success) || 0;
-  const failed = Number(account.failed) || 0;
-  const total = success + failed;
-  const rateText = total > 0 ? `${((success / total) * 100).toFixed(1)}%` : "-";
-  const rateNum = total > 0 ? (success / total) * 100 : 0;
-  const hasFails = failed > 0;
-
-  return h("div.account-traffic-panel", {},
-    h("div.traffic-head-row", {},
-      h("span.traffic-total", `${formatCount(total)} 次调用`),
-      h("div.traffic-split-counts", {},
-        h("span.count-success", { title: "成功请求" }, `✓ ${formatCount(success)}`),
-        h("span.count-sep", "/"),
-        h("span.count-failed" + (hasFails ? ".has-fails" : ""), { title: "失败请求" }, `✗ ${formatCount(failed)}`),
-      ),
-    ),
-    h("span", { style: { display: "none" } }, `${formatCount(account.success)} / ${formatCount(account.failed)}`),
-    total > 0
-      ? h("div.traffic-rate-row", {},
-          progressBar(rateNum, hasFails && rateNum < 98 ? "warn" : "good"),
-          h("span.traffic-rate-text", `${rateText} 成功率`),
-        )
-      : h("span.cell-sub", "暂无调用采样"),
-    recentBars(account.recent_requests),
-  );
-}
-
-// 账号标题退回文件名：CPA 的 label 常常是空的，只显示 label 会出现一整列空白。
-function accountCell(account) {
-  const title = account.label || account.name || "未命名账号";
-  const email = account.email;
-  const filename = account.name;
-  const hasIndex = account.auth_index !== undefined && account.auth_index !== null && account.auth_index !== "";
-
-  const detailLines = [];
-  if (email && email !== title) {
-    detailLines.push(h("div.account-subtext", email));
-  }
-  if (filename && filename !== title) {
-    detailLines.push(h("div.account-subtext", { title: "CPA 凭据文件" }, filename));
-  }
-
-  return h("div.account-identity-cell", {},
-    h("div.identity-head", {},
-      hasIndex ? h("span.auth-index-chip", { title: `凭据索引 #${account.auth_index}` }, `#${account.auth_index}`) : null,
-      h("span.account-title", title),
-    ),
-    ...detailLines,
-    accountMeta(account),
   );
 }
 
@@ -599,7 +480,7 @@ function quotaCell(account) {
               badge(healthLabel, healthTone),
             )
           : null,
-        h("div", { style: ringRowStyle }, ...group.windows.map((window) => quotaRing(window, offset))),
+        h("div", { style: quotaBarGridStyle }, ...group.windows.map((window) => quotaBar(window, offset))),
       );
     })),
     ...extras,
@@ -609,27 +490,15 @@ function quotaCell(account) {
 // 额度组的排版：一行放两个（列宽不够时自动落回一个）。
 //
 // Antigravity 这类 provider 的额度天然是两组（Gemini 一组、Claude 与 GPT 一组），两组竖着
-// 叠会各占一整行：表格行被撑到近三百像素，而每组的环只占列宽的一小截，于是又高又空。
-// 并排之后组与组对齐、行高减半，宽列也不再留一大片空白。
+// 叠会各占一整行、行高翻倍；并排之后组与组对齐，宽列也不再留一大片空白。
 //
-// 用 auto-fit 而不是写死两列：写死两列在窄屏会把每个组压到环都放不下（环有 52px 的
-// min-width，压不下就溢出到表格外），auto-fit 在窄屏落回一列。
+// 用 auto-fit 而不是写死两列：写死两列在窄屏会把每个组压到横条都放不下（条里有
+// 「窗口名 + 倒计时 + 百分比」一行头部，压不下就溢出到卡片外），auto-fit 在窄屏落回一列。
 const groupGridStyle = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
   gap: "10px 20px",
   alignItems: "start",
-};
-
-// 一组里的环固定两个一行（grid 而不是 flex-wrap）。
-//
-// flex-wrap 是按列宽走的：列一宽，三个四个窗口就挤成一排，百分比与窗口名连成一串小数；
-// 固定两列之后每组的节奏一致，读数也排得整齐。
-const ringRowStyle = {
-  display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-  gap: "8px 12px",
-  justifyItems: "start",
 };
 
 // 按「模型组」切分窗口。
@@ -651,18 +520,20 @@ function groupWindows(windows) {
   return groups;
 }
 
-// 一个窗口 = 一个圆环 + 环里的百分比 + 窗口名 + 极短的重置提示。
+// 一个窗口 = 一条带光泽的横条：头部一行放「窗口名 / 重置倒计时 / 剩余百分比」，
+// 下面是一条进度轨道。
 //
-// 为什么不用横条：一行账号常有四个窗口（Antigravity 就是两组 × 两个窗口），横条每个占满
-// 一整行，四条就把这块撑到大半屏；圆环把这些压进两行，百分比数字直接写在环里，也不必再
-// 把读数对齐到右端。
+// 为什么从圆环换成横条：圆环把窗口名与倒计时竖着摞在环底下，一个窗口要占近 80px 高、
+// 52px 宽，两组四个窗口叠下来又高又难横向比较；横条把三件读数压进一行头部，轨道本身横着
+// 长，同组两条一对比就知道"哪条更紧"。质感由 CSS 三层叠出来（轨道内阴影、填充的纵向光泽
+// 渐变、填充外缘 1px 高光），不做动效——额度是静态读数，动起来只会干扰扫视。
 //
 // 上游那句说明（"You have used some of your weekly limit, it will fully refresh in
 // 5 days, 9 hours."）只进 title 提示、**不占版面**：它是"为什么只剩这么多"的解释，不是
 // 窗口名——旧版把它当标题画上去，看板上就出现了"某个窗口叫这么长一句话"的怪状，而它说的
 // 重置时间又与提示行里的倒计时重复了一遍。
-function quotaRing(window, offsetMs) {
-  // clampPercent 给的是 0..1 的比例，环里要的是百分数——先乘 100 再取整，
+function quotaBar(window, offsetMs) {
+  // clampPercent 给的是 0..1 的比例，条上要的是百分数——先乘 100 再取整，
   // 直接 round 比例只会得到 0 或 1（本文件的第一版就这么错过）。
   //
   // 取整用 floor 而不是 round：round 会把「只剩 99.6%」显示成 100%，等于替上游保证
@@ -677,59 +548,40 @@ function quotaRing(window, offsetMs) {
     window.description || null,
   ].filter(Boolean);
   const hint = resetHintText(window.reset_at, offsetMs);
-  return h("div.ring-item", {
-    title: details.join("\n"),
-    style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "3px", minWidth: "52px" },
-  },
-    // conic-gradient 画环：实色占 percent 对应的角度，其余用描边色。内圈盖住中心，
-    // 百分比写在里面——不引 SVG（页面别处也没用），一个 div 就够。
-    h("div.quota-ring", {
-      style: {
-        width: "46px",
-        height: "46px",
-        borderRadius: "50%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: `conic-gradient(${ringColor(window.remaining)} ${(percent * 3.6).toFixed(1)}deg, var(--md-outline) 0)`,
-      },
-    },
-      h("span.quota-ring-value", {
-        style: {
-          width: "34px",
-          height: "34px",
-          borderRadius: "50%",
-          background: "var(--md-surface)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: "12px",
-          fontWeight: "500",
-          fontVariantNumeric: "tabular-nums",
-        },
-      }, `${percent}%`),
+  const label = window.label || "额度";
+  return h("div.quota-bar", { title: details.join("\n") },
+    h("div.quota-bar-head", {},
+      h("span.quota-bar-label", {}, label),
+      hint ? h("span.quota-bar-reset", {}, hint) : null,
+      h("span.quota-bar-value", {}, `${percent}%`),
     ),
-    h("span.ring-label", {
-      style: { fontSize: "12px", color: "var(--md-on-surface-variant)" },
-    }, window.label),
-    hint
-      ? h("span.ring-reset", {
-        style: { fontSize: "11px", color: "var(--md-on-surface-variant)" },
-      }, hint)
-      : null,
+    // 轨道按进度条语义标注：读屏念出来的是「剩余百分之几」，而不是一条没有含义的色块。
+    h("div.quota-bar-track", {
+      role: "progressbar",
+      "aria-label": `${label} 剩余额度`,
+      "aria-valuenow": String(percent),
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+    },
+      h("div.quota-bar-fill", {
+        class: `tone-${quotaTone(window.remaining)}`,
+        style: { width: `${percent}%` },
+      }),
+    ),
   );
 }
 
-// 环色分界与横条时期的 toneClass 完全一致：≤5% 红（已经不好使了）、≤20% 橙（该去加号了）、
-// 其余主色。两处必须同源，否则"什么时候该报警"会随呈现形式变。
-function ringColor(remaining) {
+// 额度分档：≤5% 红（已经不好使了）、≤20% 橙（该去加号了）、其余主色。这里只返回档位名，
+// 具体颜色写在 styles.css 的 .quota-bar-fill.tone-* 里——阈值与着色各只有一处定义，
+// "什么时候该报警"就不会随呈现形式变。
+function quotaTone(remaining) {
   const value = clampPercent(remaining);
-  if (value <= 0.05) return "var(--md-error)";
-  if (value <= 0.2) return "#f9a825";
-  return "var(--md-primary)";
+  if (value <= 0.05) return "bad";
+  if (value <= 0.2) return "warn";
+  return "good";
 }
 
-// 圆环下面只留一个能扫的量级（"↻ 3 小时"），完整说法在 title 里。
+// 横条头部只留一个能扫的量级（"↻ 3 小时"），完整说法在 title 里。
 // 前缀 ↻ 不能省：光写"3 小时"读者得自己猜这是"还剩 3 小时"还是"还有 3 小时重置"。
 function resetHintText(resetAt, offsetMs) {
   if (!resetAt) return "";
@@ -781,7 +633,7 @@ function modelQuotaDetails(account, offsetMs) {
             h("span.bar-name", model),
             windows.length ? null : h("span.bar-value", "无信号"),
           ),
-          h("div", { style: ringRowStyle }, ...windows.map((window) => quotaRing(window, offsetMs))),
+          h("div", { style: quotaBarGridStyle }, ...windows.map((window) => quotaBar(window, offsetMs))),
         );
       })),
   );
@@ -847,7 +699,7 @@ function signalDetails(signals) {
 
 // —— 读数口径 ——
 
-// 剩余比例夹到 0..1：CPA 与上游都可能给出超界值，圆环的角度与告警分界都按这个前提算。
+// 剩余比例夹到 0..1：CPA 与上游都可能给出超界值，横条的宽度与告警分界都按这个前提算。
 function clampPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;

@@ -1,15 +1,17 @@
 // 账号资源页回归探针：用最小 DOM 垫片驱动真实的 webui/pages/accounts.js。
 //
-// 锁的是四件"代码里看不出来、坏了却很难发现"的事：
+// 锁的是五件"代码里看不出来、坏了却很难发现"的事：
 //
 //   1. 浏览器**不直接访问 CPA**，也**不直接访问订阅厂商**，而且进页面时**不把管理密钥
 //      拉下来**——管理密钥只在打开实例编辑框时才取。所有请求都必须落在 AMKR 自己的
 //      /api/ 下。订阅那部分的读数由服务端扇出，页面只拿结果。
 //   2. 这一页**不轮询**：进页面只发一次 /api/cpa-accounts（一次刷新要替每个实例问一遍
 //      账号、逐账号问额度，还要挨家问订阅用量，轮询会把对端与 AMKR 一起拖住）。
-//   3. 进度条画的是**剩余**比例，20% / 5% 两档颜色与读数一致——显示已用会把 18% 剩余
+//   3. 额度横条画的是**剩余**比例，20% / 5% 两档分档与读数一致——显示已用会把 18% 剩余
 //      读成"还早"，这一页的结论就全反了。
 //   4. 订阅条目**只读、按端点派生**：页面里没有"添加订阅"这种入口，删供应商就等于删条目。
+//   5. 账号**只以卡片列出**：表格视图与它的切换按钮都已移除，回来一个就等于多一套要跟着
+//      改的排版（表格行把四个额度窗口塞进一格之后又高又空）。
 //
 // 另外钉住故障隔离：一个实例连不上时，它的错误只出现在自己那块卡片上，另一个实例的
 // 账号照常列出；一条订阅读失败也不影响别的条目。
@@ -102,7 +104,7 @@ const findAll = (node, predicate, out = []) => {
   return out;
 };
 const hasClass = (node, name) =>
-  [node.className, node.attrs?.class].some((value) =>
+  [node?.className, node?.attrs?.class].some((value) =>
     String(value || "").split(/\s+/).includes(name));
 const byClass = (root, name) => findAll(root, (n) => hasClass(n, name));
 const byTag = (root, tag) => findAll(root, (n) => n.tagName === tag);
@@ -279,36 +281,42 @@ check("kpi_accounts_hint_has_usable_count",
 check("kpi_low_quota_merges_both_sides",
   statText(3).includes("2") && statText(3).includes("其中 2 个已用尽"), statText(3));
 
-// —— 圆环画的是剩余比例：角度、颜色、环里的数字三者同源 ——
-// 8 个环 = 订阅 4 个窗口（OpenCode Go 3 个 + Command Code 1 个，排在前）
-//        + 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口。
-// 逐模型额度用的就是同一套环，数量把两处都算上，才能保证没有窗口被漏画。
-const rings = byClass(host, "quota-ring");
-const ringValues = byClass(host, "quota-ring-value").map((node) => node.textContent);
-check("one_ring_per_window", rings.length === 8, String(rings.length));
-check("ring_degrees_match_percent",
-  rings[0]?.style.background.includes("316.8deg") && ringValues[0] === "88%",
-  `${rings[0]?.style.background} / ${ringValues[0]}`);
-// 订阅窗口的环色与 CPA 账号走同一套阈值：12% 橙、0% 红、75% 主色。
-check("subscription_rings_use_same_thresholds",
-  rings[1]?.style.background.includes("#f9a825") &&
-    rings[2]?.style.background.includes("var(--md-error)") &&
-    rings[3]?.style.background.includes("var(--md-primary)"),
-  `${rings[1]?.style.background} / ${rings[2]?.style.background} / ${rings[3]?.style.background}`);
-// 账号侧的 18% 与 3% 仍按老规矩着色（0.18 与 0.03）。
-check("ring_warn_and_drained_colors",
-  rings[4]?.style.background.includes("#f9a825") && rings[5]?.style.background.includes("var(--md-error)"),
-  `${rings[4]?.style.background} / ${rings[5]?.style.background}`);
-check("ring_healthy_has_no_alert_color",
-  ringValues[6] === "90%" && rings[6]?.style.background.includes("var(--md-primary)") &&
-    !rings[6]?.style.background.includes("#f9a825") && !rings[6]?.style.background.includes("--md-error"),
-  `${ringValues[6]} / ${rings[6]?.style.background}`);
+// —— 横条画的是剩余比例：轨道宽度、档位色、头部里的数字三者同源 ——
+// 8 条 = 订阅 4 个窗口（OpenCode Go 3 个 + Command Code 1 个，排在前）
+//      + 账号级 3 个窗口（5h / 7d / 7d_oi）+ 折叠区里那个模型的 1 个窗口。
+// 逐模型额度用的就是同一套横条，数量把两处都算上，才能保证没有窗口被漏画。
+const bars = byClass(host, "quota-bar");
+const barValues = byClass(host, "quota-bar-value").map((node) => node.textContent);
+const barFills = byClass(host, "quota-bar-fill");
+check("one_bar_per_window", bars.length === 8, String(bars.length));
+check("bar_width_matches_percent",
+  barFills[0]?.style.width === "88%" && barValues[0] === "88%",
+  `${barFills[0]?.style.width} / ${barValues[0]}`);
+// 订阅窗口的档位与 CPA 账号走同一套阈值：12% 橙、0% 红、75% 主色。
+// 具体颜色值住在 styles.css 的 .quota-bar-fill.tone-* 里，所以这里钉的是"落在哪一档"
+// ——阈值只有一份，换了呈现形式也不会出现两套报警线。
+check("subscription_bars_use_same_thresholds",
+  hasClass(barFills[1], "tone-warn") && hasClass(barFills[2], "tone-bad") && hasClass(barFills[3], "tone-good"),
+  `${barFills[1]?.className} / ${barFills[2]?.className} / ${barFills[3]?.className}`);
+// 账号侧的 18% 与 3% 仍按老规矩分档（0.18 与 0.03）。
+check("bar_warn_and_drained_tones",
+  hasClass(barFills[4], "tone-warn") && hasClass(barFills[5], "tone-bad"),
+  `${barFills[4]?.className} / ${barFills[5]?.className}`);
+check("bar_healthy_has_no_alert_tone",
+  barValues[6] === "90%" && hasClass(barFills[6], "tone-good") &&
+    !hasClass(barFills[6], "tone-warn") && !hasClass(barFills[6], "tone-bad"),
+  `${barValues[6]} / ${barFills[6]?.className}`);
+// 轨道要带进度条语义：读屏念出来的是「XX 剩余额度 88%」，而不是一条没有含义的色块。
+check("bar_track_is_progressbar",
+  bars[0]?.children.some((node) =>
+    node.attrs?.role === "progressbar" && node.attrs["aria-valuenow"] === "88") === true,
+  JSON.stringify(bars[0]?.children.map((node) => node.attrs)));
 // 来源、完整倒计时、上游那句说明都进 title；版面上只留极短的重置提示（"↻ 3 小时"）。
-check("ring_marks_source_and_reset",
+check("bar_marks_source_and_reset",
   hasTitle(host, "CPA 采集") && hasTitle(host, "已用尽") &&
     hasTitle(host, "3 小时 1 分钟后重置") && findText(host, "↻ 3 小时"));
 // 订阅窗口的来源写"现场查询"（CPA 那半边才有"CPA 采集"这个来源）。
-check("subscription_ring_source_is_live_query", hasTitle(host, "现场查询"));
+check("subscription_bar_source_is_live_query", hasTitle(host, "现场查询"));
 
 // —— 订阅卡片：出处、档位、数值项、原始信号 ——
 // 同一家可能配了多把 key，每把是独立的额度池，所以出处（provider · key）必须显示，
@@ -331,26 +339,26 @@ check("subscription_without_windows_explains",
 // —— 额度细节：这些都是 CPA 已经给了、AMKR 以前丢掉的东西 ——
 check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
 
-// —— 排版：额度组一行两个，组内环也两个一行 ——
+// —— 排版：额度组一行两个，横条三处共用同一份网格 ——
 // 垫片不算布局，所以这里只能钉结构、钉不了像素。但它挡得住"退回竖着叠"这类改动：组容器
-// 必须是 grid（两个组并排），组内的环行必须是固定两列（否则 flex-wrap 会把三四个环挤成
-// 一排，百分比与窗口名连成一串）。这正是表格行被撑到近三百像素、宽列一片空白的成因。
+// 必须是 grid（两个组并排），横条容器也必须是 grid（落回 flex-wrap 就会在窄屏把条挤成
+// 一条，窗口名与百分比连成一串）。这正是表格行被撑到近三百像素、宽列一片空白的成因。
 //
-// 只按 auto-fit 认会连订阅卡片一起数进来（订阅卡片用的是 minmax(64px) 的那一份网格），
-// 所以这里连 minmax 的宽度一起匹配，钉住的才是 CPA 那个分组容器。
+// 只按 auto-fit 认会把两种容器混在一起，所以这里连 minmax 的宽度一起匹配：
+// minmax(200px) 的是 CPA 的分组容器，minmax(150px) 的是横条容器。
 const groupRows = findAll(host, (node) =>
   node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(200px, 1fr))");
 check("quota_groups_side_by_side",
   groupRows.length === 1 && groupRows[0].style.display === "grid",
   `${groupRows.length} / ${groupRows[0]?.style.display}`);
-const ringRows = findAll(host, (node) =>
-  node.style?.gridTemplateColumns === "repeat(2, minmax(0, 1fr))");
-check("rings_two_per_row", ringRows.length >= 2, String(ringRows.length));
-// 订阅卡片的窗口用另一份网格（卡片比表格行宽，三四个环一行排开更好读），
-// 但它同样得是 grid——落回 flex-wrap 就会在窄屏把环挤成一条。
-const subscriptionGrids = findAll(host, (node) =>
-  node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(64px, 1fr))");
-check("subscription_windows_use_own_grid", subscriptionGrids.length === 2, String(subscriptionGrids.length));
+// 横条容器只有一份定义，三处共用：订阅卡片 2 张 + 账号额度组 1 个 + 逐模型额度 1 个。
+// 圆环时代这里是两份（"环"近方形，卡片比表格行宽、能多排几列），换成长条之后三处的诉求
+// 一致，再拆回两份只会让"条要多宽才放得下头部那一行"出现两个答案。
+const barGrids = findAll(host, (node) =>
+  node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(150px, 1fr))");
+check("bars_share_one_grid",
+  barGrids.length === 4 && barGrids.every((grid) => grid.style.display === "grid"),
+  String(barGrids.length));
 // 上游那句说明（"You have used some of your weekly limit…"）只进悬停提示，不占版面：
 // 旧版把它当窗口名画在进度条旁，于是看板上出现了"某个窗口叫这么长一句话"的怪状。
 check("window_description_only_in_tooltip",
@@ -376,18 +384,30 @@ const brokenSubCard = byClass(host, "card").find((card) =>
 check("broken_subscription_shows_own_error",
   brokenSubCard?.textContent.includes("不是 OpenCode Go 的订阅 key") === true,
   brokenSubCard?.textContent);
-check("broken_subscription_has_no_rings",
-  byClass(brokenSubCard || new FakeNode("x"), "quota-ring").length === 0);
+check("broken_subscription_has_no_bars",
+  byClass(brokenSubCard || new FakeNode("x"), "quota-bar").length === 0);
 
 // —— 故障隔离：坏实例的错只留在自己那块 ——
 const brokenCard = byClass(host, "card").find((card) => card.textContent.includes("备用 CPA"));
 check("broken_instance_shows_own_error",
   brokenCard?.textContent.includes("connection refused") === true, brokenCard?.textContent);
-check("broken_instance_has_no_table", byTag(brokenCard || new FakeNode("x"), "table").length === 0);
-const healthyTables = byClass(host, "table");
-check("healthy_instance_still_lists_accounts",
-  healthyTables.length === 1 && healthyTables[0].textContent.includes("claude-1.json"),
-  String(healthyTables.length));
+check("broken_instance_has_no_account_cards",
+  byClass(brokenCard || new FakeNode("x"), "account-card").length === 0);
+const healthyCards = byClass(host, "account-card");
+check("healthy_instance_lists_accounts_as_cards",
+  healthyCards.length === 3 && healthyCards.some((card) => card.textContent.includes("claude-1.json")),
+  String(healthyCards.length));
+
+// —— 只剩卡片：表格视图与它的切换按钮都不该再出现 ——
+// 这一页的读数（额度横条 + 调用统计 + 十分钟采样）在卡片里才排得开，表格行把四个额度窗口
+// 塞进一格之后又高又空。视图切换一旦回来，两个按钮就得各维护一套排版，所以钉死。
+check("no_table_view", byTag(host, "table").length === 0, String(byTag(host, "table").length));
+check("no_view_toggle",
+  !buttonWithText(host, "表格") && !buttonWithText(host, "卡片"),
+  byTag(host, "button").map((node) => node.textContent).join(" | "));
+check("card_grid_is_the_only_view",
+  byClass(host, "account-cards-grid").length === 1,
+  String(byClass(host, "account-cards-grid").length));
 
 // —— 管理密钥只在实例编辑框里出现，且是密码框 ——
 click(buttonWithText(host, "管理实例"));
