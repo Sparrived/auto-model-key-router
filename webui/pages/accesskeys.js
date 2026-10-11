@@ -260,49 +260,40 @@ function scopePicker({
 
   // 供应商快速分类筛选栏（模型选择器专用）
   let providerFilterBar = null;
-  function renderFilterTabs() {
+  function renderFilterTabs(focusValue = null) {
     if (!providerFilterBar) return;
     const linkedProviders = getLinkedProviders ? getLinkedProviders() : null;
     const hasLinkedRestricted = linkedProviders && !linkedProviders.unrestricted;
+    const filterButton = (label, value) => buttonNode(label, {
+      small: true,
+      variant: "text",
+      class: `model-filter-tab${providerFilter === value ? " is-active" : ""}`,
+      "data-filter-value": value,
+      onClick: () => {
+        providerFilter = value;
+        renderFilterTabs(value);
+        drawList();
+      },
+    });
 
-    const tabs = [
-      buttonNode("全部", {
-        small: true,
-        variant: "text",
-        class: `model-filter-tab${providerFilter === "all" ? " is-active" : ""}`,
-        onClick: () => { providerFilter = "all"; renderFilterTabs(); drawList(); },
-      }),
-    ];
-
-    if (hasLinkedRestricted) {
-      tabs.push(
-        buttonNode("仅看已选供应商", {
-          small: true,
-          variant: "text",
-          class: `model-filter-tab${providerFilter === "only_selected" ? " is-active" : ""}`,
-          onClick: () => { providerFilter = "only_selected"; renderFilterTabs(); drawList(); },
-        }),
-      );
-    }
+    const tabs = [filterButton("全部", "all")];
+    if (hasLinkedRestricted) tabs.push(filterButton("仅看已选供应商", "only_selected"));
 
     for (const pid of state.providerIds) {
       const count = state.providerToModels?.get(pid)?.size || 0;
-      if (count > 0) {
-        tabs.push(
-          buttonNode(`${pid} (${count})`, {
-            small: true,
-            variant: "text",
-            class: `model-filter-tab${providerFilter === pid ? " is-active" : ""}`,
-            onClick: () => { providerFilter = pid; renderFilterTabs(); drawList(); },
-          }),
-        );
-      }
+      if (count > 0) tabs.push(filterButton(`${pid} (${count})`, pid));
     }
 
     render(providerFilterBar,
       h("span.model-filter-label", "按供应商筛选:"),
       ...tabs,
     );
+    if (focusValue !== null) {
+      const target = [...providerFilterBar.querySelectorAll(".model-filter-tab")]
+        .find((node) => node.getAttribute("data-filter-value") === focusValue);
+      // render 会替换筛选按钮，恢复同一筛选项的键盘焦点，避免焦点落到 body。
+      target?.focus({ preventScroll: true });
+    }
   }
 
   if (isModelPicker && state.providerIds && state.providerIds.length > 0) {
