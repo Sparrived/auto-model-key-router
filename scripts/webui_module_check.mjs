@@ -13,7 +13,10 @@ const define = (name, value) =>
 
 // 最小浏览器垫片：只为让模块求值到"没有语法/导入错误"这一步。
 class FakeNode {
-  constructor(tag = "div") { this.tagName = tag; this.children = []; this.style = {}; this.attrs = {}; }
+  constructor(tag = "div") {
+    this.tagName = tag; this.children = []; this.style = {}; this.attrs = {};
+    this.classList = { add() {}, remove() {}, toggle() {} };
+  }
   append(...nodes) { this.children.push(...nodes.flat()); }
   appendChild(node) { this.children.push(node); return node; }
   replaceChildren(...nodes) { this.children = nodes.flat(); }
@@ -23,6 +26,8 @@ class FakeNode {
   removeEventListener() {}
   remove() {}
   querySelector() { return null; }
+  querySelectorAll() { return []; }
+  contains() { return false; }
   prepend() {}
   replaceWith() {}
   focus() {}

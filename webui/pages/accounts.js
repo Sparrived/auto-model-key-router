@@ -670,7 +670,7 @@ function recentBars(buckets) {
             width: "6px",
             height: `${height}px`,
             borderRadius: "2px",
-            background: failed ? "var(--md-error)" : "var(--md-primary)",
+            background: failed ? "var(--tone-bad)" : "var(--chart-primary)",
           },
         });
       }),

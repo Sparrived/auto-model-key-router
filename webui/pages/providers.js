@@ -721,7 +721,7 @@ function modelEditor(provider, key) {
         ? "端点提示（分组标题旁与卡片悬停）出自同一份读数，取不到时不显示。"
         : "端点提示只在目录可用时显示：名字规则给出的端点可能不准，宁可不显示。"));
 
-  return h("div", { style: { marginTop: "16px", padding: "16px", background: "#fafafa", borderRadius: "4px" } },
+  return h("div.model-editor-surface", {},
     h("div.card-head", h("h4", `Key ${key.name} 的服务模型`), countLabel),
     h("p.muted", "只显示该 Key 对外提供的模型；黄色卡片表示已启用但当前探测未发现。"),
     h("p.muted", "取消勾选一个模型会解除本 Key 与它的绑定；若它因此失去全部绑定，模型会被删除，"

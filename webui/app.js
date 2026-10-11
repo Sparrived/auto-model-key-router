@@ -74,6 +74,53 @@ let contentHost = null;
 let healthTimer = null;
 let metricsTimer = null;
 let renderedPage = null;
+let navHost = null;
+let navFootHost = null;
+let workspaceHost = null;
+let navBackdrop = null;
+let skipLinkHost = null;
+let navOpen = false;
+
+// 窄屏导航是有焦点约束的抽屉；健康轮询不重建它，用户操作不会被打断。
+function navFocusable() {
+  return [...(navHost?.querySelectorAll("button, a[href]") || [])]
+    .filter((node) => !node.disabled && node.getClientRects().length);
+}
+
+function setNavOpen(open, restoreFocus = true) {
+  navOpen = Boolean(open);
+  navHost?.classList.toggle("is-open", navOpen);
+  navBackdrop?.classList.toggle("is-visible", navOpen);
+  document.body.classList.toggle("nav-is-open", navOpen);
+  if (workspaceHost) workspaceHost.inert = navOpen;
+  if (skipLinkHost) {
+    skipLinkHost.inert = navOpen;
+    skipLinkHost.setAttribute("aria-hidden", String(navOpen));
+    if (navOpen) skipLinkHost.setAttribute("tabindex", "-1");
+    else skipLinkHost.removeAttribute("tabindex");
+  }
+  const trigger = barHost?.querySelector(".nav-toggle");
+  trigger?.setAttribute("aria-expanded", String(navOpen));
+  if (navOpen) {
+    navHost?.setAttribute("role", "dialog");
+    navHost?.setAttribute("aria-modal", "true");
+    // visibility 过渡开始后再聚焦，避免 Chromium 拒绝对隐藏节点的同步 focus。
+    // 兜底只在焦点仍位于抽屉外时生效，不能抢走用户已经移动到其他导航项的焦点。
+    const focusDrawer = () => {
+      if (!navOpen || navHost?.contains(document.activeElement)) return;
+      navFocusable()[0]?.focus({ preventScroll: true });
+    };
+    (globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0)))(focusDrawer);
+    setTimeout(focusDrawer, 220);
+  } else {
+    navHost?.removeAttribute("role");
+    navHost?.removeAttribute("aria-modal");
+    if (restoreFocus) {
+      trigger?.focus();
+      setTimeout(() => { if (!navOpen) barHost?.querySelector(".nav-toggle")?.focus(); }, 0);
+    }
+  }
+}
 
 // 页面订阅：页面重绘时重新注册，切页时清空，避免旧页面继续被通知。
 let tickListeners = new Set();
@@ -259,10 +306,11 @@ function buildBar() {
   const metrics = liveMetrics();
   const tone = serviceTone();
   return h("header.app-bar", {},
-    h("div.brand", {},
-      h("span.brand-mark", {}, icon("bolt", { size: 18 })),
-      h("div", {}, "AMKR", h("small", "Auto Model Key Router")),
-    ),
+    buttonNode("", {
+      class: "icon-btn nav-toggle", "aria-label": "打开主导航", "aria-controls": "main-nav",
+      "aria-expanded": String(navOpen), onClick: () => setNavOpen(true),
+    }, icon("menu", { size: 18 })),
+    h("div.shell-crumb", {}, "控制台", h("span.crumb-separator", "/"), h("strong", currentPage().label)),
     h("div.spacer"),
     h("div.live-pill", {},
       h("span.status-dot", { class: `tone-${tone}`, title: serviceLabel() }),
@@ -289,25 +337,37 @@ function buildBar() {
 }
 
 function buildNav() {
-  return h("nav.nav", { "aria-label": "主导航" },
-    PAGES.map((group) => h("div", {},
+  navFootHost = h("div.nav-foot-slot", navFoot());
+  return h("nav.nav", { id: "main-nav", "aria-label": "主导航" },
+    h("div.nav-brand", {},
+      h("span.brand-mark", {}, icon("routing", { size: 22 })),
+      h("div", {}, h("strong", "AMKR"), h("small", "Auto Model Key Router")),
+      buttonNode("", { class: "icon-btn nav-close", "aria-label": "关闭主导航", onClick: () => setNavOpen(false) }, icon("close", { size: 18 })),
+    ),
+    h("div.nav-links", {}, PAGES.map((group) => h("div", {},
       h("div.group-label", group.group),
       group.items.map((item) => h("button.nav-item", {
         type: "button",
         "aria-current": store.page === item.id ? "page" : null,
-        onClick: () => navigate(item.id),
+        onClick: () => {
+          const fromDrawer = navOpen;
+          const samePage = store.page === item.id;
+          setNavOpen(false, fromDrawer && samePage);
+          navigate(item.id);
+          if (fromDrawer && !samePage) contentHost?.focus({ preventScroll: true });
+        },
       }, icon(item.icon, { size: 18 }), h("span", item.label))),
-    )),
-    navFoot(),
+    ))),
+    navFootHost,
   );
 }
 
 function navFoot() {
   const health = store.health;
   return h("div.nav-foot", {},
-    h("div", {}, "版本 ", h("code", health?.version ? `v${health.version}` : "读取中")),
-    health?.base_url ? h("div", {}, "入口 ", h("code", { title: health.base_url }, health.base_url)) : null,
-    health?.webui_path ? h("div", {}, "界面 ", h("code", health.webui_path)) : null,
+    h("div.nav-service", {}, h("span.status-dot", { class: `tone-${serviceTone()}` }), serviceLabel()),
+    h("div.nav-version", {}, h("span", "本地路由实例"), h("span", health?.version ? `v${health.version}` : "读取中")),
+    health?.base_url ? h("code", { title: health.base_url }, health.base_url) : null,
   );
 }
 
@@ -315,7 +375,10 @@ function navFoot() {
 // 用独立槽位而不是 querySelector(".app-bar")，既不依赖节点查找，也不需要 prepend。
 function renderBar() {
   if (!barHost) return;
+  const focused = barHost.contains?.(document.activeElement) ? document.activeElement?.getAttribute("aria-label") : null;
   mount(barHost, buildBar());
+  if (navFootHost) mount(navFootHost, navFoot());
+  if (focused) [...barHost.querySelectorAll("button")].find((node) => node.getAttribute("aria-label") === focused)?.focus();
 }
 
 export function renderShell() {
@@ -330,11 +393,15 @@ export function renderShell() {
     redirectToLogin();
     return;
   }
-  const nav = buildNav();
-  contentHost = h("main.content", { id: "content" });
+  setNavOpen(false, false);
+  navHost = buildNav();
+  contentHost = h("main.content", { id: "content", tabindex: "-1" });
   barHost = h("div.bar-slot");
-  const shell = h("div.shell", nav, contentHost);
-  mount(appHost, barHost, shell);
+  workspaceHost = h("div.workspace", barHost, contentHost);
+  navBackdrop = h("div.nav-backdrop", { onClick: () => setNavOpen(false) });
+  skipLinkHost = h("a.skip-link", { href: "#content", onClick: (event) => { event.preventDefault(); contentHost.focus(); } }, "跳到页面内容");
+  const shell = h("div.shell", navHost, workspaceHost);
+  mount(appHost, skipLinkHost, navBackdrop, shell);
   renderBar();
   renderContent(true);
 }
@@ -427,6 +494,42 @@ async function boot() {
   root.append(appHost);
   installToastHost(root);
   store.page = pageFromHash();
+  document.addEventListener("keydown", (event) => {
+    if (!navOpen) return;
+    if (event.key === "Escape") { event.preventDefault(); setNavOpen(false); return; }
+    if (event.key !== "Tab") return;
+    const items = navFocusable();
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    const activeIndex = items.indexOf(document.activeElement);
+    // 可见性过渡期间浏览器可能仍把焦点留在 BODY；捕获首个 Tab，
+    // 不能让键盘焦点逃到抽屉外的工作区或跳过链接。
+    if (activeIndex < 0) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+      return;
+    }
+    if (event.shiftKey && activeIndex === 0) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && activeIndex === items.length - 1) { event.preventDefault(); first.focus(); }
+  }, true);
+  window.addEventListener("resize", () => {
+    const focusToggle = () => {
+      const toggle = barHost?.querySelector(".nav-toggle");
+      if (toggle?.getClientRects().length) toggle.focus({ preventScroll: true });
+    };
+    if (window.innerWidth <= 860) {
+      // 桌面导航会在窄屏隐藏；若焦点原本在其条目上，先转到可见的打开按钮。
+      if (!navOpen && navHost?.contains(document.activeElement)) {
+        focusToggle();
+        setTimeout(focusToggle, 0);
+      }
+      return;
+    }
+    if (!navOpen) return;
+    setNavOpen(false, false);
+    // 桌面断点会隐藏菜单/关闭按钮，焦点改落到仍可见的当前导航项。
+    (navHost?.querySelector('[aria-current="page"]') || contentHost)?.focus({ preventScroll: true });
+  });
 
   // 先挂 hash 监听：未授权时 renderShell 一律落回验证页，因此浏览器前进/后退或
   // 手改地址栏都无法绕过鉴权。

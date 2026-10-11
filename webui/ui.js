@@ -29,18 +29,37 @@ export function toast(message, tone = "info") {
 // —— 模态对话框 ——
 // closeOnBackdrop=false 用于"操作进行中不允许关闭"的场景。
 export function dialog({ title, body, actions = [], onClose, closeOnBackdrop = true }) {
+  const previousFocus = document.activeElement;
   const backdrop = h("div.backdrop", { role: "presentation" });
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     backdrop.remove();
     document.removeEventListener("keydown", onKey);
+    if (previousFocus?.isConnected) previousFocus.focus();
     if (onClose) onClose();
   };
   const onKey = (event) => {
-    if (event.key === "Escape" && closeOnBackdrop) close();
+    // 多层影响确认时只让最上层对话框处理键盘。
+    const layers = document.querySelectorAll(".backdrop");
+    if (layers[layers.length - 1] !== backdrop) return;
+    if (event.key === "Escape" && closeOnBackdrop) { event.preventDefault(); close(); }
+    if (event.key !== "Tab") return;
+    const items = [...panel.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href], [tabindex]')]
+      .filter((item) => item.tabIndex >= 0 && !item.disabled && item.getClientRects().length);
+    const first = items[0], last = items[items.length - 1];
+    if (!first) { event.preventDefault(); panel.focus(); return; }
+    const activeIndex = items.indexOf(document.activeElement);
+    if (activeIndex < 0 && (!panel.contains(document.activeElement) || document.activeElement === panel)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && activeIndex === 0) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && activeIndex === items.length - 1) { event.preventDefault(); first.focus(); }
   };
   const panel = h(
     "div.dialog",
-    { role: "dialog", "aria-modal": "true", "aria-label": typeof title === "string" ? title : "对话框" },
+    { role: "dialog", "aria-modal": "true", tabindex: "-1", "aria-label": typeof title === "string" ? title : "对话框" },
     h("div.dialog-head", {}, h("h3", title), buttonNode("", {
       variant: "text", small: true, "aria-label": "关闭", onClick: close,
     }, icon("close", { size: 16 }))),
@@ -54,7 +73,7 @@ export function dialog({ title, body, actions = [], onClose, closeOnBackdrop = t
   backdrop.append(panel);
   document.body.append(backdrop);
   const focusable = panel.querySelector("input, select, textarea, button");
-  if (focusable) focusable.focus();
+  (focusable || panel).focus();
   return { close, panel };
 }
 
@@ -110,7 +129,7 @@ export function cardHead(title, ...rest) {
 }
 
 // KPI 瓦片：值 + 单位 + 线索 +（可选）迷你趋势与环比。
-// 强调"读数"而不是"卡片"，因此不自带海拔，由父级 grid 统一对齐。
+// 主次布局由页面选择，数值与口径仍在共享组件内保持一致。
 //
 // trendPolarity 决定环比颜色的含义，必须由调用方明确指定：
 //   "inverse"（默认）—— 涨 = 红。适用于耗时、错误率这类"越低越好"的指标。
@@ -152,7 +171,7 @@ export function statGrid(...tiles) {
   return h("div.stat-grid", {}, tiles.flat().filter(Boolean));
 }
 
-// 5 列变体：给瓦片数能被 5 整除的看板用（概览 10 张、工作空间 5 张）。
+// 5 列变体：给瓦片数能被 5 整除的看板用（如工作空间 10 张）。
 // 单开一个函数而不是给 statGrid 加参数：它是变参的，插一个列数参数会把另外三处
 // 调用（用量统计 8 张、成本页 4 张、面板 4 张）一起卷进改动，而那几处都靠默认的
 // 4 列正好排满。

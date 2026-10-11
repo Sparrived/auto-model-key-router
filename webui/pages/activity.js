@@ -364,7 +364,7 @@ const COLUMNS = [
   { key: "requests", label: "请求", numeric: true, render: (row) => formatCount(row.stats.requests), sortValue: (row) => row.stats.requests },
   { key: "successes", label: "成功", numeric: true, render: (row) => formatCount(row.stats.successes), sortValue: (row) => row.stats.successes },
   { key: "failures", label: "失败", numeric: true, render: (row) => row.stats.failures
-      ? h("span", { style: { color: "var(--md-error)" } }, formatCount(row.stats.failures))
+      ? h("span", { style: { color: "var(--tone-bad)" } }, formatCount(row.stats.failures))
       : "0", sortValue: (row) => row.stats.failures },
   { key: "rate", label: "成功率", numeric: true, render: (row) => formatPercent(row.stats.successes, row.stats.requests), sortValue: (row) => (row.stats.requests ? row.stats.successes / row.stats.requests : -1) },
   { key: "tokens", label: "Token", numeric: true, render: (row) => formatCompact(row.stats.total_tokens), sortValue: (row) => row.stats.total_tokens },
