@@ -487,16 +487,22 @@ function quotaCell(account) {
   );
 }
 
-// 额度组的排版：一行放两个（列宽不够时自动落回一个）。
+// 额度组的排版：一行放两个（放不下就落回一个）。
 //
 // Antigravity 这类 provider 的额度天然是两组（Gemini 一组、Claude 与 GPT 一组），两组竖着
 // 叠会各占一整行、行高翻倍；并排之后组与组对齐，宽列也不再留一大片空白。
+//
+// 260px 这个下限是从「组容器的表头必须放得下」倒推的，不是随手取的值：并排的前提是本容器
+// 至少有 2×260 加 20 的间距，于是每个组至少 260px、内容区 240px，刚好装下最长的组名
+// （Claude and GPT models ≈ 130px）+ 健康徽标（≈ 67px）+ 两者之间的间距。下限放小到 200px
+// 时，1440 这种宽度会并排出两个 208px 的组，组名被省略成「Claude and GPT m…」、徽标也被
+// 裁掉一截——两个读数都读不全，比多占一行表头的高度糟得多。
 //
 // 用 auto-fit 而不是写死两列：写死两列在窄屏会把每个组压到横条都放不下（条里有
 // 「窗口名 + 倒计时 + 百分比」一行头部，压不下就溢出到卡片外），auto-fit 在窄屏落回一列。
 const groupGridStyle = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
   gap: "10px 20px",
   alignItems: "start",
 };

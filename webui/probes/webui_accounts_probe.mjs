@@ -345,9 +345,14 @@ check("window_group_heading", findText(host, "Claude 与 GPT 模型"));
 // 一条，窗口名与百分比连成一串）。这正是表格行被撑到近三百像素、宽列一片空白的成因。
 //
 // 只按 auto-fit 认会把两种容器混在一起，所以这里连 minmax 的宽度一起匹配：
-// minmax(200px) 的是 CPA 的分组容器，minmax(150px) 的是横条容器。
+// minmax(260px) 的是 CPA 的分组容器，minmax(150px) 的是横条容器。
+//
+// 分组容器的下限不能往回调小：并排的前提是容器至少有 2×下限加 20 的间距，也就是每个组
+// 至少"下限"那么宽，而组容器的表头（最长组名 ≈ 130px + 健康徽标 ≈ 67px）要 240px 才放得下。
+// 调到 200px 时 1440 那种宽度会并排出两个 208px 的组，组名被省略、徽标被裁——两个读数都读
+// 不全，浏览器实测过（组名 scrollWidth 130 / clientWidth 112、徽标 67 / 60）。
 const groupRows = findAll(host, (node) =>
-  node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(200px, 1fr))");
+  node.style?.gridTemplateColumns === "repeat(auto-fit, minmax(260px, 1fr))");
 check("quota_groups_side_by_side",
   groupRows.length === 1 && groupRows[0].style.display === "grid",
   `${groupRows.length} / ${groupRows[0]?.style.display}`);

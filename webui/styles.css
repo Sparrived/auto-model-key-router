@@ -597,6 +597,10 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
   display: flex;
   align-items: center;
   gap: 4px;
+  /* 四个筛选按钮横着排开约 317px，且各自 nowrap，所以窄到放不下时这一行会顶出视口
+     （实测 320px 视口溢出 37px）。工具栏本身已经是 flex-wrap: wrap，但内层这一行不换行
+     照样溢出——让它在放不下时把后几个按钮落到第二行，比整页横向滚动好。 */
+  flex-wrap: wrap;
 }
 /* 计数推到最右端：视图切换取消之后，它是这条工具栏上唯一右对齐的元素。 */
 .accounts-toolbar .toolbar-meta {
@@ -817,9 +821,14 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 }
 
 /* 卡片网格视图 */
+/* 轨道下限写成 min(360px, 100%) 而不是写死 360px：卡片是账号唯一的呈现形式了，而容器
+   可用宽度不足 360px 时（约 410px 以下的视口），写死的 360px 会把轨道撑出容器、整页横向
+   溢出并冒出横向滚动条（实测 390px 溢出 10px、360px 溢出 40px、320px 溢出 80px）。
+   旧版窄屏默认落在表格视图上，这个坑一直没露出来，去掉表格后它就成了默认行为。
+   容器够宽时 min() 取 360px，与原来逐像素一致；不够宽时取 100%，卡片跟着容器缩。 */
 .account-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
   gap: 14px;
 }
 .account-card {
