@@ -167,6 +167,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # 算 Full Changelog 的 compare 链接要用上一个 tag，而 checkout 默认只取一个提交，
+          # 历史 tag 不在本地，`git describe` 会空手而归。
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -235,11 +239,34 @@ jobs:
           path: dist/
 
       - name: 创建 GitHub Release
+        # 发布说明取自 CHANGELOG.md 里该版本的段落：本仓库的版本记录都写在那里，而
+        # 原先只用 `--generate-notes`——直接 push 到 master 的提交没有关联 PR，生成的
+        # 正文只有一行 compare 链接，等于发布页没有日志。CHANGELOG 里找不到该版本时
+        # 才退回自动生成，避免「有版本没日志」变成「有版本没发布」。
         if: steps.version.outputs.is_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-            --title "${GITHUB_REF#refs/tags/}" \
-            --generate-notes \
-            dist/amkr_* dist/checksums.txt
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          # 抽出 "## [VERSION]" 到下一个 "## [" 之间的内容；末尾补一个哨兵标题，保证
+          # 区间一定闭合——否则最后一版会被 `sed '$d'` 吃掉末尾一行正文。
+          { cat CHANGELOG.md; echo "## [__END__]"; } \
+            | sed -n "/^## \[${VERSION}\]/,/^## \[/p" | sed '$d' \
+            | sed '1{/^## \[/d}' > notes.md
+          if [ -s notes.md ]; then
+            PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+            if [ -n "$PREV" ]; then
+              printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
+                "$GITHUB_REPOSITORY" "$PREV" "$TAG" >> notes.md
+            fi
+            gh release create "$TAG" --title "$TAG" --notes-file notes.md \
+              dist/amkr_* dist/checksums.txt
+          else
+            echo "CHANGELOG.md 里没有 $VERSION 的段落，退回自动生成说明"
+            gh release create "$TAG" --title "$TAG" --generate-notes \
+              dist/amkr_* dist/checksums.txt
+          fi
+          echo "----- 发布说明（$VERSION）-----"
+          cat notes.md || true
