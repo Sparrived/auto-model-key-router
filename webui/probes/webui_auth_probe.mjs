@@ -41,6 +41,11 @@ class FakeNode {
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   setAttribute(key, value) { this.attrs[key] = String(value); }
   getAttribute(key) { return this.attrs[key]; }
+  removeAttribute(key) { delete this.attrs[key]; }
+  // 外壳的 setNavOpen 会开关跳转链接的 tabindex / aria-hidden，抽屉的焦点约束还要用
+  // getClientRects() 判断"这个节点是否可见"（空数组 = 不可见，会被排除出焦点链）。
+  // 垫片里的节点都当作可见，正是外壳渲染出来的元素的实际情况。
+  getClientRects() { return [{ width: 16, height: 16 }]; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   removeEventListener(type, fn) {
     this.listeners[type] = (this.listeners[type] || []).filter((item) => item !== fn);
@@ -50,6 +55,26 @@ class FakeNode {
   }
   querySelector() { return null; }
   focus() {}
+  // 忠实还原 classList：新外壳的 setNavOpen 会在 document.body 上 toggle 类名开关
+  // 抽屉状态（.nav-is-open），垫片缺了它会在 boot 阶段直接抛 TypeError。
+  // toggle(name, force) 的第二个参数按 DOM 语义处理——给了就以它为准。
+  get classList() {
+    const self = this;
+    const names = () => String(self.className).split(/\s+/).filter(Boolean);
+    const set = (list) => { self.className = list.join(" "); };
+    return {
+      add: (...add) => set([...new Set([...names(), ...add])]),
+      remove: (...drop) => set(names().filter((n) => !drop.includes(n))),
+      contains: (name) => names().includes(name),
+      toggle: (name, force) => {
+        const has = names().includes(name);
+        const next = force === undefined ? !has : Boolean(force);
+        if (next && !has) set([...names(), name]);
+        else if (!next && has) set(names().filter((n) => n !== name));
+        return next;
+      },
+    };
+  }
   // 忠实还原 isConnected：沿 parent 走到文档根才算已挂载。页面（概览/活动）用它
   // 跳过"离开后仍在途的重绘"，垫片若恒为 true/false 都会把这个判断测成另一回事。
   get isConnected() {
@@ -1091,23 +1116,31 @@ if (scenario === "stale_key_prompts_login") {
 } else if (scenario === "overview_reentry_paints_immediately") {
   // 首次进入：等异步数据落地，确认首页确实画出了 KPI 瓦片。
   await settle();
-  checks.firstEntryHasContent = byClass("stat-grid").length === 1;
-  // 概览是 10 张瓦片排 5 列（两整行）。列数写死在 CSS 的 .cols-5 里，这里同时
-  // 锁住"类名还在"和"瓦片数正好排满"，否则以后加第 11 张又会甩出孤儿行。
-  checks.overviewUsesFiveColumns = byClass("cols-5").length === 1;
+  // 概览的 KPI 分成主 4 张（.overview-primary，强调首张）与次 6 张（.overview-secondary）
+  // 两组，列数分别写死在 CSS 的 grid-template-columns 里。这里锁住"两组都在、每组瓦片
+  // 数正好排满、强调的是首张"，否则以后加第 11 张又会甩出孤儿行。
+  const classNames = (n) => `${n.className || ""} ${n.attrs?.class || ""}`.split(/\s+/);
+  const tilesIn = (host) => (host ? findAll(host, (n) => classNames(n).includes("stat")) : []);
+  const primaryHost = byClass("overview-primary");
+  const primaryTiles = tilesIn(primaryHost[0]);
+  checks.firstEntryHasContent = primaryHost.length === 1 && primaryTiles.length === 4;
+  checks.overviewPrimaryTilesFeaturedFirst = primaryTiles.length === 4
+    && classNames(primaryTiles[0]).includes("is-featured");
+  // 主 4 张 + 次 6 张合计 10 张：原判据"加第 11 张会甩出孤儿行"按新分组保留下来。
+  checks.overviewSecondaryHasSixTiles = tilesIn(byClass("overview-secondary")[0]).length === 6;
   checks.overviewHasTenTiles = byClass("stat").length === 10;
-  // 重试率是补进第 10 格的那张，得真的画出来（不是被 cols-5 挤掉）。
+  // 重试率是补进第 10 格的那张，得真的画出来（不是被分组挤掉）。
   checks.showsRetryKpi = text().includes("重试率");
 
   // 切走再切回：这一次 state 里的快照/序列/热力图都还在缓存里，两条 load* 都会
   // 提前 return（不产生任何回调），所以内容只能靠 renderOverview 里的同步首绘。
   navigate("settings");
   await settle();
-  checks.leftOverview = store.page === "settings" && byClass("stat-grid").length === 0;
+  checks.leftOverview = store.page === "settings" && byClass("overview-primary").length === 0;
 
   navigate("overview");
   // 刻意**不**排空微任务：切回后必须当场就有内容，而不是等下一次轮询。
-  checks.reentryPaintsSynchronously = byClass("stat-grid").length === 1;
+  checks.reentryPaintsSynchronously = byClass("overview-primary").length === 1;
   checks.reentryHasHeatmap = byClass("heat-cell").length > 0;
   // 用 .chart-host（折线 + 两处堆叠柱）而不是数 <svg>：导航图标也是 svg，
   // 数 svg 在"页面空白只剩余壳"时照样为真，那种断言等于没测。
