@@ -3,13 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light" />
-    <meta name="theme-color" content="#c9967a" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f1f5f9" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <!-- 登录页地址里带着 ?next=（可能含内页深链），不该被搜索引擎收录。 -->
     <meta name="robots" content="noindex, nofollow" />
     <title>AMKR 登录</title>
     <link rel="stylesheet" href="./styles.css" />
+    <script>
+      (function() {
+        try {
+          var pref = localStorage.getItem("amkr.theme") || "system";
+          var theme = pref;
+          if (pref === "system") {
+            theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          }
+          document.documentElement.setAttribute("data-theme-preference", pref);
+          document.documentElement.setAttribute("data-theme", theme);
+          if (theme === "custom") {
+            var raw = localStorage.getItem("amkr.themeCustom");
+            if (raw) {
+              var c = JSON.parse(raw);
+              if (c) {
+                if (c.canvas) document.documentElement.style.setProperty("--ui-canvas", c.canvas);
+                if (c.surface) document.documentElement.style.setProperty("--ui-surface", c.surface);
+                if (c.action) document.documentElement.style.setProperty("--ui-action", c.action);
+                if (c.text) {
+                  document.documentElement.style.setProperty("--ui-text", c.text);
+                  document.documentElement.style.setProperty("--ui-text-on-canvas", c.text);
+                }
+              }
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,129 @@
+/* ══ 工作空间面板（webui/panel.html） ══
+ *
+ * 面板是同一份资源里的第二个入口，被嵌在**别人的**页面里，因此这里的两条原则：
+ *
+ *  1. 全部规则挂在 .panel 前缀下，不改动任何既有选择器 —— 面板与主界面共用
+ *     styles.css，动到通用类会同时改变管理界面的外观。
+ *  2. 只用既有的设计令牌（--ui-*、--tone-*、--sp-*），不引入新颜色。面板在外观上
+ *     应当明确是 AMKR 的一部分，而不是另一个来路不明的组件。
+ *
+ * 与主界面的差别只有一处：没有固定高度的 app-bar 与左侧导航，页面自己纵向排布，
+ * 并且在窄 iframe 里从一开始就是单列。 */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  min-width: 0;
+}
+.panel > * { min-width: 0; }
+
+/* 页头：左边是"我在哪个空间"，右边是窗口与动作。
+ * 与 .app-bar 不同，它是内容的一部分（随 iframe 一起滚动），不做 sticky —— 窄
+ * 视口里 sticky 的头部会吃掉本就不多的高度。 */
+.panel-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  color: var(--ui-text-on-canvas);
+}
+.panel-bar .panel-eyebrow, .panel-bar .panel-hint,
+.panel-bar .freshness, .panel-bar .btn.text,
+.panel > p.muted { color: var(--ui-text-on-canvas); }
+.panel-id { min-width: 0; }
+.panel-eyebrow {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--ui-text-muted);
+}
+.panel-name {
+  margin: 2px 0 0;
+  font-size: 21px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.panel-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+/* 密钥尾号：页头里用来确认"看的是哪一把 key"的那一小段。
+ * 刻意只显示尾部 6 位而不是完整 key —— 访客看板常被投屏或截图，页头不该带着凭据。
+ * 用等宽字并压低存在感：它是一条身份注记，不是标题。 */
+.panel-hint {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ui-text-muted);
+}
+
+/* 表格里的"时间"等不该被折断的短字段。 */
+.nowrap { white-space: nowrap; }
+
+/* 流向链路：桑基图在窄 iframe 里会挤成一团，这一行是它在任何宽度下的可读摘要，
+ * 同时给读屏用户一个带数值的文字替代（图上只有 aria-label，说不出各层有几个节点）。
+ * 它是本页唯一的"签名"元素，其余部分保持安静。 */
+.chain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border: 1px solid var(--ui-divider);
+  border-radius: var(--radius);
+  background: var(--ui-surface);
+  font-size: 12px;
+}
+.chain-seg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--tone-info-bg);
+}
+.chain-count {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--tone-info);
+}
+.chain-label { color: var(--ui-text-muted); }
+.chain-arrow { color: var(--ui-text-muted); }
+
+/* 卡片内的任务编辑器：夹在卡片标题与任务表之间，用分隔线标出它是表单而不是内容。 */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-1) 0 var(--sp-2);
+  border-bottom: 1px solid var(--ui-divider);
+}
+
+/* 嵌入片段：让用户能看清完整一行，而不是靠横向滚动猜后面还有什么。 */
+.snippet {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-divider);
+  border-radius: var(--radius);
+  background: var(--ui-surface-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* 面板常被嵌在窄栏里：栅格提早就退化，别等主界面的 1280/900 断点，那时右侧那栏
+ * 已经挤成一条了。 */
+@media (max-width: 720px) {
+  .panel { padding: var(--sp-1); }
+  .panel-name { font-size: 18px; }
+  .panel-tools { margin-left: 0; width: 100%; }
+}

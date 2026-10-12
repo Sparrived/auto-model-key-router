@@ -1,0 +1,242 @@
+/* 主题体系：
+ * - 默认跟随系统（system），自动匹配 prefers-color-scheme 深浅色；
+ * - 浅色主题（light）提供清爽高对比度的数据工作台；
+ * - 深色主题（dark）提供沉浸低照度的现代控制台；
+ * - 自定义主题（custom）完整保留原本的暖色赤陶（warm-dashboard）配色，并支持自定义关键色彩。
+ * 画布、交互、图表、状态分开定义颜色角色；所有入口共用这份主题。
+ * 规范见 ui.md 与 docs/design/warm-dashboard-hard-prompt.md。
+ */
+:root {
+  --sp-1: 8px;
+  --sp-2: 20px;
+  --sp-3: 24px;
+  --sp-4: 32px;
+  --sp-5: 40px;
+  --sp-6: 48px;
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur: 180ms;
+  --radius: 10px;
+  --radius-lg: 20px;
+  --radius-card: 24px;
+
+  --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+  --nav-w: 232px;
+  --shell-pad: 24px;
+  --content-max: 1720px;
+}
+
+/* ══ 浅色主题（默认 / light） ══ */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ui-canvas: #f1f5f9;
+  --ui-surface: #ffffff;
+  --ui-surface-soft: #f8fafc;
+  --ui-surface-emphasis: #e2e8f0;
+  --ui-text: #0f172a;
+  --ui-text-muted: #64748b;
+  --ui-text-on-canvas: #0f172a;
+  --ui-text-selected: #2563eb;
+  --ui-focus: #2563eb;
+  --ui-action: #2563eb;
+  --ui-action-hover: #1d4ed8;
+  --ui-on-action: #ffffff;
+  --ui-divider: #e2e8f0;
+  --ui-input-outline: #cbd5e1;
+
+  --tone-good: #15803d;
+  --tone-good-bg: #dcfce7;
+  --tone-warn: #b45309;
+  --tone-warn-bg: #fef3c7;
+  --tone-bad: #b91c1c;
+  --tone-bad-bg: #fee2e2;
+  --tone-info: #1d4ed8;
+  --tone-info-bg: #dbeafe;
+
+  --chart-primary: #2563eb;
+  --chart-secondary: #0d9488;
+  --chart-tertiary: #d97706;
+  --chart-neutral: #64748b;
+  --chart-fourth: #7c3aed;
+  --chart-fifth: #db2777;
+  --chart-track: #e2e8f0;
+
+  --heat-level-1: #bfdbfe;
+  --heat-level-2: #60a5fa;
+  --heat-level-3: #2563eb;
+  --btn-tonal-hover: #e2e8f0;
+
+  --ui-shadow-rgb: 15, 23, 42;
+  --ui-tint-rgb: 15, 23, 42;
+  --ui-action-rgb: 37, 99, 235;
+  --ui-tooltip-bg: rgba(15, 23, 42, 0.92);
+  --nav-backdrop-bg: rgba(15, 23, 42, 0.35);
+
+  --shadow-sm: 0 4px 14px -4px rgba(var(--ui-shadow-rgb), 0.06);
+  --shadow-card: 0 10px 30px -6px rgba(var(--ui-shadow-rgb), 0.08);
+  --shadow-hover: 0 12px 32px -6px rgba(var(--ui-shadow-rgb), 0.12);
+  --shadow-float: 0 16px 44px -10px rgba(var(--ui-shadow-rgb), 0.16);
+  --shadow-dialog: 0 24px 70px -12px rgba(var(--ui-shadow-rgb), 0.22);
+}
+
+/* ══ 深色主题（OS 偏好深色 或显式 dark） ══ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="custom"]) {
+    color-scheme: dark;
+    --ui-canvas: #0f172a;
+    --ui-surface: #1e293b;
+    --ui-surface-soft: #0f172a;
+    --ui-surface-emphasis: #334155;
+    --ui-text: #f8fafc;
+    --ui-text-muted: #94a3b8;
+    --ui-text-on-canvas: #f8fafc;
+    --ui-text-selected: #60a5fa;
+    --ui-focus: #60a5fa;
+    --ui-action: #3b82f6;
+    --ui-action-hover: #2563eb;
+    --ui-on-action: #ffffff;
+    --ui-divider: #334155;
+    --ui-input-outline: #475569;
+
+    --tone-good: #4ade80;
+    --tone-good-bg: rgba(74, 222, 128, 0.16);
+    --tone-warn: #fbbf24;
+    --tone-warn-bg: rgba(251, 191, 36, 0.16);
+    --tone-bad: #f87171;
+    --tone-bad-bg: rgba(248, 113, 113, 0.16);
+    --tone-info: #60a5fa;
+    --tone-info-bg: rgba(96, 165, 250, 0.16);
+
+    --chart-primary: #60a5fa;
+    --chart-secondary: #2dd4bf;
+    --chart-tertiary: #fbbf24;
+    --chart-neutral: #94a3b8;
+    --chart-fourth: #a78bfa;
+    --chart-fifth: #f472b6;
+    --chart-track: #334155;
+
+    --heat-level-1: #1e3a5f;
+    --heat-level-2: #2563eb;
+    --heat-level-3: #60a5fa;
+    --btn-tonal-hover: #334155;
+
+    --ui-shadow-rgb: 0, 0, 0;
+    --ui-tint-rgb: 255, 255, 255;
+    --ui-action-rgb: 59, 130, 246;
+    --ui-tooltip-bg: rgba(2, 6, 23, 0.95);
+    --nav-backdrop-bg: rgba(0, 0, 0, 0.65);
+
+    --shadow-sm: 0 4px 14px -4px rgba(var(--ui-shadow-rgb), 0.35);
+    --shadow-card: 0 10px 30px -6px rgba(var(--ui-shadow-rgb), 0.45);
+    --shadow-hover: 0 12px 32px -6px rgba(var(--ui-shadow-rgb), 0.55);
+    --shadow-float: 0 16px 44px -10px rgba(var(--ui-shadow-rgb), 0.65);
+    --shadow-dialog: 0 24px 70px -12px rgba(var(--ui-shadow-rgb), 0.75);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ui-canvas: #0f172a;
+  --ui-surface: #1e293b;
+  --ui-surface-soft: #0f172a;
+  --ui-surface-emphasis: #334155;
+  --ui-text: #f8fafc;
+  --ui-text-muted: #94a3b8;
+  --ui-text-on-canvas: #f8fafc;
+  --ui-text-selected: #60a5fa;
+  --ui-focus: #60a5fa;
+  --ui-action: #3b82f6;
+  --ui-action-hover: #2563eb;
+  --ui-on-action: #ffffff;
+  --ui-divider: #334155;
+  --ui-input-outline: #475569;
+
+  --tone-good: #4ade80;
+  --tone-good-bg: rgba(74, 222, 128, 0.16);
+  --tone-warn: #fbbf24;
+  --tone-warn-bg: rgba(251, 191, 36, 0.16);
+  --tone-bad: #f87171;
+  --tone-bad-bg: rgba(248, 113, 113, 0.16);
+  --tone-info: #60a5fa;
+  --tone-info-bg: rgba(96, 165, 250, 0.16);
+
+  --chart-primary: #60a5fa;
+  --chart-secondary: #2dd4bf;
+  --chart-tertiary: #fbbf24;
+  --chart-neutral: #94a3b8;
+  --chart-fourth: #a78bfa;
+  --chart-fifth: #f472b6;
+  --chart-track: #334155;
+
+  --heat-level-1: #1e3a5f;
+  --heat-level-2: #2563eb;
+  --heat-level-3: #60a5fa;
+  --btn-tonal-hover: #334155;
+
+  --ui-shadow-rgb: 0, 0, 0;
+  --ui-tint-rgb: 255, 255, 255;
+  --ui-action-rgb: 59, 130, 246;
+  --ui-tooltip-bg: rgba(2, 6, 23, 0.95);
+  --nav-backdrop-bg: rgba(0, 0, 0, 0.65);
+
+  --shadow-sm: 0 4px 14px -4px rgba(var(--ui-shadow-rgb), 0.35);
+  --shadow-card: 0 10px 30px -6px rgba(var(--ui-shadow-rgb), 0.45);
+  --shadow-hover: 0 12px 32px -6px rgba(var(--ui-shadow-rgb), 0.55);
+  --shadow-float: 0 16px 44px -10px rgba(var(--ui-shadow-rgb), 0.65);
+  --shadow-dialog: 0 24px 70px -12px rgba(var(--ui-shadow-rgb), 0.75);
+}
+
+/* ══ 自定义主题（当前暖色赤陶主题 / custom） ══ */
+:root[data-theme="custom"] {
+  color-scheme: light;
+  --ui-canvas: #c9967a;
+  --ui-surface: #faf8f5;
+  --ui-surface-soft: #f2eae2;
+  --ui-surface-emphasis: #edc5ae;
+  --ui-text: #49392f;
+  --ui-text-muted: #7b6558;
+  --ui-text-on-canvas: #423127;
+  --ui-text-selected: #854332;
+  --ui-focus: #423127;
+  --ui-action: #a34f3d;
+  --ui-action-hover: #8e4434;
+  --ui-on-action: #fff8f2;
+  --ui-divider: #e8ddd4;
+  --ui-input-outline: #977b68;
+
+  --tone-good: #596044;
+  --tone-good-bg: #e7eadf;
+  --tone-warn: #866022;
+  --tone-warn-bg: #f3e6c9;
+  --tone-bad: #923f38;
+  --tone-bad-bg: #f5ddd6;
+  --tone-info: #854332;
+  --tone-info-bg: #f2eae2;
+
+  --chart-primary: #ba725c;
+  --chart-secondary: #717859;
+  --chart-tertiary: #9b754f;
+  --chart-neutral: #8c6854;
+  --chart-fourth: #95635f;
+  --chart-fifth: #736b57;
+  --chart-track: #e8ddd4;
+
+  --heat-level-1: #ebcfbc;
+  --heat-level-2: #d7a98e;
+  --heat-level-3: #bd8064;
+  --btn-tonal-hover: #e5b99e;
+
+  --ui-shadow-rgb: 83, 49, 31;
+  --ui-tint-rgb: 83, 49, 31;
+  --ui-action-rgb: 163, 79, 61;
+  --ui-tooltip-bg: rgba(83, 49, 31, 0.95);
+  --nav-backdrop-bg: rgba(66, 49, 39, 0.35);
+
+  --shadow-sm: 0 4px 14px -4px rgba(var(--ui-shadow-rgb), 0.08);
+  --shadow-card: 0 10px 30px -6px rgba(var(--ui-shadow-rgb), 0.10);
+  --shadow-hover: 0 12px 32px -6px rgba(var(--ui-shadow-rgb), 0.14);
+  --shadow-float: 0 16px 44px -10px rgba(var(--ui-shadow-rgb), 0.18);
+  --shadow-dialog: 0 24px 70px -12px rgba(var(--ui-shadow-rgb), 0.24);
+}

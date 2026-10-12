@@ -136,7 +136,16 @@ function braceBody(source, at, what) {
 
 // —— styles.css：解析出各断点的列定义 ——
 
-const css = read("styles.css").replace(/\/\*[\s\S]*?\*\//g, "");
+function readCSS(fileName, visited = new Set()) {
+  if (visited.has(fileName)) return "";
+  visited.add(fileName);
+  const raw = read(fileName).replace(/\/\*[\s\S]*?\*\//g, "");
+  return raw.replace(/@import\s+["']\.\/([^"']+)["'];/g, (_, imp) => {
+    return readCSS(imp, visited);
+  });
+}
+
+const css = readCSS("styles.css");
 
 const mediaBlocks = [];
 {

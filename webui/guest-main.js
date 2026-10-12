@@ -5,5 +5,7 @@
 // 个受限凭据，用户看到的每个链接都会 401（工作空间面板也是同一个理由，见 panel.js）。
 // 访客只需要"我用了多少"，那就只给它这一页。
 import { bootGuest } from "./pages/guest.js";
+import { initTheme } from "./theme.js";
 
+initTheme();
 bootGuest();

@@ -2,7 +2,18 @@
 
 import { h, errorText, copyText } from "../dom.js";
 import { api } from "../api.js";
-import { card, cardHead, notice, badge, loading, render, toast, buttonNode, input, field, confirmDialog, kv, toggle } from "../ui.js";
+import { card, cardHead, notice, badge, loading, render, toast, buttonNode, input, field, confirmDialog, kv, toggle, segmented } from "../ui.js";
+import {
+  THEMES,
+  getThemePreference,
+  getResolvedTheme,
+  setThemePreference,
+  getCustomColors,
+  setCustomColors,
+  resetCustomColors,
+  isCustomColorsModified,
+  onThemeChange,
+} from "../theme.js";
 
 const SERVICE_GROUPS = [
   { title: "服务控制", actions: [
@@ -352,8 +363,117 @@ function toolCard() {
   );
 }
 
+function themeCard() {
+  const pref = getThemePreference();
+  const resolved = getResolvedTheme(pref);
+  const customColors = getCustomColors();
+  const modified = isCustomColorsModified();
+
+  const themeSegments = THEMES.map((t) => ({
+    id: t.id,
+    label: t.label,
+    title: t.desc,
+  }));
+
+  let hintText = "";
+  if (pref === "system") {
+    hintText = `当前系统设置为 ${resolved === "dark" ? "深色" : "浅色"} 模式，界面已自动适配。`;
+  } else if (pref === "light") {
+    hintText = "明快清爽的浅色高对比度数据工作台，适合明亮光线环境。";
+  } else if (pref === "dark") {
+    hintText = "沉浸现代的深色控制台，适合弱光环境并降低眼部疲劳。";
+  } else if (pref === "custom") {
+    hintText = "以经典的暖色赤陶（Terracotta）配色为基准，保留原有风格并支持定制关键色彩。";
+  }
+
+  const customFields = pref === "custom"
+    ? h("div.stack.tight", { style: { marginTop: "16px", padding: "14px 16px", background: "var(--ui-surface-soft)", borderRadius: "var(--radius)" } },
+        h("div.inline", { style: { justifyContent: "space-between", alignItems: "center" } },
+          h("h4", "自定义色彩微调"),
+          modified
+            ? buttonNode("恢复默认暖色赤陶", {
+                variant: "secondary",
+                small: true,
+                iconName: "refresh",
+                onClick: () => {
+                  resetCustomColors();
+                  toast("已恢复为默认暖色赤陶配色。");
+                  draw();
+                },
+              })
+            : null,
+        ),
+        h("div.form-grid", { style: { marginTop: "8px" } },
+          field("画布背景", h("div.inline.tight", {},
+            h("input", {
+              type: "color",
+              value: customColors.canvas,
+              style: { width: "36px", height: "36px", padding: "2px", border: "1px solid var(--ui-input-outline)", borderRadius: "6px", cursor: "pointer", background: "var(--ui-surface)" },
+              onChange: (e) => {
+                setCustomColors({ ...getCustomColors(), canvas: e.target.value });
+                draw();
+              },
+            }),
+            h("span.mono", { style: { fontSize: "12px", color: "var(--ui-text)" } }, customColors.canvas),
+          )),
+          field("卡片表面", h("div.inline.tight", {},
+            h("input", {
+              type: "color",
+              value: customColors.surface,
+              style: { width: "36px", height: "36px", padding: "2px", border: "1px solid var(--ui-input-outline)", borderRadius: "6px", cursor: "pointer", background: "var(--ui-surface)" },
+              onChange: (e) => {
+                setCustomColors({ ...getCustomColors(), surface: e.target.value });
+                draw();
+              },
+            }),
+            h("span.mono", { style: { fontSize: "12px", color: "var(--ui-text)" } }, customColors.surface),
+          )),
+          field("主操作色", h("div.inline.tight", {},
+            h("input", {
+              type: "color",
+              value: customColors.action,
+              style: { width: "36px", height: "36px", padding: "2px", border: "1px solid var(--ui-input-outline)", borderRadius: "6px", cursor: "pointer", background: "var(--ui-surface)" },
+              onChange: (e) => {
+                setCustomColors({ ...getCustomColors(), action: e.target.value });
+                draw();
+              },
+            }),
+            h("span.mono", { style: { fontSize: "12px", color: "var(--ui-text)" } }, customColors.action),
+          )),
+          field("主文本色", h("div.inline.tight", {},
+            h("input", {
+              type: "color",
+              value: customColors.text,
+              style: { width: "36px", height: "36px", padding: "2px", border: "1px solid var(--ui-input-outline)", borderRadius: "6px", cursor: "pointer", background: "var(--ui-surface)" },
+              onChange: (e) => {
+                setCustomColors({ ...getCustomColors(), text: e.target.value });
+                draw();
+              },
+            }),
+            h("span.mono", { style: { fontSize: "12px", color: "var(--ui-text)" } }, customColors.text),
+          )),
+        ),
+      )
+    : null;
+
+  return card(
+    cardHead("外观与主题", badge(pref === "system" ? `跟随系统 (${resolved === "dark" ? "深色" : "浅色"})` : THEMES.find((t) => t.id === pref)?.label || pref, "muted")),
+    h("div", { style: { marginTop: "4px" } },
+      segmented(themeSegments, pref, (newPref) => {
+        setThemePreference(newPref);
+        toast(`主题已设为：${THEMES.find((t) => t.id === newPref)?.label || newPref}`);
+        draw();
+      }),
+    ),
+    h("p.muted", { style: { marginTop: "12px" } }, hintText),
+    customFields,
+  );
+}
+
 export function renderSettings(context) {
   xtxRef = context;
+  const unsubTheme = onThemeChange(() => draw());
+  context.onLeave?.(unsubTheme);
   host = h("div.stack");
   if (state.loading) {
     render(host, h("div.page-head", h("h1", "设置")), loading("正在读取设置。"));
@@ -386,6 +506,6 @@ function draw() {
     ),
   ];
   if (state.error) children.push(notice(`读取设置失败: ${state.error}`, "error"));
-  children.push(runtimeCard(), serviceCard(), toolCard(), transferCard());
+  children.push(themeCard(), runtimeCard(), serviceCard(), toolCard(), transferCard());
   render(host, children);
 }

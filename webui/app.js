@@ -6,8 +6,9 @@
 
 import { h, mount, errorText, formatCount, formatCompact } from "./dom.js";
 import { api, apiBase, setKey, ApiError, onUnauthorized } from "./api.js";
-import { installToastHost, notice, buttonNode, empty } from "./ui.js";
+import { installToastHost, toast, notice, buttonNode, empty } from "./ui.js";
 import { icon } from "./icons.js";
+import { getThemePreference, getResolvedTheme, cycleTheme, onThemeChange, THEMES } from "./theme.js";
 
 import { renderOverview } from "./pages/overview.js";
 import { renderActivity } from "./pages/activity.js";
@@ -305,6 +306,13 @@ function liveMetrics() {
 function buildBar() {
   const metrics = liveMetrics();
   const tone = serviceTone();
+  const pref = getThemePreference();
+  const currentTheme = THEMES.find((t) => t.id === pref) || THEMES[0];
+  const resolved = getResolvedTheme(pref);
+  const themeLabel = pref === "system"
+    ? `主题：跟随系统（当前${resolved === "dark" ? "深色" : "浅色"}）`
+    : `主题：${currentTheme.label}`;
+
   return h("header.app-bar", {},
     buttonNode("", {
       class: "icon-btn nav-toggle", "aria-label": "打开主导航", "aria-controls": "main-nav",
@@ -321,6 +329,17 @@ function buildBar() {
         : null,
     ),
     h("div.bar-actions", {},
+      buttonNode("", {
+        class: "icon-btn theme-toggle",
+        "aria-label": themeLabel,
+        title: `${themeLabel}，点击切换`,
+        onClick: () => {
+          const next = cycleTheme();
+          const target = THEMES.find((t) => t.id === next);
+          toast(`已切换至：${target?.label || next}`);
+          renderBar();
+        },
+      }, icon(currentTheme.icon, { size: 18 })),
       buttonNode("", {
         class: "icon-btn",
         "aria-label": "立即刷新",
@@ -493,6 +512,7 @@ async function boot() {
   appHost = h("div.app");
   root.append(appHost);
   installToastHost(root);
+  onThemeChange(() => renderBar());
   store.page = pageFromHash();
   document.addEventListener("keydown", (event) => {
     if (!navOpen) return;
