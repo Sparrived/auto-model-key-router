@@ -52,6 +52,11 @@ import (
 // Hours 为 nil 表示不设时间窗口（对应 /metrics 的 all_history）。
 type KeyUsageParams struct {
 	Hours *float64
+	// AccessKeyID 非 nil 时把三份拆分与 unattributed 都收窄到**这一把访问密钥**发起的
+	// 请求（本项目新增的全局筛选，供「用量统计」页按访问密钥看）。
+	//
+	// nil 时行为与加这个参数之前完全一致：WHERE 里一个字节都不多。
+	AccessKeyID *string
 }
 
 // keyUsageFinestColumns 是最细分组里的列，顺序即 SQL 的 SELECT / GROUP BY 列序。
@@ -84,6 +89,10 @@ var keyUsageFinestColumns = [...]string{
 //
 // access_keys 里**只有 access_key_id**：显示名在配置里，而本包不读配置。服务端
 // 在写响应前补上 access_key_name（见 internal/server/key_usage.go）。
+//
+// 带 AccessKeyID 过滤时，三份拆分与 unattributed 收窄到**这一把**访问密钥发起的请求：
+// upstream_keys / model_keys 因此回答「这把 key 都打到哪些上游 Key 上」，
+// unattributed 则是「这把 key 里没有上游归属的那些行」。
 func (s *Store) KeyUsage(params KeyUsageParams) (*canonical.Value, error) {
 	now := nowBeijing()
 	var since *string
@@ -113,6 +122,13 @@ func (s *Store) KeyUsage(params KeyUsageParams) (*canonical.Value, error) {
 	// 上界恒有值（就是 now）：与 Snapshot / WorkspaceUsage 一致，窗口总是封口的。
 	filters = append(filters, "m.created_at <= ?")
 	parameters = append(parameters, untilStr)
+	// 访问密钥过滤（本项目新增）：条件同样落在 **WHERE** 而不是 ON 上（理由就是上面
+	// 那条）。放 WHERE 等价于把没有归属的行排除掉，也就把三份拆分收窄到了这一把 key
+	// （未归属那一桶随之变成「这把 key 里没有上游归属的行」）。
+	if params.AccessKeyID != nil {
+		filters = append(filters, "a.access_key_id = ?")
+		parameters = append(parameters, *params.AccessKeyID)
+	}
 	whereSQL := " WHERE " + strings.Join(filters, " AND ")
 
 	// 一次最细粒度扫描 + Go 侧上卷：三份拆分各自 GROUP BY 一遍要扫三次窗口，而

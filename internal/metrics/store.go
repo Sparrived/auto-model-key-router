@@ -483,11 +483,16 @@ func nullableParam[T any](value *T) any {
 // 原样回显）。
 func (s *Store) Snapshot(hours *float64, since *time.Time) (*canonical.Value, error) {
 	now := nowBeijing()
-	return s.snapshotSync(hours, since, now)
+	// /metrics 永远是全实例读数：这里**没有**访问密钥过滤（过滤能力只对本项目自有的
+	// /ui 读数开放，见 accesskeymetrics.go）。
+	return s.snapshotSync(hours, since, now, nil)
 }
 
 // snapshotSync 对应 _snapshot_sync（metrics.py:680）。
-func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time) (*canonical.Value, error) {
+//
+// accessKeyID 非 nil 时全部分组、总量与 rate 窗口都收窄到这把访问密钥；nil 时与
+// 参照实现逐字节同形（/metrics 走的就是 nil）。
+func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time, accessKeyID *string) (*canonical.Value, error) {
 	var sinceStr *string
 	if since != nil {
 		value := formatISO(*since)
@@ -501,7 +506,7 @@ func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time) (*
 	// 窗口内的 9 个分组由一次最细粒度扫描上卷得到（见 rollup.go 的成本说明）：
 	// 归属维度只统计三个归属列全非空、未归属统计其余的行，这两种互补口径都在
 	// 那一层表达，这里不再逐个拼 WHERE。
-	groups, err := s.snapshotRollup(sinceStr, &untilStr)
+	groups, err := s.snapshotRollup(sinceStr, &untilStr, accessKeyID)
 	if err != nil {
 		return nil, err
 	}
@@ -509,8 +514,9 @@ func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time) (*
 
 	rateStart := formatISO(addSeconds(now, RateWindowSeconds))
 	// rate 窗口只有几分钟，行数极少；这里继续用参照实现的 queryStats，一分钱不省，
-	// 但让那份实现留在链路上（它也是上卷结果的对照物）。
-	recent, err := s.queryStats(nil, &rateStart, &untilStr, true)
+	// 但让那份实现留在链路上（它也是上卷结果的对照物）。过滤条件必须一并带上，
+	// 否则 current_rpm / current_tpm 会是全实例的数——那不是「这一把 key 的读数」。
+	recent, err := s.queryStats(nil, &rateStart, &untilStr, true, accessKeyID)
 	if err != nil {
 		return nil, err
 	}
@@ -524,6 +530,9 @@ func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time) (*
 	groups.callerTypes.setDefault(dimKey{N: 1, A: "workspace"})
 	groups.callerTypes.setDefault(dimKey{N: 1, A: "access_key"})
 
+	// active_requests 刻意保持**全局**：它是进程内的在途请求数（AcquireActive /
+	// ReleaseActive 计数），不挂在任何一行指标上，因此按访问密钥过滤时也给同一个数。
+	// 这是这份读数里唯一的全局量——不是漏了过滤，而是它按定义无法按 key 拆分。
 	return canonical.NewObjectOf(
 		canonical.ObjectPair{Key: "count_semantics", Value: canonical.NewString(CountSemantics)},
 		canonical.ObjectPair{Key: "window", Value: canonical.NewObjectOf(
@@ -714,14 +723,25 @@ type RequestHistoryParams struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	Limit            int64
-	BeforeID         *int64
+	// AccessKeyID 非 nil 时只返回这把访问密钥发起的请求（本项目新增，参照实现没有）。
+	//
+	// 它不进响应里的 filters：那是已发布形状，多一个键就变了。
+	AccessKeyID *string
+	Limit       int64
+	BeforeID    *int64
 }
 
 // RequestHistory 对应 request_history()（metrics.py:263）。
 func (s *Store) RequestHistory(params RequestHistoryParams) (*canonical.Value, error) {
-	now := nowBeijing()
+	return s.requestHistorySync(params, nowBeijing())
+}
 
+// requestHistorySync 是 RequestHistory 的主体，now 由调用方给定。
+//
+// 拆出来是为了让「一把访问密钥的整页读数」能复用同一条取数路径并**共用同一个时间
+// 窗口**（见 accesskeymetrics.go）：那边先定下 now，再依次取 snapshot / series /
+// 明细，三次读数因此落在同一个 created_at <= now 的封口上。
+func (s *Store) requestHistorySync(params RequestHistoryParams, now time.Time) (*canonical.Value, error) {
 	// 校验顺序照抄：hours → limit → before_id。
 	if params.Hours != nil && *params.Hours <= 0 {
 		return nil, formatValidationError("hours must be greater than zero or null")
@@ -749,6 +769,7 @@ func (s *Store) RequestHistory(params RequestHistoryParams) (*canonical.Value, e
 		StatusCode:       params.StatusCode,
 		Success:          params.Success,
 		Attributed:       params.Attributed,
+		AccessKeyID:      params.AccessKeyID,
 	}
 	untilStr := formatISO(now)
 	filter := query.metricFilter(since, &untilStr)
@@ -787,7 +808,8 @@ func (s *Store) RequestHistory(params RequestHistoryParams) (*canonical.Value, e
 	//
 	// JOIN 条件里的 request_metrics.id 不写别名：whereSQL 用的是裸列名
 	// （见 stats.go 的 metricFilter.sql），给主表起别名会让两边的列名对不上。
-	// 三张旁挂表只有 request_id 与自己的列，不存在列名歧义。
+	// 三张旁挂表只有 request_id 与自己的列，不存在列名歧义——访问密钥过滤在
+	// whereSQL 里追加的那条子查询同样引用裸 `id`，靠的也是这一点。
 	itemQuery := "SELECT id, created_at, caller_type, model_id, requested_model_id,\n" +
 		"                   provider_id, pool_name, upstream_model_id, key_name,\n" +
 		"                   status_code, success, retried, prompt_tokens,\n" +
@@ -876,6 +898,10 @@ type TimeSeriesParams struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
+	// AccessKeyID 非 nil 时只统计这把访问密钥发起的请求（本项目新增，参照实现没有）。
+	//
+	// 它不进响应里的 filters：那是已发布形状，多一个键就变了。
+	AccessKeyID *string
 }
 
 // TimeSeries 对应 time_series()（metrics.py:300）。
@@ -892,10 +918,7 @@ func (s *Store) TimeSeries(params TimeSeriesParams) (*canonical.Value, error) {
 		return nil, formatValidationError("time series cannot exceed %d points", MaxSeriesPoints)
 	}
 
-	requestedStart := addHours(now, params.Hours)
-	firstEpoch := bucketEpoch(requestedStart, params.BucketSeconds)
-	start := fromUnix(firstEpoch)
-
+	firstEpoch := bucketEpoch(addHours(now, params.Hours), params.BucketSeconds)
 	query := queryFilter{
 		CallerType:       params.CallerType,
 		ModelID:          params.ModelID,
@@ -907,15 +930,46 @@ func (s *Store) TimeSeries(params TimeSeriesParams) (*canonical.Value, error) {
 		StatusCode:       params.StatusCode,
 		Success:          params.Success,
 		Attributed:       params.Attributed,
+		AccessKeyID:      params.AccessKeyID,
 	}
-	startStr := formatISO(start)
+	points, err := s.seriesPoints(query, params.BucketSeconds, firstEpoch, now)
+	if err != nil {
+		return nil, err
+	}
+
+	return canonical.NewObjectOf(
+		canonical.ObjectPair{Key: "count_semantics", Value: canonical.NewString(CountSemantics)},
+		canonical.ObjectPair{Key: "window", Value: canonical.NewObjectOf(
+			canonical.ObjectPair{Key: "from", Value: canonical.NewString(formatISO(fromUnix(firstEpoch)))},
+			canonical.ObjectPair{Key: "to", Value: canonical.NewString(formatISO(now))},
+			canonical.ObjectPair{Key: "hours", Value: canonical.NewFloat(params.Hours)},
+		)},
+		canonical.ObjectPair{Key: "filters", Value: canonical.NewObjectOf(query.filterPairs()...)},
+		canonical.ObjectPair{Key: "bucket_seconds", Value: canonical.NewIntValue(params.BucketSeconds)},
+		canonical.ObjectPair{Key: "points", Value: points},
+	), nil
+}
+
+// seriesPoints 产出 [firstEpoch, now] 内按 bucketSeconds 分桶、补零后的点数组。
+//
+// 从 TimeSeries 抽出来是为了让「一把访问密钥的整页读数」（accesskeymetrics.go）能用同
+// 一份取数：那张页面上的三份读数必须共用同一个时间窗口，各自再取一次 now 会让它们的
+// 窗口边界差出几微秒（看起来无关紧要，但那是「同一窗口」这句话唯一可验证的含义）。
+//
+// 调用方负责参数校验与 firstEpoch 的桶对齐；SQL 与 TimeSeries 逐字节相同。
+func (s *Store) seriesPoints(
+	query queryFilter,
+	bucketSeconds, firstEpoch int64,
+	now time.Time,
+) (*canonical.Value, error) {
+	startStr := formatISO(fromUnix(firstEpoch))
 	untilStr := formatISO(now)
 	whereSQL, parameters := query.metricFilter(&startStr, &untilStr).sql()
 
 	bucketParams := []any{
 		int64(BucketAnchorEpoch),
-		params.BucketSeconds,
-		params.BucketSeconds,
+		bucketSeconds,
+		bucketSeconds,
 		int64(BucketAnchorEpoch),
 	}
 	bucketExpression := bucketSQL
@@ -984,11 +1038,11 @@ func (s *Store) TimeSeries(params TimeSeriesParams) (*canonical.Value, error) {
 	statusRows.Close()
 
 	// 补齐空桶：从 firstEpoch 到 lastEpoch 每步一点，让前端拿到连续的序列。
-	lastEpoch := bucketEpoch(now, params.BucketSeconds)
+	lastEpoch := bucketEpoch(now, bucketSeconds)
 	points := canonical.NewArray()
-	for epoch := firstEpoch; epoch <= lastEpoch; epoch += params.BucketSeconds {
+	for epoch := firstEpoch; epoch <= lastEpoch; epoch += bucketSeconds {
 		startedAt := fromUnix(epoch)
-		endedAt := startedAt.Add(time.Duration(params.BucketSeconds) * time.Second)
+		endedAt := startedAt.Add(time.Duration(bucketSeconds) * time.Second)
 		stats, ok := buckets[epoch]
 		if !ok {
 			stats = &UsageStats{StatusCodes: map[string]int64{}}
@@ -1005,18 +1059,7 @@ func (s *Store) TimeSeries(params TimeSeriesParams) (*canonical.Value, error) {
 		}
 		points.Arr = append(points.Arr, point)
 	}
-
-	return canonical.NewObjectOf(
-		canonical.ObjectPair{Key: "count_semantics", Value: canonical.NewString(CountSemantics)},
-		canonical.ObjectPair{Key: "window", Value: canonical.NewObjectOf(
-			canonical.ObjectPair{Key: "from", Value: canonical.NewString(startStr)},
-			canonical.ObjectPair{Key: "to", Value: canonical.NewString(untilStr)},
-			canonical.ObjectPair{Key: "hours", Value: canonical.NewFloat(params.Hours)},
-		)},
-		canonical.ObjectPair{Key: "filters", Value: canonical.NewObjectOf(query.filterPairs()...)},
-		canonical.ObjectPair{Key: "bucket_seconds", Value: canonical.NewIntValue(params.BucketSeconds)},
-		canonical.ObjectPair{Key: "points", Value: points},
-	), nil
+	return points, nil
 }
 
 // db 返回读连接池；只读查询都走它。

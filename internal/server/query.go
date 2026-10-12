@@ -56,6 +56,10 @@ type qParam struct {
 	kind qKind
 	// def 是缺省值；nil 表示 `T | None = None`（缺省即 null）。
 	def *canonical.Value
+	// required 对应 FastAPI 的 `Query(...)`：**没有缺省值**，请求里缺这个参数是 422
+	// missing（而不是回落到 null）。只有本项目自有的 /ui 读数用到（详见
+	// accessKeyMetricsParams），/metrics 系列的签名与参照实现一致，没有必填参数。
+	required bool
 	// 数值边界。字面量的 int/float 之别会原样进入 422 的 ctx
 	// （`{"le":8760.0}` 与 `{"le":200}` 是不同的字节），因此直接存 canonical 值。
 	ge, gt, le, lt *canonical.Value
@@ -80,6 +84,7 @@ var (
 	qBoolFalse = canonical.NewBool(false)
 	qFloat24   = canonical.NewFloat(24)
 	qFloatOne  = canonical.NewFloat(1)
+	qInt0      = canonical.NewInt("0")
 	qInt60     = canonical.NewInt("60")
 	// 三档：本机（local_api_key）、工作空间推理凭据、访问密钥。后两者是 Go 侧新增
 	// （参照实现只有 local 与已删除的 visitor 两档）。
@@ -111,9 +116,36 @@ var workspaceUsageParams = []qParam{
 // 同样复用 hours + all_history 这一对，让「哪把 Key 出去了」的读数与 /metrics、
 // workspace-usage 的时间选择器语义一致。**有意增补**的读数：参照实现没有按 Key 拆分
 // 的口径，因此没有对应签名可比对，这里的取值方式只是复用既有解析器，不构成兼容性声明。
+//
+// access_key_id 是可选过滤：给了就只统计**这一把访问密钥**发起的请求（三份拆分与
+// unattributed 一并收窄），不给则与加这个参数之前完全一致。
 var keyUsageParams = []qParam{
 	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
 	{name: "all_history", kind: qBool, def: qBoolFalse},
+	filterTextParam("access_key_id"),
+}
+
+// accessKeyMetricsParams 是 GET /ui/access-key-metrics.json 的签名。
+//
+// 与 /metrics 系列有两处刻意的差别：
+//
+//   - access_key_id **必填**：这条读数就是为「筛一把 key」而生的，缺了它没有意义
+//     （管理面要看全量读数请直接用 /metrics）。缺失时的 422 missing 与 FastAPI 的
+//     `Query(...)` 同形（input 为 null，而不是空串）。
+//   - bucket_seconds 默认 **0 = 自动**：/metrics/series 要求调用方自己按跨度挑桶，
+//     24 小时配 60 秒桶是 1441 点、直接超上限被拒；整页读数把概览、趋势与明细拼在
+//     一起，默认交给服务端选最小的合适桶（响应里回真实桶宽）。显式给值时仍走
+//     /metrics/series 那一套（15..86400，点数超限报 422）。
+//
+// 注意 0 只能来自缺省：validateQuery 与 Pydantic 一样**不校验缺省值**，所以下界写
+// 15 不会把默认值判成非法，而 `?bucket_seconds=0` 这种显式传法照旧报 422——「自动」
+// 是没说，不是说了个 0。
+var accessKeyMetricsParams = []qParam{
+	{name: "access_key_id", kind: qStr, required: true, minLen: 1, maxLen: 512},
+	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	{name: "all_history", kind: qBool, def: qBoolFalse},
+	{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
+	{name: "limit", kind: qInt, def: qInt0, ge: qInt0, le: qInt200},
 }
 
 // accessKeyUsageParams 是 GET /ui/access-key-usage.json（访客看板）的签名。
@@ -209,7 +241,11 @@ type queryError struct {
 	typ   string
 	msg   string
 	input string
-	ctx   *canonical.Value
+	// inputNull 表示 input 渲染成 JSON null：Pydantic 对**缺失**的必填参数报的就是
+	// null（`{"type":"missing",…,"input":null}`），与「传了一个空串」在响应里必须
+	// 分得开——后者是 string_too_short，input 是 ""。
+	inputNull bool
+	ctx       *canonical.Value
 }
 
 // toValue 渲染成 JSON 对象。
@@ -219,7 +255,11 @@ func (e queryError) toValue() *canonical.Value {
 	item.SetKey("loc", canonical.NewArray(
 		canonical.NewString("query"), canonical.NewString(e.name)))
 	item.SetKey("msg", canonical.NewString(e.msg))
-	item.SetKey("input", canonical.NewString(e.input))
+	if e.inputNull {
+		item.SetKey("input", canonical.NewNull())
+	} else {
+		item.SetKey("input", canonical.NewString(e.input))
+	}
 	if e.ctx != nil && e.ctx.Obj.Len() > 0 {
 		item.SetKey("ctx", e.ctx)
 	}
@@ -235,6 +275,12 @@ func validateQuery(raw url.Values, specs []qParam) (*queryResult, []queryError) 
 	for _, spec := range specs {
 		texts, present := raw[spec.name]
 		if !present || len(texts) == 0 {
+			if spec.required {
+				errs = append(errs, queryError{
+					name: spec.name, typ: "missing", msg: "Field required", inputNull: true,
+				})
+				continue
+			}
 			result.values[spec.name] = defaultValue(spec)
 			continue
 		}

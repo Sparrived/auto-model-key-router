@@ -168,11 +168,15 @@ func (g *snapshotGroups) targets() []rollupTarget {
 //
 // 时间边界与参照实现一致（`created_at >= ?` / `created_at <= ?`），为 nil 表示不设该
 // 边界（all_history 与内部 since 都是这种形态）。
-func (s *Store) snapshotRollup(sinceCreatedAt, untilCreatedAt *string) (*snapshotGroups, error) {
+//
+// accessKeyID 非 nil 时只统计这把访问密钥发起的请求，nil 时 SQL 与加这个参数之前
+// 逐字节相同。用子查询而不是 JOIN：这条扫描的主表是裸 `request_metrics`，加 JOIN 会
+// 动到既有 SQL 的形状（与 stats.go 的 metricFilter 同一处理）。
+func (s *Store) snapshotRollup(sinceCreatedAt, untilCreatedAt *string, accessKeyID *string) (*snapshotGroups, error) {
 	groups := newSnapshotGroups()
 
-	filters := make([]string, 0, 2)
-	parameters := make([]any, 0, 2)
+	filters := make([]string, 0, 3)
+	parameters := make([]any, 0, 3)
 	if sinceCreatedAt != nil {
 		filters = append(filters, "created_at >= ?")
 		parameters = append(parameters, *sinceCreatedAt)
@@ -180,6 +184,10 @@ func (s *Store) snapshotRollup(sinceCreatedAt, untilCreatedAt *string) (*snapsho
 	if untilCreatedAt != nil {
 		filters = append(filters, "created_at <= ?")
 		parameters = append(parameters, *untilCreatedAt)
+	}
+	if accessKeyID != nil {
+		filters = append(filters, "id IN (SELECT request_id FROM request_access_key WHERE access_key_id = ?)")
+		parameters = append(parameters, *accessKeyID)
 	}
 	whereSQL := ""
 	if len(filters) > 0 {

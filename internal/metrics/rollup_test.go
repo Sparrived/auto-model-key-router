@@ -60,7 +60,7 @@ func TestSnapshotRollupMatchesGroupedQueries(t *testing.T) {
 	// assertMatchesGrouped 比对一次窗口取数。
 	assertMatchesGrouped := func(t *testing.T, store *Store, since, until *string) {
 		t.Helper()
-		groups, err := store.snapshotRollup(since, until)
+		groups, err := store.snapshotRollup(since, until, nil)
 		if err != nil {
 			t.Fatalf("上卷失败: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestSnapshotRollupMatchesGroupedQueries(t *testing.T) {
 				flatStats(groups.upstreamModels)},
 		}
 		for _, testCase := range cases {
-			reference, err := store.queryStats(testCase.dims, since, until, testCase.includeNull)
+			reference, err := store.queryStats(testCase.dims, since, until, testCase.includeNull, nil)
 			if err != nil {
 				t.Fatalf("%s: 逐分组查询失败: %v", testCase.name, err)
 			}
