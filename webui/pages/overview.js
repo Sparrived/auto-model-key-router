@@ -372,9 +372,9 @@ function compositionCard(metrics) {
 // 请求结果（成功/重试/失败）。后两者一度并成一张，但"这次调用最后成没成"和"上游到底
 // 回了什么"终究是两个问题，上下堆在一张卡里读着像同一条漏斗的两步——所以拆成左右两张。
 //
-// 两张卡共用同一种画法：一条按比例分摊的横条 + 一组「颜色／名称／次数／占比」标签，
-// 色块与标签一一对应（见 distributionBlock）。两边占比的基数不同：左边按全部尝试算，
-// 右边按有状态码的请求算，基数不相等时右边会写明。
+// 两张卡共用同一种画法，也共用同一副骨架：卡头 → 大数字（下面横条的基数）→ 横条 +
+// 标签 → 卡脚。两边占比的基数不同（左边按全部尝试算，右边按有状态码的请求算），所以
+// 各写各的大数字；骨架一致，两条横条与两排标签并排时才会落在同一条水平线上。
 const CODE_CLASSES = [
   { label: "2xx 成功", tone: "good", match: (code) => code >= 200 && code < 300 },
   { label: "3xx 重定向", tone: "neutral", match: (code) => code >= 300 && code < 400 },
@@ -419,12 +419,10 @@ function statusCodeRows(statusCodes) {
 // 没有 shade 的行（调用结果那三档）别写成 opacity: undefined，属性会被原样塞进 style。
 const shadeStyle = (row) => (row.shade === undefined ? null : { opacity: String(row.shade) });
 
-// 一张分布图：横条一段一行，下面一组标签（颜色+名称/码+次数+占比）。行同时喂给两者，
-// 顺序与颜色只有一个来源。note 是横条上方的补充说明（如"88 / 90 次有状态码"）。
-// 行形如 { label, value, tone, hint, shade?, code? }。
-function distributionBlock(rows, total, note, ariaLabel) {
+// 分布区：横条一段一行，下面一组标签（颜色+名称/码+次数+占比）。行同时喂给两者，
+// 顺序与颜色只有一个来源。行形如 { label, value, tone, hint, shade?, code? }。
+function distributionBlock(rows, total, ariaLabel) {
   return h("div.distribution", {},
-    note,
     h("div.status-bar", { role: "img", "aria-label": ariaLabel },
       // 值为 0 的档不画段：.status-seg 带 min-width，0 宽也会留下 3px 色条，看着像
       // "有一点点"；标签里那个 0 已经把话说清楚了。
@@ -442,6 +440,13 @@ function distributionBlock(rows, total, note, ariaLabel) {
     ))),
   );
 }
+
+// 两张卡的大数字行：下面横条的百分比就是这个数当分母算出来的。两张卡都用它，横条才能
+// 落在同一条水平线上——左右并排时，一条偏高、一条偏低，对照着看就废了一半。
+const totalLine = (value, label) => h("div.flow-total", {},
+  h("span.flow-total-value", formatCount(value)),
+  h("span.flow-total-label", label),
+);
 
 // 调用结果卡：这三段互斥，相加正好是尝试数——成功的那次、失败后换了 Key/上游再试的
 // 那次、再试也用尽的那次。"重试"标记打在**失败的那一行**上（internal/proxy 的
@@ -462,12 +467,9 @@ function resultCard(metrics) {
     cardHead("请求结果",
       badge("按上游尝试计数", "muted"),
       badge(`最近 ${rangeLabel()}`, "muted")),
-    h("div.flow-total", {},
-      h("span.flow-total-value", formatCount(attempts)),
-      h("span.flow-total-label", "次上游尝试"),
-    ),
+    totalLine(attempts, "次上游尝试"),
     attempts
-      ? distributionBlock(rows, attempts, null, `成功、重试与失败占比，最近 ${rangeLabel()}`)
+      ? distributionBlock(rows, attempts, `成功、重试与失败占比，最近 ${rangeLabel()}`)
       : h("p.muted", "窗口内没有请求。"),
     h("div.card-foot", {},
       `平均耗时 ${formatDuration(total.avg_duration_ms)} · 缓存率 ${formatRate(total.cached_token_rate)}`),
@@ -476,23 +478,26 @@ function resultCard(metrics) {
 
 // 响应状态码卡：占比按"有状态码的请求"算——连不上上游的那几次没有状态码
 // （status_code 为 NULL 的行不进 status_codes），不该拿来稀释 2xx 的占比。
-// 左边那张卡按全部尝试算，两套分母不相等时写明基数，免得两个百分数看着互相打架。
+// 所以两张卡的大数字各是各的基数（90 次尝试 vs 88 次有状态码），差在哪写在卡脚，
+// 免得两个百分数看着互相打架；左边的卡脚是耗时与缓存率，两张卡的底边因此一样齐。
 function statusCodesCard(metrics) {
   const total = metrics.total || {};
   const attempts = total.requests || 0;
   const rows = statusCodeRows(total.status_codes);
   const coded = rows.reduce((sum, row) => sum + row.value, 0);
-  const note = coded === attempts
-    ? null
-    : h("span.section-label", `${formatCount(coded)} / ${formatCount(attempts)} 次有状态码`);
 
   return card(
     cardHead("响应状态码",
       rows.length ? badge(`${rows.length} 种`, "muted") : null,
       badge(`最近 ${rangeLabel()}`, "muted")),
+    totalLine(coded, "次有状态码"),
     rows.length
-      ? distributionBlock(rows, coded, note, `按状态码着色的响应占比，最近 ${rangeLabel()}`)
+      ? distributionBlock(rows, coded, `按状态码着色的响应占比，最近 ${rangeLabel()}`)
       : h("p.muted", "窗口内没有带状态码的请求。"),
+    h("div.card-foot", {},
+      coded < attempts
+        ? `${formatCount(attempts)} 次尝试中有 ${formatCount(attempts - coded)} 次没有状态码`
+        : ""),
   );
 }
 
