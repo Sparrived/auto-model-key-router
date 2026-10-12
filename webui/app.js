@@ -64,9 +64,11 @@ export const store = {
   revision: null,
   healthTicking: false,
   metricsTicking: false,
-  // 全局筛选：按访问密钥收窄监控页的读数（"" = 全部）。放在外壳里而不是各页自己存，
-  // 是为了在概览与用量统计之间切换时保持同一把 key —— 否则"全局"只到页面边界。
-  accessKeyFilter: "",
+  // 全局筛选：按供应商 / 访问密钥收窄监控页的读数（空数组 = 该维度不设限）。放在外壳里
+  // 而不是各页自己存，是为了在概览与用量统计之间切换时保持同一组条件——否则「全局」只到
+  // 页面边界。维度内多选（OR）、维度间同时成立（AND），见 webui/metric-filter.js。
+  providerFilters: [],
+  accessKeyFilters: [],
 };
 
 let root = null;      // #root

@@ -12,7 +12,7 @@ import {
   formatRate,
 } from "../dom.js";
 import { api } from "../api.js";
-import { accessKeyFilterNode, selectedAccessKey, filterNote } from "../access-filter.js";
+import { metricFilterBar, metricFilterActive, selectedAccessKeys, selectedProviders, filterNote } from "../metric-filter.js";
 import {
   card, cardHead, stat, statGrid, notice, badge, empty, skeleton, render,
   segmented, table, freshness,
@@ -116,31 +116,35 @@ function pickRange(selection) {
 // —— 取数 ——
 // 快照与序列同一窗口一次取回，保证同屏读数自洽。
 //
-// 全局筛选（外壳的 store.accessKeyFilter）决定走哪条路径：
+// 全局筛选（外壳 store 里的两个维度）决定走哪条路径：
 //   - 未筛选：仍是 /metrics + /metrics/series + /ui/key-usage.json 三条，与页面此前的
 //     行为逐字一致；
 //   - 已筛选：/metrics 系列是**对照参照实现**的读数、形状已发布，加不了过滤条件
-//     （见 webui/api.js 的 accessKeyMetrics），因此快照与序列改从
-//     /ui/access-key-metrics.json 一条拿回，归成同一种形状后共用下面的落状态与错误处理。
+//     （见 webui/api.js 的 filteredMetrics），因此快照与序列改从
+//     /ui/filtered-metrics.json 一条拿回，归成同一种形状后共用下面的落状态与错误处理。
+//     该端点收两个维度（维度内 OR、维度间 AND），这里原样把两个数组传下去。
 //
 // 两条路径都用**同一个** spec.hours：本页的「全部历史」是先由最早一条记录推出跨度、
 // 再当小时数查（series 根本没有 all_history），因此这里不能单独传 all_history=true
 // ——那会让按 Key 的表覆盖比上方 KPI/曲线更长的跨度，同屏数字对不上。
 async function loadWindow(force = false) {
   const spec = currentSpec();
-  const accessKeyId = selectedAccessKey(xtxRef?.store);
-  // 缓存键必须带上筛选值：否则切到筛选会命中旧的 seriesKey 而不重新取数，
-  // 切回「全部」也会继续显示筛选后的数据。
-  const key = `${state.selection}:${spec.hours}:${accessKeyId}`;
+  const accessKeyIds = selectedAccessKeys(xtxRef?.store);
+  const providerIds = selectedProviders(xtxRef?.store);
+  const scoped = metricFilterActive(xtxRef?.store);
+  // 缓存键必须带上筛选条件：否则切到筛选会命中旧的 seriesKey 而不重新取数，
+  // 清空筛选也会继续显示筛选后的数据。
+  const key = `${state.selection}:${spec.hours}:${providerIds.join(",")}|${accessKeyIds.join(",")}`;
   if (!force && state.series && state.seriesKey === key) return;
   const bucket = pickBucketSeconds(spec.hours);
   const token = ++seriesToken;
   let reads;
-  if (accessKeyId) {
+  if (scoped) {
     const [bundle, keyUsage] = await Promise.all([
-      api.accessKeyMetrics({ accessKeyId, hours: spec.hours, bucketSeconds: bucket, limit: 0 })
+      api.filteredMetrics({ accessKeyIds, providerIds, hours: spec.hours, bucketSeconds: bucket, limit: 0 })
         .catch((error) => ({ __error: errorText(error) })),
-      api.keyUsage({ hours: spec.hours, accessKeyId }).catch((error) => ({ __error: errorText(error) })),
+      api.keyUsage({ hours: spec.hours, accessKeyIds, providerIds })
+        .catch((error) => ({ __error: errorText(error) })),
     ]);
     // 筛选态里快照与序列来自**同一条响应**：一次失败就是两者都失败，因此共用同一个
     // 错误文本，不假装其中一半还能读。
@@ -598,8 +602,9 @@ function draw(firstPaint = false) {
   const points = state.series || [];
   const bucketSeconds = state.seriesBucket || pickBucketSeconds(spec.hours);
   // 全局筛选是否生效。生效时整页读数只含这一把访问密钥发起的调用，按 Key 拆分的
-  // 三张卡同时收起——它们的行只剩被筛中的那一行，答不了「哪把 Key 出去了」。
-  const scoped = Boolean(selectedAccessKey(store));
+  // 任一维度筛选生效，三张卡同时收起——它们的行只剩被筛中的那一行（或那一家的行），
+  // 答不了「哪把 Key 出去了」。
+  const scoped = metricFilterActive(store);
 
   const children = [
     h("div.page-head", {},
@@ -611,7 +616,7 @@ function draw(firstPaint = false) {
         state.snapshotAt ? freshness(state.snapshotAt) : null,
         metadataBadges(metrics),
         // 筛选作用于整页所有卡片，因此与时间窗口分段控件并排放在 actions 行里。
-        accessKeyFilterNode(store, () => { state.loading = true; draw(); loadWindow(true); }),
+        metricFilterBar(store, () => { state.loading = true; draw(); loadWindow(true); }),
         segmented(
           USAGE_RANGES.map((item) => ({
             id: item.hours, label: item.short, title: item.label,
@@ -624,7 +629,7 @@ function draw(firstPaint = false) {
   ];
 
   if (store.connectionError) children.push(notice(`无法连接 AMKR 服务：${store.connectionError}`, "error"));
-  // 筛选态要先说明「看的是哪把 key」，并交代收起来的按 Key 明细去了哪 —— 不写这一句，
+  // 筛选态要先说明「看的是哪些条件」，并交代收起来的按 Key 明细去了哪 —— 不写这一句，
   // 用户会以为那三张卡是页面出了问题才消失的。
   const filterInfo = filterNote(store);
   if (filterInfo) {
@@ -636,7 +641,7 @@ function draw(firstPaint = false) {
     children.push(notice(`历史跨度超过 ${limitDays} 天，图中只覆盖最近 ${limitDays} 天。`, "warn"));
   }
   // 筛选态与全量态读的不是同一条接口，报错时写明范围，否则用户会去查错的地方。
-  const scopeSuffix = scoped ? "（按访问密钥筛选）" : "";
+  const scopeSuffix = scoped ? "（已筛选）" : "";
   if (state.snapshotError && !metrics) children.push(notice(`指标读取失败${scopeSuffix}：${state.snapshotError}`, "error"));
   if (state.seriesError) children.push(notice(`趋势数据读取失败${scopeSuffix}：${state.seriesError}`, "error"));
   // 按 Key 是单独一条读数：它读失败只该让那三张卡显示空态，不该连累上面的总量与曲线。

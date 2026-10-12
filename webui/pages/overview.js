@@ -13,7 +13,7 @@ import {
 import { api } from "../api.js";
 // 全局筛选（按访问密钥）：控件、当前取值与说明文案都在这个共享模块里，概览与用量统计
 // 用同一套，免得两页在标签、空态与失败回退上长得不一样。
-import { accessKeyFilterNode, selectedAccessKey, filterNote } from "../access-filter.js";
+import { metricFilterBar, metricFilterActive, selectedProviders, selectedAccessKeys, filterNote } from "../metric-filter.js";
 import {
   card, cardHead, stat, statSkeleton, notice, badge, empty, skeleton, render,
   buttonNode, segmented, freshness, progressBar, toast,
@@ -98,16 +98,16 @@ const state = {
   series: null,
   seriesHours: null,
   seriesBucket: null,
-  // 缓存归属：这份序列属于哪把访问密钥（"" = 全部）。光看 hours 判断缓存，切筛选后
-  // 会把上一把 key 的曲线画在新筛选下，切回「全部」也不会重取。
-  seriesAccessKey: "",
+  // 缓存归属：这份序列属于哪一组筛选条件。光看 hours 判断缓存，切筛选后会把上一组
+  // 条件的曲线画在新筛选下，清空筛选也不会重取。
+  seriesFilterKey: "",
   seriesError: null,
   // 本页自己按所选窗口取快照，而不是复用全局的 1 小时快照：
   // 否则把窗口切到 7 天时，折线是 7 天、排行与状态分布却仍是 1 小时，
   // 同一屏出现两个口径的"总量"。
   snapshot: null,
   snapshotHours: null,
-  snapshotAccessKey: "",
+  snapshotFilterKey: "",
   snapshotError: null,
   snapshotAt: null,
   loading: true,
@@ -117,8 +117,8 @@ const state = {
   heatPoints: null,
   heatError: null,
   heatAt: null,
-  // 热力图的缓存归属与上面同理：换筛选后第一件事是重取，而不是继续用上一把 key 的节律图。
-  heatAccessKey: "",
+  // 热力图的缓存归属与上面同理：换筛选后第一件事是重取，而不是继续用上一组条件的节律图。
+  heatFilterKey: "",
   heatToken: 0,
   // 请求流：从「实时活动」移到这里，因为它回答的正是"此刻正在发生什么"。
   // 跟随概览的 1h/6h/24h 窗口，但只取最近若干条明细。
@@ -137,10 +137,16 @@ function rangeLabel() {
   return TIME_RANGES.find((range) => range.hours === state.hours)?.label || `${state.hours} 小时`;
 }
 
+// filterKeyOf 把两个维度的选择压成一个字符串，只用来判断「这份缓存属于哪一组条件」。
+// 它不参与请求构造：请求各自把数组交给 api（维度内多选靠同名参数重复出现表达）。
+function filterKeyOf(store) {
+  return `${selectedProviders(store).join(",")}|${selectedAccessKeys(store).join(",")}`;
+}
+
 // dropFilteredData 丢掉与当前筛选归属不符的读数。
 //
 // 切筛选、以及带着另一页选的筛选回到本页时都要先清一遍：异步取数总有几百毫秒延迟，
-// 新数据落地前屏上不能还留着上一把 key 的曲线、热力图与明细——那正是"用旧数据画新
+// 新数据落地前屏上不能还留着上一组条件的曲线、热力图与明细——那正是"用旧数据画新
 // 筛选"，比空态更容易被当真。
 function dropFilteredData() {
   state.series = null;
@@ -152,19 +158,20 @@ function dropFilteredData() {
 }
 
 // 请求明细：与窗口同一 hours，保证"图上是 1 小时、列表里却是 24 小时"不会发生。
-// 筛选生效时改走 /ui/access-key-metrics.json：/metrics/requests 是对照参照实现的已发布
-// 读数，不能给它加过滤参数（见 webui/api.js 的 accessKeyMetrics）。
+// 筛选生效时改走 /ui/filtered-metrics.json：/metrics/requests 是对照参照实现的已发布
+// 读数，不能给它加过滤参数（见 webui/api.js 的 filteredMetrics）。
 async function loadRequests() {
   const token = ++streamToken;
-  const accessKeyId = selectedAccessKey(xtxRef.store);
+  const accessKeyIds = selectedAccessKeys(xtxRef.store);
+  const providerIds = selectedProviders(xtxRef.store);
   try {
     // 桶宽只由 hours 决定，这里必须自己推导而不能读 state.seriesBucket：切窗口时
     // loadRequests 与 loadWindow 是并发跑的，那一刻它还是上一个窗口的值，24 小时窗口
     // 配 15 秒桶会直接撞上后端 500 点上限。
     const bucket = pickBucketSeconds(state.hours);
-    const data = accessKeyId
-      ? (await api.accessKeyMetrics({
-          accessKeyId, hours: state.hours, bucketSeconds: bucket, limit: 40,
+    const data = metricFilterActive(xtxRef.store)
+      ? (await api.filteredMetrics({
+          accessKeyIds, providerIds, hours: state.hours, bucketSeconds: bucket, limit: 40,
         })).requests
       : await api.requests({ hours: state.hours, limit: 40 });
     if (token !== streamToken) return;
@@ -180,17 +187,19 @@ async function loadRequests() {
 
 // 快照与序列必须同一个窗口、同一次请求周期内取，保证同屏数字自洽。
 //
-// 筛选生效时改用 /ui/access-key-metrics.json 一次取回两者：它本来就返回同一窗口的一份
+// 筛选生效时改用 /ui/filtered-metrics.json 一次取回两者：它本来就返回同一窗口的一份
 // 快照 + 序列，而 /metrics 与 /metrics/series 是不能加过滤参数的已发布读数。
 async function loadWindow(force = false) {
-  const accessKeyId = selectedAccessKey(xtxRef.store);
+  const accessKeyIds = selectedAccessKeys(xtxRef.store);
+  const providerIds = selectedProviders(xtxRef.store);
+  const filterKey = filterKeyOf(xtxRef.store);
   if (!force && state.series && state.seriesHours === state.hours
-      && state.seriesAccessKey === accessKeyId) return;
+      && state.seriesFilterKey === filterKey) return;
   const bucket = pickBucketSeconds(state.hours);
   const token = ++windowToken;
   const hours = state.hours;
-  const [snapshot, series] = accessKeyId
-    ? await api.accessKeyMetrics({ accessKeyId, hours, bucketSeconds: bucket, limit: 0 })
+  const [snapshot, series] = metricFilterActive(xtxRef.store)
+    ? await api.filteredMetrics({ accessKeyIds, providerIds, hours, bucketSeconds: bucket, limit: 0 })
       .then((bundle) => [bundle.snapshot, bundle.series])
       // 两条读数合成了一次请求，失败时给两边同一个错误：调用方下面那套按字段处理的
       // 代码因此不必为筛选态再写一份分支。
@@ -209,8 +218,8 @@ async function loadWindow(force = false) {
   state.series = series.__error ? null : (series.points || []);
   state.seriesHours = hours;
   state.snapshotHours = hours;
-  state.seriesAccessKey = accessKeyId;
-  state.snapshotAccessKey = accessKeyId;
+  state.seriesFilterKey = filterKey;
+  state.snapshotFilterKey = filterKey;
   state.seriesBucket = series.bucket_seconds || bucket;
   state.snapshotAt = new Date().toISOString();
   state.loading = false;
@@ -219,25 +228,28 @@ async function loadWindow(force = false) {
 
 // 热力图数据与主图分开取：它固定 7 天，且不需要每次都重算。
 // TTL 对失败同样生效（heatAt 记录的是"上次尝试"），否则接口报错时每次轮询都会重试。
-// 归属（heatAccessKey）也参与判定：换筛选后即使 TTL 没到也必须重取。
+// 归属（heatFilterKey）也参与判定：换筛选后即使 TTL 没到也必须重取。
 async function loadHeatmap(force = false) {
-  const accessKeyId = selectedAccessKey(xtxRef.store);
-  if (!force && state.heatAt && state.heatAccessKey === accessKeyId
+  const accessKeyIds = selectedAccessKeys(xtxRef.store);
+  const providerIds = selectedProviders(xtxRef.store);
+  const filterKey = filterKeyOf(xtxRef.store);
+  if (!force && state.heatAt && state.heatFilterKey === filterKey
       && Date.now() - Date.parse(state.heatAt) < HEATMAP_TTL_MS) return;
   const token = ++state.heatToken;
-  // 筛选态复用 /ui/access-key-metrics.json 取序列：它顺带把 168 小时 / 1800 秒窗口的
+  // 筛选态复用 /ui/filtered-metrics.json 取序列：它顺带把 168 小时 / 1800 秒窗口的
   // 快照也算了一遍，那份聚合这里用不上——这是为了不给后端再加一条"只要序列"的接口
   // 而付出的多余聚合。热力图 60 秒才刷一次，这点代价可以接受。
-  const series = await (accessKeyId
-    ? api.accessKeyMetrics({
-        accessKeyId, hours: HEATMAP_WINDOW_HOURS, bucketSeconds: HEATMAP_BUCKET_SECONDS, limit: 0,
+  const series = await (metricFilterActive(xtxRef.store)
+    ? api.filteredMetrics({
+        accessKeyIds, providerIds, hours: HEATMAP_WINDOW_HOURS,
+        bucketSeconds: HEATMAP_BUCKET_SECONDS, limit: 0,
       }).then((bundle) => bundle.series)
     : api.series(HEATMAP_WINDOW_HOURS, HEATMAP_BUCKET_SECONDS)
   ).catch((error) => ({ __error: errorText(error) }));
   if (token !== state.heatToken) return; // 已有更新的请求在途，丢弃过期响应
   state.heatError = series?.__error || null;
   state.heatPoints = series?.__error ? null : (series?.points || []);
-  state.heatAccessKey = accessKeyId;
+  state.heatFilterKey = filterKey;
   state.heatAt = new Date().toISOString();
   draw();
 }
@@ -247,10 +259,6 @@ async function loadHeatmap(force = false) {
 // 其余累计量都取自同一份窗口快照，保证同屏数字出自同一口径。
 function kpiTiles(metrics, points, bucketSeconds) {
   const total = metrics.total || {};
-  // 在途数是进程内的计数，按定义无法按访问密钥拆（见 docs/API.md 对新端点的说明）。
-  // 筛选时把它标明是全实例的，否则它看起来像「这把 key 正在进行中的请求数」，与本页
-  // 那句「读数只含这把密钥发起的调用」正好相反。
-  const scoped = Boolean(selectedAccessKey(xtxRef?.store));
   const successRatio = total.requests ? total.successes / total.requests : null;
   const cacheRatio = total.prompt_tokens ? total.cached_tokens / total.prompt_tokens : null;
   // retries 是 SUM(retried)，每行一条尝试记录，所以分母同样用 requests（= COUNT(*)）。
@@ -308,7 +316,7 @@ function kpiTiles(metrics, points, bucketSeconds) {
         iconName: "clock",
       }),
     stat("平均首字", total.requests && total.avg_first_token_ms ? formatDuration(total.avg_first_token_ms) : "-",
-      `${formatCount(metrics.active_requests ?? 0)} 个请求进行中${scoped ? "（全实例）" : ""}`, {
+      `${formatCount(metrics.active_requests ?? 0)} 个请求进行中`, {
         iconName: "activity",
       }),
     costTile(metrics),
@@ -1008,13 +1016,13 @@ export function renderOverview(context) {
     return h("div.stack", {}, notice("需要本地鉴权 Key 才能读取用量。", "warn"));
   }
   // 筛选是全局的（可能是在用量统计页选的），因此它变了同样要重取：只比 hours 会让
-  // 带着一把 key 切回概览时，曲线与排行还停在上一把 key 上。
-  const accessKeyId = selectedAccessKey(context.store);
-  if (state.seriesAccessKey !== accessKeyId || state.snapshotAccessKey !== accessKeyId) {
+  // 带着一组条件切回概览时，曲线与排行还停在上一次筛选上。
+  const filterKey = filterKeyOf(context.store);
+  if (state.seriesFilterKey !== filterKey || state.snapshotFilterKey !== filterKey) {
     dropFilteredData();
   }
   if (!state.snapshot && !state.loading) state.loading = true;
-  if (state.seriesHours !== state.hours || state.seriesAccessKey !== accessKeyId) loadWindow();
+  if (state.seriesHours !== state.hours || state.seriesFilterKey !== filterKey) loadWindow();
   loadHeatmap();
   // 请求流与窗口同一 hours：切窗口时旧列表会被下一次 onTick 覆盖，
   // 这里先取一次，避免切完窗口后列表还停在上一个窗口的记录上。
@@ -1052,7 +1060,7 @@ function draw(firstPaint = false) {
     ),
     h("div.page-actions", {},
       // 全局筛选与窗口选择器并排：两者回答的都是"这批读数覆盖什么"。
-      accessKeyFilterNode(store, () => {
+      metricFilterBar(store, () => {
         // 换筛选等于换了一整套读数，三个数据源各有自己的缓存与在途请求，必须全部
         // 重取：不带 force 的话 loadWindow/loadHeatmap 会命中缓存，切完看着像没生效。
         dropFilteredData();

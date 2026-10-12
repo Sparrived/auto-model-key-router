@@ -132,11 +132,13 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .page-head .sub { color: var(--ui-text-on-canvas); font-size: 13px; margin-top: 6px; max-width: 74ch; }
 .page-head .freshness, .page-head .muted { color: var(--ui-text-on-canvas); }
 .page-actions { display: flex; align-items: center; gap: var(--sp-1); margin-left: auto; flex-wrap: wrap; min-width: 0; }
-/* 全局筛选（按访问密钥）：控件本身沿用 .select，标签要压在赤陶画布上，因此不能
-   用 .toolbar-label 的 --ui-text-muted（那是给卡片表面上的文字用的）。 */
-.access-key-filter { display: flex; align-items: center; gap: var(--sp-1); }
-.access-key-filter > span { font-size: 12px; color: var(--ui-text-muted); }
-.page-head .access-key-filter > span { color: var(--ui-text-on-canvas); }
+/* 全局筛选（供应商 / 访问密钥）：两个维度各一排 chip，维度内多选、维度间同时成立。
+   chip 复用 .segmented / .segment（多枚同时 aria-pressed="true" 就是多选），这里只负责
+   分组排版：标签压在赤陶画布上，因此不能用 .toolbar-label 的 --ui-text-muted。 */
+.metric-filters { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+.metric-filters .filter-group { display: flex; align-items: center; gap: var(--sp-1); min-width: 0; }
+.metric-filters .filter-label { font-size: 12px; color: var(--ui-text-muted); white-space: nowrap; }
+.page-head .metric-filters .filter-label { color: var(--ui-text-on-canvas); }
 
 /* ══ 仪表板栅格 ══ */
 /* 12 列栅格：看板卡片按列跨距排布，窄屏逐级塌缩。
