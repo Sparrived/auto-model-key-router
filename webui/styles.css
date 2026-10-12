@@ -242,8 +242,6 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .stat.is-featured .stat-value { font-size: 38px; }
 .overview-focus { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--sp-2); }
 .overview-focus > .card { min-width: 0; }
-.overview-distribution { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); }
-@media (max-width: 1100px) { .overview-distribution { grid-template-columns: minmax(0, 1fr); } }
 .model-editor-surface { margin-top: 16px; padding: 20px; background: var(--ui-surface-soft); border-radius: 16px; }
 :where(button, input, select, textarea, a):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 :where(button, input, select, textarea) { max-width: 100%; }

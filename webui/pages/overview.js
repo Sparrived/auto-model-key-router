@@ -19,7 +19,7 @@ import { icon } from "../icons.js";
 import { lineChart, stackedBars, donut, barList, legend, chartSummary, heatmap, sparkline } from "../charts.js";
 import {
   TIME_RANGES, pickBucketSeconds, bucketLabel, METRIC_MAP, HEATMAP_METRICS,
-  rank, statusGroups, formatPercentValue, formatCompactNumber, formatNumber,
+  rank, formatPercentValue, formatCompactNumber, formatNumber,
   trend as computeTrend,
 } from "../chart-math.js";
 // 成本是派生读数：目录拿不到时 KPI 与排行卡显示"—"，其余看板不受影响。
@@ -367,72 +367,101 @@ function compositionCard(metrics) {
   );
 }
 
-function statusCard(metrics) {
-  const groups = statusGroups(metrics.total?.status_codes || {});
-  const total = groups.ok + groups.client + groups.server + groups.other;
-  const rows = [
-    { label: "2xx 成功", value: groups.ok, tone: "good" },
-    { label: "4xx 客户端错误", value: groups.client, tone: "warn" },
-    { label: "5xx 服务端错误", value: groups.server, tone: "bad" },
-    { label: "其它状态", value: groups.other, tone: "neutral" },
-  ].filter((row) => row.value > 0);
+// —— 请求结果 ——
+// 这里原先挤着三张卡：响应状态分布（类别占比）、状态码明细（到底是 502 还是 504）、
+// 请求结果（成功/重试/失败）。三者回答的是同一个问题——这段窗口里的请求最后怎么了——
+// 拆成三张卡只会让同一批数字（86、86、86）看起来像三个不同的读数。
+//
+// 并成一张后的读法：一条横条给整体形状，类别用语义色，**同类内按次数深浅区分具体
+// 状态码**（200 是最深的绿，201 淡一档……），下面的明细行与色块一一对应；最下面才是
+// 尝试层面的成功/重试/失败——那是同一批请求的另一个侧面，不是漏斗的三步。
+const CODE_CLASSES = [
+  { label: "2xx 成功", tone: "good", match: (code) => code >= 200 && code < 300 },
+  { label: "4xx 客户端错误", tone: "warn", match: (code) => code >= 400 && code < 500 },
+  { label: "5xx 服务端错误", tone: "bad", match: (code) => code >= 500 },
+];
+// 兜底档不写判定式：写 `() => true` 会让每个状态码同时落进两档。
+const OTHER_CLASS = { label: "其它状态", tone: "neutral" };
+const classOf = (code) => CODE_CLASSES.find((item) => item.match(code)) || OTHER_CLASS;
 
-  return card(
-    cardHead("响应状态分布", badge(`最近 ${rangeLabel()}`, "muted")),
-    total
-      ? h("div.stack", {},
-          h("div.status-bar", { role: "img", "aria-label": "响应状态占比" },
-            rows.map((row) => h("span", {
-              class: `status-seg tone-${row.tone}`,
-              style: { flex: String(row.value) },
-              title: `${row.label} ${formatCount(row.value)}`,
-            }))),
-          h("div.stack.tight", {}, rows.map((row) =>
-            h("div.row-between", {},
-              h("span.inline", {},
-                h("i", { class: `swatch tone-${row.tone === "good" ? "secondary" : row.tone === "neutral" ? "neutral" : row.tone}` }),
-                row.label,
-              ),
-              h("span.inline", {},
-                h("strong", formatCount(row.value)),
-                h("span.muted", ` · ${formatPercent(row.value, total)}`),
-              ),
-            ))),
-        )
-      : empty("窗口内没有带状态码的请求。", { icon: "activity" }),
-  );
+// 同类内第 n 多的状态码淡一档。用透明度而不是另算一套色阶：色块底下就是卡片背景，
+// 深浅关系在浅色/深色主题里都成立，也不必为每套配色维护色板。
+// 取 1/(1+0.4n) 而不是每档减同一个数：减法定长会在长尾上撞到同一个值（第 5 名和第
+// 6 名变成一个颜色，"深浅即排名"就断了），这条曲线严格递减、永远不会重复。
+const shadeOf = (rank) => 1 / (1 + rank * 0.4);
+
+// 横条与明细共用同一组行——两边各自排序迟早会出现"色块与说明对不上号"。
+function statusCodeRows(statusCodes) {
+  const codes = Object.entries(statusCodes || {})
+    .map(([code, count]) => ({ code: Number(code), count: Number(count) || 0 }))
+    .filter((row) => row.count > 0)
+    .sort((a, b) => b.count - a.count);
+  const rows = [];
+  for (const cls of [...CODE_CLASSES, OTHER_CLASS]) {
+    codes
+      .filter((row) => classOf(row.code) === cls)
+      .forEach((row, index) => rows.push({
+        ...row, label: cls.label, tone: cls.tone, shade: shadeOf(index),
+      }));
+  }
+  return rows;
 }
 
-// 请求流转：本次窗口内的"尝试"如何收敛成成功。
-// 刻意不用箭头列：那会让人误读成顺序漏斗（请求→重试→失败→成功），
-// 而成功率/重试率/失败率是同一批请求的三个侧面，用横向占比条最诚实。
-function waterfallCard(metrics) {
+function resultCard(metrics) {
   const total = metrics.total || {};
-  const requests = total.requests || 0;
-  const retries = total.retries || 0;
-  const failures = total.failures || 0;
-  const successes = total.successes || 0;
-
-  const rows = [
-    { label: "成功", value: successes, tone: "secondary", hint: "上游返回 2xx" },
-    { label: "重试", value: retries, tone: "warn", hint: "同一次调用换了 Key/上游再试" },
-    { label: "失败", value: failures, tone: "bad", hint: "所有尝试均未成功" },
+  const attempts = total.requests || 0;
+  const codes = statusCodeRows(total.status_codes);
+  const coded = codes.reduce((sum, row) => sum + row.count, 0);
+  const outcomes = [
+    { label: "成功", value: total.successes || 0, tone: "secondary", hint: "上游返回 2xx" },
+    { label: "重试", value: total.retries || 0, tone: "warn", hint: "同一次调用换了 Key/上游再试" },
+    { label: "失败", value: total.failures || 0, tone: "bad", hint: "所有尝试均未成功" },
   ];
 
   return card(
-    cardHead("请求结果", badge("按上游尝试计数", "muted"), badge(`最近 ${rangeLabel()}`, "muted")),
+    cardHead("请求结果",
+      codes.length ? badge(`${codes.length} 种状态码`, "muted") : null,
+      badge(`最近 ${rangeLabel()}`, "muted")),
     h("div.flow-total", {},
-      h("span.flow-total-value", formatCount(requests)),
+      h("span.flow-total-value", formatCount(attempts)),
       h("span.flow-total-label", "次上游尝试"),
     ),
-    h("div.flow-rows", {}, rows.map((row) => {
-      const ratio = requests ? row.value / requests : 0;
+    codes.length
+      ? h("div.stack.tight", {},
+          // 两套分母必须说清楚：状态码行按"有状态码的请求"算（连不上上游的那些没有
+          // 状态码，不该把 2xx 的占比稀释掉），下面成功/重试/失败按全部尝试算。
+          // 两者相等时不加这句，免得变成噪声。
+          h("span.section-label", coded === attempts
+            ? "响应状态码"
+            : `响应状态码 · ${formatCount(coded)} / ${formatCount(attempts)} 次有状态码`),
+          h("div.status-bar", { role: "img", "aria-label": `按状态码着色的响应占比，最近 ${rangeLabel()}` },
+            codes.map((row) => h(`span.status-seg.tone-${row.tone}`, {
+              style: { flex: String(row.count), opacity: String(row.shade) },
+              title: `${row.code} · ${formatCount(row.count)} 次 · ${formatPercent(row.count, coded)}`,
+            }))),
+          h("div.stack.tight", {}, codes.map((row) =>
+            h("div.row-between", {},
+              h("span.inline", {},
+                h("i", { class: `swatch tone-${row.tone}`, style: { opacity: String(row.shade) } }),
+                h("span.mono", String(row.code)),
+                h("span.muted", row.label),
+              ),
+              h("span.inline", {},
+                h("strong", formatCount(row.count)),
+                h("span.muted", ` · ${formatPercent(row.count, coded)}`),
+              ),
+            ))),
+        )
+      : h("p.muted", "窗口内没有带状态码的请求。"),
+    h("hr.divider"),
+    h("div.flow-rows", {}, outcomes.map((row) => {
+      const ratio = attempts ? row.value / attempts : 0;
       return h("div.flow-row", {},
         h("div.flow-row-head", {},
-          h("span.inline", {}, h("i", { class: `swatch tone-${row.tone === "secondary" ? "secondary" : row.tone}` }), row.label),
+          h("span.inline", {}, h("i", { class: `swatch tone-${row.tone}` }), row.label),
           h("span.inline", {},
             h("strong", formatCount(row.value)),
-            h("span.muted", ` · ${formatPercent(row.value, requests)}`),
+            h("span.muted", ` · ${formatPercent(row.value, attempts)}`),
           ),
         ),
         progressBar(ratio * 100, row.tone === "secondary" ? "good" : row.tone),
@@ -841,37 +870,6 @@ function outcomeCard(points, bucketSeconds) {
   );
 }
 
-// —— 状态码明细 ——
-// 比状态分组更细一层：分组告诉你"有 5xx"，这张表告诉你"是 502 还是 504"，
-// 排查时这是两种完全不同的原因。
-function statusCodeCard(metrics) {
-  const codes = metrics.total?.status_codes || {};
-  const entries = Object.entries(codes)
-    .map(([code, count]) => ({ code: Number(code), count: Number(count) || 0 }))
-    .filter((row) => row.count > 0)
-    .sort((a, b) => b.count - a.count);
-  if (!entries.length) {
-    return card(cardHead("状态码明细", badge(rangeLabel(), "muted")),
-      empty("窗口内没有带状态码的请求。", { icon: "activity" }));
-  }
-  const total = entries.reduce((sum, row) => sum + row.count, 0);
-  const group = (code) => (code >= 200 && code < 300 ? "good" : code >= 500 ? "bad" : code >= 400 ? "warn" : "neutral");
-  return card(
-    cardHead("状态码明细", badge(`${entries.length} 种`, "muted"), badge(rangeLabel(), "muted")),
-    h("div.stack.tight", {}, entries.slice(0, 8).map((row) =>
-      h("div.row-between", {},
-        h("span.inline", {},
-          h("i", { class: `swatch tone-${group(row.code)}` }),
-          h("span.mono", String(row.code)),
-        ),
-        h("span.inline", {},
-          h("strong", formatCount(row.count)),
-          h("span.muted", ` · ${formatPercent(row.count, total)}`),
-        ),
-      ))),
-  );
-}
-
 // —— 实时脉搏：四个指标的小倍数图 ——
 // 把 RPM / TPM / 耗时 / 成功率并成一组同宽的迷你曲线。分开看四张折线要上下滚动，
 // 摆在一起才能回答"这次耗时抬升是不是伴随了成功率下滑"。
@@ -1002,7 +1000,7 @@ function draw(firstPaint = false) {
     // 横轴因此仍然完全对齐，并排看"结果结构"与"Token 结构"才读得出同步异动。
     h("div.col-6", {}, outcomeCard(points, bucketSeconds)),
     h("div.col-6", {}, tokenBreakdownCard(points, bucketSeconds)),
-    h("div.col-12", {}, h("div.overview-distribution", {}, statusCard(metrics), statusCodeCard(metrics), waterfallCard(metrics))),
+    h("div.col-12", {}, resultCard(metrics)),
     h("div.col-6", {}, rankingCard("模型调用排行", metrics.models, "模型")),
     h("div.col-6", {}, rankingCard("调用方排行", metrics.caller_types, "调用方")),
     h("div.col-6", {}, rankingCard("上游 Token 排行", metrics.upstream_models, "上游模型的 Token", {
