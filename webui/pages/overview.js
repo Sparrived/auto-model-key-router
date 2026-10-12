@@ -372,9 +372,9 @@ function compositionCard(metrics) {
 // 请求结果（成功/重试/失败）。后两者一度并成一张，但"这次调用最后成没成"和"上游到底
 // 回了什么"终究是两个问题，上下堆在一张卡里读着像同一条漏斗的两步——所以拆成左右两张。
 //
-// 两张卡共用同一种画法，也共用同一副骨架：卡头 → 大数字（下面横条的基数）→ 横条 +
-// 标签 → 卡脚。两边占比的基数不同（左边按全部尝试算，右边按有状态码的请求算），所以
-// 各写各的大数字；骨架一致，两条横条与两排标签并排时才会落在同一条水平线上。
+// 两张卡共用同一种画法，也共用同一副骨架：卡头 → 大数字（下面横条的基数，旁注跟在
+// 同一行）→ 横条 + 标签。两边占比的基数不同（左边按全部尝试算，右边按有状态码的请求
+// 算），所以各写各的大数字；骨架一致，两条横条与两排标签并排时才会落在同一条水平线上。
 const CODE_CLASSES = [
   { label: "2xx 成功", tone: "good", match: (code) => code >= 200 && code < 300 },
   { label: "3xx 重定向", tone: "neutral", match: (code) => code >= 300 && code < 400 },
@@ -442,9 +442,10 @@ function distributionBlock(rows, total, ariaLabel) {
 }
 
 // 两张卡的大数字行：下面横条的百分比就是这个数当分母算出来的。两张卡都用它，横条才能
-// 落在同一条水平线上——左右并排时，一条偏高、一条偏低，对照着看就废了一半。
+// 落在同一条水平线上。大数字只有一个，旁边那句 12px 的次要信息可以捎上同一窗口的旁注
+// （耗时、缓存率、尝试总数），但不再单开一行——单开一行就会把横条顶下去，两张卡错位。
 const totalLine = (value, label) => h("div.flow-total", {},
-  h("span.flow-total-value", formatCount(value)),
+  h("span.flow-total-value", value),
   h("span.flow-total-label", label),
 );
 
@@ -467,19 +468,20 @@ function resultCard(metrics) {
     cardHead("请求结果",
       badge("按上游尝试计数", "muted"),
       badge(`最近 ${rangeLabel()}`, "muted")),
-    totalLine(attempts, "次上游尝试"),
+    // 耗时与缓存率跟着大数字走：它们是同一个窗口的旁注，单开一行卡脚只会让大数字和
+    // 横条孤零零地悬在上面，跟右边那张卡也对不齐。
+    totalLine(formatCount(attempts),
+      `次上游尝试 · 平均耗时 ${formatDuration(total.avg_duration_ms)} · 缓存率 ${formatRate(total.cached_token_rate)}`),
     attempts
       ? distributionBlock(rows, attempts, `成功、重试与失败占比，最近 ${rangeLabel()}`)
       : h("p.muted", "窗口内没有请求。"),
-    h("div.card-foot", {},
-      `平均耗时 ${formatDuration(total.avg_duration_ms)} · 缓存率 ${formatRate(total.cached_token_rate)}`),
   );
 }
 
 // 响应状态码卡：占比按"有状态码的请求"算——连不上上游的那几次没有状态码
 // （status_code 为 NULL 的行不进 status_codes），不该拿来稀释 2xx 的占比。
-// 所以两张卡的大数字各是各的基数（90 次尝试 vs 88 次有状态码），差在哪写在卡脚，
-// 免得两个百分数看着互相打架；左边的卡脚是耗时与缓存率，两张卡的底边因此一样齐。
+// 有状态码的请求数才是下面横条的分母，所以大数字就是它；跟全部尝试数不一致时两个都
+// 写出来（88 / 90），省得左卡 90、右卡 88 摆在一起像对不上账。
 function statusCodesCard(metrics) {
   const total = metrics.total || {};
   const attempts = total.requests || 0;
@@ -490,14 +492,13 @@ function statusCodesCard(metrics) {
     cardHead("响应状态码",
       rows.length ? badge(`${rows.length} 种`, "muted") : null,
       badge(`最近 ${rangeLabel()}`, "muted")),
-    totalLine(coded, "次有状态码"),
+    totalLine(
+      coded === attempts ? formatCount(coded) : `${formatCount(coded)} / ${formatCount(attempts)}`,
+      "次有状态码",
+    ),
     rows.length
       ? distributionBlock(rows, coded, `按状态码着色的响应占比，最近 ${rangeLabel()}`)
       : h("p.muted", "窗口内没有带状态码的请求。"),
-    h("div.card-foot", {},
-      coded < attempts
-        ? `${formatCount(attempts)} 次尝试中有 ${formatCount(attempts - coded)} 次没有状态码`
-        : ""),
   );
 }
 
