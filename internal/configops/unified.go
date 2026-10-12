@@ -30,25 +30,11 @@ func migratedUnified(data *canonical.Value) (*canonical.Value, error) {
 
 // unifiedTargets 按固定顺序展开 unified_model 里的所有目标对象。
 //
-// 对齐 config_operations.py:174：按 UNIFIEDPlanNames 遍历每个计划，每个只看
-// primary/fallback，且只有值是对象才算数（非对象静默跳过）。计划集合随
-// UNIFIEDPlanNames 扩展，这里不需要改——否则清理失效引用时会漏掉新族里的目标，
-// 表现为「删了模型，但 unified 还引用着它」。
+// 对齐 config_operations.py:174。遍历本身与「模型的端点计划」共用（见 planTargets）：
+// 计划集合随 UNIFIEDPlanNames 扩展，两处都不需要改——否则清理失效引用时会漏掉新族里的
+// 目标，表现为「删了模型，但统一模型还引用着它」。
 func unifiedTargets(unified *canonical.Value) []*canonical.Value {
-	result := []*canonical.Value{}
-	for _, planName := range UNIFIEDPlanNames {
-		plan := lookup(unified, planName)
-		if !plan.IsObject() {
-			continue
-		}
-		for _, role := range []string{"primary", "fallback"} {
-			target := lookup(plan, role)
-			if target.IsObject() {
-				result = append(result, target)
-			}
-		}
-	}
-	return result
+	return planTargets(unified)
 }
 
 // ReplaceUnifiedModelName 把 unified_model 里对 oldName 的引用改成 newName。
@@ -219,13 +205,16 @@ func FallbackModelID(data *canonical.Value) (string, bool, error) {
 // 「引用了未配置的模型」挡住，而用户想删的恰恰是那个模型。
 //
 // 顺序不能反，而且现在更严格：repair_unified_model 要先把候选配置完整解析一遍才敢改，
-// 任何一处残留的失效引用（任务、访问密钥清单、工作空间清单）都会让那次解析直接失败。
-// 所以失效引用必须先全部清掉，才轮到 unified_model。
+// 任何一处残留的失效引用（任务、访问密钥清单、工作空间清单、**模型的端点计划**）都会让
+// 那次解析直接失败。所以失效引用必须先全部清掉，才轮到 unified_model。
 func RepairModelReferences(data *canonical.Value) error {
 	if err := RepairReferenceLists(data); err != nil {
 		return err
 	}
 	if _, err := RepairTasks(data); err != nil {
+		return err
+	}
+	if err := RepairModelEndpoints(data); err != nil {
 		return err
 	}
 	return RepairUnifiedModel(data)
@@ -245,19 +234,11 @@ func RepairUnifiedModel(data *canonical.Value) error {
 		data.DeleteKey("unified_model")
 		return nil
 	}
-	routerConfig := parseConfigWithoutUnified(data)
+	routerConfig := parseConfigWithoutPlans(data)
 	if routerConfig == nil {
 		return nil
 	}
-	configured := map[string]config.ModelConfig{}
-	names := map[string]string{}
-	for _, model := range routerConfig.Models {
-		configured[model.ID] = model
-		names[model.ID] = model.ID
-		for _, alias := range model.Aliases {
-			names[alias] = model.ID
-		}
-	}
+	names, configured := configuredModelIndex(routerConfig)
 
 	defaultPlan := lookup(unified, "default")
 	var primary *canonical.Value
@@ -282,56 +263,8 @@ func RepairUnifiedModel(data *canonical.Value) error {
 		))
 	}
 
-	for _, planName := range UNIFIEDPlanNames {
-		plan := lookup(unified, planName)
-		if !plan.IsObject() {
-			if planName != "default" {
-				unified.DeleteKey(planName)
-			}
-			continue
-		}
-		for _, role := range []string{"primary", "fallback"} {
-			target := lookup(plan, role)
-			if !target.IsObject() {
-				if role == "fallback" {
-					plan.DeleteKey(role)
-				}
-				continue
-			}
-			modelID, known := names[lookup(target, "model").StringValue()]
-			if !known {
-				if planName == "default" && role == "primary" {
-					continue
-				}
-				if role == "primary" {
-					unified.DeleteKey(planName)
-					break
-				}
-				plan.DeleteKey(role)
-				continue
-			}
-			target.SetKey("model", canonical.NewString(modelID))
-			selected := strings.TrimSpace(lookup(target, "key").StringValue())
-			if selected != "" {
-				usable := false
-				for _, key := range configured[modelID].Keys {
-					if key.Enabled && (key.Name == selected || strings.HasSuffix(key.Name, "-"+selected)) {
-						usable = true
-						break
-					}
-				}
-				if !usable {
-					target.SetKey("key", canonical.NewNull())
-				}
-			}
-		}
-		planPrimary := lookup(plan, "primary")
-		planFallback := lookup(plan, "fallback")
-		if planPrimary.IsObject() && planFallback.IsObject() &&
-			pyEqualValues(lookup(planPrimary, "model"), lookup(planFallback, "model")) {
-			plan.DeleteKey("fallback")
-		}
-	}
+	// default 的 primary 由上面那一段负责补位，因此它即使失效也不在这里被删掉。
+	repairPlanContainer(unified, names, configured, map[string]bool{"default": true})
 	data.SetKey("unified_model", unified)
 	return nil
 }

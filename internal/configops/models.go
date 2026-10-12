@@ -208,6 +208,8 @@ type CreateModelOptions struct {
 	RoutingMode     string
 	ReasoningEffort *string
 	Targets         []*canonical.Value
+	// Endpoints 是模型的端点计划（见 endpoints.go）：nil 表示不配。
+	Endpoints *canonical.Value
 }
 
 // CreateModel 新建模型并返回它。
@@ -257,6 +259,11 @@ func CreateModel(data *canonical.Value, modelID string, options CreateModelOptio
 		}
 	}
 	all.SetKey(id, model)
+	// 端点计划走 SetModelEndpoints 而不是就地写：那边要跑一遍完整解析校验，还要把
+	// 别名折成真实模型 ID（与 unified_model 同一套规范化）。
+	if err := SetModelEndpoints(data, id, options.Endpoints); err != nil {
+		return nil, err
+	}
 	return model, nil
 }
 
@@ -270,6 +277,12 @@ type UpdateModelOptions struct {
 	ReasoningEffort       *string
 	UpdateReasoningEffort bool
 	Targets               []*canonical.Value
+	// Endpoints 是模型的端点计划（见 endpoints.go）：nil 表示不改，null / 空对象表示清空。
+	//
+	// 与 Targets 的差别：targets 是「不改」用 nil、「清空」用一个**非 nil 的空切片**
+	// 表达（空 targets 等于删掉整条路由，由调用方另行处理）。这里没有那条不变式，
+	// 清空就是清空，因此直接收原始值。
+	Endpoints *canonical.Value
 }
 
 // UpdateModel 修改模型，返回最终 ID（改名时是新 ID）。
@@ -359,6 +372,12 @@ func UpdateModel(data *canonical.Value, modelID string, options UpdateModelOptio
 			return "", err
 		}
 		FollowModelRename(data, modelID, targetID)
+		FollowModelEndpointRename(data, modelID, targetID)
+	}
+	if options.Endpoints != nil {
+		if err := SetModelEndpoints(data, targetID, options.Endpoints); err != nil {
+			return "", err
+		}
 	}
 	return targetID, nil
 }

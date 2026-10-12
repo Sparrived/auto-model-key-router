@@ -276,18 +276,21 @@ export const api = {
     request(`/api/probes/${encodeURIComponent(probeId)}/cancel`, { method: "POST" }),
 
   routes: () => request("/api/routes"),
-  createRoute: (revision, id, targets, aliases, routingMode) =>
-    request("/api/routes", {
-      method: "POST",
-      body: { config_revision: revision, id, targets, aliases, routing_mode: routingMode },
-    }),
-  // newId 非空时同时改名（服务端会把引用它的名字一起改：unified_model、任务、工作空间
-  // 与访问密钥清单）。
-  updateRoute: (revision, routeId, targets, aliases, routingMode, newId = null) =>
-    request(`/api/routes/${encodeURIComponent(routeId)}`, {
-      method: "PUT",
-      body: { config_revision: revision, id: newId, targets, aliases, routing_mode: routingMode },
-    }),
+  // endpoints 是「端点族 → 计划」的覆盖表（见 pages/endpoint-plans.js）。它**只在显式
+  // 传入时**才出现在请求体里：不传 = 服务端不动这张表；传 null 或 {} = 清空它。搬目标
+  // 这类只动 targets 的调用因此不会顺手抹掉别的模型配好的端点计划。
+  createRoute: (revision, id, targets, aliases, routingMode, endpoints) => {
+    const body = { config_revision: revision, id, targets, aliases, routing_mode: routingMode };
+    if (endpoints !== undefined) body.endpoints = endpoints;
+    return request("/api/routes", { method: "POST", body });
+  },
+  // newId 非空时同时改名（服务端会把引用它的名字一起改：unified_model、模型的端点计划、
+  // 任务、工作空间与访问密钥清单）。
+  updateRoute: (revision, routeId, targets, aliases, routingMode, newId = null, endpoints) => {
+    const body = { config_revision: revision, id: newId, targets, aliases, routing_mode: routingMode };
+    if (endpoints !== undefined) body.endpoints = endpoints;
+    return request(`/api/routes/${encodeURIComponent(routeId)}`, { method: "PUT", body });
+  },
   deleteRoute: (revision, routeId, options) =>
     request(`/api/routes/${encodeURIComponent(routeId)}${dryRunQuery(options)}`, {
       method: "DELETE",

@@ -1,11 +1,15 @@
-// 统一模型页回归探针：用最小 DOM 垫片驱动真实的 webui/pages/unified.js。
+// 统一模型回归探针：用最小 DOM 垫片驱动真实的 webui/pages/routing.js。
 // 用法：node webui/probes/webui_unified_probe.mjs，结果以 JSON 打到 stdout，失败时退出码 1。
 //
-// 为什么值得单独锁：这一页的保存失败**完全没有声音**。它在提交前会重画整张表单，而错误
+// 统一模型不再有独立页面：它是模型路由页里**固定的第一个名称**（配置仍写在 unified_model
+// 段），因此本探针把模型路由页当作统一模型的宿主来驱动——第一屏落在它上面，编辑入口就是
+// 那一项的「编辑」。断言口径不变：合并页面不能把这些行为弄丢。
+//
+// 为什么值得单独锁：这一处的保存失败**完全没有声音**。它在提交前会重画整张表单，而错误
 // 提示原本是写进重画前的那个节点——那个节点已经脱离文档，于是「保存」点下去只会看到按钮从
 // 「正在保存」闪回「保存」，页面上不留任何痕迹；同时表单里的模型、路由方式又是就地改的内存
 // 状态，改完立刻重画，看起来像"改上了"。两件事叠在一起就是「所有的保存只在前端显示、保存
-// 按钮无效」。这一页还有三条同类的静默故障，四条都锁在这里：
+// 按钮无效」。这里还有三条同类的静默故障，四条都锁在这里：
 //
 //   1. saving 复位 —— 它同时控制着整张表单的 disabled 与保存按钮的文案。成功路径上漏掉
 //      复位，下一次点「编辑」拿到的是一整个禁用、按钮写着「正在保存」的表单，从此再也存不进
@@ -81,7 +85,8 @@ class FakeText extends FakeNode {
 const define = (name, value) =>
   Object.defineProperty(global, name, { value, writable: true, configurable: true });
 
-const location = { hash: "#/unified", pathname: "/ui/" };
+// 统一模型已并入模型路由页，hash 也照实写（页面本身不读它，但假地址不该指向一个不存在的页）。
+const location = { hash: "#/routing", pathname: "/ui/" };
 define("location", location);
 define("window", { addEventListener() {}, isSecureContext: true, location });
 define("navigator", { clipboard: null });
@@ -137,6 +142,15 @@ global.fetch = async (url, options = {}) => {
     return respond(200, { version: 1, catalog_available: true, models });
   }
   const entry = routes[`${method} ${route}`];
+  // 统一模型现在住在模型路由页的固定第一项里（原来有自己的页面），因此这一页还会取
+  // 路由与供应商清单。这些场景不关心它们，统一给空表；真要空表的场景由上面的 routes
+  // 预置覆盖。
+  if (!entry && method === "GET" && route === "/api/routes") {
+    return respond(200, { routes: [], config_revision: "rev-1" });
+  }
+  if (!entry && method === "GET" && route === "/api/providers") {
+    return respond(200, { providers: [], config_revision: "rev-1" });
+  }
   // 没预置就抛错：探针要能发现页面发了预期之外的请求，而不是静默拿到空响应。
   if (!entry) throw new Error(`探针未预置响应: ${method} ${route}`);
   return respond(entry.status ?? 200, entry.body);
@@ -155,7 +169,7 @@ const unifiedBody = (model, revision) => ({
 // unifiedPlans 造一份"带分族计划"的响应：各族只在传了才出现，与服务端形状一致。
 const unifiedPlans = (plans, revision) => ({ unified_model: plans, config_revision: revision });
 
-const { renderUnified } = await import(pathToFileURL(path.join(WEBUI, "pages", "unified.js")).href);
+const { renderRouting } = await import(pathToFileURL(path.join(WEBUI, "pages", "routing.js")).href);
 
 // —— 查询与驱动工具 ——
 const findAll = (node, predicate, out = []) => {
@@ -219,7 +233,7 @@ routes = {
   "PUT /api/unified-model": { body: unifiedBody("model-a", "rev-2") },
 };
 requests.length = 0;
-let host = renderUnified({});
+let host = renderRouting({});
 await settle();
 
 let save = await enterEditor(host);
@@ -245,7 +259,7 @@ routes = {
     body: { detail: "unified_model.default.primary 引用了未配置的模型: model-a" },
   },
 };
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 await enterEditor(host);
 click(buttonWithText(host, "保存"));
@@ -259,13 +273,13 @@ routes = {
   "GET /api/models": { body: modelsBody(["model-a"], "rev-1") },
   "PUT /api/unified-model": { body: unifiedBody("model-a", "rev-2") },
 };
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 const getsBefore = getCalls().length;
 // 模拟「在供应商页删掉提供 model-a 的那个供应商」：服务端把模型与 unified_model 一起清掉。
 routes["GET /api/unified-model"] = { body: unifiedBody(null, "rev-2") };
 routes["GET /api/models"] = { body: modelsBody([], "rev-2") };
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 check("reentry_refetches", getCalls().length > getsBefore,
   `再次进入只发了 ${getCalls().length - getsBefore} 次 GET`);
@@ -278,7 +292,7 @@ routes = {
   "GET /api/models": { body: modelsBody(["model-b"], "rev-1") },
   "PUT /api/unified-model": { body: unifiedBody("model-b", "rev-2") },
 };
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 await enterEditor(host);
 const primarySelect = findAll(host, (node) => node.tagName === "select")[0];
@@ -310,7 +324,7 @@ routes = {
   "PUT /api/unified-model": { body: unifiedBody("model-a", "rev-2") },
 };
 requests.length = 0;
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 await enterEditor(host);
 
@@ -381,7 +395,7 @@ routes = {
   "PUT /api/unified-model": { body: unifiedBody("model-a", "rev-2") },
 };
 requests.length = 0;
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 await enterEditor(host);
 
@@ -413,7 +427,7 @@ routes = {
   "PUT /api/unified-model": { body: unifiedBody("model-a", "rev-2") },
 };
 requests.length = 0;
-host = renderUnified({});
+host = renderRouting({});
 await settle();
 await enterEditor(host);
 

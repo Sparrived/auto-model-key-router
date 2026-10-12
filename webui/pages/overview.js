@@ -532,8 +532,9 @@ function unifiedCard() {
     : "未启用";
   return h("div.card.is-lift", {
     role: "link", tabindex: "0", "aria-label": "查看统一模型配置",
-    onClick: () => navigate("unified"),
-    onKeydown: (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); navigate("unified"); } },
+    // 统一模型没有独立页面：它是模型路由页列表里的固定第一项，因此跳转目标是那一页。
+    onClick: () => navigate("routing"),
+    onKeydown: (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); navigate("routing"); } },
   },
     cardHead("统一模型入口",
       unified ? badge("已启用", "good") : badge("未启用", "muted"),
@@ -548,7 +549,7 @@ function unifiedCard() {
       unified?.default?.fallback?.model
         ? h("div", {}, h("span.muted", "回退模型："), h("span.mono", unified.default.fallback.model))
         : h("div.muted", "未配置回退模型"),
-      // 分族计划逐个列出，**只在配置了才出现**（与统一模型页同一条取舍：给没配的族补
+      // 分族计划逐个列出，**只在配置了才出现**（与模型路由页里那一项的取舍相同：给没配的族补
       // 一行"未配置"会让人以为它占着什么位置）。既有的图像/嵌入两行因此渲染结果不变。
       ...UNIFIED_FAMILY_ROWS.map(([planId, label]) => (unified?.[planId]?.primary?.model
         ? h("div", {}, h("span.muted", `${label}：`), h("span.mono", unified[planId].primary.model))

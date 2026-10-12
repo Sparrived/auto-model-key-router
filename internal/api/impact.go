@@ -72,6 +72,7 @@ func modelImpactValue(impact configops.ModelEditImpact) *canonical.Value {
 		canonical.ObjectPair{Key: "workspaces", Value: workspaces},
 		canonical.ObjectPair{Key: "removed_tasks", Value: stringArray(impact.RemovedTasks)},
 		canonical.ObjectPair{Key: "unified_model", Value: canonical.NewBool(impact.UnifiedModel)},
+		canonical.ObjectPair{Key: "endpoint_plans", Value: canonical.NewBool(impact.EndpointPlans)},
 	)
 }
 

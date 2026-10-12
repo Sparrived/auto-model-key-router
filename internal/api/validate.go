@@ -384,12 +384,16 @@ var specProviderKeyModelsRequest = newModelSpec("ProviderKeyModelsRequest",
 )
 
 // specRouteCreate 对应 RouteCreate。
+//
+// endpoints 是「端点族 → 计划」的覆盖表（unified_model 计划同构的形状），只做
+// dict 这一层校验：族名与引用的模型由 configops/config 报 422，两处不可能漂移。
 var specRouteCreate = newModelSpec("RouteCreate",
 	req("config_revision", kindStr).minLenOf(1),
 	req("id", kindStr).minLenOf(1),
 	req("targets", kindTargetList).minLenOf(1),
 	def("aliases", kindStrList),
 	nul("routing_mode", kindStr),
+	nul("endpoints", kindAnyDict),
 )
 
 // specRouteUpdate 对应 RouteUpdate。
@@ -402,6 +406,7 @@ var specRouteUpdate = newModelSpec("RouteUpdate",
 	nul("targets", kindTargetList),
 	nul("aliases", kindStrList),
 	nul("routing_mode", kindStr),
+	nul("endpoints", kindAnyDict),
 )
 
 // specSettingsUpdate 对应 SettingsUpdate。

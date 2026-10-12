@@ -424,6 +424,7 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request) {
 				Aliases:     trailingStringSlice(route, "aliases"),
 				RoutingMode: routingMode,
 				Targets:     targetItems,
+				Endpoints:   route.Lookup("endpoints"),
 			})
 			return err
 		}, optString(payload, "config_revision"))
@@ -494,6 +495,12 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 		if targetsValue.IsArray() {
 			targetItems = targetsValue.Arr
 		}
+		// endpoints 用「键不存在 = 不改」而不是 nil 判断：`"endpoints": null` 是**清空**
+		// 这张表，与不传它是两件事。
+		var endpoints *canonical.Value
+		if raw, present := updates.LookupOK("endpoints"); present {
+			endpoints = raw
+		}
 
 		if targetsValue.IsArray() && len(targetItems) == 0 {
 			mutate := func(current *canonical.Value) error {
@@ -518,6 +525,7 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 				Aliases:     optStringSlice(updates, "aliases"),
 				RoutingMode: optString(updates, "routing_mode"),
 				Targets:     targetItems,
+				Endpoints:   endpoints,
 			})
 			return err
 		}, optString(payload, "config_revision"))

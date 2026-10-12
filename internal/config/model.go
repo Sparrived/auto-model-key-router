@@ -36,6 +36,17 @@ type ModelConfig struct {
 	RoutingMode     string
 	ReasoningEffort string
 	NativeFirst     bool
+	// Endpoints 是这个模型**按入站端点族分派**的覆盖计划：键取值同
+	// UnifiedPlanNames（default / image / embeddings / speech / transcriptions /
+	// video / rerank），值是「改发给哪个模型（可带固定 Key）」。
+	//
+	// 配置了某一族时，直呼这个模型、又落在该族的请求会改发给计划里的模型；没配置的族
+	// 照旧用模型自己的 targets。它让「一个对外名称、各端点用不同模型」与 unified-model
+	// 共用同一套结构与编辑器（见 parseModelEndpoints 与 keypool.ResolveRouteIn）。
+	//
+	// 只跳一跳：计划指向的模型自己的 Endpoints 不再参与解析——否则一次请求的最终去向
+	// 取决于一条链，排查时看不出是谁把它转走的。
+	Endpoints map[string]*RoutePlan
 }
 
 // ProviderKeyConfig 是 provider 下配置的一个 key。
@@ -628,6 +639,8 @@ func parseModels(raw *canonical.Value, providerKeys map[[2]string]providerKeyRef
 	}
 
 	var models []ModelConfig
+	// rawEndpoints 与 models 按下标对齐，装的是各模型还没解析的 endpoints 段。
+	rawEndpoints := []*canonical.Value{}
 	for _, rawModelID := range rawModels.Obj.Keys() {
 		model := rawModels.Lookup(rawModelID)
 		if !model.IsObject() {
@@ -722,8 +735,100 @@ func parseModels(raw *canonical.Value, providerKeys map[[2]string]providerKeyRef
 			ReasoningEffort: reasoningEffort,
 			NativeFirst:     boolOr(model.Lookup("native_first"), true),
 		})
+		rawEndpoints = append(rawEndpoints, model.Lookup("endpoints"))
+	}
+
+	// endpoints 在**第二遍**解析：它写的是别的模型的名字，而「名字 → 真实 ID」的映射
+	// 要等全部模型都解析完才成立（别名同样算数）。第一遍只把原始值按位置记下来。
+	idsByName := modelIDsByName(models)
+	for index, rawEndpointPlans := range rawEndpoints {
+		if rawEndpointPlans == nil || rawEndpointPlans.IsNull() {
+			continue
+		}
+		plans, err := parseModelEndpoints(rawEndpointPlans, "模型 "+models[index].ID+" 的端点计划", idsByName)
+		if err != nil {
+			return nil, err
+		}
+		models[index].Endpoints = plans
 	}
 	return models, nil
+}
+
+// parseModelEndpoints 解析 models.<id>.endpoints：与 unified_model 同构的「端点族 → 计划」。
+//
+// 族名写错时直接报错而不是静默忽略：一个拼错的族名（比如 `images`）如果被丢掉，用户
+// 看到的是「配置保存成功、但图像请求照旧打到默认模型」，那正是这次改动要消除的那类故障。
+func parseModelEndpoints(
+	raw *canonical.Value,
+	fieldPrefix string,
+	idsByName map[string]string,
+) (map[string]*RoutePlan, error) {
+	if !raw.IsObject() {
+		return nil, errf("%s 必须是对象", fieldPrefix)
+	}
+	plans := map[string]*RoutePlan{}
+	for _, planName := range raw.Obj.Keys() {
+		if !isUnifiedPlanName(planName) {
+			return nil, errf("%s 的端点族 %s 无效（可用：%s）",
+				fieldPrefix, planName, strings.Join(UnifiedPlanNames, "、"))
+		}
+		plan, err := parseRoutePlan(raw.Lookup(planName), fieldPrefix+"."+planName, idsByName)
+		if err != nil {
+			return nil, err
+		}
+		plans[planName] = plan
+	}
+	return plans, nil
+}
+
+// isUnifiedPlanName 报告名字是否是合法的计划键。
+func isUnifiedPlanName(name string) bool {
+	for _, candidate := range UnifiedPlanNames {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRoutePlan 解析一个「primary + 可选 fallback」计划；unified_model 的各族与
+// models.<id>.endpoints 的各族共用它，两处的形状与报错因此逐字一致。
+//
+// idsByName 是「模型名（ID 或别名）→ 真实 ID」的映射：计划里的 model 允许写别名，
+// 解析后一律折成真实 ID（与 unified_model 同一口径）。
+func parseRoutePlan(value *canonical.Value, fieldName string, idsByName map[string]string) (*RoutePlan, error) {
+	if !value.IsObject() {
+		return nil, errf("%s 必须是对象", fieldName)
+	}
+	primary, err := parseRouteTarget(value.Lookup("primary"), fieldName+".primary", idsByName)
+	if err != nil {
+		return nil, err
+	}
+	plan := &RoutePlan{Primary: primary}
+	if rawFallback, present := value.LookupOK("fallback"); present && !rawFallback.IsNull() {
+		fallback, err := parseRouteTarget(rawFallback, fieldName+".fallback", idsByName)
+		if err != nil {
+			return nil, err
+		}
+		plan.Fallback = &fallback
+	}
+	return plan, nil
+}
+
+// parseRouteTarget 解析计划里的一个目标（model + 可选 key）。
+func parseRouteTarget(value *canonical.Value, fieldName string, idsByName map[string]string) (RouteTarget, error) {
+	if !value.IsObject() {
+		return RouteTarget{}, errf("%s 必须是对象", fieldName)
+	}
+	modelName := strings.TrimSpace(value.Lookup("model").StringValue())
+	modelID, found := idsByName[modelName]
+	if !found {
+		return RouteTarget{}, errf("%s 引用了未配置的模型: %s", fieldName, modelName)
+	}
+	return RouteTarget{
+		Model: modelID,
+		Key:   strings.TrimSpace(value.Lookup("key").StringValue()),
+	}, nil
 }
 
 // parseUnifiedModel 解析 unified_model 段。
@@ -736,38 +841,8 @@ func parseUnifiedModel(raw *canonical.Value, models []ModelConfig) (*UnifiedMode
 		return nil, errf("unified_model 必须是对象")
 	}
 	idsByName := modelIDsByName(models)
-
-	parseTarget := func(value *canonical.Value, fieldName string) (RouteTarget, error) {
-		if !value.IsObject() {
-			return RouteTarget{}, errf("%s 必须是对象", fieldName)
-		}
-		modelName := strings.TrimSpace(value.Lookup("model").StringValue())
-		modelID, found := idsByName[modelName]
-		if !found {
-			return RouteTarget{}, errf("%s 引用了未配置的模型: %s", fieldName, modelName)
-		}
-		return RouteTarget{
-			Model: modelID,
-			Key:   strings.TrimSpace(value.Lookup("key").StringValue()),
-		}, nil
-	}
 	parsePlan := func(value *canonical.Value, fieldName string) (*RoutePlan, error) {
-		if !value.IsObject() {
-			return nil, errf("%s 必须是对象", fieldName)
-		}
-		primary, err := parseTarget(value.Lookup("primary"), fieldName+".primary")
-		if err != nil {
-			return nil, err
-		}
-		plan := &RoutePlan{Primary: primary}
-		if rawFallback, present := value.LookupOK("fallback"); present && !rawFallback.IsNull() {
-			fallback, err := parseTarget(rawFallback, fieldName+".fallback")
-			if err != nil {
-				return nil, err
-			}
-			plan.Fallback = &fallback
-		}
-		return plan, nil
+		return parseRoutePlan(value, fieldName, idsByName)
 	}
 
 	defaultPlan, err := parsePlan(rawUnified.Lookup("default"), "unified_model.default")
@@ -1217,6 +1292,42 @@ func (c *RouterConfig) Validate() error {
 			}
 			if !hasHTTPScheme(key.BaseURL) {
 				return errf("模型 %s 的 base_url %s 必须以 http:// 或 https:// 开头", model.ID, key.BaseURL)
+			}
+		}
+	}
+
+	// 端点计划（某一族改发给哪个模型）与 unified_model 的计划同构，校验也同一套：
+	// 引用的模型必须存在、指定的 Key 必须在那个模型下可用。这条检查**不能**并进下面
+	// unified_model 那段——那段在没有 unified_model 时会提前 return，而端点计划与
+	// unified_model 是否存在无关。
+	for _, model := range c.Models {
+		for _, planName := range UnifiedPlanNames {
+			plan := model.Endpoints[planName]
+			if plan == nil {
+				continue
+			}
+			if plan.Fallback != nil && plan.Primary.Model == plan.Fallback.Model {
+				return errf("模型 %s 的端点计划 %s 的 primary 和 fallback 不能引用同一模型", model.ID, planName)
+			}
+			targets := []struct {
+				name   string
+				target *RouteTarget
+			}{
+				{"primary", &plan.Primary},
+				{"fallback", plan.Fallback},
+			}
+			for _, target := range targets {
+				if target.target == nil {
+					continue
+				}
+				targetModel, found := modelsByID[target.target.Model]
+				if !found {
+					return errf("模型 %s 的端点计划 %s.%s 引用了未配置的模型: %s",
+						model.ID, planName, target.name, target.target.Model)
+				}
+				if target.target.Key != "" && !targetModel.hasEnabledKey(target.target.Key) {
+					return errf("模型 %s 未配置可用 key: %s", target.target.Model, target.target.Key)
+				}
 			}
 		}
 	}

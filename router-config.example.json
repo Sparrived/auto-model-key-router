@@ -63,7 +63,15 @@
           "key": "main",
           "upstream_model": "gpt-4o-mini-2024-07-18"
         }
-      ]
+      ],
+      "endpoints": {
+        "embeddings": {
+          "primary": {
+            "model": "text-embedding-3-small",
+            "key": null
+          }
+        }
+      }
     },
     "text-embedding-3-small": {
       "targets": [

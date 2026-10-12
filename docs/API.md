@@ -632,7 +632,7 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 以及 `PUT /api/providers/{provider_id}` 的 `id`），上表里的引用会**跟着改成新名字**：
 
 - 模型改名：`tasks.*.model` / `fallback_model`、`workspaces.<空间>.models`、
-  `access_keys.<id>.models` 与 `unified_model` 里指向它的名字一起改。
+  `access_keys.<id>.models`、`unified_model` 与 `models.*.endpoints.*` 里指向它的名字一起改。
 - 供应商改名：模型 `targets[].provider` 与 `access_keys.<id>.providers` 一起改。
 
 跟的是**与旧 ID 完全相同**的那些名字。清单与任务里允许写别名（调用方就是用那些名字请求
@@ -653,6 +653,11 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 | `access_keys.<id>.models` | 摘掉失效的名字 |
 | `access_keys.<id>.providers` | 删除供应商时摘掉失效的名字 |
 | `unified_model.<计划>.<primary\|fallback>` | 指向被删模型的计划被改写（回落另一个模型）或移除 |
+| `models.<模型>.endpoints.<族>.<primary\|fallback>` | 指向被删模型的端点计划被改写（回落另一个模型）或移除 |
+
+指向被删模型的**端点计划**与 `unified_model` 是同一套修复：被删模型不再是那个端点族的分派
+目标，那条计划要么改指回退模型，要么整条移除；移除后该族回落到模型自己的 `targets`。
+`?dry_run=1` 的结果里这份变动记为 `endpoint_plans: true`。
 
 清单被摘空后**保留空数组**而不是删掉字段：这两份清单是三态的，字段缺失或 `null` 表示
 「不限制」，`[]` 表示「一个都不许」。删字段等于把禁令松开，那是扩权。因此一把访问密钥的
@@ -716,7 +721,7 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 
 #### ModelUpdate
 
-字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`（`aliases: []` 表示清空别名）；`reasoning_effort: null` 用于清除模型级覆盖。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。改 `id` 即改名，引用这个模型的名字会跟着改（见「改模型会连带改掉别处的引用」）。
+字段与 ModelCreate 的模型字段相同，全部可省略，但请求中至少需要出现一个字段。`id`、`aliases`、`routing_mode` 不能为 `null`（`aliases: []` 表示清空别名）；`reasoning_effort: null` 用于清除模型级覆盖；`endpoints` 省略表示不改动这张端点计划表，`null` 或 `{}` 表示清空（见「模型路由接口」）。不能通过该接口更新 `keys` 或 `targets`（使用模型 Key 接口或 `/api/routes`）。改 `id` 即改名，引用这个模型的名字会跟着改（见「改模型会连带改掉别处的引用」）。
 
 #### KeyCreate
 
@@ -1369,7 +1374,24 @@ curl -X POST http://127.0.0.1:8000/api/providers/openai/keys/main/probe \
 
 ### 路由接口
 
-`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。请求体还认 `id`（改名，会一并改写 `unified_model`、任务、工作空间与访问密钥清单里的引用，见「改模型会连带改掉别处的引用」）与 `aliases`（额外的可调用名）；`hidden_aliases` 已移除，请求里带上它会被当成未知字段返回 `422`。
+`/api/routes` 系列是模型路由（targets）的管理入口，与 `/api/models` 操作同一份模型数据：`POST /api/routes` 创建模型并写入 targets，`GET/PUT/DELETE /api/routes/{route_id}` 读取、整体替换或删除某模型的 targets。请求体中的 `targets` 为 RouteTarget 数组（`{provider, key, upstream_model}`），target 引用的供应商与 Key 必须已存在。v3 的 `pool` 引用已不存在于 target 中。请求体还认 `id`（改名，会一并改写 `unified_model`、模型的端点计划、任务、工作空间与访问密钥清单里的引用，见「改模型会连带改掉别处的引用」）与 `aliases`（额外的可调用名）；`hidden_aliases` 已移除，请求里带上它会被当成未知字段返回 `422`。
+
+请求体里的 `endpoints` 是这个模型名下的**端点计划**：形如 `{"<族>": {"primary": {"model", "key"}, "fallback": {...}}}`，与 `unified_model` 的分族计划逐字同构（族名、字段、校验规则都相同）。它在**直呼这个模型名**时生效：落在配置过的端点族上的请求改发给那一族的模型，未配置的族仍走该模型自己的 `targets`。分派只有一跳——被指到的模型自己的 `endpoints` 不再参与解析。三态与 `targets` 不同：
+
+- **省略** `endpoints`：不改动这张表（与 `targets` 一样，省略 ≠ 清空）；
+- **传 `null` 或 `{}`**：清空这张表，所有端点回到该模型自己的 `targets`；
+- **传含有键的对象**：**整体替换**——没写到的族会被清掉。
+
+```bash
+curl -X PUT http://127.0.0.1:8000/api/routes/gpt-5.5 \
+  -H "Authorization: Bearer your-local-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config_revision": "rev-...",
+    "targets": [{"provider": "openai", "key": "main", "upstream_model": "gpt-5.5"}],
+    "endpoints": {"image": {"primary": {"model": "gpt-image-1"}}}
+  }'
+```
 
 一条路由下没有 target 就不该存在，这条不变式由服务端在各条写路径上保证：
 

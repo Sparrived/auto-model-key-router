@@ -22,7 +22,10 @@ export function hasImpact(impact) {
     impact.access_keys?.length ||
     impact.workspaces?.length ||
     impact.removed_tasks?.length ||
-    impact.unified_model,
+    impact.unified_model ||
+    // 模型的端点计划（endpoints）也会指向别的模型：删掉一个模型名，别处把它当作某一族的
+    // 分派目标时，那条计划会被改写。这件事必须说出来——它是"删一个名字"最不显眼的连带后果。
+    impact.endpoint_plans,
   );
 }
 
@@ -102,6 +105,11 @@ function impactSections(impact) {
   if (impact.unified_model) {
     sections.push(section("统一模型", [
       "unified_model 指向被删的模型，会被改写或移除",
+    ]));
+  }
+  if (impact.endpoint_plans) {
+    sections.push(section("端点计划", [
+      "别的模型名把它当作某一端点族的分派目标，那几条端点计划会被清掉（未配置的族回落到该模型自己的目标）",
     ]));
   }
   return sections;

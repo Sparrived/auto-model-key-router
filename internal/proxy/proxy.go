@@ -97,6 +97,9 @@ type KeyPool interface {
 	// ResolveRouteIn 在指定工作空间里解析路由；任务名只在该空间内查表。
 	ResolveRouteIn(workspace, modelID string, keyName *string, path string) (string, string, error)
 	ResolveUnifiedPlan(routeKind string, keyName *string) (config.RoutePlan, error)
+	// EndpointFallback 返回某个模型在本次请求的端点族上配置的备选目标（模型的端点
+	// 计划，见 config.ModelConfig.Endpoints）：首选整轮失败后改发给它。
+	EndpointFallback(modelID, path string) (config.RouteTarget, bool)
 	TaskPlan(taskName string) (config.RoutePlan, bool)
 	// TaskPlanIn / TaskParamsIn 按 (工作空间, 任务名) 查表。
 	TaskPlanIn(workspace, taskName string) (config.RoutePlan, bool)

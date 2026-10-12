@@ -56,6 +56,12 @@ func (h *Handler) handle(w http.ResponseWriter, request *http.Request, path stri
 		h.writeTaskFallback(w, prepared, result)
 		return
 	}
+	// 模型的端点计划可以在该族上配一个备选：首选整轮失败后改发给它。没配的话这里
+	// 与改动前逐字相同——把首选的结果写给下游。
+	if target, ok := prepared.pool().EndpointFallback(prepared.RequestedModelName, prepared.Path); ok {
+		h.runFallback(w, prepared, result, target)
+		return
+	}
 	result.writeTo(w)
 }
 

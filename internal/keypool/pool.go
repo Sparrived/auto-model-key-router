@@ -152,6 +152,13 @@ type KeyPool struct {
 	// applyConfig、计划选择、展示四处各加一行，而漏掉任何一处的表现都是「配置写了，
 	// 但请求仍落到 default」。键集合由 config.UnifiedPlanNames 定义，未知键查不到。
 	unifiedPlans map[string]*config.RoutePlan
+	// endpointPlans 是「模型 ID → 端点族 → 计划」：直呼某个模型时，落在它配置过的
+	// 端点族上的请求改发给那一族指定的模型（见 config.ModelConfig.Endpoints）。
+	//
+	// 与 unifiedPlans 分开存：那边是固定名称 unified-model 的计划表（只看路径），这边
+	// 挂在任意模型上（先看请求的是哪个模型）。外层键用**真实 ID**——别名先解析再查这
+	// 张表，否则同一个模型写成别名就绕过了它自己的端点计划。
+	endpointPlans map[string]map[string]*config.RoutePlan
 	// taskPlans / taskParams 的键是 (工作空间, 任务名)：任务名只在工作空间内唯一，
 	// 用单个字符串当键会让两个空间里的同名任务互相覆盖。
 	taskPlans  map[[2]string]config.RoutePlan
@@ -228,6 +235,22 @@ func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 		p.aliases[model.ID] = model.ID
 		for _, alias := range model.Aliases {
 			p.aliases[alias] = model.ID
+		}
+	}
+
+	// 各模型自己的端点计划：外层只收有计划的模型，内层只收配置过的族（缺席即该族
+	// 照旧用模型自己的 targets）。
+	p.endpointPlans = map[string]map[string]*config.RoutePlan{}
+	for _, model := range cfg.Models {
+		for planName, plan := range model.Endpoints {
+			if plan == nil {
+				continue
+			}
+			if p.endpointPlans[model.ID] == nil {
+				p.endpointPlans[model.ID] = map[string]*config.RoutePlan{}
+			}
+			canonicalized := p.canonicalizePlan(*plan)
+			p.endpointPlans[model.ID][planName] = &canonicalized
 		}
 	}
 
@@ -413,10 +436,35 @@ func (p *KeyPool) ResolveRouteIn(workspace, modelID string, keyName *string, pat
 		// 任务固定模型，不接受调用方指定的 Key。
 		return plan.Primary.Model, plan.Primary.Key, nil
 	}
-	if keyName == nil {
-		return p.resolveModelID(modelID), "", nil
+	resolved := p.resolveModelID(modelID)
+	// 端点计划：这个模型在本次请求的端点族上配了「改发给谁」时，改发给它。调用方显式
+	// 指定的 Key 会**替换**计划里的固定 Key（与 unified-model 的 `model[key]` 同一语义）。
+	// 只跳一跳：计划指向的模型自己的端点计划不再参与解析。
+	if plan := p.endpointPlans[resolved][RequestRouteKind(path)]; plan != nil {
+		key := plan.Primary.Key
+		if keyName != nil {
+			key = *keyName
+		}
+		return plan.Primary.Model, key, nil
 	}
-	return p.resolveModelID(modelID), *keyName, nil
+	if keyName == nil {
+		return resolved, "", nil
+	}
+	return resolved, *keyName, nil
+}
+
+// EndpointFallback 返回某个被直呼的模型名在本次请求的端点族上配置的备选目标。
+//
+// 供代理在「首选整轮失败」后改发；没配端点计划、该族没配、或没配备选时返回 false，
+// 调用方照旧把首选的结果写给下游（行为与没有这个功能时逐字相同）。
+func (p *KeyPool) EndpointFallback(modelID, path string) (config.RouteTarget, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	plan := p.endpointPlans[p.resolveModelID(modelID)][RequestRouteKind(path)]
+	if plan == nil || plan.Fallback == nil {
+		return config.RouteTarget{}, false
+	}
+	return *plan.Fallback, true
 }
 
 // taskKey 归一化任务查表键：空工作空间视作默认工作空间。

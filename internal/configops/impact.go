@@ -45,6 +45,9 @@ type ModelEditImpact struct {
 	RemovedTasks []string
 	// UnifiedModel 报告 unified_model 是否被一并改写。
 	UnifiedModel bool
+	// EndpointPlans 报告是否有模型的端点计划被一并改写：被删的模型被别的模型的端点
+	// 计划引用时，那些端点会被移除（该模型不再按那个端点分派）。
+	EndpointPlans bool
 }
 
 // ModelEditImpactOf 对比一次写操作前后的配置，算出它连带改掉了哪些引用。
@@ -57,11 +60,42 @@ func ModelEditImpactOf(before, after *canonical.Value) ModelEditImpact {
 			objectKeys(lookup(before, "models")),
 			objectKeys(lookup(after, "models")),
 		),
-		RemovedTasks: removedNames(taskIdentities(before), taskIdentities(after)),
-		AccessKeys:   accessKeyListChanges(before, after),
-		Workspaces:   workspaceListChanges(before, after),
-		UnifiedModel: !pyEqualValues(lookup(before, "unified_model"), lookup(after, "unified_model")),
+		RemovedTasks:  removedNames(taskIdentities(before), taskIdentities(after)),
+		AccessKeys:    accessKeyListChanges(before, after),
+		Workspaces:    workspaceListChanges(before, after),
+		UnifiedModel:  !pyEqualValues(lookup(before, "unified_model"), lookup(after, "unified_model")),
+		EndpointPlans: endpointPlansChanged(before, after),
 	}
+}
+
+// endpointPlansChanged 报告两次配置里是否有模型的端点计划不同。
+//
+// 只比 endpoints 这一段：模型本身的增删改由 RemovedModels 与调用方自己说明，这里回答的
+// 是「有别的模型的端点分派被连带改掉了」——那是最容易事后才发现的一种连带变动。
+func endpointPlansChanged(before, after *canonical.Value) bool {
+	endpointsOf := func(data *canonical.Value) map[string]*canonical.Value {
+		result := map[string]*canonical.Value{}
+		for _, pair := range objectItems(lookup(data, "models")) {
+			if !pair.Value.IsObject() {
+				continue
+			}
+			if endpoints := lookup(pair.Value, "endpoints"); endpoints != nil {
+				result[pair.Key] = endpoints
+			}
+		}
+		return result
+	}
+	left, right := endpointsOf(before), endpointsOf(after)
+	if len(left) != len(right) {
+		return true
+	}
+	for name, value := range left {
+		other, found := right[name]
+		if !found || !pyEqualValues(value, other) {
+			return true
+		}
+	}
+	return false
 }
 
 // accessKeyListChanges 算出每把访问密钥被摘掉的名字。

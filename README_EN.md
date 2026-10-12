@@ -206,8 +206,7 @@ Navigate to the WebUI to manage routing topologies:
 | Navigation Item | Functionality |
 | :--- | :--- |
 | **Providers** | Add upstream providers (OpenAI, Anthropic, DeepSeek, etc.), register keys with concurrency limits, and run automatic route & model discovery |
-| **Model Routing** | Configure public model IDs (e.g., `gpt-4o`, `claude-3-7-sonnet`), bind multiple upstream keys, and choose routing modes |
-| **Unified Model** | Map `unified-model` to an active model, with endpoint-family overrides for images, embeddings, audio, video, etc. |
+| **Model Routing** | Configure public model IDs (e.g., `gpt-4o`, `claude-3-7-sonnet`), create new model names, bind multiple upstream keys, and choose routing modes; each name can also dispatch per endpoint family (text / image / embedding / speech / transcription / video / rerank). The list's first entry is always `unified-model` — **the unified model is configured right here**, mapping `unified-model` to an active model with per-family overrides |
 | **Task Routing** | Define `TASK_XXXXXX` aliases with server-locked models and fixed sampling parameters (`temperature`, `top_p`, etc.) |
 | **Workspaces** | Manage tenant workspaces, generate embeddable panel tokens, and issue project-scoped inference keys |
 | **Access Keys** | Issue scoped credentials for team members with provider and model whitelisting |
