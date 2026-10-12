@@ -24,7 +24,8 @@ import (
 //
 //  1. **重复参数取最后一个**。Starlette 的 QueryParams.__getitem__ 取列表末位
 //     （`?hours=1&hours=2` 得到 2.0），而 Go 的 url.Values.Get 取第一位——必须显式取
-//     末位，否则多值请求会静默选错值。
+//     末位，否则多值请求会静默选错值。唯一的例外是 qStrList：那两个筛选维度**故意**
+//     收齐全部出现值（维度内多选是它们的语义），见 qStrList 的说明。
 //  2. **校验先于鉴权**。FastAPI 在调用路由函数之前解析依赖与参数，所以
 //     `GET /metrics?hours=0`（不带任何凭据）是 422 而不是 401。装配层必须保持这个
 //     顺序。
@@ -48,6 +49,12 @@ const (
 	qBool
 	qStr
 	qLiteral
+	// qStrList 是**可重复出现**的字符串参数：同名参数的每一次出现都是一个独立取值
+	// （维度内多选，见 validateQuery）。
+	//
+	// 只有本项目自有的两个筛选维度用它：/metrics 系列的参数一律保持「取末位」，那是
+	// 已发布行为（对齐 FastAPI 的单值语义）。
+	qStrList
 )
 
 // qParam 描述一个查询参数，字段顺序即响应里错误的顺序（Pydantic 按声明顺序报错）。
@@ -56,10 +63,6 @@ type qParam struct {
 	kind qKind
 	// def 是缺省值；nil 表示 `T | None = None`（缺省即 null）。
 	def *canonical.Value
-	// required 对应 FastAPI 的 `Query(...)`：**没有缺省值**，请求里缺这个参数是 422
-	// missing（而不是回落到 null）。只有本项目自有的 /ui 读数用到（详见
-	// accessKeyMetricsParams），/metrics 系列的签名与参照实现一致，没有必填参数。
-	required bool
 	// 数值边界。字面量的 int/float 之别会原样进入 422 的 ctx
 	// （`{"le":8760.0}` 与 `{"le":200}` 是不同的字节），因此直接存 canonical 值。
 	ge, gt, le, lt *canonical.Value
@@ -117,21 +120,23 @@ var workspaceUsageParams = []qParam{
 // workspace-usage 的时间选择器语义一致。**有意增补**的读数：参照实现没有按 Key 拆分
 // 的口径，因此没有对应签名可比对，这里的取值方式只是复用既有解析器，不构成兼容性声明。
 //
-// access_key_id 是可选过滤：给了就只统计**这一把访问密钥**发起的请求（三份拆分与
-// unattributed 一并收窄），不给则与加这个参数之前完全一致。
+// provider_id 与 access_key_id 都是**可重复出现**的多值过滤：同名参数重复出现是维度内
+// OR、两个维度之间是 AND，都不给时与加这两个参数之前完全一致（三份拆分与 unattributed
+// 都是全量口径）。
 var keyUsageParams = []qParam{
 	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
 	{name: "all_history", kind: qBool, def: qBoolFalse},
-	filterTextParam("access_key_id"),
+	listTextParam("provider_id"),
+	listTextParam("access_key_id"),
 }
 
-// accessKeyMetricsParams 是 GET /ui/access-key-metrics.json 的签名。
+// filteredMetricsParams 是 GET /ui/filtered-metrics.json 的签名。
 //
 // 与 /metrics 系列有两处刻意的差别：
 //
-//   - access_key_id **必填**：这条读数就是为「筛一把 key」而生的，缺了它没有意义
-//     （管理面要看全量读数请直接用 /metrics）。缺失时的 422 missing 与 FastAPI 的
-//     `Query(...)` 同形（input 为 null，而不是空串）。
+//   - provider_id 与 access_key_id 都是**可重复出现**的多值参数（维度内 OR、维度间
+//     AND），且**都可省**：两个都不给就是全实例读数。这条路径保留着，因为「不筛」与
+//     「筛一个不存在的值」必须是两件不同的事——前者回全量、后者回空。
 //   - bucket_seconds 默认 **0 = 自动**：/metrics/series 要求调用方自己按跨度挑桶，
 //     24 小时配 60 秒桶是 1441 点、直接超上限被拒；整页读数把概览、趋势与明细拼在
 //     一起，默认交给服务端选最小的合适桶（响应里回真实桶宽）。显式给值时仍走
@@ -140,8 +145,9 @@ var keyUsageParams = []qParam{
 // 注意 0 只能来自缺省：validateQuery 与 Pydantic 一样**不校验缺省值**，所以下界写
 // 15 不会把默认值判成非法，而 `?bucket_seconds=0` 这种显式传法照旧报 422——「自动」
 // 是没说，不是说了个 0。
-var accessKeyMetricsParams = []qParam{
-	{name: "access_key_id", kind: qStr, required: true, minLen: 1, maxLen: 512},
+var filteredMetricsParams = []qParam{
+	listTextParam("provider_id"),
+	listTextParam("access_key_id"),
 	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
 	{name: "all_history", kind: qBool, def: qBoolFalse},
 	{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
@@ -214,6 +220,15 @@ func filterTextParam(name string) qParam {
 	return qParam{name: name, kind: qStr, minLen: 1, maxLen: 512}
 }
 
+// listTextParam 构造一个**可重复出现**的字符串过滤参数：每一项按 `min_length=1,
+// max_length=512` 校验，缺省是空列表。
+//
+// 与 filterTextParam 的唯一区别在「同名参数出现多次」时：那个取末位（对齐 FastAPI 的
+// 单值语义，是已发布行为），这个收齐全部出现值。
+func listTextParam(name string) qParam {
+	return qParam{name: name, kind: qStrList, minLen: 1, maxLen: 512}
+}
+
 // queryValue 是校验后的参数值。
 type queryValue struct {
 	kind qKind
@@ -224,7 +239,9 @@ type queryValue struct {
 	// integer 用于 qInt：整数不能走 float64 中转，否则 int64 边界值会在回转时溢出。
 	integer int64
 	text    string // qStr / qLiteral
-	flag    bool   // qBool
+	// texts 用于 qStrList：同名参数的全部出现值，缺省为空。
+	texts []string
+	flag  bool // qBool
 }
 
 // queryResult 是整条路由的校验结果。
@@ -236,16 +253,14 @@ type queryResult struct {
 //
 // 渲染顺序固定为 type、loc、msg、input、ctx，与 internal/api 的同名结构一致；
 // input 对查询参数永远是**原始字符串**（Pydantic 报的是进入该字段校验器之前的值）。
+// 查询侧没有必填参数（每个参数都有缺省值），因此不存在缺失参数那种 input 为 null 的
+// 错误——那一档在请求体校验里（internal/api），与本结构无关。
 type queryError struct {
 	name  string
 	typ   string
 	msg   string
 	input string
-	// inputNull 表示 input 渲染成 JSON null：Pydantic 对**缺失**的必填参数报的就是
-	// null（`{"type":"missing",…,"input":null}`），与「传了一个空串」在响应里必须
-	// 分得开——后者是 string_too_short，input 是 ""。
-	inputNull bool
-	ctx       *canonical.Value
+	ctx   *canonical.Value
 }
 
 // toValue 渲染成 JSON 对象。
@@ -255,11 +270,7 @@ func (e queryError) toValue() *canonical.Value {
 	item.SetKey("loc", canonical.NewArray(
 		canonical.NewString("query"), canonical.NewString(e.name)))
 	item.SetKey("msg", canonical.NewString(e.msg))
-	if e.inputNull {
-		item.SetKey("input", canonical.NewNull())
-	} else {
-		item.SetKey("input", canonical.NewString(e.input))
-	}
+	item.SetKey("input", canonical.NewString(e.input))
 	if e.ctx != nil && e.ctx.Obj.Len() > 0 {
 		item.SetKey("ctx", e.ctx)
 	}
@@ -275,16 +286,34 @@ func validateQuery(raw url.Values, specs []qParam) (*queryResult, []queryError) 
 	for _, spec := range specs {
 		texts, present := raw[spec.name]
 		if !present || len(texts) == 0 {
-			if spec.required {
-				errs = append(errs, queryError{
-					name: spec.name, typ: "missing", msg: "Field required", inputNull: true,
-				})
-				continue
-			}
 			result.values[spec.name] = defaultValue(spec)
 			continue
 		}
 		// 取末位：见文件顶部第 1 条。
+		if spec.kind == qStrList {
+			// 列表参数是这条规则的**例外**：同名参数重复出现就是维度内多选，因此收齐
+			// 全部出现值。逐项走同一套长度校验（空串仍是 string_too_short），任一项
+			// 非法就以**那一项**的原文作为 input 报错并停止——一次请求里同一个参数报
+			// 一堆同型错误没有额外信息，而「哪一项错了」正是最难自查的那个。
+			items := make([]string, 0, len(texts))
+			var firstErr *queryError
+			for _, text := range texts {
+				value, queryErr := parseQueryValue(qParam{
+					name: spec.name, kind: qStr, minLen: spec.minLen, maxLen: spec.maxLen,
+				}, text)
+				if queryErr != nil {
+					firstErr = queryErr
+					break
+				}
+				items = append(items, value.text)
+			}
+			if firstErr != nil {
+				errs = append(errs, *firstErr)
+				continue
+			}
+			result.values[spec.name] = queryValue{kind: qStrList, texts: items}
+			continue
+		}
 		text := texts[len(texts)-1]
 		value, queryErr := parseQueryValue(spec, text)
 		if queryErr != nil {
@@ -589,6 +618,14 @@ func (r *queryResult) intValue(name string) int64 {
 // boolValue 返回布尔参数值。
 func (r *queryResult) boolValue(name string) bool {
 	return r.values[name].flag
+}
+
+// stringList 返回列表参数的全部取值；缺省时长度 0。
+//
+// 不回 nil/空切片的区分：存储层把两者当同一件事（都不追加条件），多一层判空只会让
+// 调用方以为它们有区别。
+func (r *queryResult) stringList(name string) []string {
+	return r.values[name].texts
 }
 
 // optionalString 返回可空字符串参数；缺省或 null 时返回 nil。

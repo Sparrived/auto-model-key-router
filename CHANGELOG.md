@@ -4,19 +4,24 @@
 
 ### 新增
 
-- **按访问密钥筛选的用量读数。** WebUI 的概览 / 用量统计页可以按「**发起这次请求的那把访问密钥**」
-  过滤了（归属取自 `request_access_key` 旁挂表；完整权限、工作空间凭据写入的行以及历史行不属于
-  任何一把 key，因此不会被算进任何筛选结果）。
-  - 新端点 `GET /ui/access-key-metrics.json`：一次取回概览、趋势与最近明细**三份共用同一时间窗口**
-    的读数——概览与 `GET /metrics` 完全同形（全部分组、总量与 rate 窗口都收窄到这把 key），趋势点
+- **按供应商 / 访问密钥多条件筛选的用量读数。** WebUI 的概览 / 用量统计页可以按「**供应商**」与
+  「**发起这次请求的那把访问密钥**」两个维度筛选了：同名参数重复出现是**维度内 OR**，两个维度之间
+  是 **AND**（访问密钥归属取自 `request_access_key` 旁挂表；完整权限、工作空间凭据写入的行以及历史行
+  不属于任何一把 key，因此不会被算进任何按 key 的筛选结果）。
+  - 新端点 `GET /ui/filtered-metrics.json`：一次取回概览、趋势与最近明细**三份共用同一时间窗口**
+    的读数——概览与 `GET /metrics` 完全同形（全部分组、总量与 rate 窗口都收窄到这组条件），趋势点
     与 `GET /metrics/series` 同形（`bucket_seconds` 缺省由服务端按跨度自动选桶，显式给值时仍按
-    `/metrics/series` 的口径校验），明细可选（`limit=0` 时为 `null`）。`access_key_id` 必填，
+    `/metrics/series` 的口径校验），明细可选（`limit=0` 时为 `null`）。两个筛选参数 `provider_id` /
+    `access_key_id` 都可重复出现、**都可省**（都不给 = 全实例读数），响应里的 `filters` 回显两个数组。
     只认完整权限，参数校验先于鉴权。
-  - `GET /ui/key-usage.json` 新增可选参数 `access_key_id`：三份拆分与 `unattributed` 一并收窄到
-    这把 key 发起的请求；不传时行为与以前逐字节一致。
+    > 端点名在发布前由上一轮的 `GET /ui/access-key-metrics.json` 改来：只挂访问密钥这一个维度的名字
+    > 已经描述不了它。它只在 `[Unreleased]` 里出现过、从未发布，因此直接改名，**不留别名**。
+  - `GET /ui/key-usage.json` 新增可选参数 `provider_id`，`access_key_id` 也改为可重复出现：三份拆分
+    与 `unattributed` 一并收窄到这些供应商 / 这些访问密钥发起的请求；都不传时行为与以前逐字节一致。
   - **`/metrics`、`/metrics/series`、`/metrics/requests` 一字未改**：这三条是对照参照实现的读数，
-    响应形状与查询参数都是已发布契约，给它们传 `access_key_id` 会被当作未知参数忽略。过滤条件只在该
-    参数非 `nil` 时追加到 SQL **末尾**，未过滤路径的 SQL 与响应逐字节不变（新增用例锁住这一点）。
+    响应形状与查询参数都是已发布契约（`/metrics/requests` 的单值 `provider_id` 仍生成 `= ?`），给它们
+    传 `access_key_id` 会被当作未知参数忽略。两个筛选维度只在切片非空时追加到 SQL **末尾**（先供应商、
+    后访问密钥），未筛选路径的 SQL 与响应逐字节不变（新增用例锁住这一点）。
 
 ## [6.6.1] - 2026-10-12
 

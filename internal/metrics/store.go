@@ -483,16 +483,21 @@ func nullableParam[T any](value *T) any {
 // 原样回显）。
 func (s *Store) Snapshot(hours *float64, since *time.Time) (*canonical.Value, error) {
 	now := nowBeijing()
-	// /metrics 永远是全实例读数：这里**没有**访问密钥过滤（过滤能力只对本项目自有的
-	// /ui 读数开放，见 accesskeymetrics.go）。
-	return s.snapshotSync(hours, since, now, nil)
+	// /metrics 永远是全实例读数：这里**不过滤**（过滤能力只对本项目自有的 /ui 读数
+	// 开放，见 filteredmetrics.go）。
+	return s.snapshotSync(hours, since, now, nil, nil)
 }
 
 // snapshotSync 对应 _snapshot_sync（metrics.py:680）。
 //
-// accessKeyID 非 nil 时全部分组、总量与 rate 窗口都收窄到这把访问密钥；nil 时与
-// 参照实现逐字节同形（/metrics 走的就是 nil）。
-func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time, accessKeyID *string) (*canonical.Value, error) {
+// 两个维度都非空时全部分组、总量与 rate 窗口都收窄到这些供应商 / 访问密钥（维度内
+// OR、维度间 AND）；都为空时与参照实现逐字节同形（/metrics 走的就是两个 nil）。
+func (s *Store) snapshotSync(
+	hours *float64,
+	since *time.Time,
+	now time.Time,
+	providerIDs, accessKeyIDs []string,
+) (*canonical.Value, error) {
 	var sinceStr *string
 	if since != nil {
 		value := formatISO(*since)
@@ -506,7 +511,7 @@ func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time, ac
 	// 窗口内的 9 个分组由一次最细粒度扫描上卷得到（见 rollup.go 的成本说明）：
 	// 归属维度只统计三个归属列全非空、未归属统计其余的行，这两种互补口径都在
 	// 那一层表达，这里不再逐个拼 WHERE。
-	groups, err := s.snapshotRollup(sinceStr, &untilStr, accessKeyID)
+	groups, err := s.snapshotRollup(sinceStr, &untilStr, providerIDs, accessKeyIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -515,8 +520,8 @@ func (s *Store) snapshotSync(hours *float64, since *time.Time, now time.Time, ac
 	rateStart := formatISO(addSeconds(now, RateWindowSeconds))
 	// rate 窗口只有几分钟，行数极少；这里继续用参照实现的 queryStats，一分钱不省，
 	// 但让那份实现留在链路上（它也是上卷结果的对照物）。过滤条件必须一并带上，
-	// 否则 current_rpm / current_tpm 会是全实例的数——那不是「这一把 key 的读数」。
-	recent, err := s.queryStats(nil, &rateStart, &untilStr, true, accessKeyID)
+	// 否则 current_rpm / current_tpm 会是全实例的数——那不是「这组条件下的读数」。
+	recent, err := s.queryStats(nil, &rateStart, &untilStr, true, providerIDs, accessKeyIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -723,12 +728,14 @@ type RequestHistoryParams struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	// AccessKeyID 非 nil 时只返回这把访问密钥发起的请求（本项目新增，参照实现没有）。
+	// ProviderIDs / AccessKeyIDs 非空时只返回这些供应商 / 这些访问密钥发起的请求
+	// （本项目新增，参照实现没有；维度内 OR、维度间 AND）。
 	//
-	// 它不进响应里的 filters：那是已发布形状，多一个键就变了。
-	AccessKeyID *string
-	Limit       int64
-	BeforeID    *int64
+	// 它们不进响应里的 filters：那是已发布形状，多一个键就变了。
+	ProviderIDs  []string
+	AccessKeyIDs []string
+	Limit        int64
+	BeforeID     *int64
 }
 
 // RequestHistory 对应 request_history()（metrics.py:263）。
@@ -769,7 +776,8 @@ func (s *Store) requestHistorySync(params RequestHistoryParams, now time.Time) (
 		StatusCode:       params.StatusCode,
 		Success:          params.Success,
 		Attributed:       params.Attributed,
-		AccessKeyID:      params.AccessKeyID,
+		ProviderIDs:      params.ProviderIDs,
+		AccessKeyIDs:     params.AccessKeyIDs,
 	}
 	untilStr := formatISO(now)
 	filter := query.metricFilter(since, &untilStr)
@@ -898,10 +906,12 @@ type TimeSeriesParams struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	// AccessKeyID 非 nil 时只统计这把访问密钥发起的请求（本项目新增，参照实现没有）。
+	// ProviderIDs / AccessKeyIDs 非空时只统计这些供应商 / 这些访问密钥发起的请求
+	// （本项目新增，参照实现没有；维度内 OR、维度间 AND）。
 	//
-	// 它不进响应里的 filters：那是已发布形状，多一个键就变了。
-	AccessKeyID *string
+	// 它们不进响应里的 filters：那是已发布形状，多一个键就变了。
+	ProviderIDs  []string
+	AccessKeyIDs []string
 }
 
 // TimeSeries 对应 time_series()（metrics.py:300）。
@@ -930,7 +940,8 @@ func (s *Store) TimeSeries(params TimeSeriesParams) (*canonical.Value, error) {
 		StatusCode:       params.StatusCode,
 		Success:          params.Success,
 		Attributed:       params.Attributed,
-		AccessKeyID:      params.AccessKeyID,
+		ProviderIDs:      params.ProviderIDs,
+		AccessKeyIDs:     params.AccessKeyIDs,
 	}
 	points, err := s.seriesPoints(query, params.BucketSeconds, firstEpoch, now)
 	if err != nil {

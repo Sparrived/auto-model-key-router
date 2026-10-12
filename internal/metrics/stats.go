@@ -35,11 +35,15 @@ type metricFilter struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	// AccessKeyID 是**发起这次请求的访问密钥**（配置里的 key_id）。
+	// ProviderIDs / AccessKeyIDs 是本项目新增的两个**多值**筛选维度（参照实现没有）：
+	// 维度内多选（`IN (?, …)`）、维度间 AND。切片为空与 nil 等价，都不追加条件——此时
+	// sql() 的输出与加这两个维度之前逐字节相同，/metrics、/metrics/series、
+	// /metrics/requests 的已发布行为因此不受影响。
 	//
-	// nil 表示不按访问密钥过滤——此时 sql() 的输出与加这个字段之前逐字节相同，
-	// /metrics、/metrics/series、/metrics/requests 的已发布行为因此不受影响。
-	AccessKeyID *string
+	// 上面那个单值的 ProviderID 是**参照实现已发布**的过滤参数，仍在用、仍生成
+	// `provider_id = ?`：两者不能合并，否则 /metrics 的 SQL 形状就变了。
+	ProviderIDs  []string
+	AccessKeyIDs []string
 }
 
 // attributionColumns 是三个「归属」维度，顺序与 metrics.py:1004 一致。
@@ -48,9 +52,9 @@ var attributionColumns = []string{"provider_id", "pool_name", "upstream_model_id
 // sql 对应 _metric_filter_sql（metrics.py:964）。
 //
 // 过滤条件的**拼接顺序**是查询计划与参数顺序的一部分：时间范围在前，随后是
-// 固定顺序的各列、success、attributed，最后是访问密钥（本项目新增的过滤条件，见
-// metricFilter.AccessKeyID）。改变顺序会让 EXPLAIN 结果与参照实现不一致，也会让
-// 本包与 Python 的 SQL 文本无法逐字比对。
+// 固定顺序的各列、success、attributed，最后是两个多值维度（本项目新增的过滤条件，见
+// metricFilter.ProviderIDs / AccessKeyIDs）。改变顺序会让 EXPLAIN 结果与参照实现
+// 不一致，也会让本包与 Python 的 SQL 文本无法逐字比对。
 func (f metricFilter) sql() (string, []any) {
 	filters := make([]string, 0, 14)
 	parameters := make([]any, 0, 14)
@@ -106,21 +110,64 @@ func (f metricFilter) sql() (string, []any) {
 			filters = append(filters, "("+strings.Join(parts, " OR ")+")")
 		}
 	}
-	// 访问密钥归属在旁挂表里（request_metrics 没有该列，理由见 schema.go），因此用
-	// 子查询而不是 JOIN：这些查询的主表一律是裸 `request_metrics`（无别名），加 JOIN
-	// 会动到既有 SQL 的形状；子查询只引用 request_access_key.request_id，不会与
-	// 主表的 id 产生歧义（三张旁挂表都只有 request_id 一列做主键）。
-	//
-	// 放在**最后**：nil 时这条不追加，SQL 与加这个字段之前逐字节相同；非 nil 时只是
-	// 在末尾多一个条件，已有条件的顺序与参数顺序都不变。
-	if f.AccessKeyID != nil {
-		filters = append(filters, "id IN (SELECT request_id FROM request_access_key WHERE access_key_id = ?)")
-		parameters = append(parameters, *f.AccessKeyID)
-	}
+	// 两个多值维度都追加在**最后**，顺序固定：先供应商、后访问密钥（见
+	// appendDimensionFilters）。为空时一条都不追加，SQL 与加这两个维度之前逐字节相同。
+	filters, parameters = appendDimensionFilters(filters, parameters, f.ProviderIDs, f.AccessKeyIDs)
 	if len(filters) == 0 {
 		return "", parameters
 	}
 	return " WHERE " + strings.Join(filters, " AND "), parameters
+}
+
+// appendDimensionFilters 把两个多值筛选维度追加到 filters / parameters 末尾。
+//
+// 三处调用（metricFilter.sql、queryStats、snapshotRollup）的主表都是**裸**
+// request_metrics（无别名、无 JOIN），条件形状因此可以共用；KeyUsage 那边主表带别名、
+// 访问密钥走 LEFT JOIN，写法不同（见 keyusage.go）。
+//
+// 访问密钥归属在旁挂表里（request_metrics 没有该列，理由见 schema.go），因此用子查询
+// 而不是 JOIN：这些查询的主表一律是裸 `request_metrics`，加 JOIN 会动到既有 SQL 的
+// 形状；子查询只引用 request_access_key.request_id，不会与主表的 id 产生歧义（三张
+// 旁挂表都只有 request_id 一列做主键）。
+//
+// 顺序固定：先供应商、后访问密钥。空切片（与 nil 等价）不追加任何条件——未筛选路径的
+// SQL 因此逐字节不变。
+func appendDimensionFilters(
+	filters []string,
+	parameters []any,
+	providerIDs, accessKeyIDs []string,
+) ([]string, []any) {
+	if len(providerIDs) > 0 {
+		filters = append(filters, "provider_id IN ("+placeholders(len(providerIDs))+")")
+		parameters = append(parameters, stringParams(providerIDs)...)
+	}
+	if len(accessKeyIDs) > 0 {
+		filters = append(filters,
+			"id IN (SELECT request_id FROM request_access_key WHERE access_key_id IN ("+
+				placeholders(len(accessKeyIDs))+"))")
+		parameters = append(parameters, stringParams(accessKeyIDs)...)
+	}
+	return filters, parameters
+}
+
+// placeholders 生成 count 个用 ", " 连接的 `?`，供 `IN (…)` 用。
+//
+// 只生成占位符：值一律走参数绑定，调用方给的字符串不进 SQL 文本（没有注入面），而
+// 占位符个数只由切片长度决定。
+func placeholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", count), ", ")
+}
+
+// stringParams 把字符串切片摊成 SQL 参数列表。
+//
+// 单独一个函数是为了让几条取数路径的参数顺序**只有一处写法**：抄错一处就会把供应商的
+// 值绑到访问密钥的位置上，而那种错误在单值时代不存在。
+func stringParams(values []string) []any {
+	parameters := make([]any, 0, len(values))
+	for _, value := range values {
+		parameters = append(parameters, value)
+	}
+	return parameters
 }
 
 // appendFilter 对应 _append_filter（metrics.py:1014）。
@@ -183,11 +230,12 @@ type queryFilter struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	// AccessKeyID 是本项目新增的过滤维度（参照实现没有访问密钥）。
+	// ProviderIDs / AccessKeyIDs 是本项目新增的两个多值过滤维度（参照实现没有）。
 	//
 	// **刻意不进 filterPairs()**：那几个 /metrics/* 响应的 filters 回显是已发布形状，
 	// 不能多一个键。过滤能力只对本项目自有的 /ui 读数开放。
-	AccessKeyID *string
+	ProviderIDs  []string
+	AccessKeyIDs []string
 }
 
 // metricFilter 把请求级过滤条件与时间边界合并成 SQL 过滤器。
@@ -205,7 +253,8 @@ func (q queryFilter) metricFilter(since, until *string) metricFilter {
 		StatusCode:       q.StatusCode,
 		Success:          q.Success,
 		Attributed:       q.Attributed,
-		AccessKeyID:      q.AccessKeyID,
+		ProviderIDs:      q.ProviderIDs,
+		AccessKeyIDs:     q.AccessKeyIDs,
 	}
 }
 
@@ -337,7 +386,7 @@ func (s *Store) queryStats(
 	dimensions []string,
 	sinceCreatedAt, untilCreatedAt *string,
 	includeNullDimensions bool,
-	accessKeyID *string,
+	providerIDs, accessKeyIDs []string,
 ) (*statsResult, error) {
 	dimensionSQL := strings.Join(dimensions, ", ")
 	selectPrefix := ""
@@ -369,13 +418,10 @@ func (s *Store) queryStats(
 			filters = append(filters, dimension+" IS NOT NULL")
 		}
 	}
-	// 访问密钥过滤（本项目新增）：与 metricFilter 用同一条子查询，nil 时不追加，
-	// 未过滤路径的 SQL 因此逐字节不变。status_code 的二次遍历复用同一份 parameters，
+	// 两个多值维度（本项目新增）：与 metricFilter 用同一套条件与顺序，为空时不追加，
+	// 未筛选路径的 SQL 因此逐字节不变。status_code 的二次遍历复用同一份 parameters，
 	// 两次扫描的口径因此必然一致。
-	if accessKeyID != nil {
-		filters = append(filters, "id IN (SELECT request_id FROM request_access_key WHERE access_key_id = ?)")
-		parameters = append(parameters, *accessKeyID)
-	}
+	filters, parameters = appendDimensionFilters(filters, parameters, providerIDs, accessKeyIDs)
 	whereSQL := ""
 	if len(filters) > 0 {
 		whereSQL = " WHERE " + strings.Join(filters, " AND ")

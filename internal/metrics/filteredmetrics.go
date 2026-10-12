@@ -8,9 +8,9 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 )
 
-// 本文件回答「**这一把访问密钥**这一页该看到什么」：概览读数（snapshot）、趋势
-// （series）与最近明细（requests）三份同窗口的读数拼成一个响应（**有意增补**：参照
-// 实现没有访问密钥，没有可比对的 oracle）。
+// 本文件回答「**按供应商 / 按访问密钥筛选后**这一页该看到什么」：概览读数（snapshot）、
+// 趋势（series）与最近明细（requests）三份同窗口的读数拼成一个响应（**有意增补**：参照
+// 实现既没有供应商筛选也没有访问密钥，没有可比对的 oracle）。
 //
 // # 为什么合成一个端点
 //
@@ -22,28 +22,37 @@ import (
 // # 为什么挂在 /ui/ 而不是给 /metrics 加参数
 //
 // /metrics、/metrics/series、/metrics/requests 是**对照参照实现**的读数，响应形状与
-// 查询参数都已经发布：给它们加一个 access_key_id 会改掉契约（那三条路由的 filters
-// 回显也是已发布字节）。因此过滤能力只对本项目自有的读数开放，单独一条 /ui 路由，
-// 与 keyusage.go、accesskey.go 同一条理由。
+// 查询参数都已经发布：给它们加一个 provider_id / access_key_id 会改掉契约（那三条路由
+// 的 filters 回显也是已发布字节）。因此过滤能力只对本项目自有的读数开放，单独一条 /ui
+// 路由，与 keyusage.go、accesskey.go 同一条理由。
+//
+// # 两个维度的语义
+//
+// **维度内多选是 OR、维度间是 AND**：同一参数重复出现收成 `IN (?, …)`，两个维度同时
+// 出现则是两组条件同时成立（`provider_id IN (?) AND id IN (SELECT …)`）。
+//
+// 两个维度都不给 = 全实例读数（与 /metrics 系列等价）。这条路径**保留**着，不是为了给
+// 界面用（界面不会这么发），而是因为「不筛」与「筛一个不存在的值」必须是两件不同的事：
+// 前者该回全量，后者该回空。
 //
 // # 与 /ui/key-usage.json、/ui/access-key-usage.json 的分工
 //
 //   - key-usage.json 回答「这些流量是哪把 Key 出去的」（按上游 Key 与调用方凭据拆分）；
 //   - access-key-usage.json 是**访客看板**：只认访问密钥凭据，只回它自己那把；
-//   - 这里回答「管理面按一把访问密钥筛选后，整页读数长什么样」，因此认**完整权限**，
-//     key_id 由参数指定（管理面本来就能看到全实例的读数）。
+//   - 这里回答「管理面按这组条件筛选后，整页读数长什么样」，因此认**完整权限**，
+//     筛选值由参数指定（管理面本来就能看到全实例的读数）。
 //
 // 三者读同一个指标库、共用同一套窗口语义，但回答的问题不同，因此不合并。
 
-// maxAccessKeyMetricsItems 是 requests 明细的条数上限，与 request_history 的 limit
+// maxFilteredMetricsItems 是 requests 明细的条数上限，与 request_history 的 limit
 // 上限一致（见 RequestHistory 的校验）。
-const maxAccessKeyMetricsItems = 200
+const maxFilteredMetricsItems = 200
 
 // minSeriesBucketSeconds 是自动桶的下限，与 /metrics/series 的 bucket_seconds 下界一致。
 const minSeriesBucketSeconds = 15
 
-// AccessKeyMetricsParams 是「一把访问密钥的整页读数」的参数。
-type AccessKeyMetricsParams struct {
+// FilteredMetricsParams 是「按供应商 / 访问密钥筛选的整页读数」的参数。
+type FilteredMetricsParams struct {
 	// Hours 为 nil 表示不设时间窗口（对应 /metrics 的 all_history）。
 	Hours *float64
 	// BucketSeconds 是 series 的桶宽；0 = 由服务端按窗口跨度自动选（见 autoSeriesBucket）。
@@ -51,30 +60,36 @@ type AccessKeyMetricsParams struct {
 	// Limit 是 requests 明细的条数；0 表示不要明细（响应里 requests 为 null），
 	// 大于 0 时沿用 request_history 的 limit 语义（1..200）。
 	Limit int64
-	// AccessKeyID 是过滤用的访问密钥 key_id（配置里的稳定标识符，不是明文 key）。
+	// ProviderIDs / AccessKeyIDs 是两个筛选维度：各自内部是「或」的一组取值，两组之间
+	// 是「与」。都为空 = 不筛（全实例读数），此时 SQL 与响应和没有这两个维度时一致。
 	//
-	// 归属读自 request_access_key 旁挂表：完整权限、工作空间凭据写入的行以及历史行
-	// 都没有归属，因此不会被任何一把 key 算进去（与 accesskey.go 同一口径）。
-	AccessKeyID string
+	// 访问密钥的归属读自 request_access_key 旁挂表：完整权限、工作空间凭据写入的行以及
+	// 历史行都没有归属，因此不会被任何一把 key 算进去（与 accesskey.go 同一口径）。
+	ProviderIDs  []string
+	AccessKeyIDs []string
 }
 
-// AccessKeyMetrics 返回一把访问密钥的概览、趋势与（可选的）最近明细。
+// FilteredMetrics 返回这组筛选条件下的概览、趋势与（可选的）最近明细。
 //
 // 形状由本项目自己定：
 //
 //	{
-//	  count_semantics, window: {from, to, hours}, access_key_id,
-//	  snapshot: {…与 GET /metrics 完全同形，但全部分组/总量/rate 窗口都收窄到这把 key…},
+//	  count_semantics, window: {from, to, hours},
+//	  filters: {provider_ids: [...], access_key_ids: [...]},
+//	  snapshot: {…与 GET /metrics 完全同形，但全部分组/总量/rate 窗口都收窄到这些条件…},
 //	  series: {bucket_seconds, points: [与 /metrics/series 同形的点]},
 //	  requests: null | {items: [与 /metrics/requests 同形的条目],
 //	                    next_before_id, total_items}
 //	}
 //
+// filters 回显**筛选值本身**（两个数组，未筛的维度是空数组）：界面据此回显当前条件，
+// 不必把 URL 再解析一遍。
+//
 // snapshot 直接复用 snapshotSync 的整份响应（含 started_at / database_path /
 // active_requests）：同形比精简更值钱——界面渲染概览的那套代码可以原样复用。
-// 唯一的例外是 active_requests，它是进程内的全局在途数，按定义无法按 key 拆分
+// 唯一的例外是 active_requests，它是进程内的全局在途数，按定义无法按筛选条件拆分
 // （见 snapshotSync 的说明）。
-func (s *Store) AccessKeyMetrics(params AccessKeyMetricsParams) (*canonical.Value, error) {
+func (s *Store) FilteredMetrics(params FilteredMetricsParams) (*canonical.Value, error) {
 	// 校验顺序与 RequestHistory / TimeSeries 一致：hours → bucket_seconds → limit。
 	if params.Hours != nil && *params.Hours <= 0 {
 		// 与 TimeSeries / KeyUsage / AccessKeyUsage 同一套口径与文案。
@@ -85,12 +100,11 @@ func (s *Store) AccessKeyMetrics(params AccessKeyMetricsParams) (*canonical.Valu
 		// 自动桶可能超出它——那是服务端自己选的，不是调用方要求的。
 		return nil, formatValidationError("bucket_seconds must be greater than zero")
 	}
-	if params.Limit < 0 || params.Limit > maxAccessKeyMetricsItems {
-		return nil, formatValidationError("limit must be between 0 and %d", maxAccessKeyMetricsItems)
+	if params.Limit < 0 || params.Limit > maxFilteredMetricsItems {
+		return nil, formatValidationError("limit must be between 0 and %d", maxFilteredMetricsItems)
 	}
 
 	now := nowBeijing()
-	accessKeyID := &params.AccessKeyID
 
 	var since *string
 	if params.Hours != nil {
@@ -100,11 +114,11 @@ func (s *Store) AccessKeyMetrics(params AccessKeyMetricsParams) (*canonical.Valu
 
 	// 三份读数共用同一个 now：snapshotSync 与 requestHistorySync 都从这里拿到同一个
 	// 封口（created_at <= now），series 的最后一个桶也以它收尾。
-	snapshot, err := s.snapshotSync(params.Hours, nil, now, accessKeyID)
+	snapshot, err := s.snapshotSync(params.Hours, nil, now, params.ProviderIDs, params.AccessKeyIDs)
 	if err != nil {
 		return nil, err
 	}
-	bucketSeconds, points, err := s.accessKeySeries(params, now, accessKeyID)
+	bucketSeconds, points, err := s.filteredSeries(params, now)
 	if err != nil {
 		return nil, err
 	}
@@ -114,9 +128,10 @@ func (s *Store) AccessKeyMetrics(params AccessKeyMetricsParams) (*canonical.Valu
 	requests := canonical.NewNull()
 	if params.Limit > 0 {
 		history, err := s.requestHistorySync(RequestHistoryParams{
-			Hours:       params.Hours,
-			AccessKeyID: accessKeyID,
-			Limit:       params.Limit,
+			Hours:        params.Hours,
+			ProviderIDs:  params.ProviderIDs,
+			AccessKeyIDs: params.AccessKeyIDs,
+			Limit:        params.Limit,
 		}, now)
 		if err != nil {
 			return nil, err
@@ -137,7 +152,10 @@ func (s *Store) AccessKeyMetrics(params AccessKeyMetricsParams) (*canonical.Valu
 			canonical.ObjectPair{Key: "to", Value: canonical.NewString(formatISO(now))},
 			canonical.ObjectPair{Key: "hours", Value: hoursValue(params.Hours)},
 		)},
-		canonical.ObjectPair{Key: "access_key_id", Value: canonical.NewString(params.AccessKeyID)},
+		canonical.ObjectPair{Key: "filters", Value: canonical.NewObjectOf(
+			canonical.ObjectPair{Key: "provider_ids", Value: stringArray(params.ProviderIDs)},
+			canonical.ObjectPair{Key: "access_key_ids", Value: stringArray(params.AccessKeyIDs)},
+		)},
 		canonical.ObjectPair{Key: "snapshot", Value: snapshot},
 		canonical.ObjectPair{Key: "series", Value: canonical.NewObjectOf(
 			canonical.ObjectPair{Key: "bucket_seconds", Value: canonical.NewIntValue(bucketSeconds)},
@@ -145,6 +163,18 @@ func (s *Store) AccessKeyMetrics(params AccessKeyMetricsParams) (*canonical.Valu
 		)},
 		canonical.ObjectPair{Key: "requests", Value: requests},
 	), nil
+}
+
+// stringArray 把筛选值渲染成 JSON 数组；空维度是空数组而不是 null。
+//
+// 界面据这两个数组回显当前筛选条件，空维度必须是 `[]`（「这个维度不设限」）：给 null
+// 会让读端在两处各写一次判空，而且「没筛」与「筛了空列表」在响应里也就分不开了。
+func stringArray(values []string) *canonical.Value {
+	items := make([]*canonical.Value, 0, len(values))
+	for _, value := range values {
+		items = append(items, canonical.NewString(value))
+	}
+	return canonical.NewArray(items...)
 }
 
 // objectField 取对象里的一个字段。
@@ -159,16 +189,12 @@ func objectField(object *canonical.Value, key string) *canonical.Value {
 	return canonical.NewNull()
 }
 
-// accessKeySeries 取 series 部分的桶宽与点数组，窗口与 snapshot 相同（同一个 now）。
+// filteredSeries 取 series 部分的桶宽与点数组，窗口与 snapshot 相同（同一个 now）。
 //
-// hours 给了就用 hours；all_history 时用**这把 key 自己的**最早一条记录折算跨度——
-// series 没有「不限窗口」的形态（点是从起点零填充出来的，必须有起点），而一个筛选
-// 结果有多长只有库里知道。
-func (s *Store) accessKeySeries(
-	params AccessKeyMetricsParams,
-	now time.Time,
-	accessKeyID *string,
-) (int64, *canonical.Value, error) {
+// hours 给了就用 hours；all_history 时用**这组条件自己的**最早一条记录折算跨度——
+// series 没有「不限窗口」的形态（点是从起点零填充出来的，必须有起点），而一组筛选结果
+// 有多长只有库里知道。
+func (s *Store) filteredSeries(params FilteredMetricsParams, now time.Time) (int64, *canonical.Value, error) {
 	var start time.Time
 	// 点数上限的判据与 TimeSeries 相同（ceil(跨度/桶宽) + 1 > 上限），只是 hours 分支
 	// 直接用调用方给的 hours、all_history 分支用数据里真实的跨度。
@@ -177,12 +203,12 @@ func (s *Store) accessKeySeries(
 		start = addHours(now, *params.Hours)
 		spanSeconds = *params.Hours * 3600
 	} else {
-		earliest, found, err := s.firstAccessKeySecond(accessKeyID, now)
+		earliest, found, err := s.firstFilteredSecond(params.ProviderIDs, params.AccessKeyIDs, now)
 		if err != nil {
 			return 0, nil, err
 		}
 		if !found {
-			// 这把 key 一条记录都没有：空窗口是合法状态，给空数组而不是报错——与
+			// 这组条件一条记录都没有：空窗口是合法状态，给空数组而不是报错——与
 			// snapshot / requests 在空库上的行为一致。
 			bucketSeconds := params.BucketSeconds
 			if bucketSeconds == 0 {
@@ -213,7 +239,7 @@ func (s *Store) accessKeySeries(
 	}
 
 	points, err := s.seriesPoints(
-		queryFilter{AccessKeyID: accessKeyID},
+		queryFilter{ProviderIDs: params.ProviderIDs, AccessKeyIDs: params.AccessKeyIDs},
 		bucketSeconds,
 		bucketEpoch(start, bucketSeconds),
 		now,
@@ -224,16 +250,17 @@ func (s *Store) accessKeySeries(
 	return bucketSeconds, points, nil
 }
 
-// firstAccessKeySecond 取这把访问密钥在窗口内最早一条记录的 unix 秒。
+// firstFilteredSecond 取这组筛选条件在窗口内最早一条记录的 unix 秒。
 //
 // 用 SQLite 的 strftime('%s') 而不是把 created_at 文本解析回 time.Time：分桶表达式
 // 本来就是这么算的（见 bucketSQL），两边必须用同一套秒定义，否则桶边界会位移。这里
-// 复用 metricFilter 拼条件，省得把「id IN (SELECT …)」这条子查询再抄一遍。
-func (s *Store) firstAccessKeySecond(accessKeyID *string, until time.Time) (int64, bool, error) {
+// 复用 metricFilter 拼条件，省得把两个维度的条件再抄一遍。
+func (s *Store) firstFilteredSecond(providerIDs, accessKeyIDs []string, until time.Time) (int64, bool, error) {
 	untilStr := formatISO(until)
 	whereSQL, parameters := metricFilter{
 		UntilCreatedAt: &untilStr,
-		AccessKeyID:    accessKeyID,
+		ProviderIDs:    providerIDs,
+		AccessKeyIDs:   accessKeyIDs,
 	}.sql()
 	var epoch sql.NullInt64
 	err := s.db().QueryRow(

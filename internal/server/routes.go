@@ -82,9 +82,10 @@ func (a *App) buildHandler() http.Handler {
 		// Key 用量读数（理由见 key_usage.go）：回答「这些流量是哪把 Key 出去的」。
 		// 与 workspace-usage 同样挂 /ui/，因为 /metrics 的形状已发布、不能加字段。
 		mux.HandleFunc(path+keyUsagePath, a.handleKeyUsage)
-		// 按访问密钥筛选的整页读数（理由见 accesskey_metrics.go）：概览 + 趋势 +
-		// 明细三份同窗口的读数。过滤能力只在这里开放，/metrics 系列的查询参数不动。
-		mux.HandleFunc(path+accessKeyMetricsPath, a.handleAccessKeyMetrics)
+		// 按供应商 / 访问密钥筛选的整页读数（理由见 filtered_metrics.go）：概览 +
+		// 趋势 + 明细三份同窗口的读数。过滤能力只在这里开放，/metrics 系列的查询
+		// 参数不动。
+		mux.HandleFunc(path+filteredMetricsPath, a.handleFilteredMetrics)
 		a.webuiMounted = true
 	}
 

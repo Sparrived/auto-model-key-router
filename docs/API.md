@@ -94,8 +94,8 @@ x-api-key: your-local-api-key
 | `GET` | `/ui/model-kinds.json` | 无 | 逐个模型回答「它是什么类型」（文本/图像/视频/语音/嵌入/重排），供 WebUI 把服务模型卡片分组（需 `webui_enabled`） |
 | `GET` | `/ui/workspace-usage.json` | 仅本地 | 按工作空间拆分的用量读数与请求流向，供 WebUI 的「工作空间」页（需 `webui_enabled`） |
 | `GET` | `/ui/access-key-usage.json` | 访问密钥 | 只回**这把**访问密钥自己的用量、按模型/供应商/上游模型的拆分与最近调用，供访客看板 `/ui/guest.html`（需 `webui_enabled`） |
-| `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`）；可用 `access_key_id` 只看某一把访问密钥发起的请求 |
-| `GET` | `/ui/access-key-metrics.json` | 仅本地 | **按一把访问密钥筛选**的整页读数：概览（与 `/metrics` 同形）+ 趋势 + 明细，三份共用同一时间窗口（需 `webui_enabled`） |
+| `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`）；可用 `provider_id` / `access_key_id` 收窄（两个参数都可重复出现，维度内 OR、维度间 AND） |
+| `GET` | `/ui/filtered-metrics.json` | 仅本地 | **按供应商 / 访问密钥筛选**的整页读数：概览（与 `/metrics` 同形）+ 趋势 + 明细，三份共用同一时间窗口（需 `webui_enabled`；两个筛选参数都可重复出现） |
 | `GET` | `/ui/update/status` | 无 | 报告本构建是否具备自更新能力及当前版本，供 WebUI 决定是否显示「立即更新」 |
 | `POST` | `/ui/update/apply` | 仅本地 | 执行自更新：下载并校验新版、就地替换、启动收尾助手重启服务 |
 | `GET` | `/api/logs` | 仅本地 | 读取日志文件尾部（默认最后 64 KiB） |
@@ -119,11 +119,11 @@ x-api-key: your-local-api-key
 - **本项目自有的读数**（价格目录 `/ui/pricing.json`、模型类型 `/ui/model-kinds.json`、自更新入口、
   工作空间用量
   `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`、按 Key 用量
-  `/ui/key-usage.json`、按访问密钥筛选的整页读数 `/ui/access-key-metrics.json`）挂在 `/ui/` 前缀下：它们与
+  `/ui/key-usage.json`、按供应商 / 访问密钥筛选的整页读数 `/ui/filtered-metrics.json`）挂在 `/ui/` 前缀下：它们与
   `/api` 面在语义上不连续，挂 `/ui/` 既落在那份已发布清单之外，也让「不开 WebUI 就没有这些读数」
-  顺理成章。其中「按 Key 用量」与「按访问密钥筛选」尤其不能并进 `/metrics`——那份读数的**形状与
-  查询参数都已发布**，而「按供应商 + Key 名」这个组合分组不是参照实现的口径、`access_key_id` 也不是
-  它声明过的参数（见 `/metrics` 一节）。
+  顺理成章。其中「按 Key 用量」与「按供应商 / 访问密钥筛选」尤其不能并进 `/metrics`——那份读数的
+  **形状与查询参数都已发布**，而「按供应商 + Key 名」这个组合分组不是参照实现的口径，
+  `provider_id` 的多值形态与 `access_key_id` 也不是它声明过的参数（见 `/metrics` 一节）。
 
 判断标准是**它是不是管理面的正式资源**，而不是「能不能挂到 `/ui/` 躲开清单」。
 
@@ -446,7 +446,7 @@ Key 的失败次数和冷却属于内部调度细节，不通过 `/health` 或�
 
 > `keys` 的 Key 只作为模型的子项出现，且不含供应商——因此它答不出「这一把 Key 一共出去了多少流量」，也分不清两家的同名 Key。要按 Key 看用量请用 [`GET /ui/key-usage.json`](#get-uikey-usagejson)；那个端点是本项目自有的读数，这里**不新增字段**（形状已发布）。
 
-> 同理，`/metrics`、`/metrics/series`、`/metrics/requests` **没有 `access_key_id` 参数**：查询参数与响应形状一样属于已发布契约，多一个参数就变了。按访问密钥筛选的读数在 [`GET /ui/access-key-metrics.json`](#get-uiaccess-key-metricsjson)（本项目自有的端点），`/ui/key-usage.json` 也接受同一个可选参数。给这三条路由传 `access_key_id` 会被当作未知参数**忽略**（FastAPI 不校验未声明的查询参数，Go 侧保持同一行为）。
+> 同理，`/metrics`、`/metrics/series`、`/metrics/requests` **没有 `access_key_id` 参数**，`provider_id` 也只在 `/metrics/requests` 那条上作为**单值**已发布参数存在：查询参数与响应形状一样属于已发布契约，多一个参数、或者把 `provider_id` 从等值改成 `IN`，都是改契约。按供应商 / 访问密钥筛选的读数在 [`GET /ui/filtered-metrics.json`](#get-uifiltered-metricsjson)（本项目自有的端点），`/ui/key-usage.json` 也接受同一对参数（两个都可重复出现）。给这三条路由传 `access_key_id` 会被当作未知参数**忽略**（FastAPI 不校验未声明的查询参数，Go 侧保持同一行为）。
 
 每组统计包含：
 
@@ -1839,9 +1839,12 @@ http://127.0.0.1:8000/ui/
 | --- | --- | --- | --- | --- |
 | `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
 | `all_history` | boolean | `false` | — | 为真时忽略 `hours`，统计全部历史（此时 `window.from` 为 `null`） |
-| `access_key_id` | string | 无 | `1..512` 字符 | 可选：只统计**这把访问密钥发起**的请求。三份拆分与 `unattributed` 一并收窄——`upstream_keys` / `model_keys` 因此回答「这把 key 都打到哪些上游 Key 上」；不传时与以前完全一致 |
+| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 可选：只统计**这些供应商**的请求（同一参数重复出现 = 维度内 OR，即 `provider_id IN (…)`） |
+| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 可选：只统计**这些访问密钥发起**的请求（同上，归属取自 `request_access_key` 旁挂表） |
 
-参数校验与 `/metrics` 同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。
+两个维度之间是 **AND**：`?provider_id=openai&access_key_id=ak1` 是「ak1 打到 openai 的那些请求」。三份拆分与 `unattributed` 一并收窄——`upstream_keys` / `model_keys` 因此回答「这组条件都打到哪些上游 Key 上」，`unattributed` 则是「这组条件里没有上游归属的那些行」。两个参数都不传时与加它们之前完全一致。
+
+参数校验与 `/metrics` 同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。多值参数逐项校验：任一项非法（超 512 字符或空串）就回 `422`，`input` 是**那一项**的原文（空串是 `string_too_short`，`input` 为 `""`）。
 
 `access_key_id` 的语义是「谁**发起**的这次请求」（`request_access_key` 旁挂表），不是「用了哪把上游 Key」，两者互不嵌套：一把访问密钥的流量会打到多把上游 Key 上，反之亦然。完整权限与工作空间凭据写入的行没有访问密钥归属，任何一次筛选都不会把它们算进去。
 
@@ -1880,21 +1883,24 @@ http://127.0.0.1:8000/ui/
 
 > 该端点挂在 `/ui/` 之下而非 `/metrics` 新增字段：`/metrics` 是**对照参照实现**的读数，形状已经发布、不能加字段（见「新增能力挂在 `/api/` 还是 `/ui/`」）。
 
-### `GET /ui/access-key-metrics.json`
+### `GET /ui/filtered-metrics.json`
 
-**按一把访问密钥筛选**的整页读数：概览、趋势与最近明细三份**共用同一时间窗口**，供 WebUI 的概览 / 用量统计页做全局筛选时一次取完。
+**按供应商 / 访问密钥筛选**的整页读数：概览、趋势与最近明细三份**共用同一时间窗口**，供 WebUI 的概览 / 用量统计页做全局筛选时一次取完。
 
-**只认完整权限**：内容是全实例读数按 key 筛选的结果（配置结构的投影），与 `/metrics` 同级；访问密钥与工作空间的面板 key / 推理 key 一律 `401`。要「看自己那一把」的调用方请用 `/ui/access-key-usage.json`——那条只认访问密钥凭据，也不接受任何指定别人 key 的参数。
+**只认完整权限**：内容是全实例读数按这组条件筛选的结果（配置结构的投影），与 `/metrics` 同级；访问密钥与工作空间的面板 key / 推理 key 一律 `401`。要「看自己那一把」的调用方请用 `/ui/access-key-usage.json`——那条只认访问密钥凭据，也不接受任何指定别人 key 的参数。
 
 | 参数 | 类型 | 默认 | 约束 | 说明 |
 | --- | --- | --- | --- | --- |
-| `access_key_id` | string | **必填** | `1..512` 字符 | 筛选哪一把访问密钥（配置里的 key_id，不是明文 key） |
+| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选供应商；同一参数重复出现 = 维度内 OR（`provider_id IN (…)`）。全部可省 |
+| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选访问密钥（配置里的 key_id，不是明文 key）；语义与校验同上，归属取自 `request_access_key` 旁挂表 |
 | `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
 | `all_history` | boolean | `false` | — | 为真时忽略 `hours`（`window.from` 与 `window.hours` 为 `null`） |
 | `bucket_seconds` | integer | `0`（自动） | 显式给值时 `15..86400` | 趋势图的桶宽 |
 | `limit` | integer | `0` | `0..200` | 明细条数；`0` 表示不要明细（`requests` 为 `null`） |
 
-参数校验与其它读数同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。缺 `access_key_id` 是 `422 missing`（`{"type":"missing","loc":["query","access_key_id"],"msg":"Field required","input":null}`）。
+两个维度之间是 **AND**：`?provider_id=openai&provider_id=azure&access_key_id=ak1` 是「ak1 打到这两家的量」。两个维度**都可省**：都不给就是全实例读数（与 `/metrics` 系列等价，前端不会这么发）——这条路径必须留着，因为「不筛」与「筛一个不存在的值」是两件不同的事：前者回全量，后者回空。
+
+参数校验与其它读数同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。多值参数逐项校验：任一项非法（超 512 字符或空串）就回 `422`，`input` 是**那一项**的原文（空串是 `string_too_short`，`input` 为 `""`）。
 
 响应（`Content-Type: application/json`）：
 
@@ -1902,7 +1908,7 @@ http://127.0.0.1:8000/ui/
 {
   "count_semantics": "upstream_attempt",
   "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24},
-  "access_key_id": "ak1",
+  "filters": {"provider_ids": ["openai", "azure"], "access_key_ids": ["ak1"]},
   "snapshot": {"count_semantics": "upstream_attempt", "window": {"...": "..."}, "started_at": "…",
                "database_path": "…", "rate_window_seconds": 60, "current_rpm": 2, "current_tpm": 300,
                "active_requests": 0, "total": {"requests": 2, "...": "..."},
@@ -1921,20 +1927,21 @@ http://127.0.0.1:8000/ui/
 
 | 字段 | 说明 |
 | --- | --- |
-| `snapshot` | 与 `GET /metrics` **完全同形**（含 `count_semantics` / `window` / `started_at` / `database_path` / `rate_window_seconds` / `current_rpm` / `current_tpm` / 九个分组），但全部分组、总量与 rate 窗口都收窄到这把 key |
-| `snapshot.active_requests` | **唯一的例外，刻意保持全局**：进程内的在途请求数，按定义无法按 key 拆分 |
+| `snapshot` | 与 `GET /metrics` **完全同形**（含 `count_semantics` / `window` / `started_at` / `database_path` / `rate_window_seconds` / `current_rpm` / `current_tpm` / 九个分组），但全部分组、总量与 rate 窗口都收窄到这组条件 |
+| `snapshot.active_requests` | **唯一的例外，刻意保持全局**：进程内的在途请求数，按定义无法按筛选条件拆分 |
 | `series` | 点与 `GET /metrics/series` 同形；窗口与 `snapshot` 相同（同一个 `now`），因此各桶 `requests` 合计与 `snapshot.total.requests` 对得上 |
 | `requests` | `limit=0` 时为 `null`（「这次没要明细」与「要了但一条都没有」要分得开）；否则 `items` 与 `GET /metrics/requests` 的条目同形 |
-| `access_key_id` | 回显筛选的 key_id。**不含** `access_key_name`——显示名是配置信息，界面从 `GET /api/access-keys` 拿 |
+| `filters` | 回显筛选值本身，两个数组（未筛的维度是空数组）。**不含**显示名——那是配置信息，界面从 `GET /api/access-keys` / `GET /api/providers` 拿 |
 | `window` | 与 `/metrics` 同义：`all_history` 时 `from` 为 `null` |
 
 几点刻意的取舍：
 
-- **为什么不给 `/metrics` 加参数**：那三条路由是对照参照实现的读数，**响应形状与查询参数都已发布**（连响应里 `filters` 回显的键序都是发布字节）。给它们加 `access_key_id` 就改了契约；而按 key 筛选是本项目自有的能力，因此单独一条 `/ui` 路由，落在所有已发布清单之外。给 `/metrics` 传 `access_key_id` 会被当作未知参数**忽略**（与参照实现的 FastAPI 行为一致）。
+- **为什么不给 `/metrics` 加参数**：那三条路由是对照参照实现的读数，**响应形状与查询参数都已发布**（连响应里 `filters` 回显的键序都是发布字节）。给它们加 `access_key_id`、或者把 `provider_id` 从等值改成 `IN`，都改了契约；而这两个筛选维度是本项目自有的能力，因此单独一条 `/ui` 路由，落在所有已发布清单之外。给 `/metrics` 传 `access_key_id` 会被当作未知参数**忽略**（与参照实现的 FastAPI 行为一致）。
+- **同名参数重复出现 = 维度内多选**：单值参数在查询串里只能表达一个值，「这几家的量之和」用重复参数表达最直接（`?provider_id=a&provider_id=b`），服务端收成 `IN (?, …)`、值走参数绑定。其它参数一律保持 `FastAPI` 的「取末位」语义——那是已发布行为。
 - **三份读数一次取完**：分三次请求会让「概览说 12 次、趋势图加起来 11 次」无法归因——窗口边界各差一点，或者两次请求之间又落进来一行。服务端一次定下 `now` 与窗口起点，三份取数共用。
 - **`bucket_seconds` 默认自动**：`/metrics/series` 要求调用方自己按跨度挑桶（`hours=24` 配 60 秒桶是 1441 点，超过 500 的上限直接 `422`）。整页读数默认由服务端挑最小的合适桶，真实桶宽在响应里回显；显式给值时仍走 `/metrics/series` 那一套，点数超限回 `422`（`{"error":{"message":"time series cannot exceed 500 points"}}`），**不**静默换一个更粗的桶。
-- **`all_history` 下的趋势**：`series` 没有「不限窗口」的形态（点是从起点零填充出来的），因此按**这把 key 自己的**最早一条记录折算跨度选桶，而不是用全库跨度——否则趋势图开头会多出一大段与这把 key 无关的空桶。
-- **归属口径**：只认「谁**发起**的这次请求」（`request_access_key` 旁挂表）。完整权限、工作空间凭据写入的行以及升级前的历史行没有访问密钥归属，任何一把 key 的读数都不会把它们算进去（与 `/ui/access-key-usage.json` 同一口径）。
+- **`all_history` 下的趋势**：`series` 没有「不限窗口」的形态（点是从起点零填充出来的），因此按**这组条件自己的**最早一条记录折算跨度选桶，而不是用全库跨度——否则趋势图开头会多出一大段与这组条件无关的空桶。
+- **归属口径**：只认「谁**发起**的这次请求」（`request_access_key` 旁挂表）。完整权限、工作空间凭据写入的行以及升级前的历史行没有访问密钥归属，任何按 key 的筛选都不会把它们算进去（与 `/ui/access-key-usage.json` 同一口径）；按供应商筛选则只看 `provider_id` 列，没有供应商归因的行同样不会被算进去。
 
 ### `GET /ui/pricing.json`
 
