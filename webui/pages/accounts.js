@@ -378,35 +378,55 @@ function accountCardsGrid(accounts, defaultOffset) {
       const failed = Number(account.failed) || 0;
       const rateText = totalCalls > 0 ? `${((success / totalCalls) * 100).toFixed(1)}%` : "-";
 
+      const authIndex = account.auth_index === undefined || account.auth_index === null
+        ? "" : String(account.auth_index).trim();
+      const metaRows = [
+        account.email && account.email !== title ? h("div.account-subtext", account.email) : null,
+        account.name && account.name !== title ? h("div.account-subtext", account.name) : null,
+        accountMeta(account),
+      ].filter(Boolean);
+
       return h("div.account-card", {},
-        h("div.card-head", {},
-          account.auth_index !== undefined && account.auth_index !== null && account.auth_index !== ""
-            ? h("span.auth-index-chip", `#${account.auth_index}`)
-            : null,
-          h("h3.account-title", title),
-          badge(account.provider || "未知", "info"),
-          statusBadge(account),
-        ),
-        h("div.account-card-meta", {},
-          account.email && account.email !== title ? h("div.account-subtext", account.email) : null,
-          account.name && account.name !== title ? h("div.account-subtext", account.name) : null,
-          accountMeta(account),
-        ),
-        h("div.account-card-quota-section", {},
-          h("span.section-label", "剩余额度:"),
-          quotaCell(account),
-        ),
-        h("div.account-card-traffic-section", {},
-          h("span.section-label", `调用统计 (${formatCount(totalCalls)} 次 · 成功率 ${rateText}):`),
-          h("div.traffic-split-counts", {},
-            h("span.count-success", `✓ ${formatCount(success)} 成功`),
-            h("span.count-sep", "/"),
-            h("span.count-failed" + (failed > 0 ? ".has-fails" : ""), `✗ ${formatCount(failed)} 失败`),
+        // 顶部两列两行：左列「账户名 / 指纹」，右列「平台 / 可用性」。
+        //
+        // 这里刻意不是一条 flex 行。旧版把这四项依次排开，徽标落在第几行取决于标题有多长：
+        // 同一排的两张卡能一张换行、一张不换行（长邮箱那张把「可用」挤到第二行），一眼看
+        // 过去像排版坏了，也没法纵向比较两个账号。两列各自竖排之后，卡片的形状与标题长度
+        // 无关，平台与可用性也总落在同一条竖线上。
+        h("div.account-card-head", {},
+          h("div.account-head-main", {},
+            h("h3.account-title", title),
+            // 指纹 = CPA 的 auth_index：同一条凭据在实例内稳定不变，也是 quota/fetch 的
+            // 唯一入参，排查时要在卡片上直接读得到。
+            authIndex
+              ? h("span.auth-index-chip",
+                  { title: "凭据指纹：CPA 的 auth_index，quota/fetch 按它定位这条凭据" },
+                  `#${authIndex}`)
+              : null,
           ),
-          totalCalls > 0
-            ? progressBar((success / totalCalls) * 100, failed > 0 ? "warn" : "good")
-            : null,
-          recentBars(account.recent_requests),
+          h("div.account-head-side", {},
+            badge(account.provider || "未知", "info"),
+            statusBadge(account),
+          ),
+        ),
+        h("div.account-card-body", {},
+          metaRows.length ? h("div.account-card-meta", {}, ...metaRows) : null,
+          h("div.account-card-quota-section", {},
+            h("span.section-label", "剩余额度:"),
+            quotaCell(account),
+          ),
+          h("div.account-card-traffic-section", {},
+            h("span.section-label", `调用统计 (${formatCount(totalCalls)} 次 · 成功率 ${rateText}):`),
+            h("div.traffic-split-counts", {},
+              h("span.count-success", `✓ ${formatCount(success)} 成功`),
+              h("span.count-sep", "/"),
+              h("span.count-failed" + (failed > 0 ? ".has-fails" : ""), `✗ ${formatCount(failed)} 失败`),
+            ),
+            totalCalls > 0
+              ? progressBar((success / totalCalls) * 100, failed > 0 ? "warn" : "good")
+              : null,
+            recentBars(account.recent_requests),
+          ),
         ),
       );
     }),

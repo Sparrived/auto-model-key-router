@@ -483,9 +483,40 @@ input::placeholder, textarea::placeholder { color: var(--ui-text-muted); opacity
 .bar-list-empty { padding: var(--sp-3) 0; text-align: center; color: var(--ui-text-muted); font-size: 13px; }
 
 /* ══ 账号资源 ══ */
+/* 卡片顶部：左列「账户名 / 指纹」，右列「平台 / 可用性」。
+ *
+ * 两列各自竖排，而不是一条 flex 行。一条行里这四项的换行位置取决于标题有多长：长邮箱把
+ * 「可用」挤到第二行、短标题又留在同一行，同一排的两张卡于是长得不一样，也没法纵向比较
+ * 两个账号。分列之后形状与标题长度无关，右侧那列还能整列贴到卡片右边。
+ *
+ * 左列 min-width: 0 + 标题的 overflow-wrap: anywhere 是必须的：邮箱是长且不可断的词，
+ * 不给它收缩余地的话（flex 项默认 min-width: auto），窄屏上它会把右侧徽标列顶出卡片。 */
+.account-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--ui-divider);
+}
+.account-head-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+/* 徽标列不参与压缩：平台名（antigravity）与可用性被压瘦之后，这张卡就没有可读的读数了，
+ * 宁可让左边的标题折成两行。 */
+.account-head-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: none;
+}
 .account-title {
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ui-text);
   overflow-wrap: anywhere;
   line-height: 1.4;
@@ -500,6 +531,7 @@ input::placeholder, textarea::placeholder { color: var(--ui-text-muted); opacity
 .auth-index-chip {
   display: inline-flex;
   align-items: center;
+  align-self: flex-start;
   font-size: 11px;
   font-weight: 600;
   color: var(--ui-action);
@@ -778,20 +810,40 @@ input::placeholder, textarea::placeholder { color: var(--ui-text-muted); opacity
   grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
   gap: 14px;
 }
+/* 账号卡片：嵌在实例卡片里，两者底色同为 --ui-surface。旧版只靠一圈 8% 透明度的描边把
+ * 自己从实例卡片上分出来——在同类底色上那圈线几乎读不出来，整张卡看起来是"页面上一段
+ * 文字"而不是一张卡片。现在补齐三样：
+ *   1. 描边换成实色 --ui-divider；
+ *   2. 内边距挪进顶部带与内容区，顶部带因此能画出一条整宽的分隔线，卡片有了"头"；
+ *   3. 阴影用 --shadow-sm 而不是 --shadow-card：父卡片自己已经投了 --shadow-card 那一层，
+ *      嵌在里面再投一层同样强度的只会糊成一团。
+ */
 .account-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  background: var(--ui-surface);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--ui-divider);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--dur) var(--ease);
+}
+/* 卡片本身不可进入（没有点击目标），hover 只提亮描边、不抬阴影：抬阴影是"这里能点进去"
+ * 的信号，给一排展示卡用上，整块看板都会显得可以点。 */
+.account-card:hover {
+  border-color: rgba(83, 49, 31, 0.2);
+}
+.account-card-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px;
-  background: var(--ui-surface);
-  border-radius: var(--radius-lg);
-  border: 1px solid rgba(83, 49, 31, 0.08);
-  box-shadow: var(--shadow-card);
-  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-.account-card:hover {
-  border-color: rgba(83, 49, 31, 0.2);
-  box-shadow: var(--shadow-sm);
+.account-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 .account-card-quota-section, .account-card-traffic-section {
   display: flex;
