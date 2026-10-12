@@ -12,6 +12,7 @@ import {
   formatRate,
 } from "../dom.js";
 import { api } from "../api.js";
+import { accessKeyFilterNode, selectedAccessKey, filterNote } from "../access-filter.js";
 import {
   card, cardHead, stat, statGrid, notice, badge, empty, skeleton, render,
   segmented, table, freshness,
@@ -114,21 +115,48 @@ function pickRange(selection) {
 
 // —— 取数 ——
 // 快照与序列同一窗口一次取回，保证同屏读数自洽。
+//
+// 全局筛选（外壳的 store.accessKeyFilter）决定走哪条路径：
+//   - 未筛选：仍是 /metrics + /metrics/series + /ui/key-usage.json 三条，与页面此前的
+//     行为逐字一致；
+//   - 已筛选：/metrics 系列是**对照参照实现**的读数、形状已发布，加不了过滤条件
+//     （见 webui/api.js 的 accessKeyMetrics），因此快照与序列改从
+//     /ui/access-key-metrics.json 一条拿回，归成同一种形状后共用下面的落状态与错误处理。
+//
+// 两条路径都用**同一个** spec.hours：本页的「全部历史」是先由最早一条记录推出跨度、
+// 再当小时数查（series 根本没有 all_history），因此这里不能单独传 all_history=true
+// ——那会让按 Key 的表覆盖比上方 KPI/曲线更长的跨度，同屏数字对不上。
 async function loadWindow(force = false) {
   const spec = currentSpec();
-  const key = `${state.selection}:${spec.hours}`;
+  const accessKeyId = selectedAccessKey(xtxRef?.store);
+  // 缓存键必须带上筛选值：否则切到筛选会命中旧的 seriesKey 而不重新取数，
+  // 切回「全部」也会继续显示筛选后的数据。
+  const key = `${state.selection}:${spec.hours}:${accessKeyId}`;
   if (!force && state.series && state.seriesKey === key) return;
   const bucket = pickBucketSeconds(spec.hours);
   const token = ++seriesToken;
-  // 三条读数用**同一个** spec.hours：本页的「全部历史」是先由最早一条记录推出跨度、
-  // 再当小时数查（series 根本没有 all_history），因此这里不能单独传 all_history=true
-  // ——那会让按 Key 的表覆盖比上方 KPI/曲线更长的跨度，同屏数字对不上。
-  const [snapshot, series, keyUsage] = await Promise.all([
-    api.metrics(spec.hours).catch((error) => ({ __error: errorText(error) })),
-    api.series(spec.hours, bucket).catch((error) => ({ __error: errorText(error) })),
-    api.keyUsage({ hours: spec.hours }).catch((error) => ({ __error: errorText(error) })),
-  ]);
+  let reads;
+  if (accessKeyId) {
+    const [bundle, keyUsage] = await Promise.all([
+      api.accessKeyMetrics({ accessKeyId, hours: spec.hours, bucketSeconds: bucket, limit: 0 })
+        .catch((error) => ({ __error: errorText(error) })),
+      api.keyUsage({ hours: spec.hours, accessKeyId }).catch((error) => ({ __error: errorText(error) })),
+    ]);
+    // 筛选态里快照与序列来自**同一条响应**：一次失败就是两者都失败，因此共用同一个
+    // 错误文本，不假装其中一半还能读。
+    reads = bundle.__error
+      ? { snapshot: { __error: bundle.__error }, series: { __error: bundle.__error }, keyUsage }
+      : { snapshot: bundle.snapshot, series: bundle.series || {}, keyUsage };
+  } else {
+    const [snapshot, series, keyUsage] = await Promise.all([
+      api.metrics(spec.hours).catch((error) => ({ __error: errorText(error) })),
+      api.series(spec.hours, bucket).catch((error) => ({ __error: errorText(error) })),
+      api.keyUsage({ hours: spec.hours }).catch((error) => ({ __error: errorText(error) })),
+    ]);
+    reads = { snapshot, series, keyUsage };
+  }
   if (token !== seriesToken) return;
+  const { snapshot, series, keyUsage } = reads;
   state.snapshotError = snapshot.__error || null;
   state.snapshot = snapshot.__error ? null : snapshot;
   if (!snapshot.__error) state.snapshotAt = new Date().toISOString();
@@ -569,6 +597,9 @@ function draw(firstPaint = false) {
   const metrics = state.snapshot;
   const points = state.series || [];
   const bucketSeconds = state.seriesBucket || pickBucketSeconds(spec.hours);
+  // 全局筛选是否生效。生效时整页读数只含这一把访问密钥发起的调用，按 Key 拆分的
+  // 三张卡同时收起——它们的行只剩被筛中的那一行，答不了「哪把 Key 出去了」。
+  const scoped = Boolean(selectedAccessKey(store));
 
   const children = [
     h("div.page-head", {},
@@ -579,6 +610,8 @@ function draw(firstPaint = false) {
       h("div.page-actions", {},
         state.snapshotAt ? freshness(state.snapshotAt) : null,
         metadataBadges(metrics),
+        // 筛选作用于整页所有卡片，因此与时间窗口分段控件并排放在 actions 行里。
+        accessKeyFilterNode(store, () => { state.loading = true; draw(); loadWindow(true); }),
         segmented(
           USAGE_RANGES.map((item) => ({
             id: item.hours, label: item.short, title: item.label,
@@ -591,15 +624,23 @@ function draw(firstPaint = false) {
   ];
 
   if (store.connectionError) children.push(notice(`无法连接 AMKR 服务：${store.connectionError}`, "error"));
+  // 筛选态要先说明「看的是哪把 key」，并交代收起来的按 Key 明细去了哪 —— 不写这一句，
+  // 用户会以为那三张卡是页面出了问题才消失的。
+  const filterInfo = filterNote(store);
+  if (filterInfo) {
+    children.push(notice(`${filterInfo} 按 Key 的拆分明细在筛选时收起（按访问密钥 / 按上游 Key / 模型 / 上游 Key 三张卡）。`, "info"));
+  }
   if (state.allHoursError) children.push(notice(`无法确定历史跨度：${state.allHoursError}`, "warn"));
   if (spec.truncated) {
     const limitDays = Math.round(MAX_HISTORY_HOURS / 24);
     children.push(notice(`历史跨度超过 ${limitDays} 天，图中只覆盖最近 ${limitDays} 天。`, "warn"));
   }
-  if (state.snapshotError && !metrics) children.push(notice(`指标读取失败：${state.snapshotError}`, "error"));
-  if (state.seriesError) children.push(notice(`趋势数据读取失败：${state.seriesError}`, "error"));
+  // 筛选态与全量态读的不是同一条接口，报错时写明范围，否则用户会去查错的地方。
+  const scopeSuffix = scoped ? "（按访问密钥筛选）" : "";
+  if (state.snapshotError && !metrics) children.push(notice(`指标读取失败${scopeSuffix}：${state.snapshotError}`, "error"));
+  if (state.seriesError) children.push(notice(`趋势数据读取失败${scopeSuffix}：${state.seriesError}`, "error"));
   // 按 Key 是单独一条读数：它读失败只该让那三张卡显示空态，不该连累上面的总量与曲线。
-  if (state.keyUsageError) children.push(notice(`按 Key 用量读取失败：${state.keyUsageError}`, "error"));
+  if (state.keyUsageError) children.push(notice(`按 Key 用量读取失败${scopeSuffix}：${state.keyUsageError}`, "error"));
   // 切到长窗口时查询要一会儿（1 年 = 扫更多行、点也更多）。这时下面的数字还是上一
   // 个窗口的，必须说明"正在换成你选的那个窗口"，否则会被当成新窗口的读数。
   if (state.loading && metrics) children.push(notice("正在读取所选窗口的数据，下方读数仍属于上一次查询的窗口。", "info"));
@@ -619,6 +660,10 @@ function draw(firstPaint = false) {
   //
   // 「按 Key」两张半宽卡与「模型 / 上游 Key」整宽卡排在最后：前者回答"哪把 Key 出去了"
   // （上游 Key 与访问密钥各一张），后者是带供应商前缀的「模型 × Key」明细。
+  //
+  // 筛选生效时这三张卡不渲染（scoped ? null）。条件表达式而**不是**把卡片抽进 helper：
+  // webui/probes/webui_layout_probe.mjs 静态解析这份源码里的 h("div.col-N")，两个分支
+  // 的声明都要留在 .grid-12 的实参里，声明序列才与未筛选态一致（每排仍正好 12 轨）。
   const keyUsage = state.keyUsage;
   children.push(h("div.grid-12", {},
     h("div.col-12", {}, cumulativeCard(points, bucketSeconds)),
@@ -630,12 +675,12 @@ function draw(firstPaint = false) {
     h("div.col-12", {}, latencyCard(points, bucketSeconds)),
     h("div.col-6", {}, breakdownCard("模型用量", metrics.models, "模型", "窗口内没有模型调用。")),
     h("div.col-6", {}, breakdownCard("调用方用量", metrics.caller_types, "调用方", "窗口内没有调用方数据。")),
-    h("div.col-6", {}, breakdownCard("按上游 Key 用量", upstreamKeyEntries(keyUsage?.upstream_keys),
+    scoped ? null : h("div.col-6", {}, breakdownCard("按上游 Key 用量", upstreamKeyEntries(keyUsage?.upstream_keys),
       "Key", "窗口内没有可归因到上游 Key 的调用。", unattributedNote(keyUsage))),
-    h("div.col-6", {}, breakdownCard("按访问密钥用量", accessKeyEntries(keyUsage?.access_keys),
+    scoped ? null : h("div.col-6", {}, breakdownCard("按访问密钥用量", accessKeyEntries(keyUsage?.access_keys),
       "访问密钥", "窗口内没有访问密钥发起的调用。",
       "只统计访问密钥发起的调用；完整权限与工作空间凭据的流量不在这一维。")),
-    h("div.col-12", {}, breakdownCard("模型 / 上游 Key 用量", modelKeyEntries(keyUsage?.model_keys),
+    scoped ? null : h("div.col-12", {}, breakdownCard("模型 / 上游 Key 用量", modelKeyEntries(keyUsage?.model_keys),
       "条目", "窗口内没有 Key 调用数据。")),
   ));
 

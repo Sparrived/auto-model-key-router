@@ -139,10 +139,29 @@ export const api = {
   // Key 用量读数：「这些流量是哪把 Key 出去的」（上游 Key + 访问密钥两份拆分）。
   // 同样挂 /ui/ 且要完整鉴权：/metrics 是**对照参照实现**的读数，形状已发布不能加
   // 字段，所以这份按 Key 拆分的读数是单独一条本项目自有的接口。
-  keyUsage: ({ hours = 24, allHistory = false } = {}) =>
-    request(allHistory
-      ? "/ui/key-usage.json?all_history=true"
-      : `/ui/key-usage.json?hours=${hours}`),
+  keyUsage: ({ hours = 24, allHistory = false, accessKeyId = "" } = {}) => {
+    const params = new URLSearchParams(allHistory ? { all_history: "true" } : { hours: String(hours) });
+    // 全局筛选生效时三类拆分一起收窄到这把访问密钥（上游分布卡里的「按上游 Key」也要跟着走）。
+    if (accessKeyId) params.set("access_key_id", accessKeyId);
+    return request(`/ui/key-usage.json?${params}`);
+  },
+
+  // 按访问密钥收窄的整页读数：快照 + 序列（可选逐条明细）一次取回，三者共用同一个
+  // 时间窗口，同屏数字因此自洽。为什么不用 /metrics 系列：那是**对照参照实现**的读数，
+  // 形状与查询参数都已发布，不能给它加过滤条件（见 docs/API.md「新增能力挂在
+  // /api/ 还是 /ui/」）。limit=0 表示不要明细（用量统计页只画图与表）。
+  accessKeyMetrics: ({
+    accessKeyId = "", hours = 24, allHistory = false, bucketSeconds = 60, limit = 0,
+  }) => {
+    const params = new URLSearchParams({
+      access_key_id: accessKeyId,
+      bucket_seconds: String(bucketSeconds),
+    });
+    if (allHistory) params.set("all_history", "true");
+    else params.set("hours", String(hours));
+    if (limit > 0) params.set("limit", String(limit));
+    return request(`/ui/access-key-metrics.json?${params}`);
+  },
 
   // 价格目录（models.dev）：由服务端缓存并定期刷新，挂在 WebUI 前缀下。
   // **不鉴权**——内容是 models.dev 的公开数据，静态资源本身也是公开的。

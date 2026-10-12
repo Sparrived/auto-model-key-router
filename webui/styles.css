@@ -132,6 +132,11 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .page-head .sub { color: var(--ui-text-on-canvas); font-size: 13px; margin-top: 6px; max-width: 74ch; }
 .page-head .freshness, .page-head .muted { color: var(--ui-text-on-canvas); }
 .page-actions { display: flex; align-items: center; gap: var(--sp-1); margin-left: auto; flex-wrap: wrap; min-width: 0; }
+/* 全局筛选（按访问密钥）：控件本身沿用 .select，标签要压在赤陶画布上，因此不能
+   用 .toolbar-label 的 --ui-text-muted（那是给卡片表面上的文字用的）。 */
+.access-key-filter { display: flex; align-items: center; gap: var(--sp-1); }
+.access-key-filter > span { font-size: 12px; color: var(--ui-text-muted); }
+.page-head .access-key-filter > span { color: var(--ui-text-on-canvas); }
 
 /* ══ 仪表板栅格 ══ */
 /* 12 列栅格：看板卡片按列跨距排布，窄屏逐级塌缩。

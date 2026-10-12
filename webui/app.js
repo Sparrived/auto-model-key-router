@@ -64,6 +64,9 @@ export const store = {
   revision: null,
   healthTicking: false,
   metricsTicking: false,
+  // 全局筛选：按访问密钥收窄监控页的读数（"" = 全部）。放在外壳里而不是各页自己存，
+  // 是为了在概览与用量统计之间切换时保持同一把 key —— 否则"全局"只到页面边界。
+  accessKeyFilter: "",
 };
 
 let root = null;      // #root
