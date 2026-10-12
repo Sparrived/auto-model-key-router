@@ -367,15 +367,14 @@ function compositionCard(metrics) {
   );
 }
 
-// —— 请求结果 ——
-// 这里原先挤着三张卡：响应状态分布（类别占比）、状态码明细（到底是 502 还是 504）、
-// 请求结果（成功/重试/失败）。三者回答的是同一个问题——这段窗口里的请求最后怎么了——
-// 拆成三张卡只会让同一批数字（86、86、86）看起来像三个不同的读数。
+// —— 请求结果 / 响应状态码 ——
+// 这一带原先挤着三张卡：响应状态分布（类别占比）、状态码明细（到底是 502 还是 504）、
+// 请求结果（成功/重试/失败）。后两者一度并成一张，但"这次调用最后成没成"和"上游到底
+// 回了什么"终究是两个问题，上下堆在一张卡里读着像同一条漏斗的两步——所以拆成左右两张。
 //
-// 并成一张后的读法：一条横条给整体形状，类别用语义色，**同类内按次数深浅区分具体
-// 状态码**（200 是最深的绿，201 淡一档……），下面一组标签（颜色+码+次数+占比）与
-// 色块一一对应；最下面才是尝试层面的成功/重试/失败——那是同一批请求的另一个侧面，
-// 不是漏斗的三步。
+// 两张卡共用同一种画法：一条按比例分摊的横条 + 一组「颜色／名称／次数／占比」标签，
+// 色块与标签一一对应（见 distributionBlock）。两边占比的基数不同：左边按全部尝试算，
+// 右边按有状态码的请求算，基数不相等时右边会写明。
 const CODE_CLASSES = [
   { label: "2xx 成功", tone: "good", match: (code) => code >= 200 && code < 300 },
   { label: "3xx 重定向", tone: "neutral", match: (code) => code >= 300 && code < 400 },
@@ -401,83 +400,99 @@ const shadeOf = (rank) => 1 / (1 + rank * 0.4);
 //     否则 502/503 同为 1 次却一深一浅，看起来像数据不同，还取决于 JSON 键序。
 function statusCodeRows(statusCodes) {
   const rows = Object.entries(statusCodes || {})
-    .map(([code, count]) => ({ code: Number(code), count: Number(count) || 0 }))
-    .filter((row) => row.count > 0)
-    .sort((a, b) => b.count - a.count);
+    .map(([code, count]) => ({ code: Number(code), value: Number(count) || 0 }))
+    .filter((row) => row.value > 0)
+    .sort((a, b) => b.value - a.value);
   const seen = new Map(); // 类别 → 已出现过的次数集合
   for (const row of rows) {
     const cls = classOf(row.code);
     const counts = seen.get(cls) || new Set();
-    counts.add(row.count);
+    counts.add(row.value);
     seen.set(cls, counts);
-    Object.assign(row, { label: cls.label, tone: cls.tone, shade: shadeOf(counts.size - 1) });
+    Object.assign(row, {
+      label: cls.label, tone: cls.tone, hint: cls.label, shade: shadeOf(counts.size - 1),
+    });
   }
   return rows.sort((a, b) => a.code - b.code);
 }
 
+// 没有 shade 的行（调用结果那三档）别写成 opacity: undefined，属性会被原样塞进 style。
+const shadeStyle = (row) => (row.shade === undefined ? null : { opacity: String(row.shade) });
+
+// 一张分布图：横条一段一行，下面一组标签（颜色+名称/码+次数+占比）。行同时喂给两者，
+// 顺序与颜色只有一个来源。note 是横条上方的补充说明（如"88 / 90 次有状态码"）。
+// 行形如 { label, value, tone, hint, shade?, code? }。
+function distributionBlock(rows, total, note, ariaLabel) {
+  return h("div.distribution", {},
+    note,
+    h("div.status-bar", { role: "img", "aria-label": ariaLabel },
+      // 值为 0 的档不画段：.status-seg 带 min-width，0 宽也会留下 3px 色条，看着像
+      // "有一点点"；标签里那个 0 已经把话说清楚了。
+      rows.filter((row) => row.value > 0).map((row) => h(`span.status-seg.tone-${row.tone}`, {
+        style: { flex: String(row.value), ...shadeStyle(row) },
+        title: `${row.label} ${formatCount(row.value)} 次 · ${formatPercent(row.value, total)}`,
+      }))),
+    h("div.chips", {}, rows.map((row) => h("span.status-tag", { title: row.hint },
+      h("i", { class: `swatch tone-${row.tone}`, style: shadeStyle(row) }),
+      row.code === undefined ? h("span", row.label) : h("span.mono", String(row.code)),
+      h("span.inline", {},
+        h("strong", formatCount(row.value)),
+        h("span.muted", ` · ${formatPercent(row.value, total)}`),
+      ),
+    ))),
+  );
+}
+
+// 调用结果卡：这三段互斥，相加正好是尝试数——成功的那次、失败后换了 Key/上游再试的
+// 那次、再试也用尽的那次。"重试"标记打在**失败的那一行**上（internal/proxy 的
+// recordUpstreamFailure 在还要再试时传 retried=true），所以失败段必须先减掉重试，
+// 否则同一批尝试会被画两遍。唯一的例外是原生端点回退那条路径：它给一条 failed=false
+// 的行打了 retried，这里钳到 0，宁可少画一段也不画出负宽度。
 function resultCard(metrics) {
   const total = metrics.total || {};
   const attempts = total.requests || 0;
-  const codes = statusCodeRows(total.status_codes);
-  const coded = codes.reduce((sum, row) => sum + row.count, 0);
-  const outcomes = [
-    { label: "成功", value: total.successes || 0, tone: "secondary", hint: "上游返回 2xx" },
-    { label: "重试", value: total.retries || 0, tone: "warn", hint: "同一次调用换了 Key/上游再试" },
-    { label: "失败", value: total.failures || 0, tone: "bad", hint: "所有尝试均未成功" },
+  const retries = total.retries || 0;
+  const rows = [
+    { label: "成功", value: total.successes || 0, tone: "good", hint: "上游返回 2xx 的那次尝试" },
+    { label: "重试", value: retries, tone: "warn", hint: "失败后换了 Key/上游再试的那次尝试" },
+    { label: "失败", value: Math.max(0, (total.failures || 0) - retries), tone: "bad", hint: "再试也用尽、以失败收场的那次尝试" },
   ];
 
   return card(
     cardHead("请求结果",
-      codes.length ? badge(`${codes.length} 种状态码`, "muted") : null,
+      badge("按上游尝试计数", "muted"),
       badge(`最近 ${rangeLabel()}`, "muted")),
     h("div.flow-total", {},
       h("span.flow-total-value", formatCount(attempts)),
       h("span.flow-total-label", "次上游尝试"),
     ),
-    codes.length
-      ? h("div.status-codes", {},
-          // 两套分母必须说清楚：状态码行按"有状态码的请求"算（连不上上游的那些没有
-          // 状态码，不该把 2xx 的占比稀释掉），下面成功/重试/失败按全部尝试算。
-          // 两者相等时不加这句，免得变成噪声。
-          h("span.section-label", coded === attempts
-            ? "响应状态码"
-            : `响应状态码 · ${formatCount(coded)} / ${formatCount(attempts)} 次有状态码`),
-          h("div.status-bar", { role: "img", "aria-label": `按状态码着色的响应占比，最近 ${rangeLabel()}` },
-            codes.map((row) => h(`span.status-seg.tone-${row.tone}`, {
-              style: { flex: String(row.count), opacity: String(row.shade) },
-              title: `${row.code} · ${formatCount(row.count)} 次 · ${formatPercent(row.count, coded)}`,
-            }))),
-          // 一个状态码一个标签，横排换行：颜色、码、次数、占比本来就是一个整体，
-          // 拆成一行一个既拉长卡片，也让人以为每行是独立的一档数据。
-          h("div.chips", {}, codes.map((row) => h("span.status-tag", {
-            title: `${row.label} · ${formatCount(row.count)} 次`,
-          },
-            h("i", { class: `swatch tone-${row.tone}`, style: { opacity: String(row.shade) } }),
-            h("span.mono", String(row.code)),
-            h("span.inline", {},
-              h("strong", formatCount(row.count)),
-              h("span.muted", ` · ${formatPercent(row.count, coded)}`),
-            ),
-          ))),
-        )
-      : h("p.muted", "窗口内没有带状态码的请求。"),
-    h("hr.divider"),
-    h("div.flow-rows", {}, outcomes.map((row) => {
-      const ratio = attempts ? row.value / attempts : 0;
-      return h("div.flow-row", {},
-        h("div.flow-row-head", {},
-          h("span.inline", {}, h("i", { class: `swatch tone-${row.tone}` }), row.label),
-          h("span.inline", {},
-            h("strong", formatCount(row.value)),
-            h("span.muted", ` · ${formatPercent(row.value, attempts)}`),
-          ),
-        ),
-        progressBar(ratio * 100, row.tone === "secondary" ? "good" : row.tone),
-        h("span.flow-row-hint", row.hint),
-      );
-    })),
+    attempts
+      ? distributionBlock(rows, attempts, null, `成功、重试与失败占比，最近 ${rangeLabel()}`)
+      : h("p.muted", "窗口内没有请求。"),
     h("div.card-foot", {},
       `平均耗时 ${formatDuration(total.avg_duration_ms)} · 缓存率 ${formatRate(total.cached_token_rate)}`),
+  );
+}
+
+// 响应状态码卡：占比按"有状态码的请求"算——连不上上游的那几次没有状态码
+// （status_code 为 NULL 的行不进 status_codes），不该拿来稀释 2xx 的占比。
+// 左边那张卡按全部尝试算，两套分母不相等时写明基数，免得两个百分数看着互相打架。
+function statusCodesCard(metrics) {
+  const total = metrics.total || {};
+  const attempts = total.requests || 0;
+  const rows = statusCodeRows(total.status_codes);
+  const coded = rows.reduce((sum, row) => sum + row.value, 0);
+  const note = coded === attempts
+    ? null
+    : h("span.section-label", `${formatCount(coded)} / ${formatCount(attempts)} 次有状态码`);
+
+  return card(
+    cardHead("响应状态码",
+      rows.length ? badge(`${rows.length} 种`, "muted") : null,
+      badge(`最近 ${rangeLabel()}`, "muted")),
+    rows.length
+      ? distributionBlock(rows, coded, note, `按状态码着色的响应占比，最近 ${rangeLabel()}`)
+      : h("p.muted", "窗口内没有带状态码的请求。"),
   );
 }
 
@@ -1009,7 +1024,10 @@ function draw(firstPaint = false) {
     // 横轴因此仍然完全对齐，并排看"结果结构"与"Token 结构"才读得出同步异动。
     h("div.col-6", {}, outcomeCard(points, bucketSeconds)),
     h("div.col-6", {}, tokenBreakdownCard(points, bucketSeconds)),
-    h("div.col-12", {}, resultCard(metrics)),
+    // 调用结果与响应状态码各占半宽并排：同一个窗口的两个侧面，同一种画法（横条+标签），
+    // 放在一行里才好对照——左边"成没成"，右边"上游回了什么"。
+    h("div.col-6", {}, resultCard(metrics)),
+    h("div.col-6", {}, statusCodesCard(metrics)),
     h("div.col-6", {}, rankingCard("模型调用排行", metrics.models, "模型")),
     h("div.col-6", {}, rankingCard("调用方排行", metrics.caller_types, "调用方")),
     h("div.col-6", {}, rankingCard("上游 Token 排行", metrics.upstream_models, "上游模型的 Token", {
