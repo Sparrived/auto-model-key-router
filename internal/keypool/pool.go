@@ -3,6 +3,7 @@ package keypool
 import (
 	"errors"
 	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
@@ -83,6 +84,27 @@ func (e *noUnifiedModelError) Is(target error) bool {
 	return target == ErrNoUnifiedModel
 }
 
+// ErrConcurrencyLimited 表示候选 Key 或供应商的并发已满（配置声明的并发上限）。
+//
+// 与 ErrNoUsableKey 分开，是因为两者的语义与处置完全不同：没有可用 key 是**配置问题**
+// （都不存在、都停用、都欠费），而并发满是**容量问题**——配置完全正确，只是此刻排满了。
+// 调用方据此回 503 还是 429、要不要重试，靠这一个哨兵就能分开。
+var ErrConcurrencyLimited = errors.New("并发已达上限")
+
+// concurrencyLimitedError 描述「谁满了」。
+//
+// 对外文本以「模型 X 并发已达上限：」开头，后面接具体那一层：供应商上限是最常见的
+// 解释（一个账号池的上限会让整批候选一起没空），Key 级用尽时如实说候选都用满了。
+type concurrencyLimitedError struct {
+	modelID string
+	detail  string
+}
+
+func (e *concurrencyLimitedError) Error() string {
+	return "模型 " + e.modelID + " 并发已达上限：" + e.detail
+}
+func (e *concurrencyLimitedError) Is(target error) bool { return target == ErrConcurrencyLimited }
+
 // KeyPool 负责按路由模式挑选 key，并管理并发计数、粘滞与冷却。
 //
 // 并发计数用 mutex 保护而非 Python 的 asyncio.Lock：那只锁保护的是字典更新的
@@ -100,6 +122,21 @@ type KeyPool struct {
 	// 之所以预先算好而不是在选路时现算：选路在每次请求的关键路径上，而账号标识是
 	// sha256；配置里的 key 数量固定，算一次就够，配置热重载时自然重建。
 	credentials map[[2]string]string
+
+	// providersOf 是 (模型真实 ID, key 名) → 供应商 ID，与 credentials 同一批重建。
+	//
+	// 归还并发计数时只有 (模型, key 名) 可用，而供应商那一层计数必须靠它定位；
+	// 去 p.keys 里线性扫一遍也能得到，但那会把归还路径与配置切片的形状绑在一起。
+	providersOf map[[2]string]string
+
+	// keyLimits / providerLimits 是配置声明的并发上限，只收 >0 的条目
+	// （0 与缺省同义：不限制，不必留在表里参与每次判断）。
+	//
+	// keyLimits 的键是**账号标识**而不是 (模型, key 名)：同一把上游 Key 被多个模型
+	// 引用时，它同时承受这些模型的流量，上限必须按那把 key 本身算，否则「单 Key 限流 5」
+	// 在两个模型上会变成 10。
+	keyLimits      map[string]int
+	providerLimits map[string]int
 
 	failureThreshold int
 	cooldownSeconds  float64
@@ -123,6 +160,11 @@ type KeyPool struct {
 	cursors        map[string]int
 	activeRequests map[[2]string]int
 	stickyKeys     map[[3]string]string
+
+	// activeByKey / activeByProvider 是并发上限的**在途计数**，与 activeRequests
+	// 一样跨热重载保留（在途请求不会因为一次配置改动而消失）。
+	activeByKey      map[string]int
+	activeByProvider map[string]int
 
 	health       *KeyHealthStore
 	capabilities *EndpointCapabilityCache
@@ -155,9 +197,29 @@ func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 	p.balanceCooldownSeconds = cfg.KeyBalanceCooldownSeconds
 
 	p.credentials = map[[2]string]string{}
+	p.providersOf = map[[2]string]string{}
+	p.keyLimits = map[string]int{}
+	p.providerLimits = map[string]int{}
+	for _, provider := range cfg.Providers {
+		if provider.MaxConcurrency > 0 {
+			p.providerLimits[provider.ID] = provider.MaxConcurrency
+		}
+	}
 	for _, model := range cfg.Models {
 		for _, key := range model.Keys {
-			p.credentials[[2]string{model.ID, key.Name}] = credentialID(key)
+			tuple := [2]string{model.ID, key.Name}
+			credential := credentialID(key)
+			p.credentials[tuple] = credential
+			p.providersOf[tuple] = key.Provider
+			if key.MaxConcurrency <= 0 || credential == "" {
+				continue
+			}
+			// 同一把密钥写成两个 provider key 时（配置里不禁止），两者共享一个账号
+			// 标识，也就共享同一个在途计数。此时取**更严**的那个上限：两个条目声明的
+			// 是同一份真实配额，取大的等于凭空放宽。
+			if existing, found := p.keyLimits[credential]; !found || key.MaxConcurrency < existing {
+				p.keyLimits[credential] = key.MaxConcurrency
+			}
 		}
 	}
 
@@ -232,11 +294,13 @@ func New(cfg *config.RouterConfig, capabilityStore *CapabilityStore, clock func(
 		clock = RealClock
 	}
 	pool := &KeyPool{
-		cursors:         map[string]int{},
-		activeRequests:  map[[2]string]int{},
-		stickyKeys:      map[stickyKey]string{},
-		health:          NewKeyHealthStore(clock),
-		capabilityStore: capabilityStore,
+		cursors:          map[string]int{},
+		activeRequests:   map[[2]string]int{},
+		activeByKey:      map[string]int{},
+		activeByProvider: map[string]int{},
+		stickyKeys:       map[stickyKey]string{},
+		health:           NewKeyHealthStore(clock),
+		capabilityStore:  capabilityStore,
 	}
 	var rawStates *canonical.Value
 	if capabilityStore != nil {
@@ -563,6 +627,11 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 // 放它进来只会把同一个 402 原样转给调用方；而且放行一次就等于每来一个请求都试一次，
 // 「自动限流」也就无从谈起。全部账号都欠费时返回「没有可用 key」（503），由调用方
 // 决定怎么处理——这正是它比一个上游欠费错误更好处理的情形。
+//
+// **并发上限是第二个例外，而且是硬约束**：已满的 key 与已满的供应商一律不放行，
+// 软回退也不放行——放行一次就是直接越过用户配的上限，而这个上限的意义正是「宁可
+// 让调用方等」而不是「宁可把上游打满」。候选全被并发挡下时返回 concurrencyLimitedError
+// （429），与「没有可用 key」区分开。
 func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.AccessKeyConfig, affinityKey string) (config.KeyConfig, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -583,12 +652,17 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 	if p.routingModeLocked(modelID) == "only_first" {
 		first := keys[0]
 		if !excludedSet[first.Name] {
-			p.activeRequests[[2]string{modelID, first.Name}]++
+			if !p.hasCapacityLocked(modelID, first) {
+				return config.KeyConfig{}, p.concurrencyLimitedErrorLocked(modelID, []config.KeyConfig{first})
+			}
+			p.acquireLocked(modelID, first.Name)
 			return first, nil
 		}
 		return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
 	}
 
+	// blocked 只收「仅因并发上限被挡下」的候选，用来在最终失败时说清是谁满了。
+	blocked := make([]config.KeyConfig, 0, len(keys))
 	available := make([]config.KeyConfig, 0, len(keys))
 	for _, key := range keys {
 		if excludedSet[key.Name] || p.health.IsCoolingDown(modelID, key.Name) {
@@ -597,18 +671,31 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		if p.balanceExhaustedLocked(modelID, key) {
 			continue
 		}
+		if !p.hasCapacityLocked(modelID, key) {
+			blocked = append(blocked, key)
+			continue
+		}
 		available = append(available, key)
 	}
 	if len(available) == 0 {
-		// 软回退：冷却中的 key 可以放行（既定降级），欠费的账号不行——见函数顶部说明。
+		// 软回退：冷却中的 key 可以放行（既定降级），欠费的账号与并发满的 key 不行。
 		for _, key := range keys {
 			if excludedSet[key.Name] || p.balanceExhaustedLocked(modelID, key) {
+				continue
+			}
+			if !p.hasCapacityLocked(modelID, key) {
+				// 与第一轮一样记进 blocked：一个既在冷却、又已满的候选，说「并发满了」
+				// 比说「没有可用 key」更接近事实，也更能指出该等什么。
+				blocked = append(blocked, key)
 				continue
 			}
 			available = append(available, key)
 		}
 	}
 	if len(available) == 0 {
+		if len(blocked) > 0 {
+			return config.KeyConfig{}, p.concurrencyLimitedErrorLocked(modelID, blocked)
+		}
 		return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
 	}
 
@@ -620,7 +707,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		}
 		for _, candidate := range keys {
 			if availableSet[candidate.Name] {
-				p.activeRequests[[2]string{modelID, candidate.Name}]++
+				p.acquireLocked(modelID, candidate.Name)
 				return candidate, nil
 			}
 		}
@@ -636,7 +723,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		if stickyName, found := p.stickyKeys[sticky]; found {
 			for _, candidate := range available {
 				if candidate.Name == stickyName {
-					p.activeRequests[[2]string{modelID, candidate.Name}]++
+					p.acquireLocked(modelID, candidate.Name)
 					return candidate, nil
 				}
 			}
@@ -658,7 +745,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		candidate := keys[cursor]
 		if isInAvailable(available, candidate.Name) &&
 			p.activeRequests[[2]string{modelID, candidate.Name}] == lowestActive {
-			p.activeRequests[[2]string{modelID, candidate.Name}]++
+			p.acquireLocked(modelID, candidate.Name)
 			if hasSticky {
 				p.stickyKeys[sticky] = candidate.Name
 			}
@@ -666,6 +753,72 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		}
 	}
 	return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
+}
+
+// hasCapacityLocked 报告该候选此刻还有并发余量（供应商层与账号层都要有余量）。
+//
+// 两层上限都只在该层配了上限时判定，且判定用的是**在途数**而不是「已选中数」：
+// 在途包含正在流式返回的那些请求，而流式恰恰是最占上游并发的那种。
+func (p *KeyPool) hasCapacityLocked(modelID string, key config.KeyConfig) bool {
+	if limit := p.providerLimits[key.Provider]; limit > 0 && p.activeByProvider[key.Provider] >= limit {
+		return false
+	}
+	credential := p.credentials[[2]string{modelID, key.Name}]
+	if limit := p.keyLimits[credential]; limit > 0 && p.activeByKey[credential] >= limit {
+		return false
+	}
+	return true
+}
+
+// concurrencyLimitedErrorLocked 给「候选全被并发挡下」凑一句能指明谁满了的说明。
+//
+// 优先说供应商：一个账号池的上限通常一次性解释了整批候选为什么都没空；只有 Key 级
+// 各满各的（或供应商没配上限）时，才如实说候选 Key 都用满了。
+func (p *KeyPool) concurrencyLimitedErrorLocked(modelID string, blocked []config.KeyConfig) *concurrencyLimitedError {
+	for _, key := range blocked {
+		if limit := p.providerLimits[key.Provider]; limit > 0 && p.activeByProvider[key.Provider] >= limit {
+			return &concurrencyLimitedError{
+				modelID: modelID,
+				detail:  "供应商 " + key.Provider + " 已达上限 " + strconv.Itoa(limit),
+			}
+		}
+	}
+	return &concurrencyLimitedError{modelID: modelID, detail: "候选 Key 均已达各自上限"}
+}
+
+// acquireLocked 记一次在途请求：key、账号、供应商三层计数一起加。
+//
+// 三层必须同增同减：round_robin 的负载均衡看第一层，并发上限看后两层，而释放路径
+// 只有一条（ReleaseKey）。漏掉任何一层，上限都会慢慢变成摆设。
+func (p *KeyPool) acquireLocked(modelID, keyName string) {
+	p.activeRequests[[2]string{modelID, keyName}]++
+	if credential := p.credentials[[2]string{modelID, keyName}]; credential != "" {
+		p.activeByKey[credential]++
+	}
+	if provider := p.providersOf[[2]string{modelID, keyName}]; provider != "" {
+		p.activeByProvider[provider]++
+	}
+}
+
+// releaseLocked 归还一次在途请求的账号与供应商计数；归零时删除条目。
+//
+// 删除而非留 0，与 activeRequests 同一套做法：这两张表都不该随访问过的 key 增长。
+func (p *KeyPool) releaseLocked(modelID, keyName string) {
+	tuple := [2]string{modelID, keyName}
+	if credential := p.credentials[tuple]; credential != "" {
+		if p.activeByKey[credential] <= 1 {
+			delete(p.activeByKey, credential)
+		} else {
+			p.activeByKey[credential]--
+		}
+	}
+	if provider := p.providersOf[tuple]; provider != "" {
+		if p.activeByProvider[provider] <= 1 {
+			delete(p.activeByProvider, provider)
+		} else {
+			p.activeByProvider[provider]--
+		}
+	}
 }
 
 // routingModeLocked 是无锁版本。
@@ -677,27 +830,45 @@ func (p *KeyPool) routingModeLocked(modelID string) string {
 	return mode
 }
 
-// AcquireKey 增加某 key 的在途计数。
-func (p *KeyPool) AcquireKey(modelID, keyName string) {
+// AcquireKey 记一个在途请求，并在并发已满时拒绝。
+//
+// 与 NextKey 的分工：NextKey **负责挑**（顺带计数），本方法只回答「点名的这把 key
+// 还能不能再塞一个」。返回值从「无」变成 error，是因为点名路径（`model[key]` 语法）
+// 同样受并发上限约束——绕过它等于上限在显式指定 key 时形同不存在。
+func (p *KeyPool) AcquireKey(modelID, keyName string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.activeRequests[[2]string{p.resolveModelID(modelID), keyName}]++
+	modelID = p.resolveModelID(modelID)
+	for _, key := range p.keys[modelID] {
+		if key.Name != keyName {
+			continue
+		}
+		if !p.hasCapacityLocked(modelID, key) {
+			return p.concurrencyLimitedErrorLocked(modelID, []config.KeyConfig{key})
+		}
+		break
+	}
+	// 配置里查不到这个 key 时照记不误：调用方（selectKey）总是先用 KeyByName 校验过，
+	// 走到这里说明配置在两者之间被热重载过，此时宁可多记一笔也绝不能漏记。
+	p.acquireLocked(modelID, keyName)
+	return nil
 }
 
 // ReleaseKey 减少某 key 的在途计数；归零时删除条目。
 //
-// 删除而非留 0 是为了让 activeRequests 不随访问过的 key 无限增长（与 Python 的
-// pop 语义一致）。
+// 删除而非留 0 是为了让计数表不随访问过的 key 无限增长（与 Python 的 pop 语义一致），
+// 账号层与供应商层的计数同理，见 releaseLocked。
 func (p *KeyPool) ReleaseKey(modelID, keyName string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	activeKey := [2]string{p.resolveModelID(modelID), keyName}
-	count := p.activeRequests[activeKey]
-	if count <= 1 {
+	modelID = p.resolveModelID(modelID)
+	activeKey := [2]string{modelID, keyName}
+	if count := p.activeRequests[activeKey]; count <= 1 {
 		delete(p.activeRequests, activeKey)
-		return
+	} else {
+		p.activeRequests[activeKey] = count - 1
 	}
-	p.activeRequests[activeKey] = count - 1
+	p.releaseLocked(modelID, keyName)
 }
 
 // ActiveCount 返回某 key 的当前在途请求数（供测试与观测）。

@@ -108,7 +108,8 @@ type KeyPool interface {
 	RoutingMode(modelID string) string
 	KeyByName(modelID, keyName string, accessKey *config.AccessKeyConfig) (config.KeyConfig, error)
 	NextKey(modelID string, excluded []string, accessKey *config.AccessKeyConfig, affinityKey string) (config.KeyConfig, error)
-	AcquireKey(modelID, keyName string)
+	// AcquireKey 记一个在途请求；并发已达上限时返回 keypool.ErrConcurrencyLimited。
+	AcquireKey(modelID, keyName string) error
 	ReleaseKey(modelID, keyName string)
 	MarkSuccess(modelID, keyName string)
 	MarkFailure(modelID, keyName string, statusCode *int, retryAfter *float64)

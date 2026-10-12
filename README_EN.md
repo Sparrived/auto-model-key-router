@@ -48,6 +48,7 @@ When working with Large Language Models (LLMs) across various projects and devel
   - Load balancing strategies: `round_robin`, `priority` (fallback chain), and `only_first`.
   - Automatic retry and key rotation on `401`, `403`, `429`, or `5xx` transient errors.
   - **Smart Balance Exhaustion Circuit Breaker**: Identifies `402 Payment Required`, `insufficient_quota`, `Insufficient Balance`, or `credit balance is too low`, putting the account into an exponential cooldown (starting at 300s up to 30m). Automatically performs half-open recovery when the window expires and fails fast with 503 when all keys are exhausted.
+  - **Concurrency Limits (provider + key)**: Cap in-flight upstream requests with `providers.<id>.max_concurrency` (counted across every key and every model of that provider) and `providers.<id>.keys.<key>.max_concurrency` (per upstream key; all models referencing the same key share one counter). Omitted, `null`, or `0` means unlimited. Keys and providers at their limit are excluded hard (no cooldown-style soft fallback), and when every candidate for a model is blocked by concurrency the proxy answers `429` instead of sending a request that would only queue up or fail upstream.
 - 🎯 **Unified Model (`unified-model`)**: Point client requests to a single model name. AMKR resolves requests based on endpoint family (chat, image, embedding, speech synthesis, transcription, video, rerank) to preconfigured upstream models.
 - 📋 **Task-Based Routing (`TASK_XXXXXX`)**: Pass semantic task IDs as model names. AMKR locks primary models, fallback models, and sampling hyperparameters (`temperature`, `top_p`, `reasoning_effort`, etc.), preventing client overrides.
 - 🏢 **Multi-Tenant Workspaces**:
@@ -204,7 +205,7 @@ Navigate to the WebUI to manage routing topologies:
 
 | Navigation Item | Functionality |
 | :--- | :--- |
-| **Providers** | Add upstream providers (OpenAI, Anthropic, DeepSeek, etc.), register keys, and run automatic route & model discovery |
+| **Providers** | Add upstream providers (OpenAI, Anthropic, DeepSeek, etc.), register keys with concurrency limits, and run automatic route & model discovery |
 | **Model Routing** | Configure public model IDs (e.g., `gpt-4o`, `claude-3-7-sonnet`), bind multiple upstream keys, and choose routing modes |
 | **Unified Model** | Map `unified-model` to an active model, with endpoint-family overrides for images, embeddings, audio, video, etc. |
 | **Task Routing** | Define `TASK_XXXXXX` aliases with server-locked models and fixed sampling parameters (`temperature`, `top_p`, etc.) |
@@ -340,9 +341,10 @@ AMKR uses a JSON configuration file (with automatic backward-compatible schema m
   "providers": {
     "openai": {
       "base_url": "https://api.openai.com",
+      "max_concurrency": 10,
       "keys": {
-        "primary": { "api_key": "sk-proj-..." },
-        "backup": { "api_key": "sk-proj-..." }
+        "primary": { "api_key": "sk-proj-...", "max_concurrency": 4 },
+        "backup": { "api_key": "sk-proj-...", "max_concurrency": 4 }
       }
     },
     "anthropic": {
@@ -404,6 +406,8 @@ AMKR uses a JSON configuration file (with automatic backward-compatible schema m
 | `key_balance_cooldown_seconds` | int | Initial cooldown duration for balance exhaustion (seconds, default 300, doubles up to 30m) |
 | `ops_enabled` | bool | Toggle for host management APIs (log viewing, system service control, client config writes; disable in Docker) |
 | `webui_enabled` | bool | Mount status of the embedded WebUI |
+| `providers.<id>.max_concurrency` | int / null | Maximum in-flight upstream requests for **every key and every model** of this provider; omitted, `null`, or `0` means unlimited |
+| `providers.<id>.keys.<key>.max_concurrency` | int / null | Maximum in-flight requests for this upstream key, shared by all models referencing the same key; omitted, `null`, or `0` means unlimited. With both levels enabled, the limits of this provider's **enabled** keys must not sum to more than the provider limit, or config validation fails |
 
 </details>
 

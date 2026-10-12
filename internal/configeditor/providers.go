@@ -74,7 +74,7 @@ func (e *Editor) AddProviderKeyInteractively(providerID string, createProvider b
 			}
 			baseURL := strings.TrimSpace(baseURLText)
 			draft["base_url"] = baseURL
-			if _, err := configops.CreateProvider(data, providerID, baseURL); err != nil {
+			if _, err := configops.CreateProvider(data, providerID, baseURL, configops.CreateProviderOptions{}); err != nil {
 				if isConfigOperationError(err) {
 					return tui.SectionPanel("[red]"+err.Error()+"[/red]", "添加失败", "red"), nil
 				}

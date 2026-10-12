@@ -18,6 +18,11 @@ type KeyConfig struct {
 	UpstreamRoutes map[string]string
 	Provider       string
 	UpstreamModel  string
+	// MaxConcurrency 是该上游 Key 同时在途请求的上限；0 表示不限制。
+	//
+	// 取自 providers.<id>.keys.<key>，因此同一把上游 Key 被多个模型引用时，
+	// 各模型看到的是同一个上限——限的是那把 key 本身，不是某条路由。
+	MaxConcurrency int
 }
 
 // ModelConfig 是一个可路由的模型。
@@ -38,17 +43,22 @@ type ProviderKeyConfig struct {
 	Name    string
 	APIKey  string
 	Enabled bool
+	// MaxConcurrency 是该 Key 同时在途请求的上限；0 表示不限制。
+	MaxConcurrency int
 	// Capabilities 是探测缓存（模型列表、各路由可用性等）。
 	Capabilities *canonical.Value
 }
 
 // ProviderConfig 是一个上游供应商。
 type ProviderConfig struct {
-	ID           string
-	BaseURL      string
-	Keys         []ProviderKeyConfig
-	Routes       map[string]string
-	Capabilities *canonical.Value
+	ID      string
+	BaseURL string
+	Keys    []ProviderKeyConfig
+	Routes  map[string]string
+	// MaxConcurrency 是该供应商（全部 Key、全部模型合计）同时在途请求的上限；
+	// 0 表示不限制。
+	MaxConcurrency int
+	Capabilities   *canonical.Value
 }
 
 // RouteTarget 是 unified_model / task 的一个目标（模型 + 可选 key）。
@@ -550,11 +560,17 @@ func parseProviders(raw *canonical.Value) ([]ProviderConfig, map[[2]string]provi
 			if caps := key.Lookup("capabilities"); caps.IsObject() {
 				capabilities = caps.Clone()
 			}
+			maxConcurrency, err := maxConcurrencyOr(key.Lookup("max_concurrency"),
+				"供应商 "+providerID+" 的 Key "+keyName)
+			if err != nil {
+				return nil, nil, err
+			}
 			keys = append(keys, ProviderKeyConfig{
-				Name:         keyName,
-				APIKey:       rawAPIKey.PyStr(),
-				Enabled:      boolOr(key.Lookup("enabled"), true),
-				Capabilities: capabilities,
+				Name:           keyName,
+				APIKey:         rawAPIKey.PyStr(),
+				Enabled:        boolOr(key.Lookup("enabled"), true),
+				MaxConcurrency: maxConcurrency,
+				Capabilities:   capabilities,
 			})
 		}
 
@@ -574,12 +590,17 @@ func parseProviders(raw *canonical.Value) ([]ProviderConfig, map[[2]string]provi
 		if caps := provider.Lookup("capabilities"); caps.IsObject() {
 			providerCapabilities = caps.Clone()
 		}
+		providerMaxConcurrency, err := maxConcurrencyOr(provider.Lookup("max_concurrency"), "供应商 "+providerID)
+		if err != nil {
+			return nil, nil, err
+		}
 		providerConfig := ProviderConfig{
-			ID:           providerID,
-			BaseURL:      normalizedBaseURL,
-			Keys:         keys,
-			Routes:       routes,
-			Capabilities: providerCapabilities,
+			ID:             providerID,
+			BaseURL:        normalizedBaseURL,
+			Keys:           keys,
+			Routes:         routes,
+			MaxConcurrency: providerMaxConcurrency,
+			Capabilities:   providerCapabilities,
 		}
 		providers = append(providers, providerConfig)
 		for _, keyConfig := range providerConfig.Keys {
@@ -666,6 +687,9 @@ func parseModels(raw *canonical.Value, providerKeys map[[2]string]providerKeyRef
 				Enabled:       providerKey.Key.Enabled && targetEnabled,
 				Provider:      providerID,
 				UpstreamModel: upstreamModel,
+				// 并发上限只属于上游 Key：target 无法覆盖它，否则同一个账号的
+				// 并发口径会随引用它的模型数量漂移。
+				MaxConcurrency: providerKey.Key.MaxConcurrency,
 				// 参照实现在此未传 upstream_routes（config.py:963），故恒为空。
 				UpstreamRoutes: map[string]string{},
 			})
@@ -1251,6 +1275,33 @@ func (c *RouterConfig) Validate() error {
 			if task.FallbackModel == task.Model {
 				return errf("任务 %s 的首选和备选不能引用同一模型", task.Name)
 			}
+		}
+	}
+
+	// 并发上限的自洽性：供应商给的是整家上游的总配额，Key 上限是它内部的分摊。
+	// 两者同时启用时，分摊之和大于总配额就意味着「承诺了上游不会接受的同时请求数」，
+	// 而这种配置只会在限流真正生效的那天才暴露出来——因此必须在配置层直接拒掉。
+	//
+	// 只统计**启用中**的 Key：停用的 Key 不参与选路，不占用配额。
+	//
+	// 这条检查不能像其它新增检查那样追加到 Validate 末尾：函数在 unified_model 缺席时
+	// 提前 return nil，追加到末尾会让「没配 unified_model」的部署完全跳过校验。
+	for _, provider := range c.Providers {
+		if provider.MaxConcurrency < 0 {
+			return errf("供应商 %s 的 max_concurrency 不能为负数", provider.ID)
+		}
+		keyLimits := 0
+		for _, key := range provider.Keys {
+			if key.MaxConcurrency < 0 {
+				return errf("供应商 %s 的 Key %s 的 max_concurrency 不能为负数", provider.ID, key.Name)
+			}
+			if key.Enabled && key.MaxConcurrency > 0 {
+				keyLimits += key.MaxConcurrency
+			}
+		}
+		if provider.MaxConcurrency > 0 && keyLimits > provider.MaxConcurrency {
+			return errf("供应商 %s 的 Key 并发上限之和 %d 不能大于供应商并发上限 %d",
+				provider.ID, keyLimits, provider.MaxConcurrency)
 		}
 	}
 

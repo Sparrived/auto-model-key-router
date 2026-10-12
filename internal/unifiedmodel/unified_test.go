@@ -32,7 +32,7 @@ func writeBaseline(t *testing.T, path string) {
 	if err != nil {
 		t.Fatalf("构造空配置失败: %v", err)
 	}
-	if _, err := configops.CreateProvider(data, "p1", "https://up.example"); err != nil {
+	if _, err := configops.CreateProvider(data, "p1", "https://up.example", configops.CreateProviderOptions{}); err != nil {
 		t.Fatalf("建供应商失败: %v", err)
 	}
 	if _, err := configops.CreateProviderKey(data, "p1", "k1", "s1", configops.CreateProviderKeyOptions{}); err != nil {

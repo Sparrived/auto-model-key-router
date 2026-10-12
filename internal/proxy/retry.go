@@ -450,7 +450,9 @@ func (h *Handler) selectKey(context *RequestContext, excluded map[string]bool) (
 		if err != nil {
 			return nil, h.keySelectionFailure(context, err)
 		}
-		pool.AcquireKey(context.ModelID, key.Name)
+		if err := pool.AcquireKey(context.ModelID, key.Name); err != nil {
+			return nil, h.keySelectionFailure(context, err)
+		}
 		return &key, nil
 	}
 	excludedNames := make([]string, 0, len(excluded))
@@ -485,6 +487,18 @@ func (h *Handler) keySelectionFailure(context *RequestContext, err error) attemp
 			context.Workspace, "key_selection_failed")
 		return jsonResult(http.StatusNotFound, jsonErrorResponse(
 			"模型 "+context.RequestedModelID+" 未配置；请先在 AMKR 的模型设置中配置该模型"))
+	}
+	// 并发上限是**自己配的**，因此与「没有可用 key」是两回事：配置完全正确，只是此刻
+	// 排满了。用 429（而不是 503）把这两件事分开——调用方可以稍后重试，按状态码告警的
+	// 监控也不该把一次正常限流报成「没有可用 key」。
+	if errors.Is(err, keypool.ErrConcurrencyLimited) {
+		h.logger.Warn("并发已达上限",
+			"model_id", context.ModelID,
+			"requested_model_id", context.RequestedModelID,
+			"path", "/v1/"+context.Path,
+			"workspace", context.Workspace,
+			"reason", err.Error())
+		return jsonResult(http.StatusTooManyRequests, jsonErrorResponse(err.Error()))
 	}
 	if context.AccessKey != nil && context.RequestedKeyName != nil && *context.RequestedKeyName != "" {
 		return jsonResult(http.StatusForbidden, jsonErrorResponse(

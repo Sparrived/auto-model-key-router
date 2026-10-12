@@ -91,10 +91,15 @@ global.document = {
 // —— 假的供应商配置：覆盖"认得出品牌"与"认不出"两种情况 ——
 // openai 的 primary 故意让探测结果比绑定结果多一个模型：Key 行下方要显示的是**正在
 // 服务**的模型（模型 targets 里的绑定），而不是上游 /v1/models 广告出来的全部。
+//
+// 并发上限按契约给出**总是存在**的读数，并覆盖三种取值：有限上限（openai 10 / primary 4）、
+// 不限制（null）、以及同一家供应商下混着有限与不限制两把 Key（local-lab）。混着的那种
+// 正是"逐行读"才会发现问题的情形：把上限渲染成供应商级的公共值，在只有一种取值的
+// 假数据上看起来完全正常。
 const PROVIDERS = [
-  { id: "openai", base_url: "https://api.openai.com", keys: [{ name: "primary", capabilities: { models: ["gpt-5.5", "unbound-model"], errors: {} } }] },
-  { id: "my-deepseek", base_url: "https://api.deepseek.com", keys: [] },
-  { id: "local-lab", base_url: "https://gateway.internal.example", keys: [{ name: "a" }, { name: "b" }] },
+  { id: "openai", base_url: "https://api.openai.com", max_concurrency: 10, keys: [{ name: "primary", max_concurrency: 4, capabilities: { models: ["gpt-5.5", "unbound-model"], errors: {} } }] },
+  { id: "my-deepseek", base_url: "https://api.deepseek.com", max_concurrency: null, keys: [] },
+  { id: "local-lab", base_url: "https://gateway.internal.example", max_concurrency: null, keys: [{ name: "a", max_concurrency: null }, { name: "b", max_concurrency: 2 }] },
 ];
 
 // 绑定关系：primary 只服务 gpt-5.5，所以 unbound-model 不该出现在 Key 行下方。
@@ -105,6 +110,13 @@ const ROUTES = [
 
 // 请求流水：新增 Key 那一节要断言"真的写到了服务端"，而不只是"页面重画了一下"。
 const requests = [];
+// 写请求连同请求体一起留档：并发上限的断言全都落在"发出去的到底是 null、数字，还是
+// 干脆没带这个字段"上——只看 URL 与次数看不出这三种情形的差别，而它们的后果完全不同
+// （清除上限 / 设上限 / 什么都不动）。
+const writes = [];
+// 由用例置成一段 detail 文本：下一次改 Key 的请求回 400，模拟"启用 Key 的上限之和超过
+// 供应商上限"这条服务端不变式被违反。用完即清，避免影响后面的写入。
+let rejectKeyWrite = null;
 // catalogAvailable 模拟"models.dev 目录取不回来"：此时类型只由名字规则给出，端点提示
 // 必须整体消失（末尾那一节锁这件事）。
 let catalogAvailable = true;
@@ -112,13 +124,46 @@ global.fetch = async (url, options = {}) => {
   const target = String(url);
   const method = (options.method || "GET").toUpperCase();
   const payload = options.body ? JSON.parse(options.body) : null;
-  requests.push(`${method} ${target.split("?")[0].replace(/^.*\/ui/, "")}`);
+  const path = target.split("?")[0].replace(/^.*\/ui/, "");
+  requests.push(`${method} ${path}`);
+  if (method !== "GET") writes.push({ method, path, body: payload });
   // 新建 Key：像服务端一样把这把 Key 真的加进配置，后续的重新取数必须能拿到它。
   if (method === "POST" && /\/api\/providers\/[^/]+\/keys$/.test(target)) {
     const provider = PROVIDERS.find((item) => target.includes(`/providers/${item.id}/keys`));
     // 探测结果给三个不同类型（文本 / 图像 / 未分类）：这一节的末尾用它们锁模型分组。
-    provider.keys = [...(provider.keys || []), { name: payload.name, enabled: true, capabilities: { models: ["gpt-5.5", "gpt-image-1", "gateway-renamed-model"], errors: {} } }];
+    // max_concurrency 照契约补成 null（= 不限制）：读侧这个字段总是存在，页面据此渲染行内读数。
+    provider.keys = [...(provider.keys || []), { name: payload.name, enabled: true, max_concurrency: payload.max_concurrency ?? null, capabilities: { models: ["gpt-5.5", "gpt-image-1", "gateway-renamed-model"], errors: {} } }];
     return { ok: true, status: 201, async text() { return JSON.stringify({ key: { name: payload.name }, config_revision: "rev-000000000001" }); } };
+  }
+  // 改供应商：像服务端一样把 max_concurrency 写回配置（null 就是清除上限），这样
+  // "存完之后界面上还剩什么"也能一起断言，而不只是"发过请求"。
+  if (method === "PUT" && /\/api\/providers\/[^/]+$/.test(target)) {
+    const provider = PROVIDERS.find((item) => target.endsWith(`/providers/${item.id}`));
+    if (provider) {
+      if (payload.id) provider.id = payload.id;
+      if (payload.base_url) provider.base_url = payload.base_url;
+      // 键存在才动它：服务端把「省略 = 不改」与「显式 null = 清除」分开，假服务端同口径。
+      if ("max_concurrency" in payload) provider.max_concurrency = payload.max_concurrency;
+    }
+    return { ok: true, status: 200, async text() { return JSON.stringify({ provider, config_revision: "rev-000000000002" }); } };
+  }
+  // 改 Key（不改模型绑定那一份）：patch 里带了什么就写什么，null 照写——这正是
+  // "取消上限"能不能生效的关键。
+  if (method === "PUT" && /\/keys\/[^/]+$/.test(target)) {
+    if (rejectKeyWrite) {
+      const detail = rejectKeyWrite;
+      rejectKeyWrite = null;
+      return { ok: false, status: 400, async text() { return JSON.stringify({ detail }); } };
+    }
+    const name = decodeURIComponent(target.split("/").pop());
+    const provider = PROVIDERS.find((item) => target.includes(`/providers/${item.id}/keys/`));
+    const key = (provider?.keys || []).find((item) => item.name === name);
+    if (key) {
+      if (payload.name) key.name = payload.name;
+      if ("enabled" in payload) key.enabled = payload.enabled;
+      if ("max_concurrency" in payload) key.max_concurrency = payload.max_concurrency;
+    }
+    return { ok: true, status: 200, async text() { return JSON.stringify({ key, config_revision: "rev-000000000002" }); } };
   }
   if (method === "POST" && target.endsWith("/probe")) {
     return { ok: true, status: 200, async text() { return JSON.stringify({ config_revision: "rev-000000000001" }); } };
@@ -172,6 +217,18 @@ const byClass = (root, name) => findAll(root, (n) => hasClass(n, name));
 const buttonWithText = (root, text) =>
   findAll(root, (n) => n.tagName === "button" && n.textContent.includes(text))[0];
 const click = (node) => { for (const fn of node.listeners.click || []) fn({ target: node, preventDefault() {} }); };
+// 并发上限输入框：三处表单（编辑供应商 / 新建 Key / Key 行内编辑）共用同一段占位符，
+// 因此按 placeholder 找而不是按输入框序号找——序号会随表单增删字段而漂移，而 placeholder
+// 就是"留空 = 不限制"这条语义本身，改了它本来也该让这些断言一起红。
+const concurrencyFields = (root) =>
+  findAll(root, (node) => node.tagName === "input" && node.attrs.placeholder === "留空不限制");
+const concurrencyField = (root) => concurrencyFields(root)[0];
+const writesOf = (method, path) =>
+  writes.filter((item) => item.method === method && item.path === path);
+// 一次点击触发的异步链（请求 → 重新取数 → draw）要跑好几轮微任务/宏任务，等两拍不够稳。
+const settle = async () => {
+  for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+};
 
 // —— 渲染真实页面 ——
 const host = renderProviders({});
@@ -243,6 +300,110 @@ check("route_hint_explains_blank_means_default", formText.includes("路径留空
 check("route_hint_explains_passthrough",
   formText.includes("透传端点") && formText.includes("上游 Key"), formText.slice(0, 200));
 click(buttonWithText(host, "取消"));
+
+// —— 并发上限：供应商 ——
+//
+// 契约：null 或 0 = 不限制，正整数 = 上限；表单里的空输入必须发成**显式的 null**。
+// 服务端对 PUT 区分「省略 = 不改」与「显式 null = 清除」，省略字段的后果是上限静默留着
+// ——请求照样 200，用户以为清掉了，实际没清。
+//
+// 这一节锁三种会静默出错的情形：
+//   1. 预填丢了 —— 顺手改一次地址就把上限抹掉了，而界面看起来一切正常；
+//   2. 非法输入（0 是最像"取消上限"的那一个，因为读侧契约里 0 就是不限制）没被前端拦住
+//      —— 发出去的请求注定 400，而同一份表单里一起改的路径也跟着没落盘；
+//   3. 空值发成了 0、NaN 或干脆没带字段 —— 服务端只会回一个笼统的 400，用户看着空框
+//      想不通哪里错了。
+const providerCardHead = byClass(host, "card-head")[0];
+check("provider_concurrency_badge_shows_limit",
+  Boolean(providerCardHead) && findText(providerCardHead, "并发 10"),
+  providerCardHead?.textContent);
+
+click(buttonWithText(host, "编辑"));
+const providerConcurrencyField = concurrencyField(host);
+check("provider_concurrency_field_present", Boolean(providerConcurrencyField),
+  `${concurrencyFields(host).length} 个并发上限输入框`);
+check("provider_concurrency_prefilled", providerConcurrencyField?.value === "10", providerConcurrencyField?.value);
+check("provider_concurrency_hint",
+  host.textContent.includes("全部上游请求的同时在途上限") && host.textContent.includes("留空表示不限制"),
+  host.textContent.slice(0, 160));
+check("provider_concurrency_sum_hint",
+  host.textContent.includes("所有启用 Key 的并发上限之和不得大于供应商上限"),
+  host.textContent.slice(0, 160));
+
+const providerWrites = () => writesOf("PUT", "/api/providers/openai").length;
+const providerWritesBeforeInvalid = providerWrites();
+providerConcurrencyField.value = "0";
+click(buttonWithText(host, "保存"));
+check("provider_concurrency_invalid_blocked", providerWrites() === providerWritesBeforeInvalid,
+  "非法输入不该发出请求");
+check("provider_concurrency_invalid_explained",
+  host.textContent.includes("并发上限必须是大于 0 的整数"), host.textContent.slice(0, 160));
+
+// 留空提交：请求体里必须带 max_concurrency: null，界面随之回到「并发不限」。
+providerConcurrencyField.value = "";
+click(buttonWithText(host, "保存"));
+await settle();
+const providerWrite = writesOf("PUT", "/api/providers/openai").pop();
+check("provider_concurrency_cleared_with_null",
+  Boolean(providerWrite) && "max_concurrency" in providerWrite.body && providerWrite.body.max_concurrency === null,
+  JSON.stringify(providerWrite?.body));
+check("provider_concurrency_badge_unlimited_after_clear",
+  findText(byClass(host, "card-head")[0] || new FakeNode("x"), "并发不限"),
+  byClass(host, "card-head")[0]?.textContent);
+
+// —— 并发上限：Key 行 ——
+//
+// 行里的读数（「并发 4」）必须在**不点开**编辑表单时就看得见：扫一遍 Key 列表想知道
+// "哪把 Key 被限流了"，只有这一处依据。而多把 Key 各有各的上限，所以读数必须逐行取。
+const concurrencyKeyTable = byClass(host, "table")[0];
+const concurrencyKeyRow = byTag(concurrencyKeyTable || new FakeNode("x"), "tr")[1];
+check("key_row_shows_concurrency_limit", concurrencyKeyRow?.textContent.includes("并发 4") === true,
+  concurrencyKeyRow?.textContent);
+
+// 行内编辑：先看预填，再一次改非法（必须一个字节都不发）、一次改合法。
+click(buttonWithText(concurrencyKeyRow, "编辑"));
+const keyEditingRow = byTag(byClass(host, "table")[0], "tr")[1];
+const keyConcurrencyField = concurrencyField(keyEditingRow);
+check("key_edit_concurrency_prefilled", keyConcurrencyField?.value === "4", keyConcurrencyField?.value);
+check("key_edit_concurrency_hint",
+  keyEditingRow.textContent.includes("留空即清除该 Key 的上限")
+  && keyEditingRow.textContent.includes("所有启用 Key 的并发上限之和不得大于供应商上限"),
+  keyEditingRow.textContent.slice(0, 200));
+
+const keyWrites = () => writesOf("PUT", "/api/providers/openai/keys/primary").length;
+const keyWritesBeforeInvalid = keyWrites();
+keyConcurrencyField.value = "0";
+click(buttonWithText(keyEditingRow, "保存"));
+check("key_concurrency_invalid_blocked", keyWrites() === keyWritesBeforeInvalid, "非法输入不该发出请求");
+check("key_concurrency_invalid_explained",
+  keyEditingRow.textContent.includes("并发上限必须是大于 0 的整数"), keyEditingRow.textContent.slice(0, 160));
+
+keyConcurrencyField.value = "7";
+click(buttonWithText(keyEditingRow, "保存"));
+await settle();
+const keyWrite = writesOf("PUT", "/api/providers/openai/keys/primary").pop();
+check("key_concurrency_patch_carries_number", keyWrite?.body?.max_concurrency === 7, JSON.stringify(keyWrite?.body));
+check("key_row_shows_updated_concurrency",
+  byTag(byClass(host, "table")[0], "tr")[1]?.textContent.includes("并发 7") === true,
+  byTag(byClass(host, "table")[0], "tr")[1]?.textContent);
+
+// —— 违反供应商不变式时，服务端的 400 必须原样落到用户眼前 ——
+//
+// 前端刻意**不算**「启用 Key 的上限之和」（那会造出第二个真相源），所以这条路径是用户
+// 唯一能知道"为什么两个数加起来就不让存"的地方：detail 被吞掉或换了措辞，用户只会看到
+// 一次莫名其妙的失败，然后反复重试。
+click(buttonWithText(byTag(byClass(host, "table")[0], "tr")[1], "编辑"));
+const rejectedRow = byTag(byClass(host, "table")[0], "tr")[1];
+concurrencyField(rejectedRow).value = "12";
+rejectKeyWrite = "配置校验失败: 供应商 openai 的 Key 并发上限之和 12 不能大于供应商并发上限 10";
+click(buttonWithText(rejectedRow, "保存"));
+await settle();
+check("server_invariant_error_rendered",
+  rejectedRow.textContent.includes("不能大于供应商并发上限"), rejectedRow.textContent.slice(0, 200));
+// 被拒之后编辑态必须留着：用户改个数字就能重试，而不是重填一遍表单。
+check("rejected_write_keeps_editor_open",
+  byTag(byClass(host, "table")[0], "tr")[1] === rejectedRow, "被拒后不该关掉编辑表单");
+click(buttonWithText(rejectedRow, "取消"));
 
 // —— 切换供应商：详情必须跟着换 ——
 click(items[1]);
@@ -335,7 +496,14 @@ document.body.children = [];
 click(buttonWithText(host, "添加 Key"));
 const keyDialog = byClass(document.body, "dialog")[0];
 const keyInputs = byClass(keyDialog || new FakeNode("x"), "input");
-check("add_key_dialog_has_name_and_secret", keyInputs.length === 2, `${keyInputs.length} 个输入框`);
+check("add_key_dialog_has_name_secret_and_concurrency", keyInputs.length === 3, `${keyInputs.length} 个输入框`);
+// 新建 Key 时留空 = 不限制：新 Key 本来就没有上限，没有"清除"一说。
+check("add_key_concurrency_defaults_blank",
+  keyInputs[2]?.attrs.type === "number" && keyInputs[2]?.value === "" && keyInputs[2]?.attrs.placeholder === "留空不限制",
+  `${keyInputs[2]?.attrs.type} / ${JSON.stringify(keyInputs[2]?.value)}`);
+check("add_key_dialog_explains_sum_limit",
+  keyDialog?.textContent.includes("所有启用 Key 的并发上限之和不得大于供应商上限"),
+  keyDialog?.textContent.slice(0, 200));
 keyInputs[0].value = "secondary";
 keyInputs[1].value = "sk-secondary";
 click(buttonWithText(keyDialog, "添加 Key"));
@@ -344,10 +512,19 @@ await new Promise((resolve) => setTimeout(resolve, 600));
 await new Promise((resolve) => setTimeout(resolve, 0));
 
 check("add_key_posts_to_server", requests.includes("POST /api/providers/openai/keys"));
+// 留空 = 不带这个字段（而不是发一个 null）：新建 Key 没有"清除上限"这回事，多一个空
+// 字段只会让人以为这次请求动过并发配置。
+const addKeyWrite = writesOf("POST", "/api/providers/openai/keys").pop();
+check("add_key_omits_blank_concurrency",
+  Boolean(addKeyWrite) && !("max_concurrency" in addKeyWrite.body), JSON.stringify(addKeyWrite?.body));
 check("add_key_count_updated", host.textContent.includes("Key（2）"), host.textContent.replace(/\s+/g, " ").slice(0, 160));
 const addedRows = byTag(byClass(host, "table")[0] || new FakeNode("x"), "tr");
 check("add_key_row_appears_without_reload",
   addedRows.some((row) => row.textContent.includes("secondary")),
+  `${addedRows.length} 行：${addedRows.map((row) => row.textContent.trim()).join(" / ")}`);
+// 没设上限的新 Key 行里也要有明确的读数，不能什么都不画（空白读不出"不限制"）。
+check("add_key_row_shows_unlimited_concurrency",
+  addedRows.some((row) => row.textContent.includes("secondary") && row.textContent.includes("并发不限")),
   `${addedRows.length} 行：${addedRows.map((row) => row.textContent.trim()).join(" / ")}`);
 check("add_key_drops_empty_placeholder", !findText(host, "尚无 Key。"));
 check("add_key_opens_model_editor", findText(host, "Key secondary 的服务模型"));

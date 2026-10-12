@@ -341,6 +341,7 @@ var specProviderCreate = newModelSpec("ProviderCreate",
 	req("config_revision", kindStr).minLenOf(1),
 	req("id", kindStr).minLenOf(1),
 	req("base_url", kindStr).minLenOf(1),
+	nul("max_concurrency", kindInt),
 )
 
 // specProviderUpdate 对应 ProviderUpdate。
@@ -349,6 +350,7 @@ var specProviderUpdate = newModelSpec("ProviderUpdate",
 	nul("id", kindStr).minLenOf(1),
 	nul("base_url", kindStr).minLenOf(1),
 	nul("routes", kindStrOrNullMap),
+	nul("max_concurrency", kindInt),
 )
 
 // specProviderKeyCreate 对应 ProviderKeyCreate。
@@ -357,6 +359,7 @@ var specProviderKeyCreate = newModelSpec("ProviderKeyCreate",
 	req("name", kindStr).minLenOf(1),
 	req("api_key", kindStr).minLenOf(1),
 	def("enabled", kindBool),
+	nul("max_concurrency", kindInt),
 )
 
 // specProviderKeyUpdate 对应 ProviderKeyUpdate。
@@ -365,6 +368,7 @@ var specProviderKeyUpdate = newModelSpec("ProviderKeyUpdate",
 	nul("name", kindStr).minLenOf(1),
 	nul("api_key", kindStr).minLenOf(1),
 	nul("enabled", kindBool),
+	nul("max_concurrency", kindInt),
 )
 
 // specProviderKeyProbeRequest 对应 ProviderKeyProbeRequest。

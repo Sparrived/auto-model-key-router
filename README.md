@@ -48,6 +48,7 @@
   - 支持 `round_robin`（轮询）、`priority`（主备优先级）、`only_first` 等路由策略。
   - 遇到 `401/403/429/5xx` 自动重试并切换候选 Key，并在进程内临时冷却异常节点。
   - **欠费智能熔断与恢复**：精准识别 `402`、`insufficient_quota`、`Insufficient Balance`、`欠费` 等余额不足信号，按阶梯窗口（初始 300s，翻倍退避至 30 分钟）自动限流该账号，窗口期满自动半开探测并在恢复时立即重入池，候选全被熔断时安全返回 503 避免无效重试。
+  - **并发上限（供应商级 + Key 级）**：用 `providers.<id>.max_concurrency` 限制该供应商所有 Key、所有模型上同时在途的请求数，用 `providers.<id>.keys.<key>.max_concurrency` 限制单把上游 Key 的在途请求数（同一把 Key 被多个模型引用时共用一个计数）；缺省、`null` 或 `0` 表示不限制。达到上限的 Key 与供应商会被硬性排除（不做冷却式软回退），某个模型的所有候选都被挡下时直接返回 `429`，不向上游发出注定失败或排队的请求。
 - 🎯 **统一模型名 (`unified-model`)**：客户端固定请求 `unified-model`，路由器按入站端点族（对话、图像、嵌入、语音合成、语音识别、视频、重排）动态分流到预设模型，换模型无需改动客户端代码。
 - 📋 **任务路由 (`TASK_XXXXXX`)**：将业务任务抽象为模型名。服务端统一固化主选模型、备选模型与采样参数（`temperature`、`top_p`、`reasoning_effort`、`max_tokens` 等），调用方不可篡改，实现提示词与推理参数集中治理。
 - 🏢 **多租户工作空间 (Workspaces)**：
@@ -204,7 +205,7 @@ amkr --show-api-key
 
 | 模块 | 核心功能 |
 | :--- | :--- |
-| **供应商** | 添加 OpenAI、Anthropic、DeepSeek、SiliconFlow 等上游，配置每个 Key 并自动探测模型清单与可用路由 |
+| **供应商** | 添加 OpenAI、Anthropic、DeepSeek、SiliconFlow 等上游，配置每个 Key 与并发上限，并自动探测模型清单与可用路由 |
 | **模型路由** | 配置统一对外别名（如 `gpt-4o`、`claude-3-7-sonnet`），绑定多供应商 Key 并指定 `round_robin` 或 `priority` |
 | **统一模型** | 将 `unified-model` 映射到主选模型，并可按图像、嵌入、语音合成、语音转写等入站端点族单独分流 |
 | **任务路由** | 为业务场景定义 `TASK_XXXXXX` 别名，并固化模型与采样超参数（温度、Top-P、思考强度等） |
@@ -341,9 +342,10 @@ AMKR 的核心配置文件为 JSON 格式（自动兼容迁移历史版本配置
   "providers": {
     "openai": {
       "base_url": "https://api.openai.com",
+      "max_concurrency": 10,
       "keys": {
-        "primary": { "api_key": "sk-proj-..." },
-        "backup": { "api_key": "sk-proj-..." }
+        "primary": { "api_key": "sk-proj-...", "max_concurrency": 4 },
+        "backup": { "api_key": "sk-proj-...", "max_concurrency": 4 }
       }
     },
     "anthropic": {
@@ -405,6 +407,8 @@ AMKR 的核心配置文件为 JSON 格式（自动兼容迁移历史版本配置
 | `key_balance_cooldown_seconds` | int | 欠费/余额耗尽时的初始熔断冷却时长（秒，默认 300，阶梯翻倍最高至 30 分钟） |
 | `ops_enabled` | bool | 是否启用宿主机运维接口（日志读取、服务注册、客户端配置改写；容器环境建议设为 `false`） |
 | `webui_enabled` | bool | 是否挂载内置 Web 管理控制台 |
+| `providers.<id>.max_concurrency` | int / null | 该供应商**所有 Key、所有模型**上同时在途的上游请求上限；缺省、`null` 或 `0` 表示不限制 |
+| `providers.<id>.keys.<key>.max_concurrency` | int / null | 该上游 Key 同时在途的请求上限，同一把 Key 被多个模型引用时共用一个计数；缺省、`null` 或 `0` 表示不限制。同时启用两级上限时，该供应商**启用中**的 Key 的上限之和不得大于供应商上限，否则配置校验失败 |
 
 </details>
 

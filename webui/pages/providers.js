@@ -85,6 +85,55 @@ function activeProvider() {
   return state.providers.find((provider) => provider.id === state.active) || null;
 }
 
+// —— 并发上限（供应商级 + 单把 Key 级）——
+//
+// 契约：null 或 0 表示**不限制**，正整数表示上限。读侧这两个字段总是存在，写侧可以带
+// `max_concurrency`（null = 清除）。三处表单（编辑供应商 / 新建 Key / Key 行内编辑）
+// 共用下面几个函数，语义只有一处，避免三份各解释一遍再慢慢走形。
+//
+// 服务端不变式：某供应商启用中的 Key 的上限之和不得大于该供应商的上限，违反时接口回
+// 400。前端**不做这套算术**——它要知道 Key 的启用状态、还要知道服务端此刻的口径，
+// 在这里重算一遍只会造出第二个真相源；错误照原样渲染给用户即可。
+//
+// CONCURRENCY_SUM_HINT 就是这条不变式的说明文案：它是用户被 400 拒掉时唯一能看懂原因
+// 的东西，所以三处表单共用同一份常量，不各写一句。
+const CONCURRENCY_SUM_HINT =
+  "与供应商的并发上限同时启用时，该供应商下所有启用 Key 的并发上限之和不得大于供应商上限。";
+
+// CONCURRENCY_INVALID 是三个表单共用的校验提示。
+const CONCURRENCY_INVALID = "并发上限必须是大于 0 的整数；留空表示不限制。";
+
+// concurrencyText 把读侧的值写回输入框：null、0 与字段缺失一律显示成空（= 不限制）。
+// 显示成 0 会让人以为"上限是 0，一个请求都出不去"——那是把一条要靠注释才讲得清的
+// 契约直接摆到用户面前。
+function concurrencyText(value) {
+  const limit = Number(value);
+  return Number.isFinite(limit) && limit > 0 ? String(limit) : "";
+}
+
+// concurrencyLimit 把输入框的文本读成可提交的值：空 → null（清除），正整数 → 该数，
+// 其余（0、负数、小数、非数字）→ undefined。undefined 是**无效输入**的专用信号，
+// 调用方必须据此中止提交并提示，绝不能把 NaN 发出去：服务端只会回一个笼统的 400，
+// 而用户眼前的框里明明写着字，很难想到问题出在这里。
+function concurrencyLimit(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  // 只认十进制正整数：`1e3`、`3.5`、`+5`、`0x10` 这些 Number() 收得下的写法一律拒绝，
+  // 契约里的字段是 JSON 整数，科学计数法和小数到了服务端语义不明。
+  if (!/^\d+$/.test(text)) return undefined;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value >= 1 ? value : undefined;
+}
+
+// concurrencyBadge 是详情卡与 Key 行上的读数：设了上限 `并发 5` 显绿（它是一条正在
+// 生效的设置），不限制则显示 `并发不限`。**必须把"不限制"写出来**——一个空白徽标读不出
+// 任何意思，而"没设上限"正是用户扫这一行时最想知道的事之一。
+function concurrencyBadge(value) {
+  const limit = Number(value);
+  const limited = Number.isFinite(limit) && limit > 0;
+  return badge(limited ? `并发 ${limit}` : "并发不限", limited ? "good" : "muted");
+}
+
 function capabilityBadge(key) {
   const capabilities = key.capabilities;
   if (!capabilities) return badge("未探测", "muted");
@@ -192,9 +241,22 @@ function openCreateProvider() {
 function providerForm(provider) {
   const nameInput = input({ value: provider.id, required: true });
   const urlInput = input({ value: provider.base_url, required: true });
+  const concurrencyInput = input({
+    type: "number", min: "1", step: "1",
+    value: concurrencyText(provider.max_concurrency),
+    placeholder: "留空不限制",
+  });
   const routeInputs = {};
   const errorHost = h("div");
   const save = async () => {
+    // 先校验再动任何东西：非法输入必须**一个字节都不发**（见 concurrencyLimit 的说明），
+    // 否则用户改完并发上限顺手一存，整次保存会因为一个数字被服务端拒掉，而同一份表单里
+    // 的路径改动也跟着一起没落盘。
+    const maxConcurrency = concurrencyLimit(concurrencyInput.value);
+    if (maxConcurrency === undefined) {
+      render(errorHost, notice(CONCURRENCY_INVALID, "error"));
+      return;
+    }
     const routes = {};
     let routesChanged = false;
     for (const mode of ROUTE_MODES) {
@@ -206,7 +268,7 @@ function providerForm(provider) {
     }
     try {
       const nextId = nameInput.value.trim();
-      await api.updateProvider(state.revision, provider.id, nextId, urlInput.value.trim(), routesChanged ? routes : provider.routes || {});
+      await api.updateProvider(state.revision, provider.id, nextId, urlInput.value.trim(), routesChanged ? routes : provider.routes || {}, maxConcurrency);
       await reloadProviders();
       state.active = nextId;
       state.editing = null;
@@ -221,8 +283,13 @@ function providerForm(provider) {
     h("div.form-grid", {},
       field("供应商名称", nameInput),
       field("供应商地址", urlInput),
+      field("并发上限", concurrencyInput),
     ),
     h("p.muted", "改名称会同时改写模型目标与访问密钥的供应商清单里指向它的引用。"),
+    // 留空语义同样要写明：空输入框在其它字段上往往表示"这次不动它"，而这里表示
+    // "不限制"（并会清掉已设的上限）。第二句是服务端不变式的说明——用户在供应商这一侧
+    // 定下的数字，会被 Key 那一侧的上限之和顶着，不先说清就只剩 400 可看。
+    h("p.muted", `并发上限是该供应商全部上游请求的同时在途上限，留空表示不限制。${CONCURRENCY_SUM_HINT}`),
     h("details", {}, h("summary.muted", "高级路径设置"),
       // 留空语义必须写明：一个空的输入框看起来像"这里没配"，而实际是"用标准路径"。
       // 填前缀的合并规则也要写明——服务端的 NormalizeUpstreamRoutePath 会把该模式的
@@ -288,6 +355,7 @@ async function removeProvider(provider) {
 function openCreateKey(provider) {
   const nameInput = input({ placeholder: "例如 primary", required: true });
   const secretInput = input({ type: "password", required: true, autocomplete: "new-password" });
+  const concurrencyInput = input({ type: "number", min: "1", step: "1", placeholder: "留空不限制" });
   const statusHost = h("div");
   const errorHost = h("div");
   let ref = null;
@@ -303,10 +371,15 @@ function openCreateKey(provider) {
     const name = nameInput.value.trim();
     const secret = secretInput.value;
     if (!name || !secret) return;
+    const maxConcurrency = concurrencyLimit(concurrencyInput.value);
+    if (maxConcurrency === undefined) {
+      render(errorHost, notice(CONCURRENCY_INVALID, "error"));
+      return;
+    }
     setStatus("saving", "正在保存 Key…");
     let revision = state.revision;
     try {
-      await api.createProviderKey(revision, provider.id, name, secret);
+      await api.createProviderKey(revision, provider.id, name, secret, maxConcurrency);
       revision = (await reloadProviders()).config_revision;
     } catch (error) {
       render(errorHost, notice("Key 保存失败。", "error"));
@@ -342,7 +415,11 @@ function openCreateKey(provider) {
   const body = h("div.stack", {},
     field("Key 名称", nameInput),
     field("API Key", secretInput),
+    field("并发上限", concurrencyInput),
     h("p.muted", "保存后会自动探测此 Key 的可用模型与路由能力。密钥只写入服务端，不会被回显。"),
+    // 新建时留空 = 不限制（没有"清除"一说，这把 Key 本来就没有上限）。后半句是服务端
+    // 不变式：多个 Key 的上限之和顶着供应商上限，用户在这一栏填数时就得知道。
+    h("p.muted", `并发上限限制该 Key 同时在途的上游请求数，留空表示不限制。${CONCURRENCY_SUM_HINT}`),
     statusHost,
     errorHost,
   );
@@ -360,15 +437,33 @@ function keyRow(provider, key) {
   if (state.keyEditing === key.name) {
     const nameInput = input({ value: key.name, required: true });
     const secretInput = input({ type: "password", placeholder: "留空保持不变", autocomplete: "new-password" });
+    const concurrencyInput = input({
+      type: "number", min: "1", step: "1",
+      value: concurrencyText(key.max_concurrency),
+      placeholder: "留空不限制",
+    });
     const errorHost = h("div");
     return h("tr", {}, h("td", { colspan: "5" },
       h("div.stack", {},
-        h("div.form-grid", {}, field("Key 名称", nameInput), field("替换 API Key", secretInput)),
+        h("div.form-grid", {},
+          field("Key 名称", nameInput),
+          field("替换 API Key", secretInput),
+          field("并发上限", concurrencyInput),
+        ),
+        // 两个空框并排放着，含义却相反：「替换 API Key」留空是"保持不变"，而这里的
+        // 「并发上限」留空是"清除上限（不限制）"。不写出来就一定会被当成"不动它"，
+        // 于是想取消限流的人会发现怎么存都取消不掉。
+        h("p.muted", `并发上限留空即清除该 Key 的上限（不限制）。${CONCURRENCY_SUM_HINT}`),
         errorHost,
         h("div.btn-row", {},
           buttonNode("保存", {
             onClick: async () => {
-              const patch = { name: nameInput.value.trim(), enabled: key.enabled };
+              const maxConcurrency = concurrencyLimit(concurrencyInput.value);
+              if (maxConcurrency === undefined) {
+                render(errorHost, notice(CONCURRENCY_INVALID, "error"));
+                return;
+              }
+              const patch = { name: nameInput.value.trim(), enabled: key.enabled, max_concurrency: maxConcurrency };
               if (secretInput.value.trim()) patch.api_key = secretInput.value.trim();
               try {
                 await api.updateProviderKey(state.revision, provider.id, key.name, patch);
@@ -397,6 +492,9 @@ function keyRow(provider, key) {
       h("div.key-info-stack", {},
         h("div.key-name-bar", {},
           h("span.key-name", key.name),
+          // 读数就在 Key 名旁边：不点开「编辑」也能看到这把 Key 有没有被限流。
+          // 取不到字段（老服务端）时 concurrencyBadge 回落到「并发不限」，不会抛错。
+          concurrencyBadge(key.max_concurrency),
         ),
         capabilityDetail(provider, key),
       ),
@@ -957,6 +1055,9 @@ function draw() {
     ? card(providerForm(provider))
     : card(
         cardHead(provider.id,
+          // 并发上限的读数摆在标题行：它是这次新增的配置里唯一"不点开就看不到"的一项，
+          // 而它恰恰会决定调用方的并发能不能打满。字段缺失（老服务端）时照常回落。
+          concurrencyBadge(provider.max_concurrency),
           copyableMono(provider.base_url, "复制供应商基准地址"),
           buttonNode(state.editing === provider.id ? "收起" : "编辑", {
             small: true,

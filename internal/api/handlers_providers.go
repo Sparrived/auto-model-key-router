@@ -54,7 +54,9 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		providerID := payload.Lookup("id").PyStr()
 		baseURL := payload.Lookup("base_url").PyStr()
 		data, err := s.v3Update(r, func(current *canonical.Value) error {
-			_, err := configops.CreateProvider(current, providerID, baseURL)
+			_, err := configops.CreateProvider(current, providerID, baseURL, configops.CreateProviderOptions{
+				MaxConcurrency: optInt(payload, "max_concurrency"),
+			})
 			return err
 		}, optString(payload, "config_revision"))
 		if err != nil {
@@ -110,10 +112,11 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 
 		data, err := s.v3Update(r, func(current *canonical.Value) error {
 			_, err := configops.UpdateProvider(current, providerID, configops.UpdateProviderOptions{
-				NewID:        optString(updates, "id"),
-				BaseURL:      optString(updates, "base_url"),
-				Routes:       routesValue,
-				UpdateRoutes: hasRoutes,
+				NewID:          optString(updates, "id"),
+				BaseURL:        optString(updates, "base_url"),
+				Routes:         routesValue,
+				UpdateRoutes:   hasRoutes,
+				MaxConcurrency: maxConcurrencyUpdate(updates),
 			})
 			return err
 		}, optString(payload, "config_revision"))
@@ -228,7 +231,8 @@ func (s *Server) handleCreateProviderKey(w http.ResponseWriter, r *http.Request)
 
 		data, err := s.v3Update(r, func(current *canonical.Value) error {
 			_, err := configops.CreateProviderKey(current, providerID, keyName, apiKey, configops.CreateProviderKeyOptions{
-				Enabled: &enabled,
+				Enabled:        &enabled,
+				MaxConcurrency: optInt(payload, "max_concurrency"),
 			})
 			return err
 		}, optString(payload, "config_revision"))
@@ -290,9 +294,10 @@ func (s *Server) handleUpdateProviderKey(w http.ResponseWriter, r *http.Request)
 
 		data, err := s.v3Update(r, func(current *canonical.Value) error {
 			_, err := configops.UpdateProviderKey(current, providerID, keyName, configops.UpdateProviderKeyOptions{
-				NewName: optString(updates, "name"),
-				APIKey:  optString(updates, "api_key"),
-				Enabled: optBool(updates, "enabled"),
+				NewName:        optString(updates, "name"),
+				APIKey:         optString(updates, "api_key"),
+				Enabled:        optBool(updates, "enabled"),
+				MaxConcurrency: maxConcurrencyUpdate(updates),
 			})
 			return err
 		}, optString(payload, "config_revision"))

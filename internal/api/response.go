@@ -124,6 +124,7 @@ func keyResponse(key config.KeyConfig) *canonical.Value {
 		canonical.ObjectPair{Key: "name", Value: canonical.NewString(key.Name)},
 		canonical.ObjectPair{Key: "base_url", Value: canonical.NewString(key.BaseURL)},
 		canonical.ObjectPair{Key: "enabled", Value: canonical.NewBool(key.Enabled)},
+		canonical.ObjectPair{Key: "max_concurrency", Value: maxConcurrencyField(key.MaxConcurrency)},
 		canonical.ObjectPair{Key: "api_key_fingerprint", Value: canonical.NewString(formatting.KeyFingerprint(key.APIKey))},
 	)
 }
@@ -142,6 +143,7 @@ func providerResponse(provider config.ProviderConfig, routeOrder []string) *cano
 		keys.Arr = append(keys.Arr, objectOf(
 			canonical.ObjectPair{Key: "name", Value: canonical.NewString(key.Name)},
 			canonical.ObjectPair{Key: "enabled", Value: canonical.NewBool(key.Enabled)},
+			canonical.ObjectPair{Key: "max_concurrency", Value: maxConcurrencyField(key.MaxConcurrency)},
 			canonical.ObjectPair{Key: "api_key_fingerprint", Value: canonical.NewString(formatting.KeyFingerprint(key.APIKey))},
 			canonical.ObjectPair{Key: "capabilities", Value: capabilitiesField(key.Capabilities)},
 		))
@@ -166,9 +168,42 @@ func providerResponse(provider config.ProviderConfig, routeOrder []string) *cano
 	return objectOf(
 		canonical.ObjectPair{Key: "id", Value: canonical.NewString(provider.ID)},
 		canonical.ObjectPair{Key: "base_url", Value: canonical.NewString(provider.BaseURL)},
+		canonical.ObjectPair{Key: "max_concurrency", Value: maxConcurrencyField(provider.MaxConcurrency)},
 		canonical.ObjectPair{Key: "keys", Value: keys},
 		canonical.ObjectPair{Key: "routes", Value: routes},
 	)
+}
+
+// maxConcurrencyField 把并发上限渲染成 int 或 null。
+//
+// 0（不限制）对外一律是 null：让前端只处理「数字或没限制」两种形态，而不是
+// 「0 与 null 都表示不限制」这第三条规则。
+func maxConcurrencyField(limit int) *canonical.Value {
+	if limit <= 0 {
+		return canonical.NewNull()
+	}
+	return canonical.NewIntValue(int64(limit))
+}
+
+// rawMaxConcurrency 从原始配置对象里读 max_concurrency，渲染成与
+// maxConcurrencyField 相同的形状。
+//
+// 配置层接受 "5" 这种字符串（int() 语义），但接口字段的类型是对外契约：同一个字段
+// 有时是字符串、有时是数字，会逼着每个调用方自己判类型。读不出来（缺失/null/非数字）
+// 一律当「不限制」。
+func rawMaxConcurrency(owner *canonical.Value) *canonical.Value {
+	if owner == nil {
+		return canonical.NewNull()
+	}
+	raw, present := owner.LookupOK("max_concurrency")
+	if !present || raw == nil || raw.IsNull() {
+		return canonical.NewNull()
+	}
+	parsed, err := canonical.ToInt(raw)
+	if err != nil {
+		return canonical.NewNull()
+	}
+	return maxConcurrencyField(int(parsed))
 }
 
 // capabilitiesField 对应 management_api.py:1556 的 _key_capabilities_field。
@@ -203,6 +238,7 @@ func rawKeyResponse(name string, key *canonical.Value) *canonical.Value {
 	return objectOf(
 		canonical.ObjectPair{Key: "name", Value: canonical.NewString(name)},
 		canonical.ObjectPair{Key: "enabled", Value: enabled},
+		canonical.ObjectPair{Key: "max_concurrency", Value: rawMaxConcurrency(key)},
 		canonical.ObjectPair{Key: "api_key_fingerprint", Value: canonical.NewString(formatting.KeyFingerprint(apiKey))},
 		canonical.ObjectPair{Key: "capabilities", Value: capabilitiesField(key.Lookup("capabilities"))},
 	)
@@ -237,6 +273,7 @@ func rawProviderResponse(name string, provider *canonical.Value) *canonical.Valu
 	return objectOf(
 		canonical.ObjectPair{Key: "id", Value: canonical.NewString(name)},
 		canonical.ObjectPair{Key: "base_url", Value: baseURL},
+		canonical.ObjectPair{Key: "max_concurrency", Value: rawMaxConcurrency(provider)},
 		canonical.ObjectPair{Key: "keys", Value: keys},
 		canonical.ObjectPair{Key: "routes", Value: routes},
 	)

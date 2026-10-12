@@ -55,6 +55,45 @@ func optString(obj *canonical.Value, key string) *string {
 	return &text
 }
 
+// optInt 取可选整数字段：缺失或显式 null 都返回 nil（与 optString 同一条约定）。
+//
+// 与 optString 唯一的差别是**保留 0**：`max_concurrency` 的 0 是「清除上限」这个
+// 有效输入，把它和「没传这个字段」混成一个 nil 会让清除变成静默无操作。
+func optInt(obj *canonical.Value, key string) *int {
+	if obj == nil {
+		return nil
+	}
+	value, present := obj.LookupOK(key)
+	if !present || value == nil || value.Kind == canonical.KindNull {
+		return nil
+	}
+	parsed, err := canonical.ToInt(value)
+	if err != nil {
+		return nil
+	}
+	number := int(parsed)
+	return &number
+}
+
+// maxConcurrencyUpdate 解析 PUT 请求里的并发上限，区分三种状态：
+//   - 字段缺省：不改（nil）；
+//   - 显式 `null`：清除上限（0）；
+//   - 数字：设上限（0 同样是清除；负数按配置校验报错）。
+//
+// 与 optString 那套「null 等于没传」刻意不同：清除上限是这个字段上唯一的删除动作，
+// 若 null 也算「不改」，调用方就只剩 0 一种表达——而「不限制」在响应里是 null，
+// 前端把读到的对象原样回传会被静默忽略。
+func maxConcurrencyUpdate(obj *canonical.Value) *int {
+	if !hasKey(obj, "max_concurrency") {
+		return nil
+	}
+	if limit := optInt(obj, "max_concurrency"); limit != nil {
+		return limit
+	}
+	cleared := 0
+	return &cleared
+}
+
 // hasKey 对应 Python 的 `"name" in fields`。
 func hasKey(obj *canonical.Value, key string) bool {
 	if obj == nil {

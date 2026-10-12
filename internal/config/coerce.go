@@ -49,6 +49,28 @@ func intOr(value *canonical.Value, fallback int) (int, error) {
 	return int(parsed), nil
 }
 
+// maxConcurrencyOr 解析一个并发上限。
+//
+// 缺省、null 与 0 都表示「不限制」：null 是接口「清除上限」的落盘形态之一，
+// 必须与缺省同等对待，否则一份被接口写回 null 的配置会当场加载失败。
+// 负数在解析阶段就拒绝：静默夹到 0 等于把一个写错的上限变成「不限制」，
+// 那是这个功能最不该出错的方向。
+//
+// label 是出错时用来定位的完整描述（如「供应商 openai 的 Key main」）。
+func maxConcurrencyOr(value *canonical.Value, label string) (int, error) {
+	if value == nil || value.IsNull() {
+		return 0, nil
+	}
+	limit, err := intOr(value, 0)
+	if err != nil {
+		return 0, err
+	}
+	if limit < 0 {
+		return 0, errf("%s 的 max_concurrency 不能为负数", label)
+	}
+	return limit, nil
+}
+
 // floatOr 复刻 Python 的 “float(raw.get(key, default))“。
 func floatOr(value *canonical.Value, fallback float64) (float64, error) {
 	if value == nil {

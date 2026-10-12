@@ -199,10 +199,22 @@ export const api = {
   providers: () => request("/api/providers"),
   createProvider: (revision, id, baseUrl) =>
     request("/api/providers", { method: "POST", body: { config_revision: revision, id, base_url: baseUrl } }),
-  updateProvider: (revision, providerId, id, baseUrl, routes) =>
+  // maxConcurrency 是供应商级别的并发上限：null 或 0 都表示不限制，正整数表示上限。
+  //
+  // 这里**总是**把 max_concurrency 发出去（省略时补成 null），与其它按需字段不同：
+  // 服务端对 PUT 区分「省略 = 不改」与「显式 null = 清除」，表单一律带这个键就让
+  // 请求体的形状与「用户这次改没改上限」无关——清上限的唯一动作是显式 null，
+  // 少发一次字段就等于静默保留旧值。
+  updateProvider: (revision, providerId, id, baseUrl, routes, maxConcurrency = null) =>
     request(`/api/providers/${encodeURIComponent(providerId)}`, {
       method: "PUT",
-      body: { config_revision: revision, id, base_url: baseUrl, routes },
+      body: {
+        config_revision: revision,
+        id,
+        base_url: baseUrl,
+        routes,
+        max_concurrency: maxConcurrency ?? null,
+      },
     }),
   deleteProvider: (revision, providerId, options) =>
     request(`/api/providers/${encodeURIComponent(providerId)}${dryRunQuery(options)}`, {
@@ -210,11 +222,21 @@ export const api = {
       body: { config_revision: revision },
     }),
 
-  createProviderKey: (revision, providerId, name, apiKey) =>
+  // maxConcurrency **只在非 null 时**进请求体：新建 Key 没有"清除上限"这回事（新 Key
+  // 本来就没有上限），发一个显式 null 只是多余字段。沿用 updateUnified 的"给什么发什么"。
+  createProviderKey: (revision, providerId, name, apiKey, maxConcurrency = null) =>
     request(`/api/providers/${encodeURIComponent(providerId)}/keys`, {
       method: "POST",
-      body: { config_revision: revision, name, api_key: apiKey },
+      body: {
+        config_revision: revision,
+        name,
+        api_key: apiKey,
+        ...(maxConcurrency === null || maxConcurrency === undefined ? {} : { max_concurrency: maxConcurrency }),
+      },
     }),
+  // patch 的字段**原样透传**（展开运算符不做任何过滤，JSON.stringify 也保留 null）：
+  // `max_concurrency: null` 是"取消这把 Key 的上限"的唯一写法，一旦有人以"少发个空字段
+  // 更干净"为由把它筛掉，上限就设上再也取消不掉——而请求照样成功，看起来毫无异样。
   updateProviderKey: (revision, providerId, keyName, patch) =>
     request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}`, {
       method: "PUT",

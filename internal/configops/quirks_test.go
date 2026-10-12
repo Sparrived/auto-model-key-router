@@ -144,7 +144,7 @@ func TestUpdateModelKeyQualifiedNameRenamesProviderKey(t *testing.T) {
 // 非法时配置里已经多了一个空 providers 对象。管理 API 会把它存下来。
 func TestCreateProviderFailureStillCreatesProvidersKey(t *testing.T) {
 	data := mustParse(t, `{}`)
-	_, err := CreateProvider(data, "p", "not-a-url")
+	_, err := CreateProvider(data, "p", "not-a-url", CreateProviderOptions{})
 	if err == nil {
 		t.Fatal("期望报错")
 	}
@@ -181,7 +181,7 @@ func TestUpdateProviderMissingBaseURLIsBareValueError(t *testing.T) {
 // TestConfigOperationErrorExposesStatusCode 固化对外契约：errors.As 能取到状态码。
 func TestConfigOperationErrorExposesStatusCode(t *testing.T) {
 	data := mustParse(t, `{"providers":{"p":{"base_url":"https://a.example","keys":{}}}}`)
-	_, err := CreateProvider(data, "p", "https://b.example")
+	_, err := CreateProvider(data, "p", "https://b.example", CreateProviderOptions{})
 	var opErr *ConfigOperationError
 	if !errors.As(err, &opErr) {
 		t.Fatalf("期望 ConfigOperationError，实际 %T", err)

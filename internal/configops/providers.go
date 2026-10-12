@@ -10,13 +10,21 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 )
 
+// CreateProviderOptions 是 CreateProvider 的可选参数。
+//
+// MaxConcurrency 为 nil 表示不设上限（与配置里缺省该字段同义）；0 表示清除上限，
+// 负数会被配置校验拒掉（见 applyMaxConcurrency）。
+type CreateProviderOptions struct {
+	MaxConcurrency *int
+}
+
 // CreateProvider 新建一个供应商并返回它。
 //
 // 对齐 config_operations.py:89。顺序值得注意：先校验 ID、再 setdefault
 // providers、再查重、最后才校验 base_url。因此 base_url 非法时，data 里已经
 // 多了一个空的 providers 对象——这是参照实现的可观察行为，刻意保留
 // （由 TestCreateProviderFailureStillCreatesProvidersKey 钉住）。
-func CreateProvider(data *canonical.Value, providerID, baseURL string) (*canonical.Value, error) {
+func CreateProvider(data *canonical.Value, providerID, baseURL string, options CreateProviderOptions) (*canonical.Value, error) {
 	id, err := nonEmptyString(providerID, "供应商 ID")
 	if err != nil {
 		return nil, err
@@ -36,8 +44,25 @@ func CreateProvider(data *canonical.Value, providerID, baseURL string) (*canonic
 		canonical.ObjectPair{Key: "base_url", Value: canonical.NewString(normalized)},
 		canonical.ObjectPair{Key: "keys", Value: canonical.NewObject()},
 	)
+	applyMaxConcurrency(provider, options.MaxConcurrency)
 	all.SetKey(id, provider)
 	return provider, nil
+}
+
+// applyMaxConcurrency 写入并发上限：nil 不动，0 删键（清除上限），其余原样写入。
+//
+// 0 写成删键而不是文字 0：配置里「缺省」就是「不限制」，落盘多一串 `"max_concurrency": 0`
+// 只是噪声。负数**照写**，由 config.Validate 用同一套措辞拒掉——校验规则只有一份，
+// 在这里另判一次迟早与配置层漂移，而且报错文本会不一样。
+func applyMaxConcurrency(target *canonical.Value, limit *int) {
+	if limit == nil {
+		return
+	}
+	if *limit == 0 {
+		target.DeleteKey("max_concurrency")
+		return
+	}
+	target.SetKey("max_concurrency", canonical.NewIntValue(int64(*limit)))
 }
 
 // UpdateProviderOptions 是 UpdateProvider 的可选参数。
@@ -49,6 +74,8 @@ type UpdateProviderOptions struct {
 	BaseURL      *string
 	Routes       *canonical.Value
 	UpdateRoutes bool
+	// MaxConcurrency 为 nil 表示本次不改这项；0 表示清除上限。
+	MaxConcurrency *int
 }
 
 // UpdateProvider 修改供应商，返回最终 ID（改名时是新 ID）。
@@ -108,6 +135,7 @@ func UpdateProvider(data *canonical.Value, providerID string, options UpdateProv
 			provider.DeleteKey("routes")
 		}
 	}
+	applyMaxConcurrency(provider, options.MaxConcurrency)
 	if targetID != providerID {
 		moved, _ := all.LookupOK(providerID)
 		all.DeleteKey(providerID)
@@ -144,6 +172,8 @@ func UpdateProvider(data *canonical.Value, providerID string, options UpdateProv
 // 默认行为会反过来）。
 type CreateProviderKeyOptions struct {
 	Enabled *bool
+	// MaxConcurrency 为 nil 表示不设上限；0 表示清除上限。
+	MaxConcurrency *int
 }
 
 // CreateProviderKey 在供应商下新建一个 key 并返回它。
@@ -178,6 +208,7 @@ func CreateProviderKey(data *canonical.Value, providerID, keyName, apiKey string
 		canonical.ObjectPair{Key: "api_key", Value: canonical.NewString(secret)},
 		canonical.ObjectPair{Key: "enabled", Value: canonical.NewBool(enabled)},
 	)
+	applyMaxConcurrency(key, options.MaxConcurrency)
 	keys.SetKey(name, key)
 	return key, nil
 }
@@ -187,6 +218,8 @@ type UpdateProviderKeyOptions struct {
 	NewName *string
 	APIKey  *string
 	Enabled *bool
+	// MaxConcurrency 为 nil 表示本次不改这项；0 表示清除上限。
+	MaxConcurrency *int
 }
 
 // UpdateProviderKey 修改供应商 key，返回最终名字（改名时是新名字）。
@@ -228,6 +261,7 @@ func UpdateProviderKey(data *canonical.Value, providerID, keyName string, option
 	if options.Enabled != nil {
 		key.SetKey("enabled", canonical.NewBool(*options.Enabled))
 	}
+	applyMaxConcurrency(key, options.MaxConcurrency)
 	if options.Enabled != nil && !*options.Enabled {
 		if err := clearUnifiedKeysFromProvider(data, providerID, StringPtr(keyName)); err != nil {
 			return "", err
@@ -402,7 +436,7 @@ func ProviderIDForBaseURL(data *canonical.Value, baseURL string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if _, err := CreateProvider(data, id, normalized); err != nil {
+	if _, err := CreateProvider(data, id, normalized, CreateProviderOptions{}); err != nil {
 		return "", err
 	}
 	return id, nil

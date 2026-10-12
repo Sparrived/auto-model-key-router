@@ -764,11 +764,12 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
   "name": "main",
   "base_url": "https://api.openai.com",
   "enabled": true,
+  "max_concurrency": 4,
   "api_key_fingerprint": "0123456789ab"
 }
 ```
 
-模型 Key 接口与 `/api/providers/{provider_id}/keys` 系列均返回此结构；provider Key 响应额外在顶层带 `config_revision`。
+模型 Key 接口与 `/api/providers/{provider_id}/keys` 系列均返回此结构；provider Key 响应额外在顶层带 `config_revision`。`max_concurrency` 是这**把上游 Key** 同时在途请求的上限（正整数；`null` 表示不限制），两处都会返回，但只有 `/api/providers/{provider_id}/keys` 系列接口能写它；同一把 Key 被多个模型引用时共用一个计数，写入约束见「供应商接口与能力探测」。
 
 #### RouteTarget
 
@@ -797,11 +798,13 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 {
   "id": "openai",
   "base_url": "https://api.openai.com",
+  "max_concurrency": 10,
   "keys": [
     {
       "name": "main",
       "enabled": true,
       "api_key_fingerprint": "0123456789ab",
+      "max_concurrency": 4,
       "capabilities": {
         "models": ["gpt-5.5"],
         "route_status": {"openai": "ok", "anthropic": "ok", "responses": "ok"},
@@ -815,6 +818,8 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 ```
 
 provider 对象不再含顶层 `capabilities`；探测缓存按 Key 存于 `keys[]` 中每个元素的 `capabilities`（该 Key 通过 `GET /v1/models` 看到的可服务模型清单与 openai/anthropic/responses 路由的可用性，`errors` / `checked_at` 记录探测错误与时间），未探测时为 `null`。同一供应商的不同 Key 能访问的模型集可能不同（如免费/付费额度、不同订阅），因此各 Key 独立探测、独立缓存，互不复用。v3 的 `pools` 字段已移除。
+
+`max_concurrency` 在 provider 与每个 Key 上都**总是出现**（整数或 `null`）：provider 上的值统计该供应商**所有 Key、所有模型**上同时在途的上游请求数，Key 上的值统计该把上游 Key 同时在途的请求数。写入语义与两级上限之间的约束见「供应商接口与能力探测」。
 
 #### TaskCreate
 
@@ -1290,7 +1295,7 @@ curl -X PUT http://127.0.0.1:8000/api/access-keys/3f2a… \
 
 ### 供应商接口与能力探测
 
-v4 中 Key 与探测都以 Key 为单元：`providers.<id>` 保存 `base_url`、各协议 `routes` 与 `keys`（Key 集合），探测缓存按 Key 存放在 `providers.<id>.keys.<key>.capabilities`。同一供应商的不同 Key 能访问的模型集可能不同，因此每个 Key 独立探测、独立缓存，互不复用。删除供应商或其 Key 时会清理所有引用它们的模型绑定。
+v4 中 Key 与探测都以 Key 为单元：`providers.<id>` 保存 `base_url`、`max_concurrency`、各协议 `routes` 与 `keys`（Key 集合），探测缓存按 Key 存放在 `providers.<id>.keys.<key>.capabilities`。同一供应商的不同 Key 能访问的模型集可能不同，因此每个 Key 独立探测、独立缓存，互不复用。删除供应商或其 Key 时会清理所有引用它们的模型绑定。
 
 #### `GET /api/providers`
 
@@ -1308,21 +1313,24 @@ v4 中 Key 与探测都以 Key 为单元：`providers.<id>` 保存 `base_url`、
 | --- | --- | --- | --- |
 | `id` | string | 是 | 供应商 ID，非空且不能与已有 ID 重复 |
 | `base_url` | string | 是 | `http://` 或 `https://` 开头的上游地址 |
+| `max_concurrency` | integer/null | 否 | 正整数表示该供应商**所有 Key、所有模型**上同时在途的上游请求上限；`null` 或 `0` 表示不限制（默认） |
 | `config_revision` | string | 是 | 并发校验版本号 |
 
 成功返回 `201` 和 ProviderResponse。新供应商没有 Key，添加 Key 请用 `/api/providers/{provider_id}/keys` 或模型 Key 接口（按 `base_url` 自动归并）。
 
 #### `GET/PUT/DELETE /api/providers/{provider_id}`
 
-查询、更新（`id`、`base_url`、`routes`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes` 可省略）+ `config_revision`。改 `id` 即改名，模型 `targets[].provider` 与访问密钥的供应商清单会跟着改（见「改模型会连带改掉别处的引用」）。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。引用这些模型的访问密钥、工作空间与任务同样会被清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
+查询、更新（`id`、`base_url`、`routes`、`max_concurrency`）或删除供应商。`PUT` 请求体为 `ProviderUpdate`（`id`/`base_url`/`routes`/`max_concurrency` 可省略）+ `config_revision`；`max_concurrency` 传 `null` 或 `0` 表示清除该供应商的并发上限。改 `id` 即改名，模型 `targets[].provider` 与访问密钥的供应商清单会跟着改（见「改模型会连带改掉别处的引用」）。删除供应商会移除其所有 Key，并删除所有引用它的模型 target；因此失去全部 target 的模型会被一并删除（响应不含被删模型列表，删除前请自行确认）。引用这些模型的访问密钥、工作空间与任务同样会被清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
 
 #### `GET/POST /api/providers/{provider_id}/keys`
 
-列出该供应商的 Key（`{"keys": [KeyResponse]}`）或创建新 Key。创建请求体为 ProviderKeyCreate（`name`、`api_key`、`enabled`、`config_revision`），成功返回 `201` 和 KeyResponse。新 Key 默认不绑定任何模型；需要按模型绑定请使用模型 Key 接口或 `/api/routes`。
+列出该供应商的 Key（`{"keys": [KeyResponse]}`）或创建新 Key。创建请求体为 ProviderKeyCreate（`name`、`api_key`、`enabled`、`max_concurrency`、`config_revision`），成功返回 `201` 和 KeyResponse。`max_concurrency` 可选，正整数表示该把上游 Key 同时在途的请求上限，`null` 或 `0` 表示不限制。新 Key 默认不绑定任何模型；需要按模型绑定请使用模型 Key 接口或 `/api/routes`。
 
 #### `GET/PUT/DELETE /api/providers/{provider_id}/keys/{key_name}`
 
-查询、更新或删除单个供应商 Key。删除会从所有模型的 `targets[]` 中移除对该 Key 的引用，因而失去全部 target 的模型会被自动删除；若这是供应商最后一个 Key，供应商也会被删除。被模型 Key 接口解绑到只剩本模型时，同样会走到这里（删除模型 Key 的最后引用）。
+查询、更新或删除单个供应商 Key。`PUT` 请求体为 ProviderKeyUpdate（`name`/`api_key`/`enabled`/`max_concurrency` 可省略，`config_revision` 必填；`max_concurrency` 传 `null` 或 `0` 表示清除上限）。删除会从所有模型的 `targets[]` 中移除对该 Key 的引用，因而失去全部 target 的模型会被自动删除；若这是供应商最后一个 Key，供应商也会被删除。被模型 Key 接口解绑到只剩本模型时，同样会走到这里（删除模型 Key 的最后引用）。
+
+> **并发上限的两条口径与一条不变式**：`POST /api/providers`、`PUT /api/providers/{provider_id}`、`POST /api/providers/{provider_id}/keys`、`PUT /api/providers/{provider_id}/keys/{key_name}` 都可选地接受 `max_concurrency`，正整数为同时在途请求上限，`null` 或 `0` 清除上限（缺省即不限制）。供应商上限统计该供应商**所有 Key、所有模型**上同时在途的上游请求；Key 上限按**上游 Key**（按密钥/账号识别）统计，同一把 Key 被多个模型引用时共用一个计数。**同时启用两者时**，该供应商**启用中**的 Key 的 `max_concurrency` 之和不得大于供应商的 `max_concurrency`，否则写入被拒绝并返回 `400`，`detail` 以 `配置校验失败: ` 开头，例如 `配置校验失败: 供应商 openai 的 Key 并发上限之和 12 不能大于供应商并发上限 10`；负数同样是配置错误（`供应商 X 的 max_concurrency 不能为负数`、`供应商 X 的 Key Y 的 max_concurrency 不能为负数`）。选路时达到上限的 Key 与达到上限的供应商会被**硬性排除**（不做冷却式软回退），某个模型的候选全部因此不可用时，代理返回 `429`（见「状态码与错误格式」）。
 
 #### `POST /api/providers/{provider_id}/probe`
 
@@ -1602,6 +1610,7 @@ CPA 侧的口径与边界：
 | `404` | 模型、Key、供应商、探测或访问密钥不存在；任务指向的模型没有启用的 Key；任务尚未指定模型；工作空间不存在（迁移导出按名取空间时） |
 | `409` | 名称冲突、删除最后一个 Key、无法持久化嵌入式配置 |
 | `422` | 管理 API 请求字段类型错误、缺少必填字段或包含未知字段；供应商暂无 Key 时探测；工作空间迁移包畸形、含 `default` 或看起来是配置导出的整包；**在访问密钥接口里**写下的 `providers` / `models` 引用了未配置的供应商或模型，或凭据与实例内其它凭据重复 |
+| `429` | **仅 `/v1/*` 代理接口**：选路并发耗尽——该模型的候选 Key 或供应商已达 `max_concurrency` 上限，AMKR 直接拒绝，不请求上游（响应体形状见下） |
 | `500` | 配置保存失败 |
 | `502` | 上游连接或响应转换失败 |
 | `503` | 没有可用 Key |
@@ -1611,6 +1620,8 @@ CPA 侧的口径与边界：
 ```json
 {"error": {"message": "错误信息"}}
 ```
+
+**选路并发耗尽**的 `429` 也走同一个信封（同样不来自上游，而是 AMKR 自己的选路判断），只有文案不同：供应商级为 `{"error": {"message": "模型 gpt-4o-mini 并发已达上限：供应商 openai 已达上限 10"}}`，Key 级为 `{"error": {"message": "模型 gpt-4o-mini 并发已达上限：候选 Key 均已达各自上限"}}`。
 
 管理 API 的错误使用：
 
