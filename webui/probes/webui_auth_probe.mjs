@@ -185,6 +185,15 @@ const server = {
   // Key 用量读数（/ui/key-usage.json）：用量统计页的「按上游 Key」「按访问密钥」
   // 与「模型 / 上游 Key」三张表都出自这一份。
   keyUsage: null,
+  // 访问密钥清单（/api/access-keys）：全局筛选控件的选项出处。空数组 = 只有「全部」。
+  accessKeys: [],
+  // 按访问密钥收窄的读数（/ui/access-key-metrics.json），键是 access key id。
+  // 夹具由 installAccessKeyFilterFixture() 装，数字刻意与全局读数明显不同。
+  accessKeyMetrics: {},
+  // 按访问密钥收窄后的「按 Key 拆分」读数（/ui/key-usage.json?access_key_id=…），
+  // 同样按 id 存。与全局那份给**不同**的行，好让"卡片回来了但内容还是筛选读数"这种
+  // 半途而废能被断言抓住。
+  accessKeyKeyUsage: {},
 };
 
 function respond(status, payload) {
@@ -192,6 +201,57 @@ function respond(status, payload) {
     ok: status >= 200 && status < 300,
     status,
     async text() { return payload === undefined ? "" : JSON.stringify(payload); },
+  };
+}
+
+// queryOf 把请求 URL 的查询串解析成 URLSearchParams。
+//
+// 断言"页面到底传了什么参数"必须逐项读，不能用子串匹配：参数顺序由 URLSearchParams 的
+// 写入顺序决定，写死 "hours=168&bucket_seconds=1800" 这种串会在顺序变化时假装失败，
+// 也会在只传了一半时假装通过。
+const queryOf = (url) => new URLSearchParams(String(url).split("?")[1] || "");
+
+// accessKeyMetricsPayload 按请求参数拼 /ui/access-key-metrics.json 的响应：
+// limit>0 才有逐条明细，limit 缺省/0 时 requests 为 null（真实服务端同样如此，
+// 用量统计页只要读数不要明细）。未被提供的 id 回空读数而不是全量：
+// 选到配置里已删除的 key 时页面该画空态，而不是把全实例数字留在屏幕上冒充过滤结果。
+function accessKeyMetricsPayload(accessKeyId, params) {
+  const limit = Number(params.get("limit") || 0) || 0;
+  const bucketSeconds = Number(params.get("bucket_seconds") || 60) || 60;
+  const allHistory = params.get("all_history") === "true";
+  const fixture = server.accessKeyMetrics[accessKeyId] || null;
+  const items = fixture ? fixture.items : [];
+  return {
+    count_semantics: "attempts",
+    window: {
+      from: fixture ? "2026-01-01T09:00:00+08:00" : null,
+      to: "2026-01-01T10:00:00+08:00",
+      hours: allHistory ? null : Number(params.get("hours") || 24),
+    },
+    access_key_id: accessKeyId,
+    snapshot: fixture ? fixture.snapshot : {
+      count_semantics: "attempts",
+      rate_window_seconds: 60,
+      current_rpm: 0,
+      current_tpm: 0,
+      router_status: "green",
+      active_requests: 0,
+      total: { requests: 0, successes: 0, failures: 0, retries: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0 },
+      caller_types: {},
+      models: {},
+      providers: {},
+      upstream_models: {},
+      unattributed: {},
+    },
+    series: { bucket_seconds: bucketSeconds, points: fixture ? fixture.points : [] },
+    requests: limit > 0
+      ? {
+          count_semantics: "attempts",
+          summary: { requests: items.length },
+          total_items: items.length,
+          items,
+        }
+      : null,
   };
 }
 
@@ -287,17 +347,42 @@ global.fetch = async (url, options = {}) => {
     if (!server.workspaceUsage) return respond(503, { detail: "工作空间用量尚不可用" });
     return respond(200, server.workspaceUsage);
   }
+  // 按访问密钥收窄的整页读数（快照 + 序列 + 可选明细）。与 key-usage 同级：挂在 /ui/
+  // 下且要完整鉴权，所以排在鉴权分支之后。**未筛选时页面不该碰它** —— 有几条断言
+  // 正是"默认态一条这样的请求都没有"。
+  if (path.startsWith("/ui/access-key-metrics.json")) {
+    const params = queryOf(url);
+    return respond(200, accessKeyMetricsPayload(params.get("access_key_id") || "", params));
+  }
   // Key 用量读数（/ui/key-usage.json）。与 /metrics 同级的完整权限读数，因此放在
   // 鉴权分支之后；未配置时给一份结构完整的空载荷，页面应画空态而不是崩掉。
   if (path.startsWith("/ui/key-usage.json")) {
-    return respond(200, server.keyUsage || {
+    const base = server.keyUsage || {
       count_semantics: "upstream_attempt",
       window: { from: null, to: "2026-01-01T10:00:00+08:00", hours: 1 },
       upstream_keys: [],
       model_keys: [],
       access_keys: [],
       unattributed: { requests: 0, successes: 0, failures: 0, total_tokens: 0 },
-    });
+    };
+    // 筛选生效时整份读数都收窄到这把访问密钥：上游 Key / 模型 × Key / 访问密钥三份
+    // 拆分一起换，否则表内范围与上方总量不是一回事，数字会互相打架。
+    const accessKeyId = queryOf(url).get("access_key_id") || "";
+    if (accessKeyId) {
+      const scoped = server.accessKeyKeyUsage[accessKeyId];
+      // 没给夹具的 id（配置里已删除/不存在）：回结构完整的空读数，页面画空态。
+      if (scoped) return respond(200, scoped);
+      return respond(200, {
+        ...base, upstream_keys: [], model_keys: [], access_keys: [],
+        unattributed: { requests: 0, successes: 0, failures: 0, total_tokens: 0 },
+      });
+    }
+    return respond(200, base);
+  }
+  // 访问密钥清单：全局筛选控件的选项出处。只回目录（id / 显示名 / 指纹），
+  // 明文 key 与真实服务端一样不出现在任何 GET 里。
+  if (path.startsWith("/api/access-keys")) {
+    return respond(200, { config_revision: "rev-1", access_keys: server.accessKeys });
   }
   if (path.startsWith("/api/models")) {
     return respond(200, {
@@ -398,6 +483,148 @@ const submitKey = async (value) => {
   field.value = value;
   await clickButton("连接");
 };
+
+// —— 全局筛选（webui/access-filter.js）的用户动作 ——
+//
+// 控件是一个 <select aria-label="按访问密钥筛选">，选项 value 是 access key id，
+// "" = 全部。按 aria-label 找而不是按层级找：控件画在页头还是卡片里是页面自己的事，
+// 用户看到的只是"页面上有没有这个下拉、它选的是谁"。
+const filterSelects = () => findAll(root, (n) => n.tagName === "select"
+  && n.attrs?.["aria-label"] === "按访问密钥筛选");
+
+// chooseAccessKey 模拟用户在下拉里选中某把访问密钥：逐个调用 change 监听器，事件形状
+// 与浏览器一致（event.target.value 是被选中 option 的值）。**不能**直接写 store ——
+// "选了没反应"（监听器没接上、或页面没跟着重新取数）正是这个探针要测的那类缺陷。
+const chooseAccessKey = async (value) => {
+  const node = filterSelects()[0];
+  if (!node) return false;
+  const handlers = node.listeners.change || [];
+  if (!handlers.length) return false;
+  node.value = value;
+  for (const handler of handlers) await handler({ target: { value } });
+  await settle();
+  return true;
+};
+
+// statTile 返回某张 KPI 瓦片的整段文本。断言"这张瓦片上的数字"比在整页文本里搜一个
+// 数字可靠：整页里 37 可能恰好是别的数字（1,237）的一部分，那种断言红绿都说不清。
+const statTile = (label) => byClass("stat").find((n) => n.textContent.includes(label)) || null;
+
+// filterOptionValues 返回筛选下拉当前的选项 value 列表（按选项顺序）。
+const filterOptionValues = () => (filterSelects()[0]?.children || [])
+  .filter((node) => node.tagName === "option").map((node) => node.value);
+
+// clickWindowRange 模拟用户在页头切一档统计窗口（分段控件里的另一个按钮）。
+//
+// 用它触发整块重绘是刻意的：用户不会为了"让筛选器看到刚新建的 key"去刷新整页，而切窗口
+// 正是一种"走一遍 draw() 但不重载页面"的常见动作 —— 筛选器跟不跟得上就看这一次。
+const clickWindowRange = async (label) => {
+  const group = findAll(root, (n) => n.attrs?.["aria-label"] === "选择统计窗口")[0];
+  const target = group && findAll(group, (n) => n.tagName === "button")
+    .find((button) => button.textContent.trim() === label);
+  if (!target) return false;
+  for (const handler of target.listeners.click || []) await handler({});
+  await settle();
+  return true;
+};
+
+// installKeyUsageFixture 装「按 Key 拆分」三张卡的读数：两家供应商**同名** Key（都是
+// main）+ 一把访问密钥 + 一行没有供应商归因的历史行。这个组合专门覆盖三种情形：
+// 同名 Key 不能并成一行、访问密钥要单独一张表、未归属要在表里说明出处。
+function installKeyUsageFixture() {
+  server.keyUsage = {
+    count_semantics: "upstream_attempt",
+    window: { from: null, to: "2026-01-01T10:00:00+08:00", hours: 1 },
+    upstream_keys: [
+      { provider_id: "openai", key_name: "main", stats: { requests: 7, successes: 7, failures: 0, total_tokens: 700 } },
+      { provider_id: "azure", key_name: "main", stats: { requests: 3, successes: 3, failures: 0, total_tokens: 300 } },
+    ],
+    model_keys: [
+      { model_id: "route-a", provider_id: "openai", key_name: "main", stats: { requests: 7, successes: 7, failures: 0, total_tokens: 700 } },
+      { model_id: "route-b", provider_id: "azure", key_name: "main", stats: { requests: 3, successes: 3, failures: 0, total_tokens: 300 } },
+    ],
+    access_keys: [
+      { access_key_id: "ak1", access_key_name: "试用账号 A", stats: { requests: 5, successes: 5, failures: 0, total_tokens: 500 } },
+    ],
+    unattributed: { requests: 2, successes: 1, failures: 1, total_tokens: 20 },
+  };
+}
+
+// accessKeyPoint 造一个序列点，形状与 /metrics/series 的点一致（页面按同一套字段读）。
+function accessKeyPoint(startedAt, endedAt, requests, totalTokens) {
+  return {
+    started_at: startedAt, ended_at: endedAt, complete: true,
+    requests, successes: requests, failures: 0, retries: 0,
+    prompt_tokens: totalTokens, completion_tokens: 0, total_tokens: totalTokens, cached_tokens: 0,
+    total_duration_ms: requests * 100, total_first_token_ms: requests * 20,
+  };
+}
+
+// installAccessKeyFilterFixture 装全局筛选要用的两份夹具：密钥清单与过滤端点的读数。
+//
+// 数字刻意与全局读数**明显不同**：全局 /metrics 是 total.requests=3、total_tokens=40，
+// ak1 是 37 / 12345。页面若没真的换到过滤端点（或把 access_key_id 丢了），
+// 「KPI 上是 37 / 12.3K」立刻不成立 —— 取 0 或 1 这类巧合值就证明不了这件事。
+function installAccessKeyFilterFixture() {
+  server.accessKeys = [
+    { id: "ak1", name: "试用账号 A", enabled: true, key_fingerprint: "fp-ak1" },
+    { id: "ak2", name: "试用账号 B", enabled: true, key_fingerprint: "fp-ak2" },
+  ];
+  // 筛选后的「按 Key 拆分」读数：行与全局那份**完全不同**（全局是 openai/azure 两家的
+  // main，这里是这把 key 专走的一把）。页面若在切回「全部」时没换回来，卡片上就会出现
+  // ak1-only-key —— 那种"卡回来了、内容还是旧的"正是要断言的东西。
+  server.accessKeyKeyUsage = {
+    ak1: {
+      count_semantics: "upstream_attempt",
+      window: { from: null, to: "2026-01-01T10:00:00+08:00", hours: 1 },
+      upstream_keys: [
+        { provider_id: "openai", key_name: "ak1-only-key", stats: { requests: 37, successes: 36, failures: 1, total_tokens: 12345 } },
+      ],
+      model_keys: [
+        { model_id: "ak1-only-model", provider_id: "openai", key_name: "ak1-only-key", stats: { requests: 37, successes: 36, failures: 1, total_tokens: 12345 } },
+      ],
+      access_keys: [
+        { access_key_id: "ak1", access_key_name: "试用账号 A", stats: { requests: 37, successes: 36, failures: 1, total_tokens: 12345 } },
+      ],
+      unattributed: { requests: 0, successes: 0, failures: 0, total_tokens: 0 },
+    },
+  };
+  server.accessKeyMetrics = {
+    ak1: {
+      snapshot: {
+        count_semantics: "attempts",
+        window: { from: "2026-01-01T09:00:00+08:00", to: "2026-01-01T10:00:00+08:00", hours: 1 },
+        rate_window_seconds: 60,
+        current_rpm: 7,
+        current_tpm: 1234,
+        router_status: "green",
+        active_requests: 0,
+        total: {
+          requests: 37, successes: 36, failures: 1, retries: 2,
+          prompt_tokens: 10000, completion_tokens: 2345, total_tokens: 12345, cached_tokens: 1000,
+          avg_duration_ms: 820, min_duration_ms: 120, max_duration_ms: 3100, avg_first_token_ms: 210,
+        },
+        caller_types: {},
+        models: {},
+        providers: {},
+        upstream_models: {},
+        unattributed: {},
+      },
+      // 三点合计正好 37 次请求：曲线上看到的量级与 KPI 的 37 出自同一份读数。
+      points: [
+        accessKeyPoint("2026-01-01T09:00:00+08:00", "2026-01-01T09:15:00+08:00", 12, 4000),
+        accessKeyPoint("2026-01-01T09:15:00+08:00", "2026-01-01T09:30:00+08:00", 13, 4500),
+        accessKeyPoint("2026-01-01T09:30:00+08:00", "2026-01-01T09:45:00+08:00", 12, 3845),
+      ],
+      // 明细用这把 key 独有的模型名：请求流若还在读全量端点，全量夹具里那条
+      // global-only-model 就会露出来。
+      items: [
+        { id: 101, created_at: "2026-01-01T09:12:00+08:00", caller_type: "access_key", model_id: "ak1-only-model", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "main", status_code: 200, success: true, retried: false, prompt_tokens: 300, completion_tokens: 70, total_tokens: 370, cached_tokens: 0, duration_ms: 700, first_token_ms: 120 },
+        { id: 102, created_at: "2026-01-01T09:20:00+08:00", caller_type: "access_key", model_id: "ak1-only-model", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "main", status_code: 200, success: true, retried: false, prompt_tokens: 400, completion_tokens: 90, total_tokens: 490, cached_tokens: 0, duration_ms: 900, first_token_ms: 150 },
+      ],
+    },
+  };
+}
 
 // 预期：每个场景前置的 localStorage 与假服务端状态
 const setup = {
@@ -586,25 +813,45 @@ const setup = {
   usage_page_renders_history_ranges: () => {
     global.location.hash = "#/activity";
     storage.set("amkr.apiKey", "good-key");
-    // 按 Key 拆分（/ui/key-usage.json）：两家供应商**同名** Key（都是 main）+ 一把访问
-    // 密钥 + 一行没有供应商归因的历史行。这个组合专门覆盖这次要修的三种情形：
-    // 同名 Key 不能并成一行、访问密钥要单独一张表、未归属要在表里说明出处。
-    server.keyUsage = {
-      count_semantics: "upstream_attempt",
-      window: { from: null, to: "2026-01-01T10:00:00+08:00", hours: 1 },
-      upstream_keys: [
-        { provider_id: "openai", key_name: "main", stats: { requests: 7, successes: 7, failures: 0, total_tokens: 700 } },
-        { provider_id: "azure", key_name: "main", stats: { requests: 3, successes: 3, failures: 0, total_tokens: 300 } },
-      ],
-      model_keys: [
-        { model_id: "route-a", provider_id: "openai", key_name: "main", stats: { requests: 7, successes: 7, failures: 0, total_tokens: 700 } },
-        { model_id: "route-b", provider_id: "azure", key_name: "main", stats: { requests: 3, successes: 3, failures: 0, total_tokens: 300 } },
-      ],
-      access_keys: [
-        { access_key_id: "ak1", access_key_name: "试用账号 A", stats: { requests: 5, successes: 5, failures: 0, total_tokens: 500 } },
-      ],
-      unattributed: { requests: 2, successes: 1, failures: 1, total_tokens: 20 },
+    installKeyUsageFixture();
+    // 筛选控件要先有清单才画得出「试用账号 A（ak1）」这一项（选项来自配置的投影）。
+    // 这里同时断言默认态一条过滤端点的请求都不发。
+    installAccessKeyFilterFixture();
+  },
+  // 全局筛选 · 用量统计页：选中 ak1 后三张 Key 卡收起、读数换成过滤端点的那组数字；
+  // 切回「全部」后三张卡回来并重新按全量端点取数。
+  usage_filters_by_access_key: () => {
+    global.location.hash = "#/activity";
+    storage.set("amkr.apiKey", "good-key");
+    installKeyUsageFixture();
+    installAccessKeyFilterFixture();
+  },
+  // 全局筛选 · 概览页：热力图（7 天 / 半小时一格）、请求流（最近 40 条）与主窗口读数
+  // 都必须换成过滤端点；请求流只渲染 ak1 的记录；未筛选时一条过滤端点请求都没有。
+  overview_filters_by_access_key: () => {
+    global.location.hash = "#/overview";
+    storage.set("amkr.apiKey", "good-key");
+    installAccessKeyFilterFixture();
+    // 全量读数：三条记录，其中 global-only-model 是它独有的那条 —— 筛选后若还看得见它，
+    // 说明请求流仍在读 /metrics/requests。行数（3 vs 2）也刻意不同。
+    server.requestItems = [
+      { id: 3, created_at: "2026-01-01T09:59:00+08:00", caller_type: "local", model_id: "global-only-model", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 200, success: true, retried: false, prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, cached_tokens: 0, duration_ms: 800 },
+      { id: 2, created_at: "2026-01-01T09:58:00+08:00", caller_type: "local", model_id: "gpt-4o", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 200, success: true, retried: false, prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, cached_tokens: 0, duration_ms: 800 },
+      { id: 1, created_at: "2026-01-01T09:57:00+08:00", caller_type: "access_key", model_id: "route-b", upstream_model_id: "no-price-model", provider_id: "openai", key_name: "k2", status_code: 502, success: false, retried: true, prompt_tokens: 50, completion_tokens: 0, total_tokens: 50, cached_tokens: 0, duration_ms: 1200 },
+    ];
+    server.pricing = {
+      version: 1, source: "https://models.dev/api.json",
+      updated_at: "2026-01-02T03:04:05Z", error: null,
+      models: { "gpt-4o": { input: 2.5, output: 10, cache_read: 1.25 } },
     };
+  },
+  // 新建访问密钥后筛选器要立刻跟上：清单不再长期缓存，每次绘制都重读 /api/access-keys。
+  // 夹具里先只放 ak1 —— ak3 是"用户刚在访问密钥页新建的那把"，场景中途才会出现。
+  filter_picks_up_newly_created_access_key: () => {
+    global.location.hash = "#/overview";
+    storage.set("amkr.apiKey", "good-key");
+    installAccessKeyFilterFixture();
+    server.accessKeys = [{ id: "ak1", name: "试用账号 A", enabled: true, key_fingerprint: "fp-ak1" }];
   },
   // 「全部历史」的跨度由 /metrics/requests 的 window.from 推导：服务端给出的一年多
   // 以前的记录，应当被夹到后端上限（8760 小时）并如实说明"只覆盖到上限"。
@@ -1225,6 +1472,185 @@ if (scenario === "stale_key_prompts_login") {
   // 「看板数字互相矛盾」。
   checks.explainsUnattributedKeyRows = body.includes("没有供应商归因")
     && body.includes("另有 2 次调用");
+
+  // —— 全局筛选控件（本次改动的入口）：默认态 ——
+  // 控件必须在、且默认选中「全部访问密钥」。默认必须是"不筛选"：否则一进页面就少了
+  // 三张卡，读数还只覆盖一把 key，而用户从没做过这个选择。
+  const filterNodes = filterSelects();
+  const filterOptions = filterNodes.length === 1
+    ? filterNodes[0].children.filter((node) => node.tagName === "option")
+    : [];
+  checks.hasAccessKeyFilter = filterNodes.length === 1;
+  checks.filterDefaultsToAll = filterNodes.length === 1 && filterNodes[0].value === ""
+    && filterOptions.some((option) => option.value === "" && option.textContent === "全部访问密钥"
+      && option.selected === true);
+  // 清单里的访问密钥要进选项：value 是 id（稳定标识），标签带显示名（可读）。
+  checks.filterListsAccessKeys = filterOptions.some((option) => option.value === "ak1"
+    && option.textContent.includes("试用账号 A"));
+  // 未筛选时一条过滤端点的请求都不该发：发了就说明"全量"也被当成了筛选态，
+  // 首屏数字与今天（全实例）已经不是一回事。
+  checks.defaultStaysOnUnfilteredEndpoints = server.requests
+    .every((r) => !r.url.includes("/ui/access-key-metrics.json")
+      && !(r.url.startsWith("/ui/key-usage.json") && r.url.includes("access_key_id")));
+} else if (scenario === "usage_filters_by_access_key") {
+  await settle();
+  // 未选之前：一条过滤端点的请求都不该有（有就说明页面把"全量"也走了过滤端点）。
+  checks.noFilteredCallBeforeChoosing = server.requests
+    .every((r) => !r.url.includes("/ui/access-key-metrics.json"));
+  checks.filterControlPresent = filterSelects().length === 1;
+  const chosen = await chooseAccessKey("ak1");
+  // 选择值必须落在外壳 store 上：概览与用量统计共用同一份筛选状态靠的就是它。
+  checks.storeHoldsSelection = store.accessKeyFilter === "ak1";
+  if (!chosen) {
+    // 控件不在（或 change 没接上）时，下面全部无从谈起。显式记成失败而不是跳过 ——
+    // 跳过会让一个什么都没验证的场景"全绿"，这正是本探针最防的那种假阳性。
+    for (const name of [
+      "metricsCallScoped", "metricsCallNumbersOnly", "keyUsageCallScoped",
+      "keyCardsHidden", "coreCardsRemain", "filterNoteShown", "kpiFromFilteredSnapshot",
+      "switchBackToAll", "switchBackRestoresCards", "switchBackRefetchesUnfiltered",
+    ]) checks[name] = false;
+  } else {
+    const filtered = server.requests
+      .map((r) => ({ url: r.url, params: queryOf(r.url) }))
+      .filter((r) => r.url.startsWith("/ui/access-key-metrics.json"));
+    // 过滤端点必须带上被选中的那把 key：丢了参数 = 只是换了条路由，读数还是全量。
+    checks.metricsCallScoped = filtered.some((r) => r.params.get("access_key_id") === "ak1");
+    // 用量统计页只要读数不要明细（limit=0 时前端不传 limit），窗口参数要真的传下去。
+    checks.metricsCallNumbersOnly = filtered.length > 0
+      && filtered.every((r) => !r.params.get("limit"))
+      && filtered.some((r) => r.params.get("hours") === "24"
+        && Number(r.params.get("bucket_seconds")) > 0);
+    // 按 Key 拆分的读数也要跟着收窄，否则表内范围与上方总量对不上。
+    checks.keyUsageCallScoped = server.requests.some((r) => r.url.startsWith("/ui/key-usage.json")
+      && queryOf(r.url).get("access_key_id") === "ak1");
+
+    const scoped = text();
+    // 三张「按 Key 拆分」的卡在筛选态收起：只剩一把 key 时它们不再回答全实例的问题。
+    checks.keyCardsHidden = !scoped.includes("按访问密钥用量")
+      && !scoped.includes("按上游 Key 用量")
+      && !scoped.includes("模型 / 上游 Key 用量");
+    // 其余主视图一张都不能少（收起三张卡不能连它们一起带走）。
+    checks.coreCardsRemain = ["累计用量", "按天用量", "模型用量"].every((label) => scoped.includes(label));
+    // 收起来的卡去哪了必须写在页面上，否则用户会以为页面出故障。
+    checks.filterNoteShown = scoped.includes("已按访问密钥");
+    // KPI 用的是过滤端点的那组数字：37 次请求 / 12.3K Token（全量读数是 3 / 40）。
+    checks.kpiFromFilteredSnapshot = !!statTile("窗口请求") && statTile("窗口请求").textContent.includes("37")
+      && !!statTile("Token 用量") && statTile("Token 用量").textContent.includes("12.3K");
+
+    // 切回「全部」：三张卡回来、卡里的行也回到全量读数，并且重新按全量端点取数。
+    const beforeSwitchBack = server.requests.length;
+    const backChosen = await chooseAccessKey("");
+    checks.switchBackToAll = backChosen && store.accessKeyFilter === "";
+    const restored = text();
+    // 卡片回来还不够：里面的行也必须是全量的（同名 Key 带供应商前缀是默认态的判据）。
+    // 只把卡片放回来、内容还停在筛选读数上，是同屏数字互相矛盾的那种缺陷。
+    checks.switchBackRestoresCards = ["按访问密钥用量", "按上游 Key 用量", "模型 / 上游 Key 用量"]
+      .every((label) => restored.includes(label))
+      && restored.includes("openai / main") && restored.includes("azure / main");
+    checks.switchBackRefetchesUnfiltered = server.requests.slice(beforeSwitchBack)
+      .some((r) => r.url.startsWith("/metrics") && !r.url.includes("access_key_id"));
+  }
+} else if (scenario === "overview_filters_by_access_key") {
+  await settle();
+  // 默认态（未筛选）：一条过滤端点的请求都没有 —— 概览与改动前完全一样。
+  checks.defaultStateNeverHitsFilteredEndpoint = server.requests
+    .every((r) => !r.url.includes("/ui/access-key-metrics.json"));
+  checks.filterControlPresent = filterSelects().length === 1;
+  const chosen = await chooseAccessKey("ak1");
+  checks.storeHoldsSelection = store.accessKeyFilter === "ak1";
+  if (!chosen) {
+    for (const name of [
+      "heatmapCallScoped", "streamCallScoped", "windowCallScoped", "kpiFromFilteredSnapshot",
+      "marksActiveRequestsAsGlobal", "streamHasAk1Rows", "streamHidesGlobalOnlyRow",
+      "switchBackToAll", "switchBackShowsGlobalRows", "dropsGlobalMarkAfterSwitchBack",
+      "switchBackRefetchesUnfilteredHeatmap", "switchBackStopsFilteredCalls",
+    ]) checks[name] = false;
+  } else {
+    const filtered = server.requests
+      .map((r) => ({ url: r.url, params: queryOf(r.url) }))
+      .filter((r) => r.url.startsWith("/ui/access-key-metrics.json"));
+    // 热力图固定 7 天 / 半小时一格：筛选后整周矩阵也必须只含这把 key。
+    checks.heatmapCallScoped = filtered.some((r) => r.params.get("access_key_id") === "ak1"
+      && r.params.get("hours") === "168" && r.params.get("bucket_seconds") === "1800");
+    // 请求流：同一把 key、最近 40 条明细。
+    checks.streamCallScoped = filtered.some((r) => r.params.get("access_key_id") === "ak1"
+      && r.params.get("limit") === "40");
+    // 主窗口读数（KPI 与折线）也要换到过滤端点：只改请求流会让 KPI 继续报全实例的数字。
+    checks.windowCallScoped = filtered.some((r) => r.params.get("access_key_id") === "ak1"
+      && r.params.get("hours") === "1");
+
+    const scoped = text();
+    checks.kpiFromFilteredSnapshot = !!statTile("窗口请求")
+      && statTile("窗口请求").textContent.includes("37");
+    // 在途数（active_requests）是进程里的计数器，按定义拆不到某把 key：筛选态必须写明它
+    // 是全实例的，否则「N 个请求进行中」看起来像"这把 key 正在跑的请求数"，正好与本页
+    // 那句"读数只含这把密钥发起的调用"相反。
+    checks.marksActiveRequestsAsGlobal = scoped.includes("个请求进行中（全实例）");
+    // 请求流只渲染 ak1 的记录：两条都在（全量是三条），且用的是这把 key 独有的模型名。
+    checks.streamHasAk1Rows = byClass("stream-row").length === 2 && scoped.includes("ak1-only-model");
+    // 关键：全量读数里独有的那条绝不能出现（出现就说明请求流还在读 /metrics/requests）。
+    checks.streamHidesGlobalOnlyRow = !scoped.includes("global-only-model");
+
+    // 切回「全部」：请求流回到全量端点，且不再产生新的过滤端点请求。
+    const beforeSwitchBack = server.requests.length;
+    const backChosen = await chooseAccessKey("");
+    checks.switchBackToAll = backChosen && store.accessKeyFilter === "";
+    const restoredOverview = text();
+    checks.switchBackShowsGlobalRows = restoredOverview.includes("global-only-model");
+    // 未筛选时整页本来就是全实例的，文案要回到原样、不再挂「（全实例）」。
+    checks.dropsGlobalMarkAfterSwitchBack = !restoredOverview.includes("（全实例）");
+    // 热力图有自己的 TTL 缓存：切回全量必须当场重取 7 天矩阵，否则用户选着「全部」
+    // 却还在看只有 ak1 的那一周 —— 同屏数字对不上的另一种形态。
+    checks.switchBackRefetchesUnfilteredHeatmap = server.requests.slice(beforeSwitchBack)
+      .some((r) => r.url.startsWith("/metrics/series") && r.url.includes("hours=168"));
+    checks.switchBackStopsFilteredCalls = server.requests.slice(beforeSwitchBack)
+      .every((r) => !r.url.includes("/ui/access-key-metrics.json"));
+  }
+} else if (scenario === "filter_picks_up_newly_created_access_key") {
+  // 场景：用户在「访问密钥」页新建了一把 key，回到概览时筛选器里要能立刻看到它 ——
+  // 而不是必须刷新整页。清单因此每次绘制都重读一次 /api/access-keys（失败保留上一次）。
+  await settle();
+  const catalogReadsAtBoot = server.requests.filter((r) => r.url.startsWith("/api/access-keys")).length;
+  checks.startsWithExistingKey = filterOptionValues().includes("ak1");
+  checks.newKeyAbsentAtFirst = !filterOptionValues().includes("ak3");
+
+  // 先选中 ak1：后面要看"清单变了，但用户已经选好的筛选不能被弄丢"。
+  const chosen = await chooseAccessKey("ak1");
+  checks.selectionHeld = chosen && store.accessKeyFilter === "ak1"
+    && filterSelects()[0]?.value === "ak1";
+  if (!chosen) {
+    for (const name of [
+      "picksUpNewKeyOnRedraw", "keepsSelectionAfterRedraw", "rereadsCatalogOnEveryDraw",
+      "deletedSelectionStaysListed", "canSelectNewKey",
+    ]) checks[name] = false;
+  } else {
+    // 用户在别处新建了一把：服务端的清单里多出 ak3，页面自身没有任何变化。
+    server.accessKeys = server.accessKeys.concat([
+      { id: "ak3", name: "新密钥 C", enabled: true, key_fingerprint: "fp-ak3" },
+    ]);
+    // 触发一次整块重绘（切一档窗口），等价于用户回到概览后的下一次绘制。
+    checks.pageRedrawnAfterCreate = await clickWindowRange("6h");
+    const afterCreate = filterOptionValues();
+    // 无需整页刷新：选项里出现 ak3；已选中的 ak1 也没被这次重绘弄丢。
+    checks.picksUpNewKeyOnRedraw = afterCreate.includes("ak3");
+    checks.keepsSelectionAfterRedraw = filterSelects()[0]?.value === "ak1"
+      && store.accessKeyFilter === "ak1";
+    // 每次绘制都重读清单（而不是首屏读一次记一辈子）——这才是上面那条能成立的原因。
+    checks.rereadsCatalogOnEveryDraw = server.requests
+      .filter((r) => r.url.startsWith("/api/access-keys")).length > catalogReadsAtBoot;
+
+    // 已选中的 key 从配置里删掉时仍要留在选项里：否则筛选器显示"全部"，而页面上的数字
+    // 还是这把 key 的 —— 显示的范围与实际读数对不上。
+    server.accessKeys = server.accessKeys.filter((key) => key.id !== "ak1");
+    checks.pageRedrawnAfterDelete = await clickWindowRange("24h");
+    checks.deletedSelectionStaysListed = filterOptionValues().includes("ak1")
+      && filterSelects()[0]?.value === "ak1" && store.accessKeyFilter === "ak1";
+
+    // 新钥匙不只是"看得见"，还得能选：它真的在选项里，选中后筛选值落到 store 上。
+    const picked = await chooseAccessKey("ak3");
+    checks.canSelectNewKey = picked && filterOptionValues().includes("ak3")
+      && store.accessKeyFilter === "ak3" && filterSelects()[0]?.value === "ak3";
+  }
 } else if (scenario === "usage_all_history_clamps_span") {
   // 切到「全部」触发跨度推导：这里直接驱动页面上的分段控件。
   await settle();
