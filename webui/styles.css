@@ -1757,6 +1757,20 @@ details > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-of
 .status-seg.tone-warn { background: var(--tone-warn); }
 .status-seg.tone-bad { background: var(--tone-bad); }
 .status-seg.tone-neutral { background: var(--chart-neutral); }
+/* 状态码区：小标题 + 分布条 + 标签组。横条自带的 12px 下边距在这里会和 gap 叠成双倍，
+ * 把标签推得离它自己的横条太远，所以这一档里归零。 */
+.status-codes { display: flex; flex-direction: column; gap: var(--sp-1); }
+.status-codes > .status-bar { margin-bottom: 0; }
+/* 状态码标签：颜色、码、次数、占比装在同一个胶囊里横排换行（复用 .chips 的排布）。 */
+.status-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px;
+  background: var(--ui-surface-soft);
+  font-size: 12px;
+}
+.status-tag strong { font-weight: 500; font-variant-numeric: tabular-nums; }
+/* .card .muted 是 13px，比标签本身还大，这里跟着标签走。 */
+.status-tag .muted { font-size: inherit; }
 
 /* ══ 延迟面板 ══ */
 .latency-panel { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

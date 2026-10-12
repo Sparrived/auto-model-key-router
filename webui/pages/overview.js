@@ -373,10 +373,12 @@ function compositionCard(metrics) {
 // 拆成三张卡只会让同一批数字（86、86、86）看起来像三个不同的读数。
 //
 // 并成一张后的读法：一条横条给整体形状，类别用语义色，**同类内按次数深浅区分具体
-// 状态码**（200 是最深的绿，201 淡一档……），下面的明细行与色块一一对应；最下面才是
-// 尝试层面的成功/重试/失败——那是同一批请求的另一个侧面，不是漏斗的三步。
+// 状态码**（200 是最深的绿，201 淡一档……），下面一组标签（颜色+码+次数+占比）与
+// 色块一一对应；最下面才是尝试层面的成功/重试/失败——那是同一批请求的另一个侧面，
+// 不是漏斗的三步。
 const CODE_CLASSES = [
   { label: "2xx 成功", tone: "good", match: (code) => code >= 200 && code < 300 },
+  { label: "3xx 重定向", tone: "neutral", match: (code) => code >= 300 && code < 400 },
   { label: "4xx 客户端错误", tone: "warn", match: (code) => code >= 400 && code < 500 },
   { label: "5xx 服务端错误", tone: "bad", match: (code) => code >= 500 },
 ];
@@ -384,27 +386,33 @@ const CODE_CLASSES = [
 const OTHER_CLASS = { label: "其它状态", tone: "neutral" };
 const classOf = (code) => CODE_CLASSES.find((item) => item.match(code)) || OTHER_CLASS;
 
-// 同类内第 n 多的状态码淡一档。用透明度而不是另算一套色阶：色块底下就是卡片背景，
+// 同类内次数少的淡一档。用透明度而不是另算一套色阶：色块底下就是卡片背景，
 // 深浅关系在浅色/深色主题里都成立，也不必为每套配色维护色板。
 // 取 1/(1+0.4n) 而不是每档减同一个数：减法定长会在长尾上撞到同一个值（第 5 名和第
-// 6 名变成一个颜色，"深浅即排名"就断了），这条曲线严格递减、永远不会重复。
+// 6 名变成一个颜色，"深浅即量级"就断了），这条曲线严格递减、永远不会重复。
 const shadeOf = (rank) => 1 / (1 + rank * 0.4);
 
-// 横条与明细共用同一组行——两边各自排序迟早会出现"色块与说明对不上号"。
+// 横条与标签共用这组行——两边各自排序迟早会出现"色块与说明对不上号"。
+//
+// 位置与深浅分开算：
+//   * 位置按状态码升序，2xx/3xx/4xx/5xx 本来就相邻，兜底的灰段也不会被甩到红系
+//     5xx 后面（那会读成"未知的错误段"）；
+//   * 深浅按"同类内的次数档位"，次数相同的码深浅相同——深浅编码的是量级，不是名次，
+//     否则 502/503 同为 1 次却一深一浅，看起来像数据不同，还取决于 JSON 键序。
 function statusCodeRows(statusCodes) {
-  const codes = Object.entries(statusCodes || {})
+  const rows = Object.entries(statusCodes || {})
     .map(([code, count]) => ({ code: Number(code), count: Number(count) || 0 }))
     .filter((row) => row.count > 0)
     .sort((a, b) => b.count - a.count);
-  const rows = [];
-  for (const cls of [...CODE_CLASSES, OTHER_CLASS]) {
-    codes
-      .filter((row) => classOf(row.code) === cls)
-      .forEach((row, index) => rows.push({
-        ...row, label: cls.label, tone: cls.tone, shade: shadeOf(index),
-      }));
+  const seen = new Map(); // 类别 → 已出现过的次数集合
+  for (const row of rows) {
+    const cls = classOf(row.code);
+    const counts = seen.get(cls) || new Set();
+    counts.add(row.count);
+    seen.set(cls, counts);
+    Object.assign(row, { label: cls.label, tone: cls.tone, shade: shadeOf(counts.size - 1) });
   }
-  return rows;
+  return rows.sort((a, b) => a.code - b.code);
 }
 
 function resultCard(metrics) {
@@ -427,7 +435,7 @@ function resultCard(metrics) {
       h("span.flow-total-label", "次上游尝试"),
     ),
     codes.length
-      ? h("div.stack.tight", {},
+      ? h("div.status-codes", {},
           // 两套分母必须说清楚：状态码行按"有状态码的请求"算（连不上上游的那些没有
           // 状态码，不该把 2xx 的占比稀释掉），下面成功/重试/失败按全部尝试算。
           // 两者相等时不加这句，免得变成噪声。
@@ -439,18 +447,18 @@ function resultCard(metrics) {
               style: { flex: String(row.count), opacity: String(row.shade) },
               title: `${row.code} · ${formatCount(row.count)} 次 · ${formatPercent(row.count, coded)}`,
             }))),
-          h("div.stack.tight", {}, codes.map((row) =>
-            h("div.row-between", {},
-              h("span.inline", {},
-                h("i", { class: `swatch tone-${row.tone}`, style: { opacity: String(row.shade) } }),
-                h("span.mono", String(row.code)),
-                h("span.muted", row.label),
-              ),
-              h("span.inline", {},
-                h("strong", formatCount(row.count)),
-                h("span.muted", ` · ${formatPercent(row.count, coded)}`),
-              ),
-            ))),
+          // 一个状态码一个标签，横排换行：颜色、码、次数、占比本来就是一个整体，
+          // 拆成一行一个既拉长卡片，也让人以为每行是独立的一档数据。
+          h("div.chips", {}, codes.map((row) => h("span.status-tag", {
+            title: `${row.label} · ${formatCount(row.count)} 次`,
+          },
+            h("i", { class: `swatch tone-${row.tone}`, style: { opacity: String(row.shade) } }),
+            h("span.mono", String(row.code)),
+            h("span.inline", {},
+              h("strong", formatCount(row.count)),
+              h("span.muted", ` · ${formatPercent(row.count, coded)}`),
+            ),
+          ))),
         )
       : h("p.muted", "窗口内没有带状态码的请求。"),
     h("hr.divider"),
