@@ -532,7 +532,9 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
       "user_agent": "claude-cli/1.0",
       "stream": false,
       "api_format": "chat/completions",
-      "reasoning_effort": "high"
+      "reasoning_effort": "high",
+      "access_key_id": "trial",
+      "access_key_name": "试用账号 A"
     }
   ],
   "next_before_id": 1235
@@ -561,6 +563,17 @@ v4 起新写入的调用只按供应商与上游模型归因（模型池维度�
 
 Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_effort`：AMKR 不改写也不
 解释它，折算过去会造出一个上游并不认识的取值。
+
+最后两项 `access_key_id` / `access_key_name` 是增补的**调用方身份**——「这次请求是谁发的」：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `access_key_id` | string \| null | 发起这次请求的那把访问密钥在配置里的 `key_id`（取自 `request_access_key` 旁挂表）。完整权限、工作空间推理凭据写入的行以及升级前的历史行都是 `null`：它们不属于任何一把 key，**不会**兜底成某一把——那等于把别人的用量记到这个人头上 |
+| `access_key_name` | string \| null | 那把 key 在配置里的显示名，由**服务端**补上（指标库只存 `key_id`，显示名可改、属于配置）。配置里已经没有这把 key 时为 `null`，读端应回落到 `access_key_id` 显示：把 id 当名字回填会让「这把 key 已经被删掉」看不出来 |
+
+`access_key_id` 与同一条目里的 `key_name` 是两件不同的事：前者是**调用方**身份，后者是这次
+请求**打到上游用的那把 Provider Key** 的名字，两者互不嵌套（一把访问密钥的流量会打到多把
+上游 Key 上，反之亦然）。WebUI 的概览请求流用这两项显示「谁在用这个实例」。
 
 当 `next_before_id` 为 `null` 时没有下一页。刷新第一页时不要携带 `before_id`。
 
@@ -1930,8 +1943,8 @@ http://127.0.0.1:8000/ui/
 | `snapshot` | 与 `GET /metrics` **完全同形**（含 `count_semantics` / `window` / `started_at` / `database_path` / `rate_window_seconds` / `current_rpm` / `current_tpm` / 九个分组），但全部分组、总量与 rate 窗口都收窄到这组条件 |
 | `snapshot.active_requests` | **唯一的例外，刻意保持全局**：进程内的在途请求数，按定义无法按筛选条件拆分 |
 | `series` | 点与 `GET /metrics/series` 同形；窗口与 `snapshot` 相同（同一个 `now`），因此各桶 `requests` 合计与 `snapshot.total.requests` 对得上 |
-| `requests` | `limit=0` 时为 `null`（「这次没要明细」与「要了但一条都没有」要分得开）；否则 `items` 与 `GET /metrics/requests` 的条目同形 |
-| `filters` | 回显筛选值本身，两个数组（未筛的维度是空数组）。**不含**显示名——那是配置信息，界面从 `GET /api/access-keys` / `GET /api/providers` 拿 |
+| `requests` | `limit=0` 时为 `null`（「这次没要明细」与「要了但一条都没有」要分得开）；否则 `items` 与 `GET /metrics/requests` 的条目同形，含服务端补的 `access_key_id` / `access_key_name` |
+| `filters` | 回显筛选值本身，两个数组（未筛的维度是空数组）。**不含**显示名——筛选值是调用方传进来的条件，页面上的筛选器本来就渲染着名字；`items` 里的 `access_key_name` 是另一回事（那条明细要直接画到请求流上） |
 | `window` | 与 `/metrics` 同义：`all_history` 时 `from` 为 `null` |
 
 几点刻意的取舍：

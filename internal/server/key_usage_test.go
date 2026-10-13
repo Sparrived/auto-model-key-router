@@ -212,6 +212,59 @@ func TestKeyUsageEndpointValidatesHours(t *testing.T) {
 	}
 }
 
+// TestMetricsRequestsCarryAccessKeyName 断言 /metrics/requests 的明细带上访问密钥。
+//
+// 概览页请求流显示的就是这份明细（筛选态换走 /ui/filtered-metrics.json，那边是另一条
+// 装配路径，另有用例）。指标库只存 key_id，显示名是配置的属性、必须由服务端补上——
+// 否则看板只能显示一个 id，读者认不出是谁。没有归属的行补 null，**不编造**。
+func TestMetricsRequestsCarryAccessKeyName(t *testing.T) {
+	app := newKeyUsageApp(t)
+	seedKeyUsage(t, app)
+
+	recorder := serve(app, http.MethodGet, "/metrics/requests", fullAuthorization)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（body=%s）", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Items []struct {
+			CallerType    string  `json:"caller_type"`
+			AccessKeyID   *string `json:"access_key_id"`
+			AccessKeyName *string `json:"access_key_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析响应失败: %v（body=%s）", err, recorder.Body.String())
+	}
+	if len(body.Items) != 3 {
+		t.Fatalf("明细条数 = %d，期望 3（body=%s）", len(body.Items), recorder.Body.String())
+	}
+
+	attributed := 0
+	for _, item := range body.Items {
+		if item.AccessKeyID == nil {
+			if item.AccessKeyName != nil {
+				t.Errorf("无归属的行不该有显示名，实得 %q", *item.AccessKeyName)
+			}
+			continue
+		}
+		attributed++
+		if *item.AccessKeyID != "ak1" {
+			t.Errorf("access_key_id = %q，期望 ak1", *item.AccessKeyID)
+		}
+		if item.AccessKeyName == nil || *item.AccessKeyName != "试用账号 A" {
+			t.Errorf("access_key_name = %v，期望配置里的名字", item.AccessKeyName)
+		}
+		if item.CallerType != "access_key" {
+			t.Errorf("有归属的行的 caller_type = %q，期望 access_key", item.CallerType)
+		}
+	}
+	// 三行里只有一行出自访问密钥：另外两行是完整权限，必须仍是 null——把它们的用量
+	// 记到 ak1 头上等于谎报这个人的用量。
+	if attributed != 1 {
+		t.Errorf("带访问密钥归属的行数 = %d，期望 1", attributed)
+	}
+}
+
 // TestAttachAccessKeyNamesLeavesUnknownIDsNull 断言配置里已不存在的 key 不会被编造名字。
 //
 // 这条路径真实存在：访问密钥被删掉之后，历史指标行仍然按 key_id 分组返回。把 id 当
@@ -240,5 +293,32 @@ func TestAttachAccessKeyNamesLeavesUnknownIDsNull(t *testing.T) {
 	}
 	if body.AccessKeys[0].AccessKeyName != nil {
 		t.Errorf("access_key_name = %v，期望 null（配置里已无此 key）", *body.AccessKeys[0].AccessKeyName)
+	}
+
+	// 明细走同一条规则：id 照给、名字为 null，界面据此回落到 id 显示。把 id 当名字
+	// 回填会让「这把 key 已经不在配置里」看不出来。
+	recorder = serve(app, http.MethodGet, "/metrics/requests", fullAuthorization)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("明细状态码 = %d，期望 200", recorder.Code)
+	}
+	var history struct {
+		Items []struct {
+			AccessKeyID   *string `json:"access_key_id"`
+			AccessKeyName *string `json:"access_key_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &history); err != nil {
+		t.Fatalf("解析明细失败: %v", err)
+	}
+	for _, item := range history.Items {
+		if item.AccessKeyID == nil {
+			continue
+		}
+		if *item.AccessKeyID != "ak1" {
+			t.Errorf("access_key_id = %q，期望 ak1", *item.AccessKeyID)
+		}
+		if item.AccessKeyName != nil {
+			t.Errorf("access_key_name = %v，期望 null（配置里已无此 key）", *item.AccessKeyName)
+		}
 	}
 }

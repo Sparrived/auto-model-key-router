@@ -77,23 +77,61 @@ func attachAccessKeyNames(body *canonical.Value, cfg *config.RouterConfig) {
 	if !ok || entries == nil || entries.Kind != canonical.KindArray {
 		return
 	}
-	names := map[string]string{}
-	if cfg != nil {
-		for _, key := range cfg.AccessKeys {
-			if key.Name != "" {
-				names[key.ID] = key.Name
-			}
-		}
-	}
+	names := accessKeyNames(cfg)
 	for _, entry := range entries.Arr {
 		id, ok := entry.Obj.Get("access_key_id")
 		if !ok {
 			continue
 		}
-		if name, found := names[id.Str]; found {
-			entry.SetKey("access_key_name", canonical.NewString(name))
+		entry.SetKey("access_key_name", accessKeyName(names, id.Str))
+	}
+}
+
+// attachItemAccessKeyNames 给一组请求明细（items 数组）逐条补上配置里的显示名。
+//
+// 与 attachAccessKeyNames 同一件事，只是作用在 /metrics/requests 与 /ui/filtered-metrics.json
+// 的 **items** 上：概览页的请求流要显示「这次请求是谁发的」，而指标库只存 key_id。
+// 没带归属的行（完整权限、工作空间凭据、历史行）照常补一个 null——两项读数里的条目
+// 形状必须一致，读端才不用为「有些行有这个键、有些行没有」再写一次判空。
+//
+// 收的是 items 数组本身而不是整个响应：两边的 items 藏在不同的位置（一个在顶层，
+// 一个在 requests 之下），并且 `limit=0` 时那份是 null——形状不对就直接不补。
+func attachItemAccessKeyNames(items *canonical.Value, cfg *config.RouterConfig) {
+	if items == nil || items.Kind != canonical.KindArray {
+		return
+	}
+	names := accessKeyNames(cfg)
+	for _, item := range items.Arr {
+		id, ok := item.Obj.Get("access_key_id")
+		if !ok || id == nil || id.Kind != canonical.KindString {
+			// 没有归属（null）：同样写成 null，而不是把 key_id 回填成名字。
+			item.SetKey("access_key_name", canonical.NewNull())
 			continue
 		}
-		entry.SetKey("access_key_name", canonical.NewNull())
+		item.SetKey("access_key_name", accessKeyName(names, id.Str))
 	}
+}
+
+// accessKeyNames 把配置里的访问密钥渲染成 id -> 显示名。
+//
+// 没有显示名的 key 不进表：调用方据此回落到 key_id 本身，而不是拿到一个空串。
+func accessKeyNames(cfg *config.RouterConfig) map[string]string {
+	names := map[string]string{}
+	if cfg == nil {
+		return names
+	}
+	for _, key := range cfg.AccessKeys {
+		if key.Name != "" {
+			names[key.ID] = key.Name
+		}
+	}
+	return names
+}
+
+// accessKeyName 取一个 id 的显示名；配置里没有（或没写名字）时回 null。
+func accessKeyName(names map[string]string, id string) *canonical.Value {
+	if name, found := names[id]; found {
+		return canonical.NewString(name)
+	}
+	return canonical.NewNull()
 }

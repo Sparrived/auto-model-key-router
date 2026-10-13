@@ -211,6 +211,9 @@ func (a *App) handleMetricsRequests(w http.ResponseWriter, r *http.Request) {
 			writeInternalError(w)
 			return
 		}
+		// 明细要显示「这次请求是谁发的」，而指标库只存访问密钥的 key_id；显示名是配置
+		// 的属性，在这里补（与 /ui/key-usage.json 同一套做法，见 key_usage.go）。
+		attachItemAccessKeyNames(body.Lookup("items"), resources.Config)
 		writeJSON(w, http.StatusOK, body)
 	})
 }

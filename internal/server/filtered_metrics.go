@@ -63,10 +63,11 @@ func (a *App) handleFilteredMetrics(w http.ResponseWriter, r *http.Request) {
 			writeInternalError(w)
 			return
 		}
-		// 刻意**不**补显示名：那是配置信息（指标库只存 id），这条响应只回指标侧的事实，
-		// 界面自己去 /api/access-keys 与 /api/providers 拿名字——与 key_usage.go 那边
-		// 「服务端补 access_key_name」相反，因为那边是给人看的榜单，这里是一个筛选条件
-		// 的读数，页面上本来就同时渲染着筛选器。筛选值也在响应的 filters 里原样回显。
+		// 只给**明细**补访问密钥显示名（key_usage.go 的 attachItemAccessKeyNames）：
+		// items 是直接画到概览页请求流上的行，「这次请求是谁发的」必须能读出来，而指标库
+		// 只存 key_id。筛选值本身仍只回 id——`filters` 回显的是调用方传进来的条件，与
+		// 显示名无关，页面上的筛选器本来就渲染着名字。
+		attachItemAccessKeyNames(body.Lookup("requests").Lookup("items"), resources.Config)
 		writeJSON(w, http.StatusOK, body)
 	})
 }

@@ -128,8 +128,10 @@ type filteredMetricsBody struct {
 	} `json:"series"`
 	Requests *struct {
 		Items []struct {
-			ID      int64  `json:"id"`
-			ModelID string `json:"model_id"`
+			ID            int64   `json:"id"`
+			ModelID       string  `json:"model_id"`
+			AccessKeyID   *string `json:"access_key_id"`
+			AccessKeyName *string `json:"access_key_name"`
 		} `json:"items"`
 		NextBeforeID *int64 `json:"next_before_id"`
 		TotalItems   int64  `json:"total_items"`
@@ -232,6 +234,17 @@ func TestFilteredMetricsEndpoint(t *testing.T) {
 	}
 	if got := body.Requests.Items[0].ModelID; got != "model-a" {
 		t.Errorf("明细 model_id = %q，期望 model-a", got)
+	}
+	// 明细里的访问密钥：id 来自指标库，显示名由服务端从配置补（两行都是 ak1）。
+	// 这条路径的 items 嵌在 requests 之下，与 /metrics/requests 的顶层 items 不是同一处
+	// 装配代码——补名字时漏掉一边，请求流在筛选态就会显示成一个光秃秃的 id。
+	for _, item := range body.Requests.Items {
+		if item.AccessKeyID == nil || *item.AccessKeyID != "ak1" {
+			t.Errorf("明细 access_key_id = %v，期望 ak1", item.AccessKeyID)
+		}
+		if item.AccessKeyName == nil || *item.AccessKeyName != "试用账号 A" {
+			t.Errorf("明细 access_key_name = %v，期望配置里的名字", item.AccessKeyName)
+		}
 	}
 	if body.Requests.TotalItems != 2 {
 		t.Errorf("total_items = %d，期望 2", body.Requests.TotalItems)
