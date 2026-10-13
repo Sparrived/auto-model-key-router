@@ -732,7 +732,8 @@ function heatmapCard() {
 //   1. 谁、从哪儿来 —— 调用方档位、工作空间、来源地址（含 User-Agent 悬停）；
 //   2. 发了什么 —— 请求模型 → 实际模型 → 供应商 / 上游 Key / 上游模型，以及请求形态
 //      （流式与否、哪条 API 格式、什么思考强度）；
-//   3. 花了多少 Token —— 输入、输出、缓存读、合计（缓存写与未缓存输入在悬停里）；
+//   3. 花了多少 Token —— 输入、输出、缓存读、缓存写、合计，以及这次请求的生成速度
+//      （token/s；未缓存输入与口径说明在悬停里）；
 //   4. 结果如何 —— 成功/失败、状态码、是否重试、耗时与首字。
 // 四组信息一列一组，因此这张卡在概览里独占一整行（col-12）：半宽放不下，
 // 硬塞会把模型名与来源挤成省略号。
@@ -802,8 +803,12 @@ function streamRow(item) {
         ? [
             h("span.stream-tokens-line", {},
               `输入 ${formatCompact(item.prompt_tokens)} · 输出 ${formatCompact(item.completion_tokens)}`),
+            // 缓存写与缓存读分开列：两者单价与含义都不同（写是新增的缓存、读是命中的
+            // 缓存），合并成一个"缓存"数字后，读多还是写多这一眼就看不出来了。
             h("span.stream-tokens-line.muted", {},
-              `缓存 ${formatCompact(item.cached_tokens)} · 合计 ${formatCompact(item.total_tokens)}`),
+              `缓存读 ${formatCompact(item.cache_read_input_tokens)} · 缓存写 ${formatCompact(item.cache_creation_input_tokens)}`),
+            h("span.stream-tokens-line.muted", {},
+              `合计 ${formatCompact(item.total_tokens)} · ${speedText(item)}`),
           ]
         : h("span.stream-tokens-line.muted", {}, "无 Token 读数"),
     ),
@@ -901,8 +906,9 @@ function sourceTitle(item) {
   ].join("\n");
 }
 
-// tokenTitle 给出完整 Token 读数：列里放最常看的四项，缓存写与未缓存输入在悬停里。
+// tokenTitle 给出完整 Token 读数：列里放最常看的六项，未缓存输入与生成速度的口径在悬停里。
 function tokenTitle(item) {
+  const speed = decodeSpeed(item);
   return [
     `输入 ${formatCount(item.prompt_tokens)}（未缓存 ${formatCount(item.uncached_prompt_tokens)}）`,
     `输出 ${formatCount(item.completion_tokens)}`,
@@ -910,7 +916,35 @@ function tokenTitle(item) {
     `缓存写 ${formatCount(item.cache_creation_input_tokens)}`,
     `缓存合计 ${formatCount(item.cached_tokens)}`,
     `总计 ${formatCount(item.total_tokens)}`,
+    // 分母写在悬停里：同一个数按"÷ 总耗时"还是"÷ 生成阶段"能差一倍，读数的人才判断得了。
+    speed === null
+      ? "生成速度 无读数（缺输出 Token 或耗时）"
+      : `生成速度 ${speed.tps.toFixed(1)} tok/s = 输出 ÷ 生成阶段 ${formatDuration(speed.spanMS)}`,
   ].join("\n");
+}
+
+// decodeSpeed 给出这次请求的生成速度与它用的分母（毫秒）；缺读数时给 null。
+//
+// 口径是「输出 token ÷ 生成阶段耗时」（总耗时减去首字耗时）：首字之前是排队与预填充，
+// 那段时间产出的不是回答里的 token，算进分母会把"长首字"显示成"慢模型"。非流式请求
+// 通常没有首字读数（first_token_ms 为 0），此时只有总耗时可用，退化为「输出 ÷ 总耗时」。
+//
+// 缺输出 token 或缺耗时（失败请求、无 usage 的响应）时返回 null 而不是 0：0 tok/s 会被
+// 读成"卡住了"，而事实是"没有读数"——列里渲染成 "— tok/s"。
+function decodeSpeed(item) {
+  const output = Number(item.completion_tokens);
+  const duration = Number(item.duration_ms);
+  const decode = duration - Number(item.first_token_ms || 0);
+  const spanMS = decode > 0 ? decode : duration;
+  if (!(output > 0) || !(spanMS > 0)) return null;
+  // 保留 1 位小数：tok/s 是量级读数，更多位数只是噪声。
+  return { tps: Math.round((output * 1000) / spanMS * 10) / 10, spanMS };
+}
+
+// speedText 是 Token 列第三行尾部的读数；没有读数时写 "— tok/s"（未知值用 —，不是 0）。
+function speedText(item) {
+  const speed = decodeSpeed(item);
+  return speed === null ? "— tok/s" : `${formatCompact(speed.tps)} tok/s`;
 }
 
 function resultText(item) {

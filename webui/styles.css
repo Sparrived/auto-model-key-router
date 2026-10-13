@@ -1560,7 +1560,7 @@ input::placeholder, textarea::placeholder { color: var(--ui-text-muted); opacity
 .stream-row.is-failure .stream-bar { background: var(--tone-bad); }
 .stream-row.is-retry .stream-bar { background: var(--tone-warn); }
 .stream-row .stream-time { color: var(--ui-text-muted); font-variant-numeric: tabular-nums; }
-/* 五组多行单元格共用一套排版：纵向两行，各自溢出省略。 */
+/* 五组多行单元格共用一套排版：纵向 2–3 行（只有 Token 列是三行），各自溢出省略。 */
 .stream-row .stream-main,
 .stream-row .stream-shape,
 .stream-row .stream-source,
@@ -1578,15 +1578,15 @@ input::placeholder, textarea::placeholder { color: var(--ui-text-muted); opacity
 .stream-row .stream-result-sub {
   display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* 副行统一 11px 灰字：一列里两行读数靠字号与颜色分级，不靠分隔线。
+/* 副行统一 11px 灰字：一列里多行读数靠字号与颜色分级，不靠分隔线。
  * 首行（"输入 x · 输出 y"、"成功 · HTTP 200"、"流式"）保持 12px 正文色，它是这一列的主读数。 */
 .stream-row .stream-meta,
 .stream-row .stream-source-addr,
 .stream-row .stream-result-sub {
   font-size: 11px; color: var(--ui-text-muted);
 }
-/* 带 .muted 的副行（"缓存 x · 合计 y"、"Chat · 思考 high"、"无 Token 读数"）同一档；
- * 三个类压得过 .card .muted 的 13px，否则它们会比同排的副行大一号。 */
+/* 带 .muted 的副行（"缓存读 x · 缓存写 y"、"合计 x · 42 tok/s"、"Chat · 思考 high"、
+ * "无 Token 读数"）同一档；三个类压得过 .card .muted 的 13px，否则它们会比同排的副行大一号。 */
 .stream-row .stream-tokens-line.muted,
 .stream-row .stream-shape-line.muted { font-size: 11px; color: var(--ui-text-muted); }
 /* 来源地址用等宽字体：IPv6 与端口都是数字，等宽下多行之间能按位对齐。 */

@@ -933,6 +933,25 @@ const setup = {
       { id: 2, created_at: "2026-01-01T09:58:30+08:00", caller_type: "access_key", model_id: "route-b", upstream_model_id: "no-price-model", provider_id: "openai", key_name: "k2", status_code: 502, success: false, retried: true, prompt_tokens: 50, completion_tokens: 0, total_tokens: 50, cached_tokens: 0, duration_ms: 1200 },
     ];
   },
+  // 请求流的 Token 列：缓存写/读分列，并给出每条请求的生成速度。
+  // 夹具刻意让 cached_tokens（950）不等于 缓存读 + 缓存写（800 + 150）：列里若不去取
+  // cache_read_input_tokens / cache_creation_input_tokens 而拿 cached_tokens 顶替，数字会露馅。
+  overview_stream_shows_decode_speed_and_cache_split: () => {
+    global.location.hash = "#/overview";
+    storage.set("amkr.apiKey", "good-key");
+    server.requestItems = [
+      // 流式：首字 200ms、总耗时 10200ms → 生成阶段 10s，400 token = 40 tok/s。
+      // （按总耗时算是 39.2 tok/s —— 断言据此区分两个分母，不只是"有个数字"。）
+      { id: 3, created_at: "2026-01-01T09:59:00+08:00", caller_type: "local", model_id: "route-a", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 200, success: true, retried: false, prompt_tokens: 1000, completion_tokens: 400, total_tokens: 1400, cached_tokens: 950, cache_read_input_tokens: 800, cache_creation_input_tokens: 150, first_token_ms: 200, duration_ms: 10200, stream: true },
+      // 非流式：没有首字读数，分母退回总耗时 → 600 / 3s = 200 tok/s。
+      { id: 2, created_at: "2026-01-01T09:58:00+08:00", caller_type: "local", model_id: "route-a", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 200, success: true, retried: false, prompt_tokens: 100, completion_tokens: 600, total_tokens: 700, cached_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, first_token_ms: 0, duration_ms: 3000, stream: false },
+      // 失败：没有输出 token，也没有耗时 —— 速度只能写 "—"，写成 0 / NaN / Infinity 都是谎报。
+      { id: 1, created_at: "2026-01-01T09:57:00+08:00", caller_type: "access_key", model_id: "route-b", upstream_model_id: "no-price-model", provider_id: "openai", key_name: "k2", status_code: 502, success: false, retried: true, prompt_tokens: 50, completion_tokens: 0, total_tokens: 50, cached_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, first_token_ms: 0, duration_ms: 0, stream: false },
+      // 连 usage 都没有的 502：整列保持单行「无 Token 读数」，而不是三行 0 ——
+      // "没有读数"与"确实是 0"是两件事，后者才是缓存那一行的 0。
+      { id: 0, created_at: "2026-01-01T09:56:00+08:00", caller_type: "local", model_id: "route-a", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 502, success: false, retried: false, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cached_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, first_token_ms: 0, duration_ms: 0, stream: false },
+    ];
+  },
   // 用量统计页（原「实时活动」）：长窗口必须能画出来，且窗口切换项包含历史档。
   usage_page_renders_history_ranges: () => {
     global.location.hash = "#/activity";
@@ -1551,6 +1570,37 @@ if (scenario === "stale_key_prompts_login") {
   // 未匹配到单价的条目显示 "—"，**不能**是 "$0"。
   checks.unpricedShowsDash = costCells.includes("—");
   checks.noCostCellIsZero = costCells.every((t) => t !== "$0");
+} else if (scenario === "overview_stream_shows_decode_speed_and_cache_split") {
+  await settle();
+  // 每条请求的 Token 列现在是三行：输入/输出、缓存读/缓存写、合计 + 生成速度。
+  const cells = byClass("stream-tokens")
+    .map((cell) => cell.children.map((line) => line.textContent.trim()));
+  checks.hasFourTokenRows = cells.length === 4;
+  // usage 全 0 的那一条仍是单行「无 Token 读数」：三行 0 会把"没有读数"说成"读数是 0"。
+  const noUsage = cells.filter((row) => row[0] === "无 Token 读数");
+  checks.noUsageRowStaysSingleLine = noUsage.length === 1 && noUsage[0].length === 1;
+  const tokenRows = cells.filter((row) => row[0] !== "无 Token 读数");
+  checks.tokenRowsHaveThreeLines = tokenRows.length === 3 && tokenRows.every((row) => row.length === 3);
+  // 按行取，而不是按下标取：本探针的顺序不是被测对象，错位时应该报"哪一行不对"。
+  const rowOf = (needle) => cells.find((row) => row.some((line) => line.includes(needle))) || [];
+
+  // 缓存写/读分列：150 与 800 必须分别出现，且都不能是 cached_tokens（950）。
+  const streaming = rowOf("缓存读 800");
+  checks.splitsCacheReadAndWrite = streaming[1] === "缓存读 800 · 缓存写 150";
+  // 速度分母是生成阶段（10200 − 200 = 10000ms）而不是总耗时：400 token / 10s = 40 tok/s
+  // （按总耗时算会得到 39.2 —— 这一条同时锁住口径与四舍五入）。
+  checks.streamingSpeedDividesByDecodeSpan = streaming[2] === "合计 1.4K · 40 tok/s";
+  // 非流式没有首字读数，退回总耗时：600 / 3s = 200 tok/s。
+  checks.nonStreamingFallsBackToTotalDuration = rowOf("输出 600")[2] === "合计 700 · 200 tok/s";
+  // 失败行既没有输出 token 也没有耗时：未知值写 "—"，不能是 0 / NaN / Infinity。
+  checks.failedRowShowsDashSpeed = rowOf("输出 0")[2] === "合计 50 · — tok/s";
+  // 除零、漏字段最容易在这里露出来：整页都不该出现这些字样。
+  checks.noBrokenNumberInStream = !/NaN|Infinity|undefined|null tok\/s/.test(text());
+  // 悬停里要给出速度**与它的分母**：同一个数换个分母能差一倍，读数的人得判断得了。
+  const titles = byClass("stream-tokens").map((cell) => String(cell.attrs?.title || ""));
+  checks.tooltipExplainsSpeedAndSpan = titles.some((t) =>
+    t.includes("生成速度 40.0 tok/s = 输出 ÷ 生成阶段 10.0s")
+    && t.includes("缓存读 800") && t.includes("缓存写 150"));
 } else if (scenario === "workspaces_kpi_grid_has_no_orphan") {
   await settle();
   const body = text();
