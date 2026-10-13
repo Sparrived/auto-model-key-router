@@ -370,6 +370,71 @@ const layouts = VIEWPORTS.map((viewport) => ({ ...viewport, layout: layoutFor(vi
 
 let checked = 0;
 
+// —— 静态自检：筛选下拉面板必须"单列 + 纵向可滚" ——
+//
+// 面板 `.segmented` 继承基础规则的 flex-wrap: wrap（styles.css 里那行是给旧的一排 chip 写的），
+// 面板只把方向改成 column。列方向再叠 wrap，超出 max-height: 300px 的选项会折到**右侧的列**里，
+// 接着被 overflow-x: hidden 裁掉 —— 选项看不到也点不到，纵向滚动反而永远不触发。
+//
+// 真浏览器实测（1600px、34 把密钥 = 35 枚 chip）：缺陷版 clientW 353 < scrollW 913、chip 分 4 列
+// （x=1044/1392/1669/1811）、clientH 284 = scrollH 284（没有滚动条），chip 最大右缘 1950 超出面板
+// 右缘 1393 ⇒ 26 项看不见也点不到；阈值只要 10 枚 chip（≈ 9 把密钥）。修复版 clientW = scrollW
+// = 353、单列、clientH 300 < scrollH 1090，chip 28px 高、最大右缘 1374 ≤ 面板右缘 1393。
+//
+// 垫片抓不到这类缺陷（没有布局引擎，量不到矩形与滚动尺寸），只能在这里读声明把前提锁住。
+// flex-wrap: nowrap 与 chip 的 flex: none 缺一不可：只加前者，chip 会被默认收缩压成 10px 高、
+// 字被纵向切开，面板照样不滚，只是把每一行挤成一条缝。
+{
+  const panelSelector = ".metric-filters .filter-select > .segmented";
+  const chipSelector = `${panelSelector} .segment`;
+  const cssRules = rulesOf(baseCSS);
+  const panel = cssRules.find((rule) => rule.selectors.includes(panelSelector));
+  const chip = cssRules.find((rule) => rule.selectors.includes(chipSelector));
+  const declsOf = (decls) => new Map(decls.split(";")
+    .map((part) => part.split(":"))
+    .filter((pair) => pair.length > 1)
+    .map((pair) => [pair[0].trim().toLowerCase(), pair.slice(1).join(":").trim().toLowerCase()]));
+  const panelDecls = declsOf(panel ? panel.decls : "");
+  const chipDecls = declsOf(chip ? chip.decls : "");
+  const decl = (decls, name) => decls.get(name) ?? "未声明";
+  let panelOk = true;
+
+  checked += 1;
+  if (!panel || !chip) {
+    panelOk = false;
+    fail(`styles.css 里 ${!panel ? panelSelector : chipSelector} 规则找不到了`
+      + `：筛选面板的滚动前提检查已失效，请同步更新探针`);
+  }
+
+  checked += 1;
+  if (decl(panelDecls, "flex-direction") !== "column" || decl(panelDecls, "flex-wrap") !== "nowrap") {
+    panelOk = false;
+    fail(`${panelSelector} 必须同时写 flex-direction: column 与 flex-wrap: nowrap`
+      + `（现在 flex-direction: ${decl(panelDecls, "flex-direction")}、flex-wrap: ${decl(panelDecls, "flex-wrap")}）`
+      + `：面板会沿用基础 .segmented 的 wrap，列方向再叠 wrap，超出 max-height 的选项折成右侧多列、`
+      + `被 overflow-x: hidden 裁掉，纵向滚动永远不触发（实测 35 枚 chip 时 chip 分 4 列、26 项点不到）`);
+  }
+
+  checked += 1;
+  if (decl(panelDecls, "overflow-x") !== "hidden" || decl(panelDecls, "overflow-y") !== "auto") {
+    panelOk = false;
+    fail(`${panelSelector} 的纵向滚动前提被改了`
+      + `（现在 overflow-x: ${decl(panelDecls, "overflow-x")}、overflow-y: ${decl(panelDecls, "overflow-y")}）`
+      + `：需要 overflow-x: hidden + overflow-y: auto，写成 overflow: auto 会重新长出横向滚动条`);
+  }
+
+  checked += 1;
+  if (decl(chipDecls, "flex") !== "none") {
+    panelOk = false;
+    fail(`${chipSelector} 必须写 flex: none（现在 flex: ${decl(chipDecls, "flex")}）`
+      + `：单列 + nowrap 之后 chip 会被默认收缩压扁（实测 10px 高、字被纵向切开），`
+      + `面板永远不会滚，只会把每一行挤成一条缝`);
+  }
+
+  console.log(`${panelOk ? "OK  " : "FAIL"} ${"styles.css".padEnd(22)} 筛选下拉面板：`
+    + `单列（flex-direction: column + flex-wrap: nowrap）· chip flex: none · overflow-x: hidden + overflow-y: auto`);
+}
+
 for (const page of PAGES) {
   const source = read(page.file);
   const grids = gridCards(source, page.file);
@@ -445,7 +510,7 @@ console.log(`检查了 ${checked} 项，断点档位：${VIEWPORTS.map((v) => v.
 if (failures.length) {
   console.log("");
   for (const message of failures) console.log(`✗ ${message}`);
-  console.log(`\n共 ${failures.length} 处排不满；卡片数或断点列定义改动后必须让每一排都排满。`);
+  console.log(`\n共 ${failures.length} 处未通过；卡片数、断点列定义或筛选面板的滚动声明改动后都要重新核对。`);
   process.exit(1);
 }
 console.log("所有看板在四档断点下都排满了，没有空轨或孤儿瓦片。");

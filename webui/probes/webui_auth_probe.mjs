@@ -603,19 +603,91 @@ const submitKey = async (value) => {
 
 // —— 全局筛选（webui/metric-filter.js）的用户动作 ——
 //
-// 控件是两排 chip：div.metric-filters → 每维度一个 div.filter-group[data-dimension]，
-// 里面是 div.segmented[aria-label="按供应商筛选"|"按访问密钥筛选"]，chip 是
-// button.segment[data-value]（data-value="" 那枚是「全部」= 该维度不设限），按下态写
-// aria-pressed="true"，同一维度可以多枚同时按下。
+// 每个维度是一个原生 <details> 下拉：div.metric-filters → div.filter-group[data-dimension]
+// → span.filter-label（维度名）+ details.filter-select（收起时只留一行摘要）→
+// summary.filter-summary > span.filter-summary-text（摘要）与 div.segmented[aria-label]，
+// chip 是 button.segment[data-value]（data-value="" 那枚是「全部」= 该维度不设限），
+// 按下态写 aria-pressed="true"，同一维度可以多枚同时按下。
 //
-// 一律按 data-dimension + data-value 找，**不按文本找**：两排 chip 的第一枚文本都是
-// 「全部」，页头还有一档窗口也叫「全部」，按文本匹配会点到别的控件上去。
+// 一律按 data-dimension + data-value 找，**不按文本找**：两排的默认摘要都是「全部」，
+// 页头还有一档窗口也叫「全部」，按文本匹配会点到别的控件上去。
 const filterGroup = (dimension) =>
   findAll(root, (n) => n.attrs?.["data-dimension"] === dimension)[0] || null;
 
 const filterChips = (dimension) => {
   const group = filterGroup(dimension);
   return group ? findAll(group, (n) => n.tagName === "button") : [];
+};
+
+// filterDetails 返回某维度的下拉本体（details.filter-select）。
+const filterDetails = (dimension) => {
+  const group = filterGroup(dimension);
+  return group ? findAll(group, (n) => n.tagName === "details")[0] || null : null;
+};
+
+// filterExpanded 判断某维度的下拉是否展开。
+//
+// 判据是 **open 属性在不在**（dom.js 把 open:true 写成 setAttribute("open","")），
+// 不能写成 `details.attrs.open` 的真值判断：垫片里那是个空字符串，假值 —— 真值判断会把
+// "展开"读成"收起"，断言就永远成立。也不能读 details.open 属性值：垫片不把 setAttribute
+// 反映成属性（真实浏览器会），重建出来的节点上它一直是 undefined。
+const filterExpanded = (dimension) => {
+  const details = filterDetails(dimension);
+  return !!details && details.attrs.open !== undefined;
+};
+
+// filterSummary 读收起时那一行摘要（span.filter-summary-text）。
+const filterSummary = (dimension) => {
+  const details = filterDetails(dimension);
+  const node = details && findAll(details,
+    (n) => String(n.className || "").split(/\s+/).includes("filter-summary-text"))[0];
+  return node ? node.textContent.trim() : "";
+};
+
+// nativeAccordionGroup 模拟浏览器对 `details[name]` 的原生手风琴语义。
+//
+// 真 Edge 实测（--headless=new --dump-dom，三个 details：前两个同名 "g"、第三个无 name）：
+//   click1→1:true,2:false,3:false | click2→1:false,2:true,3:false | click3(无 name)→1:false,2:true,3:true
+//   事件 60ms 后收集：ev2=true | ev1=false | ev3=true
+// 三条要点，垫片照抄：
+//   ① 互斥是**同步**的 —— click 返回时被顶掉的那个 open 已经变 false（所以断言不需要等重绘）；
+//   ② 被浏览器关掉的那个**也会派发 toggle**（ev1=false），顺序在新开那个之后；
+//   ③ 没有 name 的 details 不参与分组。
+// 垫片默认什么都不模拟，这段必须显式做：否则"点开第二个"在探针里看着互斥，在真浏览器里
+// 是两个都开着（正是这条契约要锁住的东西）。
+const nativeAccordionClose = (opened) => {
+  const name = opened.attrs?.name;
+  if (!name) return [];
+  const closed = [];
+  for (const other of findAll(root, (n) => n.tagName === "details"
+    && n !== opened && n.attrs?.name === name && n.attrs.open !== undefined)) {
+    other.removeAttribute("open");
+    other.open = false;
+    closed.push(other);
+  }
+  return closed;
+};
+
+// expandFilterDimension 模拟用户点开某维度的下拉：真实浏览器会把 open 属性与 open 属性值
+// 一起打开、同步合上同名分组里的其它 details，再派发 toggle。
+//
+// 垫片不会把 setAttribute 反映成属性值，所以这里两样都设：只设属性的话，产品里读
+// event.currentTarget.open 的 onToggle 会把这次操作记成"收起"，下一次重绘（选中就会触发
+// 一次）又重新把面板合上 —— 而真实浏览器里它是开着的。
+const expandFilterDimension = async (dimension) => {
+  const details = filterDetails(dimension);
+  if (!details) return false;
+  if (filterExpanded(dimension)) return true;
+  details.setAttribute("open", "");
+  details.open = true;
+  // 先合上同名的其它面板（同步），再按"新开的先、被关掉的后"派发 toggle。
+  const closedByBrowser = nativeAccordionClose(details);
+  for (const handler of details.listeners.toggle || []) await handler({ currentTarget: details });
+  for (const other of closedByBrowser) {
+    for (const handler of other.listeners.toggle || []) await handler({ currentTarget: other });
+  }
+  await settle();
+  return filterExpanded(dimension);
 };
 
 // filterChipStates 返回某维度每枚 chip 的 {value, pressed}；value 是 id，"" 是「全部」。
@@ -641,10 +713,14 @@ const filterLabelText = (dimension) => {
   return label ? label.textContent.trim() : "";
 };
 
-// clickFilterChip 模拟用户按下一枚 chip（value="" 是「全部」= 清空该维度）：逐个调用它的
-// click 监听器。**不能**直接写 store —— "点了没反应/第二枚按下去把第一枚顶掉了"正是这个
-// 探针要测的那类缺陷。
+// clickFilterChip 模拟用户按下一枚 chip（value="" 是「全部」= 清空该维度）：先展开这个维度
+// 的下拉，再逐个调用 chip 的 click 监听器。**不能**直接写 store —— "点了没反应/第二枚按下去
+// 把第一枚顶掉了"正是这个探针要测的那类缺陷。
+//
+// 先展开不是形式主义：收起时浏览器根本不显示 panel 里的 chip，用户点不到它。垫片不模拟
+// "隐藏"，少了这一步，场景点的是收起面板里的 chip —— 看着全绿，实际没人能这么操作。
 const clickFilterChip = async (dimension, value) => {
+  if (!await expandFilterDimension(dimension)) return false;
   const chip = filterChips(dimension).find((n) => (n.attrs?.["data-value"] ?? "") === value);
   if (!chip) return false;
   const handlers = chip.listeners.click || [];
@@ -1675,6 +1751,12 @@ if (scenario === "stale_key_prompts_login") {
   checks.hasAccessKeyFilterRow = filterLabelText("access-key") === "访问密钥"
     && !!findAll(filterGroup("access-key"),
       (n) => n.attrs?.["aria-label"] === "按访问密钥筛选")[0];
+  // 取的是下拉形态：收起时只占一行摘要，而不是把两排 chip 全铺在页头上。
+  checks.filterRowsAreCollapsedDetails = !!filterDetails("provider") && !!filterDetails("access-key")
+    && !filterExpanded("provider") && !filterExpanded("access-key");
+  // 收起时那一行必须说明"当前没在筛"：摘要看不见的话，用户无法从页头上判断筛选状态。
+  checks.filterSummariesDefaultToAll = filterSummary("provider") === "全部"
+    && filterSummary("access-key") === "全部";
   checks.filterDefaultsToAllProviders = isAllPressed(providerChips);
   checks.filterDefaultsToAllAccessKeys = isAllPressed(accessKeyChips);
   // 两排的选项来自 /api/providers 与 /api/access-keys（配置的投影），value 是 id ——
@@ -1698,13 +1780,18 @@ if (scenario === "stale_key_prompts_login") {
   checks.storeHoldsSelection = Array.isArray(store.accessKeyFilters)
     && store.accessKeyFilters.join(",") === "ak1"
     && pressedFilterValues("access-key").join(",") === "ak1";
+  // 选完之后那一行摘要要说出"现在筛的是什么"（显示名 + key_id），否则收起状态下用户只看到
+  // 「全部」，会以为没筛上 —— 而页面上的数字已经是筛过的了。
+  checks.summaryShowsChosenKey = filterSummary("access-key") === "试用账号 A（ak1）";
+  checks.panelStaysOpenAfterChoosing = filterExpanded("access-key");
   if (!chosen) {
     // 控件不在（或 click 没接上）时，下面全部无从谈起。显式记成失败而不是跳过 ——
     // 跳过会让一个什么都没验证的场景"全绿"，这正是本探针最防的那种假阳性。
     for (const name of [
       "metricsCallScoped", "metricsCallNumbersOnly", "keyUsageCallScoped",
       "keyCardsHidden", "coreCardsRemain", "filterNoteShown", "kpiFromFilteredSnapshot",
-      "switchBackToAll", "switchBackRestoresCards", "switchBackRefetchesUnfiltered",
+      "switchBackToAll", "summaryBackToAllAfterClear", "panelStillOpenAfterClear",
+      "switchBackRestoresCards", "switchBackRefetchesUnfiltered",
     ]) checks[name] = false;
   } else {
     const filtered = filteredCalls();
@@ -1740,6 +1827,10 @@ if (scenario === "stale_key_prompts_login") {
     const backChosen = await clickFilterChip("access-key", "");
     checks.switchBackToAll = backChosen && store.accessKeyFilters.length === 0
       && isAllPressed(filterChipStates("access-key"));
+    // 摘要回到「全部」，而面板不能因为点了「全部」就自己合上：用户多半还要接着选别的
+    // （或者只是误点了想改回去）。
+    checks.summaryBackToAllAfterClear = filterSummary("access-key") === "全部";
+    checks.panelStillOpenAfterClear = filterExpanded("access-key");
     const restored = text();
     // 卡片回来还不够：里面的行也必须是全量的（同名 Key 带供应商前缀是默认态的判据）。
     // 只把卡片放回来、内容还停在筛选读数上，是同屏数字互相矛盾的那种缺陷。
@@ -1762,8 +1853,13 @@ if (scenario === "stale_key_prompts_login") {
     && !filterChipStates("provider").some((chip) => chip.value === "" && chip.pressed);
   checks.storeHoldsBothProviders = Array.isArray(store.providerFilters)
     && store.providerFilters.slice().sort().join(",") === "azure,openai";
-  // 另一维度没被动过：多选不该把别的维度也顺手改了。
+  // 另一维度没被动过：多选不该把别的维度顺手改了。
   checks.otherDimensionUntouched = isAllPressed(filterChipStates("access-key"));
+  // 收起那一行要把多选如实说全（「、」连接）：只显示第一项会让用户以为只筛了一家，
+  // 而页面上的数字是两家的和。
+  checks.summaryJoinsMultipleProviders = filterSummary("provider") === "openai、azure"
+    && filterSummary("access-key") === "全部";
+  checks.panelStaysOpenWhileMultiSelecting = filterExpanded("provider");
   if (!(first && second)) {
     for (const name of [
       "providerParamsRepeated", "kpiUsesOrTotal", "keyCardsHiddenForProviderOnly",
@@ -1795,6 +1891,8 @@ if (scenario === "stale_key_prompts_login") {
       && server.requests.slice(beforeToggle)
         .filter((r) => r.url.startsWith("/ui/filtered-metrics.json"))
         .every((r) => queryOf(r.url).getAll("provider_id").join(",") === "openai");
+    // 摘要跟着变回一项：取消一枚后还写着"openai、azure"，就又成了同屏数字互相矛盾。
+    checks.summaryShrinksAfterUnpress = filterSummary("provider") === "openai";
     checks.kpiUsesSingleProviderTotal = statValue("窗口请求") === "41"
       && statValue("窗口请求") !== "53";
   }
@@ -1808,10 +1906,16 @@ if (scenario === "stale_key_prompts_login") {
   checks.bothSelectionsHeld = providerChosen && keyChosen
     && store.providerFilters.join(",") === "openai"
     && store.accessKeyFilters.join(",") === "ak1";
+  // 两个维度各自的摘要都要说出自己选了什么（两维之间是 AND，两行合起来才是完整条件）。
+  checks.summariesShowBothDimensions = filterSummary("provider") === "openai"
+    && filterSummary("access-key") === "试用账号 A（ak1）";
   if (!(providerChosen && keyChosen)) {
     for (const name of [
       "requestCarriesBothDimensions", "kpiUsesAndCombination", "noteNamesBothDimensions",
-      "keyCardsHidden", "keyUsageScopedToBoth", "clearsBothDimensions",
+      "keyCardsHidden", "keyUsageScopedToBoth", "keyPanelOpenBeforeSwitch",
+      "expandingSecondDimensionClosesTheOther", "collapsedDimensionKeepsSelection",
+      "togglingBetweenDimensionsKeepsSelection", "accordionPanelRedrawn",
+      "expandedDimensionSurvivesRedraw", "clearsBothDimensions",
     ]) checks[name] = false;
   } else {
     const calls = filteredCalls();
@@ -1832,14 +1936,60 @@ if (scenario === "stale_key_prompts_login") {
       r.params.getAll("provider_id").join(",") === "openai"
       && r.params.getAll("access_key_id").join(",") === "ak1");
 
-    // 两个维度分别清空（点各自的「全部」）：读数回到全局那份（3 次请求）。
+    // —— 面板开合是"手风琴"：同时只展开一个维度 ——
+    //
+    // 两个面板都绝对定位在页头操作区右侧、向左铺开（同 z-index，后画的压住先画的），一起
+    // 展开必定重叠 —— 真浏览器夹具实测过：不选条件时「供应商」面板整块落在「访问密钥」
+    // 面板里面。所以展开一个维度会关掉另一个。
+    //
+    // 这里逐条锁住"关的是面板、不是选择"：条件在 store 里，跟面板开合无关。
+    checks.keyPanelOpenBeforeSwitch = filterExpanded("access-key");
+    const providerPressedBefore = pressedFilterValues("provider").join(",");
+    const keyPressedBefore = pressedFilterValues("access-key").join(",");
+    const providerSummaryBefore = filterSummary("provider");
+    const keySummaryBefore = filterSummary("access-key");
+
+    // 展开供应商（用户从「访问密钥」切到「供应商」去看另一排选项）。
+    checks.expandingSecondDimensionClosesTheOther = await expandFilterDimension("provider")
+      && filterExpanded("provider") && !filterExpanded("access-key");
+    // 被收起面板的那个维度，已选条件与摘要一个字都不能变 —— 顺手把选择清掉是这类改动最
+    // 容易犯的错，而用户会以为"打开另一个下拉"把刚选的条件弄丢了。
+    checks.collapsedDimensionKeepsSelection = keyPressedBefore === "ak1"
+      && pressedFilterValues("access-key").join(",") === "ak1"
+      && filterSummary("access-key") === "试用账号 A（ak1）"
+      && filterSummary("access-key") === keySummaryBefore;
+
+    // 来回切（供应商 → 访问密钥 → 供应商）：两边的选择与摘要始终不变。
+    // 这条只管"选择稳不稳"，面板互斥由上面那条单独断言 —— 两件事混在一起红的时候说不清
+    // 是选择被清了还是互斥没生效。
+    await expandFilterDimension("access-key");
+    await expandFilterDimension("provider");
+    checks.togglingBetweenDimensionsKeepsSelection = pressedFilterValues("provider").join(",") === providerPressedBefore
+      && pressedFilterValues("access-key").join(",") === keyPressedBefore
+      && filterSummary("provider") === providerSummaryBefore
+      && filterSummary("access-key") === keySummaryBefore
+      && store.providerFilters.join(",") === "openai"
+      && store.accessKeyFilters.join(",") === "ak1";
+
+    // 展开状态跨重绘：轮询/切窗口都整块重建控件，展开的那个维度要还在展开、另一个仍收着
+    //（重建时只按 openDimensions 画一次，两个都标记成展开就又重叠回去了）。
+    checks.accordionPanelRedrawn = await clickWindowRange("6m");
+    checks.expandedDimensionSurvivesRedraw = filterExpanded("provider")
+      && !filterExpanded("access-key")
+      && pressedFilterValues("provider").join(",") === providerPressedBefore
+      && pressedFilterValues("access-key").join(",") === keyPressedBefore;
+
+    // 两个维度分别清空（点各自的「全部」）：读数回到全局那份（3 次请求），两行摘要都回到
+    // 「全部」、两排都回到「全部」按下态。**不**断言两个面板同时展开 —— 那是上一版的语义，
+    // 现在展开一个必然收起另一个。
     await clickFilterChip("access-key", "");
     await clickFilterChip("provider", "");
     checks.clearsBothDimensions = store.providerFilters.length === 0
       && store.accessKeyFilters.length === 0
       && isAllPressed(filterChipStates("provider"))
       && isAllPressed(filterChipStates("access-key"))
-      && statValue("窗口请求") === "3";
+      && statValue("窗口请求") === "3"
+      && filterSummary("provider") === "全部" && filterSummary("access-key") === "全部";
   }
 } else if (scenario === "overview_filters_by_access_key") {
   await settle();
@@ -1915,7 +2065,8 @@ if (scenario === "stale_key_prompts_login") {
   if (!chosen) {
     for (const name of [
       "picksUpNewKeyOnRedraw", "picksUpNewProviderOnRedraw", "keepsSelectionAfterRedraw",
-      "rereadsCatalogOnEveryDraw", "deletedSelectionStaysListed", "canSelectNewKey",
+      "rereadsCatalogOnEveryDraw", "panelStaysOpenAfterRedraw", "pressedStateSurvivesRedraw",
+      "summarySurvivesRedraw", "deletedSelectionStaysListed", "canSelectNewKey",
     ]) checks[name] = false;
   } else {
     // 用户在别处新建了一把密钥与一个供应商：服务端的清单里多出它们，页面自身没有任何变化。
@@ -1923,8 +2074,18 @@ if (scenario === "stale_key_prompts_login") {
       { id: "ak3", name: "新密钥 C", enabled: true, key_fingerprint: "fp-ak3" },
     ]);
     server.providerCatalog = server.providerCatalog.concat([{ id: "newprov" }]);
-    // 触发一次整块重绘（切一档窗口），等价于用户回到监控页后的下一次绘制。
+    // 触发一次整块重绘（切一档窗口），等价于用户回到监控页后的下一次绘制 ——
+    // 15 秒轮询走的是同一条 draw 路径，控件是**重建**出来的。
+    const pressedBeforeRedraw = pressedFilterValues("access-key").join(",");
+    const summaryBeforeRedraw = filterSummary("access-key");
     checks.pageRedrawnAfterCreate = await clickWindowRange("6h");
+    // 重绘不丢状态：面板仍展开（open 属性还在）、按下态与摘要一字不差。状态若落在 DOM 上，
+    // 这一步会把用户正在操作的下拉合上 —— openDimensions 存在的理由就是这条断言。
+    checks.panelStaysOpenAfterRedraw = filterExpanded("access-key");
+    checks.pressedStateSurvivesRedraw = pressedFilterValues("access-key").join(",") === pressedBeforeRedraw
+      && pressedBeforeRedraw === "ak1";
+    checks.summarySurvivesRedraw = filterSummary("access-key") === summaryBeforeRedraw
+      && summaryBeforeRedraw === "试用账号 A（ak1）";
     // 无需整页刷新：两排 chip 里都出现新建的项；已按下的 ak1 也没被这次重绘弄丢。
     checks.picksUpNewKeyOnRedraw = keyChipValues().includes("ak3");
     checks.picksUpNewProviderOnRedraw = providerChipValues().includes("newprov");
