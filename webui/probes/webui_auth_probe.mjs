@@ -996,6 +996,10 @@ const setup = {
   },
   // 概览页必须真的带出请求流：它从「实时活动」移了过来，若只改了导航没搬卡片，
   // 这一页会安静地少掉"刚刚发生了什么"这块内容。同时确认成本列**不会**谎报 $0。
+  //
+  // 三行的来源列刻意覆盖三种形态：有名字的访问密钥、配置里已删掉的访问密钥（只剩
+  // key_id 可显示）、以及没有归属的完整权限。请求流若不显示访问密钥，一页里所有外部
+  // 调用方长得一模一样——出了问题不知道找谁。
   overview_shows_request_stream: () => {
     global.location.hash = "#/overview";
     storage.set("amkr.apiKey", "good-key");
@@ -1005,8 +1009,9 @@ const setup = {
       models: { "gpt-4o": { input: 2.5, output: 10, cache_read: 1.25 } },
     };
     server.requestItems = [
+      { id: 4, created_at: "2026-01-01T10:00:00+08:00", caller_type: "access_key", access_key_id: "ak2", model_id: "route-a", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 200, success: true, retried: false, prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, cached_tokens: 0, duration_ms: 800 },
       { id: 3, created_at: "2026-01-01T09:59:00+08:00", caller_type: "local", model_id: "route-a", upstream_model_id: "gpt-4o", provider_id: "openai", key_name: "k1", status_code: 200, success: true, retried: false, prompt_tokens: 100, completion_tokens: 20, total_tokens: 120, cached_tokens: 0, duration_ms: 800 },
-      { id: 2, created_at: "2026-01-01T09:58:30+08:00", caller_type: "access_key", model_id: "route-b", upstream_model_id: "no-price-model", provider_id: "openai", key_name: "k2", status_code: 502, success: false, retried: true, prompt_tokens: 50, completion_tokens: 0, total_tokens: 50, cached_tokens: 0, duration_ms: 1200 },
+      { id: 2, created_at: "2026-01-01T09:58:30+08:00", caller_type: "access_key", access_key_id: "ak1", access_key_name: "试用账号 A", model_id: "route-b", upstream_model_id: "no-price-model", provider_id: "openai", key_name: "k2", status_code: 502, success: false, retried: true, prompt_tokens: 50, completion_tokens: 0, total_tokens: 50, cached_tokens: 0, duration_ms: 1200 },
     ];
   },
   // 请求流的 Token 列：缓存写/读分列，并给出每条请求的生成速度。
@@ -1631,18 +1636,31 @@ if (scenario === "stale_key_prompts_login") {
 } else if (scenario === "overview_shows_request_stream") {
   await settle();
   const body = text();
-  // 请求流真的画出来了：两条记录都要在（含失败那条）。
-  checks.hasStreamRows = byClass("stream-row").length === 2;
+  // 请求流真的画出来了：三条记录都要在（含失败那条）。
+  checks.hasStreamRows = byClass("stream-row").length === 3;
   // 失败优先于重试着色：同一条记录既失败又重试时，红色比黄色更重要。
   checks.showsFailureRow = byClass("is-failure").length === 1;
   checks.noRetryToneOnFailure = byClass("is-retry").length === 0;
   // 概览同时保留它自己的实时图，不能为了塞进请求流把原有内容挤掉。
   checks.stillHasHeatmap = byClass("heat-cell").length > 0;
   checks.hasPulseGrid = byClass("pulse-cell").length === 4;
+  // 来源列要能读出"这页的请求是谁发的"：档位单说「访问密钥」时所有外部调用方长得
+  // 一样。名字优先，配置里已删掉这把 key（没有名字）时回落到 key_id，没有归属的行
+  // 一个「」都不该多出来。
+  const sources = byClass("stream-source-line").map((n) => n.textContent.trim());
+  checks.sourceShowsAccessKeyName = sources.includes("访问密钥「试用账号 A」");
+  checks.sourceFallsBackToDeletedKeyID = sources.includes("访问密钥「ak2」");
+  checks.sourceKeepsTierWithoutAccessKey = sources.includes("本机");
+  // 悬停给全「名字（key_id）」——列里放得下短名，报障时要照抄的是 key_id；没有名字时
+  // 不重复写一对同一个值（`访问密钥 ak2（ak2）`），只给 key_id；没有归属时直说未记录。
+  const sourceTitles = byClass("stream-source").map((n) => String(n.attrs?.title || ""));
+  checks.accessKeyTooltipHasNameAndID = sourceTitles.some((t) => t.includes("访问密钥 试用账号 A（ak1）"));
+  checks.deletedKeyTooltipOmitsDuplicateID = sourceTitles.some((t) => t.includes("访问密钥 ak2\n"));
+  checks.unattributedTooltipSaysUnrecorded = sourceTitles.some((t) => t.includes("访问密钥 未记录"));
   // 成本列：逐格断言，而不是全页搜 "$0"——小额金额本来就渲染成 $0.000250，
   // 全页搜会把"正确的小额"误判成"把不知道渲染成免费"。
   const costCells = byClass("stream-cost").map((n) => n.textContent.trim());
-  checks.costCellsFilled = costCells.length === 2 && costCells.every((t) => t.length > 0);
+  checks.costCellsFilled = costCells.length === 3 && costCells.every((t) => t.length > 0);
   // 未匹配到单价的条目显示 "—"，**不能**是 "$0"。
   checks.unpricedShowsDash = costCells.includes("—");
   checks.noCostCellIsZero = costCells.every((t) => t !== "$0");

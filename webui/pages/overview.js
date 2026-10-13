@@ -729,7 +729,8 @@ function heatmapCard() {
 // 与概览的实时定位一致；用量统计则专注于历史聚合。
 //
 // 每一行要回答四件事，缺一件就得去翻日志：
-//   1. 谁、从哪儿来 —— 调用方档位、工作空间、来源地址（含 User-Agent 悬停）；
+//   1. 谁、从哪儿来 —— 调用方档位（来自访问密钥时带上那把 key 的名字）、工作空间、
+//      来源地址（含 User-Agent 悬停）；
 //   2. 发了什么 —— 请求模型 → 实际模型 → 供应商 / 上游 Key / 上游模型，以及请求形态
 //      （流式与否、哪条 API 格式、什么思考强度）；
 //   3. 花了多少 Token —— 输入、输出、缓存读、缓存写、合计，以及这次请求的生成速度
@@ -844,12 +845,25 @@ function routeTitle(item) {
   ].join("\n");
 }
 
-// sourceText 是调用方身份：档位 + 工作空间。空值一律不写，避免出现" · · "。
+// sourceText 是调用方身份：档位（来自访问密钥时带上那把 key）+ 工作空间。空值一律不写，
+// 避免出现" · · "。
 function sourceText(item) {
   return [
-    CALLER_TYPE_LABELS[item.caller_type] || item.caller_type,
+    callerLabel(item),
     item.workspace,
   ].filter(Boolean).join(" · ") || "—";
+}
+
+// callerLabel 是来源列的第一段：调用方档位；这次请求出自访问密钥时再带上那把 key。
+//
+// 只在这里显示访问密钥：这一列回答的正是"谁在用这个实例"，而档位单说"访问密钥"时，
+// 一页里所有外部调用方长得一模一样——出了问题不知道找谁。名字可能重名、key_id 才是
+// 稳定标识符，但列里要读的是"谁"，因此优先名字；配置里已经删掉这把 key（没有名字）
+// 时回落到 key_id，那正是"这把 key 已经不在配置里"要看出来的事。
+function callerLabel(item) {
+  const tier = CALLER_TYPE_LABELS[item.caller_type] || item.caller_type || "";
+  if (!item.access_key_id) return tier;
+  return `${tier}「${item.access_key_name || item.access_key_id}」`;
 }
 
 // streamText 是形态列的首行：流式与否。
@@ -896,11 +910,18 @@ function clientAddress(addr) {
 
 // sourceTitle 在悬停里给出完整的来源：地址带端口、User-Agent、请求 ID。
 // User-Agent 往往很长（一整串客户端版本信息），放进列里会把地址挤没，只适合悬停。
+//
+// 访问密钥按「名字（key_id）」给全：列里只放得下短名，而报障时要照抄的是 key_id。
+// 没有名字（配置里已删掉这把 key）时不写一对同样的值，只给 key_id。
 function sourceTitle(item) {
+  const accessKey = item.access_key_id
+    ? (item.access_key_name ? `${item.access_key_name}（${item.access_key_id}）` : item.access_key_id)
+    : "未记录";
   return [
     `来源地址 ${item.client_addr || "未记录"}`,
     `工作空间 ${item.workspace || "未记录"}`,
     `调用方 ${CALLER_TYPE_LABELS[item.caller_type] || item.caller_type || "未记录"}`,
+    `访问密钥 ${accessKey}`,
     `User-Agent ${item.user_agent || "未记录"}`,
     `请求 #${item.id}`,
   ].join("\n");
