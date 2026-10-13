@@ -490,7 +490,9 @@ async function removeRoute(route) {
   try {
     const { confirmed } = await writeWithImpactConfirm({
       title: "删除模型路由",
-      message: `删除模型路由 ${route.id}？绑定该模型的 Key 会一并解除。`,
+      // 措辞要分清"解绑"与"删除"：删路由只是让这些 Key 不再被它引用，只有一把 Key 失去
+      // 最后一个引用时才会被清理。写成"Key 会一并删除"会让用户以为删一个模型就报销一把 Key。
+      message: `删除模型路由 ${route.id}？绑定它的 Key 只会解除绑定；不再被任何其他路由使用的 Key 会被一并删除。`,
       confirmLabel: "删除",
       alwaysConfirm: true,
       preview: () => api.deleteRoute(state.revision, route.id, { dryRun: true }),

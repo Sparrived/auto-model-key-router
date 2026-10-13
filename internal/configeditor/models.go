@@ -325,24 +325,73 @@ func (e *Editor) DeleteModelKeyBindingInteractively(modelID string) (any, error)
 	if !ok || targetIndex >= len(targets.Arr) {
 		return nil, nil
 	}
-	if len(targets.Arr) == 1 && !e.confirmChoice("这是该模型最后一个 Key，解绑后模型将不可用。继续？", false) {
-		return tui.SectionPanel("[yellow]配置未变化。[/yellow]", "模型 Key", "yellow"), nil
-	}
-	removed, err := configops.DeleteModelTarget(data, modelID, targetIndex)
+	// 先在一份副本上跑一遍同一段删除，再问用户：解绑最后一条 target 会连模型一起删掉，
+	// 而它绑定的 Key 可能就此失去最后一个使用者——那是用户手输的凭据，删了不复原，必须
+	// 在确认框里说清楚（WebUI 那边靠 dry_run 预演，这里用的是同一份 ModelEditImpactOf）。
+	// 用户点头之后写的也是这份副本，所以「预演里说的」与「落盘的」天生一致。
+	removed := targets.Arr[targetIndex]
+	preview, removedKeys, err := previewModelWrite(data, func(target *canonical.Value) error {
+		_, err := configops.DeleteModelTarget(target, modelID, targetIndex)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	restart, err := e.commitV2Config(data, oldConfig)
+	prompt := "解绑 Key " + stringOrEmpty(removed, "provider") + "/" + stringOrEmpty(removed, "key") + "？"
+	if len(targets.Arr) == 1 {
+		prompt = "这是该模型最后一个 Key，解绑后模型将不可用。"
+	}
+	// 没有 Key 要消失、也不是最后一条绑定时不提任何问题：与改动前的交互次数完全一样。
+	if len(targets.Arr) == 1 || len(removedKeys) > 0 {
+		if !e.confirmChoice(prompt+removedKeysNotice(removedKeys)+"继续？", false) {
+			return tui.SectionPanel("[yellow]配置未变化。[/yellow]", "模型 Key", "yellow"), nil
+		}
+	}
+	restart, err := e.commitV2Config(preview, oldConfig)
 	if err != nil {
 		return nil, err
+	}
+	message := "已解绑 Key: " + stringOrEmpty(removed, "provider") + "/" + stringOrEmpty(removed, "key") + "。"
+	if len(removedKeys) > 0 {
+		message += "并删除失去全部模型绑定的 Key: " + formatRemovedKeys(removedKeys) + "。"
 	}
 	return tui.Group{Items: []tui.Renderable{
-		tui.SectionPanel(
-			"已解绑 Key: "+stringOrEmpty(removed, "provider")+"/"+stringOrEmpty(removed, "key")+"。",
-			"模型 Key", "green",
-		),
+		tui.SectionPanel(message, "模型 Key", "green"),
 		asRenderable(restart),
 	}}, nil
+}
+
+// previewModelWrite 在一份副本上先跑一遍 mutation，返回改动后的配置与「会一起消失的
+// 供应商 Key」。
+//
+// 删模型与解绑最后一条绑定都会把某些 Key 的最后一条绑定带走，而 Key 是用户手输的凭据。
+// WebUI 用 dry_run 预演把这件事说清楚，TUI 这里复用同一份 ModelEditImpactOf：确认框里
+// 说的就是落盘会发生的，落盘的也是那份被看过的东西。
+func previewModelWrite(data *canonical.Value, mutation func(*canonical.Value) error) (*canonical.Value, []configops.RemovedKey, error) {
+	preview := data.Clone()
+	if err := mutation(preview); err != nil {
+		return nil, nil, err
+	}
+	return preview, configops.ModelEditImpactOf(data, preview).RemovedKeys, nil
+}
+
+// removedKeysNotice 生成确认框里那句「还有哪些 Key 会一起消失」；没有则为空串。
+//
+// 没有 Key 要消失时返回空串，是为了让原有提示逐字不变——只有真会删掉凭据时才多这一句。
+func removedKeysNotice(keys []configops.RemovedKey) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return "\n这些 Key 不再被任何模型使用，会被一并删除：" + formatRemovedKeys(keys) + "。"
+}
+
+// formatRemovedKeys 把会被清理的供应商 Key 排成一行（服务端已按 provider、key 升序给出）。
+func formatRemovedKeys(keys []configops.RemovedKey) string {
+	rendered := make([]string, 0, len(keys))
+	for _, key := range keys {
+		rendered = append(rendered, key.Provider+"/"+key.Key)
+	}
+	return strings.Join(rendered, "、")
 }
 
 // ManageV2ModelSettingsInteractively 对应 config_editor.py:1059 的
@@ -488,22 +537,32 @@ func (e *Editor) DeleteV2ModelInteractively(modelID string) (any, error) {
 	if !models.Obj.Has(modelID) {
 		return tui.SectionPanel("[red]模型不存在: "+modelID+"[/red]", "模型设置", "red"), nil
 	}
-	if !e.confirmChoice("确认删除模型 "+modelID+"？", false) {
-		return tui.SectionPanel("[yellow]配置未变化。[/yellow]", "模型设置", "yellow"), nil
-	}
 	oldConfig, err := loadRouterConfig(data)
 	if err != nil {
 		return nil, err
 	}
-	if err := configops.DeleteModel(data, modelID); err != nil {
-		return nil, err
-	}
-	restart, err := e.commitV2Config(data, oldConfig)
+	// 删模型会顺手清掉不再被任何模型绑定的 Key（仍被别的路由绑定的原样保留），所以先在
+	// 副本上算清楚会少哪把凭据，再连它一起问一次——没有 Key 要消失时这句提示是空的，
+	// 确认框与改动前逐字一样。用户点头后写的就是那份被看过的副本。
+	preview, removedKeys, err := previewModelWrite(data, func(target *canonical.Value) error {
+		return configops.DeleteModel(target, modelID)
+	})
 	if err != nil {
 		return nil, err
 	}
+	if !e.confirmChoice("确认删除模型 "+modelID+"？"+removedKeysNotice(removedKeys), false) {
+		return tui.SectionPanel("[yellow]配置未变化。[/yellow]", "模型设置", "yellow"), nil
+	}
+	restart, err := e.commitV2Config(preview, oldConfig)
+	if err != nil {
+		return nil, err
+	}
+	message := "已删除模型 " + modelID + "。"
+	if len(removedKeys) > 0 {
+		message += "并删除失去全部模型绑定的 Key: " + formatRemovedKeys(removedKeys) + "。"
+	}
 	return tui.Group{Items: []tui.Renderable{
-		tui.SectionPanel("已删除模型 "+modelID+"。", "模型设置", "green"),
+		tui.SectionPanel(message, "模型设置", "green"),
 		asRenderable(restart),
 	}}, nil
 }

@@ -79,9 +79,14 @@ type dryRunImpact struct {
 		Models        []string `json:"models"`
 		ModelsCleared bool     `json:"models_cleared"`
 	} `json:"workspaces"`
-	RemovedTasks   []string `json:"removed_tasks"`
-	UnifiedModel   bool     `json:"unified_model"`
-	ConfigRevision string   `json:"config_revision"`
+	RemovedTasks []string `json:"removed_tasks"`
+	UnifiedModel bool     `json:"unified_model"`
+	// RemovedKeys 是与模型一起消失的供应商 Key（供应商仍在，Key 没了）。
+	RemovedKeys []struct {
+		Provider string `json:"provider"`
+		Key      string `json:"key"`
+	} `json:"removed_keys"`
+	ConfigRevision string `json:"config_revision"`
 }
 
 // decodeImpact 解析预演响应。
@@ -323,6 +328,12 @@ func TestDryRunDeleteRouteReportsCascade(t *testing.T) {
 		if !slices.Equal(impact.RemovedTasks, []string{"shared", "teamA/only-a"}) {
 			t.Errorf("%s 的被删任务 = %v", target, impact.RemovedTasks)
 		}
+		// model-a 是 key-a 的唯一使用者，两条路径（删路由与删 Key）都该报出它被清理；
+		// 供应商 prov-a 还留着 key-b，所以 Key 的消失必须出现在预演里。
+		if len(impact.RemovedKeys) != 1 || impact.RemovedKeys[0].Provider != "prov-a" ||
+			impact.RemovedKeys[0].Key != "key-a" {
+			t.Errorf("%s 的被清理 Key = %+v，期望 [prov-a/key-a]", target, impact.RemovedKeys)
+		}
 	}
 	// DELETE 的请求体是必填的（带 {} 即可），带不带版本号不影响预演。
 	recorder := callCascade(t, server, http.MethodDelete, "/api/routes/model-a?dry_run=1",
@@ -358,12 +369,78 @@ func TestDryRunWithoutImpactStillReturnsShape(t *testing.T) {
 	impact := decodeImpact(t, recorder)
 
 	if !impact.DryRun || len(impact.RemovedModels) != 0 || len(impact.AccessKeys) != 0 ||
-		len(impact.Workspaces) != 0 || len(impact.RemovedTasks) != 0 || impact.UnifiedModel {
+		len(impact.Workspaces) != 0 || len(impact.RemovedTasks) != 0 || impact.UnifiedModel ||
+		len(impact.RemovedKeys) != 0 {
 		t.Errorf("这组改动不该有连带变动: %+v（body=%s）", impact, recorder.Body.String())
 	}
 	if !jsonHasKeys(t, recorder.Body.String(),
-		"dry_run", "removed_models", "access_keys", "workspaces", "removed_tasks", "unified_model", "config_revision") {
+		"dry_run", "removed_models", "access_keys", "workspaces", "removed_tasks", "unified_model", "removed_keys", "config_revision") {
 		t.Errorf("预演响应必须给全所有键: %s", recorder.Body.String())
+	}
+}
+
+// TestDeleteRoutePrunesOrphanProviderKey 固化删路由时对供应商 Key 的口径：
+// 失去最后一个模型绑定的 Key 一并删掉，仍被别的路由绑定的 Key 与供应商本身都留下。
+//
+// 这是「删一条路由」最容易被误解的地方：Key 是供应商的凭据而不是路由的附属物，删路由
+// 不该顺手删掉另一条路由还在用的凭据；但也不能让没人再用的凭据一直烂在配置里。
+func TestDeleteRoutePrunesOrphanProviderKey(t *testing.T) {
+	server, path := cascadeServer(t)
+
+	// 先把 key-a 也绑到 model-b 上：它现在服务两条路由。
+	share := callCascade(t, server, http.MethodPut, "/api/providers/prov-a/keys/key-a/models",
+		`{"config_revision":"`+currentRevision(t, path)+`","models":["model-a","model-b"]}`)
+	if share.Code != http.StatusOK {
+		t.Fatalf("把 key-a 绑到 model-b 的状态码 = %d，期望 200（body=%s）", share.Code, share.Body.String())
+	}
+
+	recorder := callCascade(t, server, http.MethodDelete, "/api/routes/model-a",
+		`{"config_revision":"`+currentRevision(t, path)+`"}`)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("删除路由状态码 = %d，期望 204（body=%s）", recorder.Code, recorder.Body.String())
+	}
+	if keys := nestedObject(t, readConfig(t, path), "providers", "prov-a", "keys"); keys["key-a"] == nil {
+		t.Errorf("仍被 model-b 绑定的 Key 不应跟着路由一起被删")
+	}
+
+	// model-b 是这两把 Key 的最后一个使用者：预演要先报出它们（按 provider、key 升序）。
+	recorder = callCascade(t, server, http.MethodDelete, "/api/routes/model-b?dry_run=1",
+		`{"config_revision":"`+currentRevision(t, path)+`"}`)
+	impact := decodeImpact(t, recorder)
+	if len(impact.RemovedKeys) != 2 || impact.RemovedKeys[0].Provider != "prov-a" ||
+		impact.RemovedKeys[0].Key != "key-a" || impact.RemovedKeys[1].Provider != "prov-a" ||
+		impact.RemovedKeys[1].Key != "key-b" {
+		t.Errorf("预演未报出被清理的 Key: %+v（body=%s）", impact.RemovedKeys, recorder.Body.String())
+	}
+
+	recorder = callCascade(t, server, http.MethodDelete, "/api/routes/model-b",
+		`{"config_revision":"`+currentRevision(t, path)+`"}`)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("删除最后一条路由状态码 = %d，期望 204（body=%s）", recorder.Code, recorder.Body.String())
+	}
+	data := readConfig(t, path)
+	if keys := nestedObject(t, data, "providers", "prov-a", "keys"); len(keys) != 0 {
+		t.Errorf("失去全部模型绑定的 Key 应被清理，实际 %v", keys)
+	}
+	// 供应商留着：空 keys 是合法配置（新建的供应商就是这样），而删供应商会连带改写
+	// 访问密钥的供应商清单，超出「删一条路由」的范围。
+	if _, present := nestedObject(t, data, "providers")["prov-a"]; !present {
+		t.Errorf("Key 被清理后供应商本身仍应保留")
+	}
+}
+
+// TestDeleteProviderDoesNotListEveryKey 固化：整个供应商一起消失时不逐把罗列 Key。
+//
+// 那种情况下 Key 是删除的**主体**（确认框标题已经说清），逐把列出来只会把确认框塞满；
+// removed_keys 只说「顺带清掉的孤儿 Key」这一件事。
+func TestDeleteProviderDoesNotListEveryKey(t *testing.T) {
+	server, path := cascadeServer(t)
+
+	recorder := callCascade(t, server, http.MethodDelete, "/api/providers/prov-a?dry_run=1",
+		`{"config_revision":"`+currentRevision(t, path)+`"}`)
+	impact := decodeImpact(t, recorder)
+	if len(impact.RemovedKeys) != 0 {
+		t.Errorf("删供应商时不该逐把罗列 Key，实际 %+v", impact.RemovedKeys)
 	}
 }
 

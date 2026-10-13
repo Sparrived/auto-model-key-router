@@ -126,7 +126,10 @@ func DeleteModelTarget(data *canonical.Value, modelID string, targetIndex int) (
 	remaining = append(remaining, targets.Arr[targetIndex+1:]...)
 	targets.Arr = remaining
 	if len(remaining) == 0 {
-		return removed, DeleteModel(data, modelID)
+		// 模型随最后一条 target 一起消失，得走删除模型那条路径（引用修复 + 孤儿 Key 清理）。
+		// 但此刻模型的 targets 已经被清空，DeleteModel 读不到刚解绑的这一条，所以由这里
+		// 把它交出去：谁删的谁交，否则 WebUI 删路由会清 Key、这条解绑路径却会留下孤儿。
+		return removed, deleteModelWithDroppedTargets(data, modelID, []*canonical.Value{removed})
 	}
 	if err := RepairModelReferences(data); err != nil {
 		return nil, err
@@ -382,19 +385,80 @@ func UpdateModel(data *canonical.Value, modelID string, options UpdateModelOptio
 	return targetID, nil
 }
 
-// DeleteModel 删除模型并修好所有指向它的引用（unified_model 与任务）。
+// DeleteModel 删除模型，修好所有指向它的引用（unified_model 与任务），并清理它留下的
+// 孤儿供应商 Key。
 //
-// 对齐 config_operations.py:694。
+// 对齐 config_operations.py:694；差异只有一处——Python 版把 Key 留给用户自己收拾，这里
+// 顺手清掉不再被任何模型绑定的 Key（仍被别的路由绑定的原样保留，见 pruneOrphanProviderKeys）。
 func DeleteModel(data *canonical.Value, modelID string) error {
-	if _, err := RequireModel(data, modelID); err != nil {
+	model, err := RequireModel(data, modelID)
+	if err != nil {
 		return err
 	}
+	targets, err := ModelTargets(model)
+	if err != nil {
+		return err
+	}
+	return deleteModelWithDroppedTargets(data, modelID, targets.Arr)
+}
+
+// deleteModelWithDroppedTargets 删掉模型，并清理 dropped 这批 target 留下的孤儿供应商 Key。
+//
+// dropped 由调用方给出，而不是在这里现读模型的 targets：DeleteModelTarget 先把 targets 清空
+// 才删模型，那一刻模型身上已经没有刚被解绑的那一条了。谁删的谁交出来，两条路径（WebUI 删
+// 路由 / TUI 解绑最后一条绑定）才不会一条清、一条留。
+func deleteModelWithDroppedTargets(data *canonical.Value, modelID string, dropped []*canonical.Value) error {
 	all, err := Models(data)
 	if err != nil {
 		return err
 	}
 	all.DeleteKey(modelID)
+	if err := pruneOrphanProviderKeys(data, dropped); err != nil {
+		return err
+	}
 	return RepairModelReferences(data)
+}
+
+// pruneOrphanProviderKeys 删掉这批 target 引用过、而已经没有模型再引用的供应商 Key。
+//
+// 「一条路由下没有 target 就不该存在」的另一半：路由没了，它绑定的 Key 也可能没人再用了。
+// 判据逐 **Key** 算，不逐路由算：
+//
+//   - 还挂在别的模型 targets 里的 Key 原样保留。同一把 Key 服务多条路由是常态，顺手删掉
+//     它等于把另一条路由的上游凭据删了——而凭据是用户手输的，删了不复原；
+//   - 不再被任何模型引用的 Key 一并删掉，否则每删一条路由就在配置里留一把再也调不动、
+//     界面上却还看得见的孤儿凭据；
+//   - **供应商本身不动**，哪怕它一把 Key 都不剩：空 `keys` 是合法状态（新建的供应商就是
+//     这样），而删供应商会连带改写访问密钥的供应商清单，超出「删一条路由」的范围。
+//
+// 判据复用解绑 Key 那条路径的 providerKeyStillReferenced：同一条规则只有一份实现，两条
+// 路径才不会各自漂移成「有的地方清、有的地方留」。
+func pruneOrphanProviderKeys(data *canonical.Value, targets []*canonical.Value) error {
+	considered := map[[2]string]bool{}
+	for _, target := range targets {
+		providerID := lookup(target, "provider").StringValue()
+		keyName := lookup(target, "key").StringValue()
+		// 缺 provider 或 key 的 target 在写路径上早就该被校验挡下；这里跳过而不是报错，
+		// 是为了不让一次「清理」把原本能删掉的模型重新变成删不动。
+		if providerID == "" || keyName == "" || considered[[2]string{providerID, keyName}] {
+			continue
+		}
+		considered[[2]string{providerID, keyName}] = true
+		stillReferenced, err := providerKeyStillReferenced(data, providerID, keyName)
+		if err != nil {
+			return err
+		}
+		if stillReferenced {
+			continue
+		}
+		keys := lookup(lookup(data, "providers"), providerID)
+		keys = lookup(keys, "keys")
+		if !keys.IsObject() || !keys.Obj.Has(keyName) {
+			continue
+		}
+		keys.DeleteKey(keyName)
+	}
+	return nil
 }
 
 // targetIdentity 复刻 target 三元组的 `str()` 归一（config_operations.py:534）。

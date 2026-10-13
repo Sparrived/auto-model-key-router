@@ -65,6 +65,13 @@ func modelImpactValue(impact configops.ModelEditImpact) *canonical.Value {
 	for _, change := range impact.Workspaces {
 		workspaces.Arr = append(workspaces.Arr, referenceListChangeValue(change))
 	}
+	removedKeys := canonical.NewArray()
+	for _, key := range impact.RemovedKeys {
+		removedKeys.Arr = append(removedKeys.Arr, objectOf(
+			canonical.ObjectPair{Key: "provider", Value: canonical.NewString(key.Provider)},
+			canonical.ObjectPair{Key: "key", Value: canonical.NewString(key.Key)},
+		))
+	}
 	return objectOf(
 		canonical.ObjectPair{Key: "dry_run", Value: canonical.NewBool(true)},
 		canonical.ObjectPair{Key: "removed_models", Value: stringArray(impact.RemovedModels)},
@@ -73,6 +80,8 @@ func modelImpactValue(impact configops.ModelEditImpact) *canonical.Value {
 		canonical.ObjectPair{Key: "removed_tasks", Value: stringArray(impact.RemovedTasks)},
 		canonical.ObjectPair{Key: "unified_model", Value: canonical.NewBool(impact.UnifiedModel)},
 		canonical.ObjectPair{Key: "endpoint_plans", Value: canonical.NewBool(impact.EndpointPlans)},
+		// removed_keys 追加在末尾：既有字段的位置一个不动，客户端按名字读。
+		canonical.ObjectPair{Key: "removed_keys", Value: removedKeys},
 	)
 }
 

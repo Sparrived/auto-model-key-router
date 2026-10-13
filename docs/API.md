@@ -65,7 +65,7 @@ x-api-key: your-local-api-key
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}` | 仅本地 | 查询、更新或删除 Provider |
 | `GET/POST` | `/api/providers/{provider_id}/keys` | 仅本地 | 查询或创建 Provider Key |
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Provider Key |
-| `GET/PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` | 仅本地 | 查询或设定该 Key 对外提供的模型（取消勾选只绑在它上面的最后一个模型会连带删除那个模型） |
+| `GET/PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` | 仅本地 | 查询或设定该 Key 对外提供的模型（取消勾选只绑在它上面的最后一个模型会连带删除那个模型；被编辑的这把 Key 本身保留，即使它不再服务任何模型，见「消失：引用被一并清理」） |
 | `POST` | `/api/providers/{provider_id}/probe` | 仅本地 | 同步刷新该 Provider 全部启用 Key 的能力探测（各 Key 的模型列表 + 路由可用性） |
 | `POST` | `/api/providers/{provider_id}/keys/{key_name}/probe` | 仅本地 | 同步刷新指定 Key 的能力探测，可用 `modes` 限定路由检查范围 |
 | `GET/POST` | `/api/routes` | 仅本地 | 查询或创建模型路由 |
@@ -671,6 +671,19 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 | `access_keys.<id>.providers` | 删除供应商时摘掉失效的名字 |
 | `unified_model.<计划>.<primary\|fallback>` | 指向被删模型的计划被改写（回落另一个模型）或移除 |
 | `models.<模型>.endpoints.<族>.<primary\|fallback>` | 指向被删模型的端点计划被改写（回落另一个模型）或移除 |
+| `providers.<供应商>.keys.<Key>` | 该模型 `targets[]` 引用过、且此后**不再被任何模型绑定**的 Key 被删除；仍被其他模型路由绑定的 Key 原样保留 |
+
+删除模型时会顺带清理供应商 Key 的只有这几条路径：`DELETE /api/models/{model_id}`、
+`DELETE /api/routes/{route_id}` 与 `PUT /api/routes/{route_id}` 传 `targets: []`（以及「按下标解绑
+最后一条 target」）。它们删掉的是该模型 `targets[]` 引用过、此后不再被任何模型绑定的 Key。
+明确**不做**这件事的有两条：其一，供应商页「Key 服务模型」取消勾选
+（`PUT /api/providers/{provider_id}/keys/{key_name}/models`）——那条路径被编辑的主体就是这把 Key
+自己，它必须留下；其二，只改一条路由 `targets[]` 里的部分条目（路由仍在，同一条路由换成少了某条
+目标的清单、或按下标解绑其中一条）——那条路径只改绑定关系，即使某把 Key 就此失去最后一个绑定也
+不动它：编辑一次目标清单就删掉一把手输的凭据，代价比配置里多一把没人引用的 Key 大得多，要删
+凭据请显式删（`DELETE /api/providers/{provider_id}/keys/{key_name}`）。`DELETE
+/api/models/{model_id}/keys/{key_name}` 是另一条语义独立的路径——它本身就是「解绑这把 Key」，
+清理规则见下文该端点。供应商**本身不删**——哪怕它一个 Key 都不剩。
 
 指向被删模型的**端点计划**与 `unified_model` 是同一套修复：被删模型不再是那个端点族的分派
 目标，那条计划要么改指回退模型，要么整条移除；移除后该族回落到模型自己的 `targets`。
@@ -690,7 +703,7 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
 | `PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` |
 | `DELETE` | `/api/providers/{provider_id}/keys/{key_name}` |
 | `DELETE` | `/api/providers/{provider_id}` |
-| `PUT` | `/api/routes/{route_id}`（`targets: []` 即删路由） |
+| `PUT` | `/api/routes/{route_id}`（仅 `targets: []` 走预演，即删路由；传非空 `targets` 是**立即写入**，`?dry_run=1` 在这个分支上不生效） |
 | `DELETE` | `/api/routes/{route_id}` |
 | `DELETE` | `/api/models/{model_id}` |
 | `DELETE` | `/api/models/{model_id}/keys/{key_name}` |
@@ -713,12 +726,20 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
   ],
   "removed_tasks": ["shared", "teamA/only-a"],
   "unified_model": true,
+  "endpoint_plans": true,
+  "removed_keys": [{"provider": "openai", "key": "backup"}],
   "config_revision": "..."
 }
 ```
 
 `removed_models` 是失去全部目标而被删除的模型；`models_cleared` / `providers_cleared` 报告
 那份清单是否被摘空。命名工作空间的任务用 `空间/任务名` 限定，默认空间按原名。
+
+`removed_keys` 是**追加在响应末尾**的字段（为兼容既有调用方而排在最后）：本次写入里**消失、
+且其供应商仍然存在**的供应商 Key，形如 `[{"provider": "openai", "key": "backup"}]`，按
+`provider`、`key` 升序。删路由时它列出的就是「失去最后一个模型绑定」而被清理的那些 Key——
+仍被其他模型路由绑定的 Key 不在其中；整个供应商被删除时不逐把罗列（那种情况已经体现在
+`access_keys` 的供应商清单里）。
 
 预演不改动配置，因此响应里的 `config_revision` 仍是**当前**版本号，真写照常用它做并发校验。
 预演本身**不比对**该版本号：它不写盘，用不上防丢改动；并发写只会让预演结果过期（确认框里
@@ -931,7 +952,7 @@ curl -X POST http://127.0.0.1:8000/api/models \
 
 #### `DELETE /api/models/{model_id}`
 
-成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。只删除模型本身及其绑定关系，被删除模型绑定的供应商 Key 与供应商会保留（供应商 Key 被模型引用不算配置错误）。若引用该模型的 Key 不再被任何模型使用，可另行通过 `/api/providers/{provider_id}/keys/{key_name}` 删除。引用该模型的任务、工作空间与访问密钥清单会被一并清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单而不落盘。
+成功返回 `204 No Content`；请求体可带 `config_revision` 进行并发校验。删除模型本身后，它 `targets[]` 引用过的供应商 Key 中，**不再被任何模型绑定**的会被一并删除；仍被其他模型路由绑定的 Key 原样保留。供应商本身不删——即使它一个 Key 都不剩。引用该模型的任务、工作空间与访问密钥清单会被一并清理（见「改模型会连带改掉别处的引用」）；带 `?dry_run=1` 可先拿到这份清理清单（含 `removed_keys`）而不落盘。
 
 ### Key 接口
 
@@ -1413,9 +1434,9 @@ curl -X PUT http://127.0.0.1:8000/api/routes/gpt-5.5 \
 一条路由下没有 target 就不该存在，这条不变式由服务端在各条写路径上保证：
 
 - `PUT /api/routes/{route_id}` 传 `targets: []` 会**删除该路由**并返回 `204 No Content`（没有响应体，也就没有 `config_revision`）。省略 `targets` 字段则表示不改动目标，与传空数组是两回事。
-- 解绑 Key、取消 Key 勾选、删除 Key 等路径删掉最后一条 target 时，同样会连带删除该路由。
+- 解绑 Key、取消 Key 勾选、删除 Key 等路径删掉最后一条 target 时，同样会连带删除该路由。其中「取消 Key 勾选」（`PUT /api/providers/{provider_id}/keys/{key_name}/models`）删掉最后一条 target 时**只删路由，不清理供应商 Key**（见「消失：引用被一并清理」）。
 
-被删掉的路由会从 `models` 里消失，引用它的 `unified_model`、任务、工作空间与访问密钥清单会被一并清理（与 `DELETE /api/routes/{route_id}` 同一套修复，见「改模型会连带改掉别处的引用」）。这两条删除路径都支持 `?dry_run=1` 先预演。
+被删掉的路由会从 `models` 里消失，引用它的 `unified_model`、任务、工作空间与访问密钥清单会被一并清理（与 `DELETE /api/routes/{route_id}` 同一套修复，见「改模型会连带改掉别处的引用」）；这两条删除路径还会把该路由 `targets[]` 引用过、此后**不再被任何模型绑定**的供应商 Key 一并删掉，仍被其他路由绑定的原样保留，供应商本身不删（见「消失：引用被一并清理」）。它们都支持 `?dry_run=1` 先预演，`removed_keys` 就是这份将被删掉的 Key 清单。
 
 不变式管的是「**失去**最后一个目标」：新模型仍然可以先不带 Key 建出来（`POST /api/models` 的 `keys` 可为空，见下），在它绑上第一个 Key 之前只是不可调用；`POST /api/routes` 则要求 `targets` 至少一项，不能用它建一条空路由。
 

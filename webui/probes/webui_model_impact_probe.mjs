@@ -137,8 +137,27 @@ const NO_IMPACT = {
   unified_model: false,
   config_revision: "rev-000000000002",
 };
+// 只报出被清理的供应商 Key：删路由不会删 Key（只解绑），但一把失去最后一个模型绑定的
+// Key 会被清理掉，而用户眼里"删的只是路由"。这份清单刻意让**其余字段全空**：确认框此时
+// 还能弹出来、并且列出这两把 Key，才说明 hasImpact 真的收下了这个新增字段。
+// 两行的顺序照服务端契约（按 provider、key 升序），用来锁住"页面不重排"。
+const REMOVED_KEYS_IMPACT = {
+  dry_run: true,
+  removed_models: [],
+  access_keys: [],
+  workspaces: [],
+  removed_tasks: [],
+  unified_model: false,
+  removed_keys: [{ provider: "cn", key: "flash" }, { provider: "openai", key: "primary" }],
+  config_revision: "rev-000000000002",
+};
 
-// impactMode 由用例切换：full = 预演报出连带变动，none = 没有连带变动。
+// 预演结果按用例切换：full = 报出全部连带变动，none = 什么都不报，
+// removed-keys = 只报被清理的供应商 Key。
+const IMPACTS = { full: IMPACT, none: NO_IMPACT, "removed-keys": REMOVED_KEYS_IMPACT };
+const impactFor = (mode) => IMPACTS[mode] || NO_IMPACT;
+
+// impactMode 由用例切换。
 let impactMode = "full";
 let bound = ["model-a", "model-b"];
 const calls = [];
@@ -159,7 +178,7 @@ global.fetch = async (url, options = {}) => {
 
   if (path.endsWith("/models") && path.includes("/keys/")) {
     if (method === "PUT") {
-      if (dryRun) return jsonResponse(impactMode === "full" ? IMPACT : NO_IMPACT);
+      if (dryRun) return jsonResponse(impactFor(impactMode));
       bound = body.models;
       return jsonResponse({ provider_id: "openai", key: "primary", models: bound, config_revision: "rev-000000000003" });
     }
@@ -237,6 +256,8 @@ check("impact_lists_access_key", text.includes("公开（public）：模型清�
 check("impact_lists_workspace", text.includes("teamA：模型清单移除 model-a"), text);
 check("impact_lists_task", text.includes("shared 引用了被删的模型，将被一并删除"), text);
 check("impact_lists_unified", text.includes("unified_model 指向被删的模型"), text);
+// 这份预演没带 removed_keys（老响应形状）：确认框不能凭空长出一段"供应商 Key"。
+check("no_removed_keys_section_when_absent", !text.includes("供应商 Key"), text);
 check("confirm_button_present", Boolean(buttonWithText(dialogPanel(), "确认改动")));
 
 // —— 取消：一个字节都不能落盘，编辑态也要留着 ——
@@ -274,6 +295,38 @@ const quiet = modelsWrites().slice(beforeQuiet);
 check("quiet_flow_is_dry_run_then_write",
   quiet.length === 2 && quiet[0].dryRun === true && quiet[1].dryRun === false,
   JSON.stringify(quiet.map((call) => (call.dryRun ? "dry" : "write"))));
+
+// —— 预演只报出被清理的供应商 Key：照样要弹框，并把这把 Key 点名 ——
+// 删一个模型路由只是让相关 Key 解绑，只有一把 Key 失去**最后一个**模型绑定时才会消失。
+// 它是整份影响清单里最容易被漏掉的一条：用户以为自己只删了路由。这一段同时盯住两件事——
+// 少了这个字段 hasImpact 就不成立（这道用例的 alwaysConfirm 为 false，不弹框即失败），
+// 以及清单必须原样落到确认框里（服务端已按 provider、key 升序，页面不重排）。
+impactMode = "removed-keys";
+click(buttonWithText(host, "管理模型"));
+await settle();
+const beforeKeys = modelsWrites().length;
+click(buttonWithText(host, "保存模型"));
+await settle();
+
+const keysText = dialogText();
+check("removed_keys_alone_asks_confirm", Boolean(dialogPanel()), keysText);
+check("impact_has_removed_keys_title", keysText.includes("供应商 Key"), keysText);
+check("impact_lists_removed_key_lines",
+  keysText.includes("cn / flash 不再被任何路由绑定，将被删除") &&
+  keysText.includes("openai / primary 不再被任何路由绑定，将被删除"),
+  keysText);
+check("impact_keeps_removed_keys_order",
+  keysText.indexOf("cn / flash") < keysText.indexOf("openai / primary"), keysText);
+
+// 取消：还是没有真写——确认框列出的后果不该在"取消"之后发生。
+// 这里先看框在不在再点：这道用例要抓的正是"没弹框"，若直接点一个不存在的按钮，报出来的是
+// 一个读 null 的栈，而不是"removed_keys 没被算进影响"。
+const cancelKeys = dialogPanel() ? buttonWithText(dialogPanel(), "取消") : null;
+if (cancelKeys) { click(cancelKeys); await settle(); }
+const keyWrites = modelsWrites().slice(beforeKeys);
+check("removed_keys_cancel_writes_nothing",
+  keyWrites.length === 1 && keyWrites[0].dryRun,
+  JSON.stringify(keyWrites.map((call) => `${call.method}${call.dryRun ? "?dry_run=1" : ""}`)));
 
 function findText(root, needle) {
   return findAll(root, (node) => node.tagName !== "#text" && node.textContent === needle).length > 0;

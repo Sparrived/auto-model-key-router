@@ -193,6 +193,19 @@ const MODEL_KINDS = {
   },
 };
 
+// 删除 gpt-5.5 的预演结果：删路由只会让引用它的 Key 解绑，只有失去**最后一个**模型绑定的
+// Key 才会被清理。removed_keys 按 provider、key 升序（服务端契约），页面对它只渲染不重排。
+const DELETE_IMPACT = {
+  dry_run: true,
+  removed_models: ["gpt-5.5"],
+  access_keys: [],
+  workspaces: [],
+  removed_tasks: [],
+  unified_model: false,
+  removed_keys: [{ provider: "anthropic", key: "main" }, { provider: "openai", key: "backup" }],
+  config_revision: "rev-000000000000",
+};
+
 // 记录每一次写请求：这一页有几处"两次写入"的流程（迁移目标），只看渲染结果看不出
 // 写入顺序与字段，必须落到请求体上。
 const CALLS = [];
@@ -213,6 +226,11 @@ global.fetch = async (url, options = {}) => {
     payload = { unified_model: UNIFIED, config_revision: UNIFIED.config_revision };
   } else if (target.includes("/ui/model-kinds.json")) {
     payload = MODEL_KINDS;
+  }
+  // 删除路由的预演照实返回一份影响清单：确认框的文案与清单都长在它上面，桩若回一份
+  // 路由列表，验的就只是"框弹出来了"。
+  if (method === "DELETE" && target.includes("/api/routes")) {
+    payload = target.includes("dry_run=1") ? DELETE_IMPACT : { config_revision: "rev-000000000000" };
   }
   if (method !== "GET") {
     CALLS.push({ url: target, method, body: options.body ? JSON.parse(options.body) : null });
@@ -610,5 +628,44 @@ const afterVanish = CALLS.find((call) => call.method === "PUT" && call.url.inclu
 check("vanished_plan_model_not_resubmitted",
   afterVanish?.body?.endpoints !== undefined && Object.keys(afterVanish.body.endpoints).length === 0,
   JSON.stringify(afterVanish?.body?.endpoints));
+
+// ═══ 删除路由的确认框：说清"只解绑"与"孤儿 Key 才会被删" ═══
+//
+// 删路由只让引用它的 Key 解绑，唯有失去最后一个模型绑定的 Key 会被清理。原先的文案
+// 「绑定该模型的 Key 会一并解除」两头都不对：既像是 Key 会被删，又说不清什么情况下才会删。
+// 这段必须逐字锁住新措辞——文案回归不会让任何请求出错，只会让用户在点确认前被误导。
+CALLS.length = 0;
+click(buttonWithText(revisit, "编辑"));
+await settle();
+click(buttonWithText(revisit, "删除路由"));
+await settle();
+const removeDialog = byClass(document.body, "dialog").at(-1);
+const removeDialogText = removeDialog?.textContent || "";
+const removeMessage = byTag(removeDialog || new FakeNode("div"), "p")
+  .find((n) => n.textContent.startsWith("删除模型路由"));
+check("remove_dialog_message_exact",
+  removeMessage?.textContent === "删除模型路由 gpt-5.5？绑定它的 Key 只会解除绑定；不再被任何其他路由使用的 Key 会被一并删除。",
+  removeMessage?.textContent);
+check("remove_dialog_drops_old_wording", !removeDialogText.includes("会一并解除"), removeDialogText.slice(0, 200));
+// 影响清单里的供应商 Key 也要落到这个框里：它是"删的只是路由"这个误会唯一被点破的地方。
+check("remove_dialog_lists_removed_keys",
+  removeDialogText.includes("供应商 Key")
+  && removeDialogText.includes("anthropic / main 不再被任何路由绑定，将被删除")
+  && removeDialogText.includes("openai / backup 不再被任何路由绑定，将被删除"),
+  removeDialogText.slice(0, 400));
+check("remove_dialog_keeps_removed_keys_order",
+  removeDialogText.indexOf("anthropic / main") < removeDialogText.indexOf("openai / backup"));
+// 预演先发、真删要等确认：取消之后一个 DELETE 都不该落在真实路由上。
+const removeDryRuns = CALLS.filter((call) => call.method === "DELETE");
+check("remove_dry_run_sent_first",
+  removeDryRuns.length === 1 && removeDryRuns[0].url.includes("dry_run=1"),
+  JSON.stringify(removeDryRuns.map((call) => call.url)));
+const cancelRemove = byTag(removeDialog || new FakeNode("div"), "button")
+  .find((n) => n.textContent.trim() === "取消");
+if (cancelRemove) click(cancelRemove);
+await settle();
+check("remove_cancel_deletes_nothing",
+  CALLS.filter((call) => call.method === "DELETE").every((call) => call.url.includes("dry_run=1")),
+  JSON.stringify(CALLS.filter((call) => call.method === "DELETE").map((call) => call.url)));
 
 report();

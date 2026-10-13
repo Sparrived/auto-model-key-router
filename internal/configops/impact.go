@@ -30,6 +30,12 @@ type ReferenceListChange struct {
 	ProvidersCleared bool
 }
 
+// RemovedKey 是一把被本次写操作清理掉的供应商 Key。
+type RemovedKey struct {
+	Provider string
+	Key      string
+}
+
 // ModelEditImpact 描述一次模型写操作**连带**改掉的引用。
 //
 // 它是给二次确认用的：用户动的是一个模型，被连带改掉的却可能是别的资源（某把访问密钥
@@ -37,6 +43,12 @@ type ReferenceListChange struct {
 type ModelEditImpact struct {
 	// RemovedModels 是因为失去全部目标而被删除的模型（升序）。
 	RemovedModels []string
+	// RemovedKeys 是因为失去最后一个模型绑定而被清理的供应商 Key（按 provider、key 升序）。
+	//
+	// 与 RemovedModels 同一性质的东西，只是位置在 providers 那一段：删掉一条路由会顺手
+	// 清掉它留下的孤儿凭据，而凭据是用户手输的、删了不复原——所以它必须出现在预演里。
+	// 仍被其他模型绑定的 Key 不在这里：那是「保留」，不是「变动」。
+	RemovedKeys []RemovedKey
 	// AccessKeys 是清单被摘掉条目的访问密钥（按 key_id 升序）。
 	AccessKeys []ReferenceListChange
 	// Workspaces 是直呼模型清单被摘掉条目的工作空间（按名称升序）。
@@ -60,12 +72,42 @@ func ModelEditImpactOf(before, after *canonical.Value) ModelEditImpact {
 			objectKeys(lookup(before, "models")),
 			objectKeys(lookup(after, "models")),
 		),
+		RemovedKeys:   removedProviderKeys(before, after),
 		RemovedTasks:  removedNames(taskIdentities(before), taskIdentities(after)),
 		AccessKeys:    accessKeyListChanges(before, after),
 		Workspaces:    workspaceListChanges(before, after),
 		UnifiedModel:  !pyEqualValues(lookup(before, "unified_model"), lookup(after, "unified_model")),
 		EndpointPlans: endpointPlansChanged(before, after),
 	}
+}
+
+// removedProviderKeys 算出本次写操作清理掉的供应商 Key（升序）。
+//
+// 只报「供应商还在、Key 没了」的那些。整个供应商一起消失时（删供应商、删掉它的最后一把
+// Key）它的 Key 是删除的**主体**而不是连带，逐把罗列只会把确认框塞满；而删一条路由顺手
+// 清掉的孤儿 Key 恰恰相反——用户根本没提过它，不说出来就等于悄悄删掉一把凭据。
+func removedProviderKeys(before, after *canonical.Value) []RemovedKey {
+	removed := []RemovedKey{}
+	for _, pair := range objectItems(lookup(before, "providers")) {
+		beforeKeys := lookup(pair.Value, "keys")
+		afterProvider := lookup(lookup(after, "providers"), pair.Key)
+		if !beforeKeys.IsObject() || !afterProvider.IsObject() {
+			continue
+		}
+		afterKeys := lookup(afterProvider, "keys")
+		for _, keyName := range objectKeys(beforeKeys) {
+			if !afterKeys.IsObject() || !afterKeys.Obj.Has(keyName) {
+				removed = append(removed, RemovedKey{Provider: pair.Key, Key: keyName})
+			}
+		}
+	}
+	sort.Slice(removed, func(i, j int) bool {
+		if removed[i].Provider != removed[j].Provider {
+			return removed[i].Provider < removed[j].Provider
+		}
+		return removed[i].Key < removed[j].Key
+	})
+	return removed
 }
 
 // endpointPlansChanged 报告两次配置里是否有模型的端点计划不同。

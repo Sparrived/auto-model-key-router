@@ -19,6 +19,9 @@ export function hasImpact(impact) {
   if (!impact) return false;
   return Boolean(
     impact.removed_models?.length ||
+    // 供应商 Key 被清理：删路由只是解绑，但一把再没有任何路由使用的 Key 会跟着消失。
+    // 这个消失最不显眼（页面删的是模型路由，用户不会想到某把 Key 没了），必须单独问一句。
+    impact.removed_keys?.length ||
     impact.access_keys?.length ||
     impact.workspaces?.length ||
     impact.removed_tasks?.length ||
@@ -90,6 +93,12 @@ function impactSections(impact) {
   if (impact.removed_models?.length) {
     sections.push(section("模型", impact.removed_models.map(
       (name) => `${name} 失去全部 Key 绑定，将被删除`)));
+  }
+  if (impact.removed_keys?.length) {
+    // 服务端已按 provider、key 升序排好，这里照序渲染：顺序即清单本身的顺序，
+    // 再排一次只会让「确认框看到的」与「服务端算出的」多一个可能不一致的地方。
+    sections.push(section("供应商 Key", impact.removed_keys.map(
+      (removed) => `${removed.provider} / ${removed.key} 不再被任何路由绑定，将被删除`)));
   }
   if (impact.access_keys?.length) {
     sections.push(section("访问密钥", impact.access_keys.flatMap(accessKeyLines)));
