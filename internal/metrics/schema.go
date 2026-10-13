@@ -117,6 +117,11 @@ const insertWorkspaceSQL = `
 // recordMetric 写的是 key.Name，key 是 config.KeyConfig），与调用方身份无关，
 // 不能拿来替代这张表。
 //
+// 概览页的请求流也读这张表（RequestHistory 的 LEFT JOIN）：来源列原先只有
+// caller_type，一页里所有外部调用方都显示成「访问密钥 · default」——那个 default 是
+// 工作空间的兜底值，看着却像这把 key 的名字，读的人自然会以为「绝大多数都是
+// default」。
+//
 // 工作空间旁挂表也替代不了：访问密钥不绑定工作空间，它的请求照常带
 // X-AMKR-Workspace（归一化后通常是 default），因此两把访问密钥会落进同一个
 // workspace 值。

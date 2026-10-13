@@ -611,10 +611,15 @@ func seriesPointLimitExceeded(hours float64, bucketSeconds int64) bool {
 // 与 key_stats 的 recent_requests 不同，这里的 success/retried 会经过 bool()
 // 转成真正的布尔（JSON true/false），而后者原样返回整数。别把两处合并。
 //
-// 末尾六列来自三条旁挂表（workspace / client_addr / user_agent / stream / api_format /
-// reasoning_effort，见 store.go 的 RequestHistory 与 schema.go）：没有归属的行全是
-// NULL，渲染成 JSON null 而不是空串或 false——「这次请求没有形态记录」与「这次请求是
-// 非流式的」是两件事，读端必须分得开。
+// 末尾七列来自四条旁挂表（workspace / client_addr / user_agent / stream / api_format /
+// reasoning_effort / access_key_id，见 store.go 的 RequestHistory 与 schema.go）：没有
+// 归属的行全是 NULL，渲染成 JSON null 而不是空串或 false——「这次请求没有形态记录」与
+// 「这次请求是非流式的」是两件事，读端必须分得开。
+//
+// access_key_id 是**哪一把**访问密钥发起的（只存配置里的 key_id，显示名由服务端从配置
+// 补，见 internal/server/key_usage.go）：不带归属的行（完整权限、工作空间凭据、历史行）
+// 为 null。注意不要拿 key_name 顶替——那是被选中的**上游** Provider key 名，
+// 与调用方身份无关。
 func requestItem(row *sql.Rows) (*canonical.Value, error) {
 	var (
 		id                                                  int64
@@ -627,6 +632,7 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		workspace, clientAddr, userAgent                    sql.NullString
 		stream                                              sql.NullInt64
 		apiFormat, reasoningEffort                          sql.NullString
+		accessKeyID                                         sql.NullString
 	)
 	if err := row.Scan(
 		&id, &createdAt, &callerType, &modelID, &requestedModelID,
@@ -636,6 +642,7 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		&cacheCreation, &cacheRead, &firstTokenMS, &durationMS,
 		&workspace, &clientAddr, &userAgent,
 		&stream, &apiFormat, &reasoningEffort,
+		&accessKeyID,
 	); err != nil {
 		return nil, err
 	}
@@ -678,6 +685,9 @@ func requestItem(row *sql.Rows) (*canonical.Value, error) {
 		canonical.ObjectPair{Key: "stream", Value: nullableBool(stream)},
 		canonical.ObjectPair{Key: "api_format", Value: nullableString(apiFormat)},
 		canonical.ObjectPair{Key: "reasoning_effort", Value: nullableString(reasoningEffort)},
+		// —— 发起请求的那把访问密钥（同样增补）——
+		// 只给 key_id：显示名是配置的属性，指标层不存也不编（由服务端从配置补 name）。
+		canonical.ObjectPair{Key: "access_key_id", Value: nullableString(accessKeyID)},
 	), nil
 }
 

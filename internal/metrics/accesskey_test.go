@@ -237,3 +237,43 @@ func TestAccessKeyRecentRespectsLimit(t *testing.T) {
 		t.Errorf("success 应是布尔，实得 %+v", success)
 	}
 }
+
+// TestRequestHistoryCarriesAccessKey 断言请求明细带上**发起请求的那把**访问密钥。
+//
+// 概览页的请求流要回答「这次请求是谁发的」，而 caller_type=access_key 只说得出档位：
+// 访问密钥一人一把，说不出哪一把就等于没答（与 AccessKeyUsage 的理由同源）。这一条
+// 同时守着写入端（request_access_key 真的写了行）与读取端的 LEFT JOIN。
+//
+// 没有归属的行必须是 **null**：兜底成空串或某一把 key，会把完整权限的用量记到某个人
+// 头上——那正是这张旁挂表要避免的事。
+func TestRequestHistoryCarriesAccessKey(t *testing.T) {
+	store := tempStore(t)
+	provider := "openai"
+	recordAccessKey(t, store, "trial", "default", "gpt-4o", &provider, 10)
+	// 完整权限的一条：没有访问密钥归属，但必须照常出现在明细里（LEFT 而不是 INNER）。
+	recordWorkspace(t, store, "default", "gpt-4o-mini", "gpt-4o-mini", &provider, &provider, 5)
+
+	byModel := map[string]*canonical.Value{}
+	for _, item := range historyItems(t, store, RequestHistoryParams{}) {
+		model, _ := item.Obj.Get("model_id")
+		byModel[model.Str] = item
+	}
+	if len(byModel) != 2 {
+		t.Fatalf("明细条数 = %d, 期望 2（无归属的行也要在）", len(byModel))
+	}
+	attributed, _ := byModel["gpt-4o"].Obj.Get("access_key_id")
+	if attributed.Str != "trial" {
+		t.Errorf("access_key_id = %q, 期望 trial", attributed.Str)
+	}
+	// 显示名不在指标层：id 是稳定标识符，名字可改、属于配置（由服务端补）。
+	if _, ok := byModel["gpt-4o"].Obj.Get("access_key_name"); ok {
+		t.Error("指标层不应返回 access_key_name（显示名在配置里，由服务端补）")
+	}
+	unattributed, ok := byModel["gpt-4o-mini"].Obj.Get("access_key_id")
+	if !ok {
+		t.Fatal("明细缺少 access_key_id 字段")
+	}
+	if unattributed.Kind != canonical.KindNull {
+		t.Errorf("无归属行的 access_key_id 应为 null, 实得 %s", compact(t, unattributed))
+	}
+}

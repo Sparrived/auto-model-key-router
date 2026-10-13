@@ -810,13 +810,14 @@ func (s *Store) requestHistorySync(params RequestHistoryParams, now time.Time) (
 		itemWhere = appendFilter(itemWhere, "id < ?")
 		itemParams = append(itemParams, *params.BeforeID)
 	}
-	// 三条 LEFT JOIN 取「请求的来源与形态」：工作空间、客户端地址、请求形态各在一张
-	// 旁挂表里，都不是 request_metrics 的列（理由见 schema.go）。LEFT 而不是 INNER：
-	// 没有归属的行（历史行、不走 proxy 的写入路径）必须照常出现在明细里，那些字段为 null。
+	// 四条 LEFT JOIN 取「请求的来源、形态与访问密钥归属」：工作空间、客户端地址、请求
+	// 形态、发起请求的访问密钥各在一张旁挂表里，都不是 request_metrics 的列（理由见
+	// schema.go）。LEFT 而不是 INNER：没有归属的行（历史行、不走 proxy 的写入路径、
+	// 完整权限与工作空间凭据发的请求）必须照常出现在明细里，那些字段为 null。
 	//
 	// JOIN 条件里的 request_metrics.id 不写别名：whereSQL 用的是裸列名
 	// （见 stats.go 的 metricFilter.sql），给主表起别名会让两边的列名对不上。
-	// 三张旁挂表只有 request_id 与自己的列，不存在列名歧义——访问密钥过滤在
+	// 四张旁挂表只有 request_id 与自己的列，不存在列名歧义——访问密钥过滤在
 	// whereSQL 里追加的那条子查询同样引用裸 `id`，靠的也是这一点。
 	itemQuery := "SELECT id, created_at, caller_type, model_id, requested_model_id,\n" +
 		"                   provider_id, pool_name, upstream_model_id, key_name,\n" +
@@ -825,11 +826,13 @@ func (s *Store) requestHistorySync(params RequestHistoryParams, now time.Time) (
 		"                   cache_creation_input_tokens, cache_read_input_tokens,\n" +
 		"                   first_token_ms, duration_ms,\n" +
 		"                   w.workspace, s.client_addr, s.user_agent,\n" +
-		"                   sh.stream, sh.api_format, sh.reasoning_effort\n" +
+		"                   sh.stream, sh.api_format, sh.reasoning_effort,\n" +
+		"                   ak.access_key_id\n" +
 		"            FROM request_metrics\n" +
 		"            LEFT JOIN request_workspace w ON w.request_id = request_metrics.id\n" +
 		"            LEFT JOIN request_source s ON s.request_id = request_metrics.id\n" +
-		"            LEFT JOIN request_shape sh ON sh.request_id = request_metrics.id" +
+		"            LEFT JOIN request_shape sh ON sh.request_id = request_metrics.id\n" +
+		"            LEFT JOIN request_access_key ak ON ak.request_id = request_metrics.id" +
 		itemWhere + "\n" +
 		"            ORDER BY id DESC LIMIT ?"
 	rows, err := s.db().Query(itemQuery, append(itemParams, params.Limit+1)...)
