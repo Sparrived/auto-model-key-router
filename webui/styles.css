@@ -132,13 +132,65 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .page-head .sub { color: var(--ui-text-on-canvas); font-size: 13px; margin-top: 6px; max-width: 74ch; }
 .page-head .freshness, .page-head .muted { color: var(--ui-text-on-canvas); }
 .page-actions { display: flex; align-items: center; gap: var(--sp-1); margin-left: auto; flex-wrap: wrap; min-width: 0; }
-/* 全局筛选（供应商 / 访问密钥）：两个维度各一排 chip，维度内多选、维度间同时成立。
-   chip 复用 .segmented / .segment（多枚同时 aria-pressed="true" 就是多选），这里只负责
-   分组排版：标签压在赤陶画布上，因此不能用 .toolbar-label 的 --ui-text-muted。 */
+/* 全局筛选（供应商 / 访问密钥）：两个维度各一个下拉，维度内多选、维度间同时成立。
+   为什么是下拉而不是一排 chip：选项随配置增长（十几把访问密钥很常见），chip 收起时也要
+   折成三四行，把页头撑得比看板还高；下拉收起后每维度只占一行摘要。
+   用原生 <details>：开合、键盘操作、点击摘要都由浏览器负责，不写浮层定位与外部点击关闭。
+   面板里仍是 .segmented / .segment（多枚同时 aria-pressed="true" 就是多选）。
+   标签压在赤陶画布上，因此不能用 .toolbar-label 的 --ui-text-muted。
+   shortcut: 原生 details 不会「点外部自动收起」，要再点一次摘要；自动收起得挂 document
+   监听，而筛选器每次重绘都会重建，还得负责把监听摘掉。 */
 .metric-filters { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
 .metric-filters .filter-group { display: flex; align-items: center; gap: var(--sp-1); min-width: 0; }
 .metric-filters .filter-label { font-size: 12px; color: var(--ui-text-muted); white-space: nowrap; }
 .page-head .metric-filters .filter-label { color: var(--ui-text-on-canvas); }
+.metric-filters .filter-select { position: relative; min-width: 0; }
+.metric-filters .filter-select > summary {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 26px;
+  max-width: min(340px, 62vw); padding: 4px 10px;
+  border: 1px solid var(--ui-divider); border-radius: 9px;
+  background: var(--ui-surface-soft); color: var(--ui-text-selected);
+  font-size: 12px; font-weight: 600; cursor: pointer; list-style: none;
+}
+.metric-filters .filter-select > summary::-webkit-details-marker { display: none; }
+.metric-filters .filter-select > summary::marker { content: ""; }
+.metric-filters .filter-select > summary:hover { background: var(--ui-surface); }
+.metric-filters .filter-select > summary::after { content: "▾"; flex: none; font-size: 10px; color: var(--ui-text-muted); }
+.metric-filters .filter-select[open] > summary::after { content: "▴"; }
+/* 摘要只占一行：名字再长也是省略号，完整内容留在 title 与展开后的面板里 */
+.metric-filters .filter-summary-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 面板绝对定位：展开不推动下面的看板，选项多了自己滚。
+   对齐到 summary 的右边缘、向左展开：页头操作区本来右对齐，向右展开时最右边那个下拉的
+   面板会伸出视口、把整页撑出横向滚动条（实测无筛选时 620px 以上才不溢出，1600px 下伸出去
+   115px）。这一档只在 860px 以上生效，更窄的对齐方式见下面的媒体查询。
+   min-width 收到 132px：供应商那种两三项的短清单不至于缩成一条缝。
+   flex-wrap 必须显式写成 nowrap：.segmented 的基础规则为旧的一排 chip 开着 wrap，列方向
+   再叠 wrap，超出 max-height 的选项会折到**右侧的列**里，接着被 overflow-x:hidden 裁掉——
+   选项看不到也点不到，纵向滚动反而永远不触发（实测 10 枚 chip 起，也就是配置里 9 把密钥）。 */
+.metric-filters .filter-select > .segmented {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  flex-direction: column; flex-wrap: nowrap; align-items: stretch; min-width: 132px;
+  max-width: min(420px, 86vw); max-height: 300px; overflow-x: hidden; overflow-y: auto;
+  background: var(--ui-surface); box-shadow: var(--shadow-card);
+}
+/* min-width: 0 是必需的：flex 项默认按内容撑开，长名字会把面板顶到超过 max-width，
+   于是面板自己长出横向滚动条、还把页面撑出横向滚动条。
+   flex: none 同样是必需的：单列 + nowrap 之后默认的收缩会把超出的 chip 压扁（实测 10px 高，
+   字被纵向切开），面板就永远不会滚，只会把每一行挤成一条缝。 */
+.metric-filters .filter-select > .segmented .segment {
+  flex: none; min-width: 0; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 860px 以下：贴着摘要展开在这条宽度带里必然有一侧出界——摘要落在行中间，向左展开会越过
+   内容右缘（504px + 有纵向滚动条时实测多出 10px 横向滚动条），而 420px 宽的面板锚在摘要上，
+   只要「摘要右缘到内容左缘」不足 420px，左边那一截就伸到视口外（实测 561px 被切掉 161px、
+   620px 被切 118px；页面级还不出现横向滚动条，所以看不出异常，就是标签开头点不到）。
+   改成对齐**整条筛选栏**、面板就占栏宽：栏一定在内容区里，两个维度共用同一个位置，
+   摘要排在行内哪个位置都不会出界。860px 用仓库既有断点，也给右侧操作区留足了宽度。 */
+@media (max-width: 860px) {
+  .metric-filters { position: relative; }
+  .metric-filters .filter-select { position: static; }
+  .metric-filters .filter-select > .segmented { left: 0; right: 0; min-width: 0; max-width: none; }
+}
 
 /* ══ 仪表板栅格 ══ */
 /* 12 列栅格：看板卡片按列跨距排布，窄屏逐级塌缩。

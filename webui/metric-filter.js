@@ -9,9 +9,12 @@
 // 再加上「访问密钥 = ak1」就是「ak1 打到这两家的量」。后端把重复出现的同名参数收成一个
 // IN 列表（见 /ui/filtered-metrics.json）。
 //
-// 控件形态：每个维度一排 chip（复用 .segmented / .segment 的样式，所以多选与时间窗口
-// 选择器看起来是同一族控件），第一枚「全部」= 该维度不设限。chip 不持内部状态、选中与否
-// 全部读 store，因此页面每 15 秒整块重绘也不会把用户正在操作的东西合上。
+// 控件形态：每个维度一个下拉（原生 <details>），收起时只占一行摘要——选项随配置增长
+// （十几把访问密钥很常见），一排 chip 折成三四行会把页头撑得比看板还高。展开后仍是同一批
+// chip（复用 .segment 的样式与按下态），第一枚「全部」= 该维度不设限。
+//
+// 状态不落在 DOM 上：选中值读 store，展开状态记在 openDimensions 里，因此页面每 15 秒整块
+// 重绘、以及选中一项触发的整页重绘，都不会把用户正在操作的下拉合上或把已选条件抹掉。
 //
 // 与「按 Key 拆分」那几张卡的关系：只要**任一维度**筛选生效，按访问密钥、按上游 Key、
 // 模型 × 上游 Key 这三张表就不再回答全实例的问题，由各页在筛选态收起（见各页的 draw）。
@@ -68,7 +71,7 @@ export function metricFilterActive(store) {
 
 // filterNote 是筛选态下要显示在页面上的说明；未筛选时返回 null。
 //
-// 措辞必须点明这套筛选的真实语义：**同一排内选中任一项都算命中（OR），两排之间都要命中
+// 措辞必须点明这套筛选的真实语义：**同一组内选中任一项都算命中（OR），两组之间都要命中
 // （AND）**。只写「条件同时成立」会把「供应商 = openai + azure」读成「同时是这两家」，
 // 与页面上的数字（两家的量之和）正好相反。文案走纯文本渲染（notice 不做 markdown），
 // 所以这里不能写 **强调**。
@@ -78,7 +81,7 @@ export function filterNote(store) {
   if (!providers && !accessKeys) return null;
   if (providers && accessKeys) {
     return `已按供应商「${providers}」与访问密钥「${accessKeys}」筛选：`
-      + "本页读数只含两排条件都命中的调用（同一排内选中任一项即可）。";
+      + "本页读数只含两组条件都命中的调用（同一组内选中任一项即可）。";
   }
   if (providers) return `已按供应商「${providers}」筛选：本页读数只含所选供应商的调用。`;
   return `已按访问密钥「${accessKeys}」筛选：本页读数只含所选密钥发起的调用。`;
@@ -95,11 +98,19 @@ function labelList(values, options) {
 
 // —— 控件 ——
 
-// chipGroup 画一个维度的 chip 排。
+// openDimensions 记录哪个维度的下拉是展开的（页面重绘会重建整块筛选器，不记就会合上）。
 //
-// allLabel 固定为「全部」：它代表**该维度不设限**（选中值清空），所以它在选中值为空时
+// 同时只留一个：两个维度都收在操作区右侧，面板又都是从右边缘向左铺开，一起展开时后开的
+// 必然盖住先开的（不选任何条件时两个摘要都很短，两个面板一定重叠）。立即互斥由 details 的
+// name 交给浏览器（见下面 filterSelect），这个集合只负责把"当前开着哪个"带过重绘。
+// 收起面板不影响已选条件——条件在 store 里，不在这个集合里。
+const openDimensions = new Set();
+
+// filterSelect 画一个维度的下拉。
+//
+// 第一枚 chip 固定为「全部」：它代表**该维度不设限**（选中值清空），所以它在选中值为空时
 // 处于按下态。各选项 chip 之间互相独立，可以同时按下——这就是维度内多选。
-function chipGroup(dimension, label, options, selected, onChange) {
+function filterSelect(dimension, label, options, selected, onChange) {
   const chips = [
     h("button.segment", {
       type: "button",
@@ -127,9 +138,30 @@ function chipGroup(dimension, label, options, selected, onChange) {
         : selected.concat(item.value)),
     }, item.label));
   }
+  // 收起时的摘要与面板里同一份清单：名字再长也只占一行（CSS 省略号，完整内容在 title）。
+  const summaryText = selected.length ? labelList(selected, values) : "全部";
   return h("div.filter-group", { "data-dimension": dimension },
     h("span.filter-label", label),
-    h("div.segmented", { role: "group", "aria-label": `按${label}筛选` }, chips),
+    h("details.filter-select", {
+      // name 让浏览器自己当手风琴：点开一个会**立即**关掉另一个（同一个 name 分组），
+      // 不依赖下一次重绘。没有这个属性时，另一个面板要等重绘才会收起来，而在那之前
+      // 它一直盖在刚打开的面板上（后者 DOM 在后、z-index 相同），看起来像"点了没反应"。
+      name: "amkr-metric-filter",
+      // true 会写成 open 属性（见 dom.js 的 applyProps），false 则完全不写。
+      open: openDimensions.has(dimension),
+      onToggle: (event) => {
+        const node = event.currentTarget;
+        if (!node?.open) { openDimensions.delete(dimension); return; }
+        // 浏览器把这个维度打开时也会给被关掉的那个派发 toggle（自己的 handler 会删掉自己），
+        // 这里的 clear() 兜住不认 name 的浏览器：那种情况下互斥要等下一次重绘才生效。
+        openDimensions.clear();
+        openDimensions.add(dimension);
+      },
+    },
+      h("summary.filter-summary", { title: `按${label}筛选：${summaryText}` },
+        h("span.filter-summary-text", {}, summaryText)),
+      h("div.segmented", { role: "group", "aria-label": `按${label}筛选` }, chips),
+    ),
   );
 }
 
@@ -146,9 +178,9 @@ export function metricFilterBar(store, onChange) {
   };
   const paint = () => {
     render(box,
-      chipGroup("provider", "供应商", providerOptions, selectedProviders(store),
+      filterSelect("provider", "供应商", providerOptions, selectedProviders(store),
         (values) => apply(values, selectedAccessKeys(store))),
-      chipGroup("access-key", "访问密钥", accessKeyOptions, selectedAccessKeys(store),
+      filterSelect("access-key", "访问密钥", accessKeyOptions, selectedAccessKeys(store),
         (values) => apply(selectedProviders(store), values)),
     );
   };
