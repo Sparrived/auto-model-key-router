@@ -75,13 +75,24 @@ func (s *streamResponse) markFallback() {
 //   - messages：**总是**走 Anthropic 重建（原生上游的响应本来就是 Anthropic 形
 //     态，重建是幂等的，参照实现也照做）；
 //   - responses：只在**非原生**上游时重建（原生响应已经是 Responses 形态）。
+//
+// 返回值与 runAttempt 同构：二选一非 nil——result 是可直接写回下游的结果，
+// retryError 表示这一轮应按上游故障重试（当前唯一来源是 2xx 空响应，见
+// emptyChatCompletionResponse）。
+//
+// 2xx 空响应拦截是**与参照实现的有意分叉**（产品决策）：上游偶发返回 200 且
+// 响应体里没有 choices 的空响应，参照实现原样透传，调用方只看到「200 但没有
+// choices」，这类错误常被归为不可重试而直接丢弃——一条回复就这么静默没了。
+// 这里改为按上游故障处理：记失败、告警，预算内重试；预算耗尽后返回 502，
+// 而不是把空壳继续透传给调用方。
 func (h *Handler) bufferedResponse(
 	context *RequestContext,
 	key config.KeyConfig,
 	response *http.Response,
 	durationMS int64,
 	nativeUpstream bool,
-) *attemptResult {
+	attemptIndex int,
+) (*attemptResult, *attemptResult) {
 	content, readErr := readResponseBody(response)
 	if readErr != nil {
 		// 响应体读到一半断开：参照实现会抛 httpx.RequestError 并冒泡，这里折算成
@@ -94,7 +105,18 @@ func (h *Handler) bufferedResponse(
 				readableReason("读取上游响应体失败: "+readErr.Error()), durationMS, false)
 		}
 		return jsonResult(http.StatusBadGateway,
-			jsonErrorResponse("上游请求失败: RemoteProtocolError"))
+			jsonErrorResponse("上游请求失败: RemoteProtocolError")), nil
+	}
+	if emptyChatCompletionResponse(context.Path, response, content) {
+		retried := attemptIndex+1 < context.Attempts
+		h.recordEmptyCompletionAnomaly(context, key, response.StatusCode, content,
+			durationMS, retried)
+		if retried {
+			return nil, jsonResult(http.StatusBadGateway,
+				jsonErrorResponse(emptyCompletionMessage))
+		}
+		return jsonResult(http.StatusBadGateway,
+			jsonErrorResponse(emptyCompletionMessage)), nil
 	}
 	h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 		content, durationMS, false, false)
@@ -102,29 +124,59 @@ func (h *Handler) bufferedResponse(
 
 	if response.StatusCode >= 400 {
 		return errorResponseFromContent(response.StatusCode, content,
-			context.Path == "messages")
+			context.Path == "messages"), nil
 	}
 	if context.Path == "messages" {
 		converted := protocol.AnthropicMessageResponse(parseJSONOrNil(content),
 			context.RequestedModelID)
 		if converted == nil {
-			return jsonResult(http.StatusBadGateway, anthropicNonJSONError())
+			return jsonResult(http.StatusBadGateway, anthropicNonJSONError()), nil
 		}
 		result := jsonResult(response.StatusCode, converted)
 		result.headers = headers
-		return result
+		return result, nil
 	}
 	if context.Path == "responses" && !nativeUpstream {
 		converted, err := protocol.ResponsesResponse(parseJSONOrNil(content),
 			context.RequestedModelID)
 		if err != nil || converted == nil {
-			return jsonResult(http.StatusBadGateway, responsesNonJSONError())
+			return jsonResult(http.StatusBadGateway, responsesNonJSONError()), nil
 		}
 		result := jsonResult(response.StatusCode, converted)
 		result.headers = headers
-		return result
+		return result, nil
 	}
-	return rawResult(response.StatusCode, headers, content)
+	return rawResult(response.StatusCode, headers, content), nil
+}
+
+// emptyCompletionMessage 是空响应故障写给下游的错误文案。
+//
+// 重试耗尽与否共用同一句：调用方要识别的是「这次上游没给内容」这个事实，而不是
+// AMKR 内部重试了几轮（轮数在日志与指标里）。
+const emptyCompletionMessage = "上游返回空响应（响应中没有 choices）"
+
+// emptyChatCompletionResponse 判定一次 2xx 的 chat/completions 响应是否为
+// 「空响应」：解析不出非空 choices 数组（缺失、非数组、空数组、乃至非 JSON 的
+// 空壳，都会命中）。
+//
+// 判据刻意收窄，宁漏不误：
+//   - 只认 chat/completions：messages / responses 在各自的重建里对空壳有自己的
+//     语义（补空 output 等），不在这条拦截的范围里；
+//   - 只认 2xx：其余状态码有既有的错误/重试路径；
+//   - 声明了 content-encoding 的响应体是压缩字节，本层不做透明解压（见
+//     TestContentEncodingIsNotDecoded 钉住的产品决策），无从检查内容，因此保持既
+//     有的原样透传，不误报成「空响应」；
+//   - 流式永远不会问到这里——响应头一写出就无从改判（见本文件顶部说明）。
+func emptyChatCompletionResponse(path string, response *http.Response, content []byte) bool {
+	if path != "chat/completions" || response == nil ||
+		response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false
+	}
+	if response.Header.Get("content-encoding") != "" {
+		return false
+	}
+	choices := parseJSONOrNil(content).Lookup("choices")
+	return !(choices.IsArray() && choices.Len() > 0)
 }
 
 // anthropicNonJSONError 是「上游非 JSON，无法转成 Anthropic 响应」的错误体。

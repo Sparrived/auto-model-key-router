@@ -410,7 +410,7 @@ func TestRetryPolicyThreeRegimes(t *testing.T) {
 		env.route("/v1/chat/completions",
 			jsonStep(500, `{"error":{"message":"a"}}`),
 			jsonStep(500, `{"error":{"message":"b"}}`),
-			jsonStep(200, `{"ok":true}`))
+			jsonStep(200, `{"ok":true,"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 		recorder := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("状态码: got %d（%s）", recorder.Code, recorder.Body.String())
@@ -520,7 +520,7 @@ func TestCooldownRules(t *testing.T) {
 				Headers: map[string]string{"content-type": "application/json", "retry-after": "30"},
 				Body:    `{"error":{"message":"slow"}}`,
 			},
-			jsonStep(200, `{"ok":true}`))
+			jsonStep(200, `{"ok":true,"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 		// 第一次：429 冷却；第二次仍会被选中（冷却过滤是软的），成功后状态被删除。
 		env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
 		env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
@@ -544,7 +544,7 @@ func TestMetricsRowsForRetryAndFailure(t *testing.T) {
 	env := newTestEnv(t, cfg, Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
 	env.route("/v1/chat/completions",
 		jsonStep(500, `{"error":{"message":"boom"}}`),
-		jsonStep(200, `{"id":"x","usage":{"prompt_tokens":3,"completion_tokens":4}}`))
+		jsonStep(200, `{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`))
 	env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
 
 	records := env.metrics.take()
@@ -578,7 +578,7 @@ func TestMetricsRowsForRetryAndFailure(t *testing.T) {
 // 的收尾也走它，因此这条用例守着非流式路径；流式那条见 stream_test.go。
 func TestMetricsRowCarriesRequestSource(t *testing.T) {
 	env := newTestEnv(t, simpleChatConfig(), Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
-	env.route("/v1/chat/completions", jsonStep(200, `{"id":"x"}`))
+	env.route("/v1/chat/completions", jsonStep(200, `{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 	env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`,
 		map[string]string{"User-Agent": "claude-cli/1.0"})
 
@@ -606,7 +606,7 @@ func TestMetricsRowCarriesRequestShape(t *testing.T) {
 	cfg := simpleChatConfig()
 	cfg.ReasoningEffortByModel = map[string]string{"vendor-model": "high"}
 	env := newTestEnv(t, cfg, Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
-	env.route("/v1/chat/completions", jsonStep(200, `{"id":"x"}`))
+	env.route("/v1/chat/completions", jsonStep(200, `{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 	// 载荷里显式写一个更低的强度：模型级配置必须覆盖它。
 	env.request(http.MethodPost, "chat/completions",
 		`{"model":"vendor-model","reasoning_effort":"low"}`, nil)
@@ -752,7 +752,7 @@ func TestLeaseReleasedOnEveryExitPath(t *testing.T) {
 			name:  "非流式成功",
 			route: "/v1/chat/completions",
 			path:  "chat/completions",
-			step:  jsonStep(200, `{"ok":true}`),
+			step:  jsonStep(200, `{"ok":true,"choices":[{"message":{"role":"assistant","content":"hi"}}]}`),
 		},
 		{
 			name:   "流式成功",

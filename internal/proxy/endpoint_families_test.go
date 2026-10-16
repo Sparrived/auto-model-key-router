@@ -141,7 +141,7 @@ func TestImagesGenerationDoesNotInjectReasoningEffort(t *testing.T) {
 	}
 	// 反证：同一份配置下对话端点**仍然**会被注入，说明失效的只是图像这条路径，
 	// 而不是整个 reasoning_effort 能力被改坏。
-	env.route("/v1/chat/completions", jsonStep(200, `{"choices":[]}`))
+	env.route("/v1/chat/completions", jsonStep(200, `{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 	env.request(http.MethodPost, "chat/completions",
 		`{"model":"chat-model","messages":[{"role":"user","content":"hi"}]}`, nil)
 	chatBody := env.transport.calls[len(env.transport.calls)-1].body

@@ -423,11 +423,16 @@ func TestMetricsDirtyOnProxyRequestStart(t *testing.T) {
 	// 而这条请求正卡在桩上游上——不先放行就要等到 request_timeout（10 秒）。
 	var releaseOnce sync.Once
 	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
+	// started 只在第一次上游命中时关闭：重试语义下（见 internal/proxy 的空响应拦截）
+	// 桩上游理论上可能被访问多次，裸 close 会 panic。
+	var startedOnce sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
+		startedOnce.Do(func() { close(started) })
 		<-release
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"ok"}`)
+		// 带 choices 的正常响应：空 choices 会被 proxy 按「空响应」故障重试。
+		_, _ = io.WriteString(w,
+			`{"id":"ok","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)
 	}))
 	defer upstream.Close()
 	defer releaseUpstream()
@@ -517,7 +522,10 @@ func (c *upstreamCapture) handler(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 	if response == "" {
-		response = `{"id":"ok"}`
+		// 默认回一条带 choices 的正常 chat completion：空 choices 的 2xx 会被
+		// internal/proxy 的空响应拦截按上游故障重试（见 empty_completion_test.go），
+		// 与本组用例要断言的帧/路由行为无关。
+		response = `{"id":"ok","choices":[{"message":{"role":"assistant","content":"hi"}}]}`
 	}
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)

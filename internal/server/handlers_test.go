@@ -314,7 +314,12 @@ func TestActiveRequestsReflectsInflightProxyRequest(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion","choices":[]}`)
+		// 用带 choices 的**正常** chat completion：空 choices 的 2xx 会被 proxy
+		// 按「空响应」故障重试/回 502（见 internal/proxy 的 empty_completion_test.go），
+		// 与本用例要验证的 active_requests 窗口无关。
+		_, _ = io.WriteString(w,
+			`{"id":"chatcmpl-1","object":"chat.completion",`+
+				`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`)
 	}))
 	defer upstream.Close()
 

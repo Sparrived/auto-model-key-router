@@ -418,8 +418,16 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		return attemptOutcome{stream: h.streamingResponse(
 			context, key, response, upstreamURL, started, useNative)}
 	}
-	return attemptOutcome{response: h.bufferedResponse(
-		context, key, response, durationMS, useNative)}
+	result, retryError := h.bufferedResponse(
+		context, key, response, durationMS, useNative, attemptIndex)
+	if retryError != nil {
+		// 2xx 空响应：重试有意义——上游账号的轮换发生在上游网关（CPA）内部，同一
+		// 把 key 的下一轮请求经常直接命中另一个账号（实测同一分钟内的空响应请求与
+		// 正常请求就落在不同账号上）。这与首字节超时那类「原地重试没有新信息」的
+		// 失败不同，因此 retrySameKey 取 true。
+		return attemptOutcome{retryErr: retryError, retrySameKey: true}
+	}
+	return attemptOutcome{response: result}
 }
 
 // attemptOutcome 是一次尝试的结果。
@@ -774,6 +782,62 @@ func (h *Handler) recordUpstreamResponse(
 		retryAfter := runtime.RetryAfterSeconds(headers.Get("retry-after"), context.now())
 		context.pool().MarkFailure(context.ModelID, key.Name, &status, retryAfter)
 	}
+}
+
+// recordEmptyCompletionAnomaly 记录一次「2xx 空响应（无 choices）」异常。
+//
+// 状态码保留上游的 2xx、但 success 记为失败：这正是这类故障原本最隐蔽的地方——
+// 修之前它被记成 success=1、completion_tokens=0，看板与成功率都看不出来。retried
+// 与 logUpstreamNotOK 的口径相同：true 表示 AMKR 还会在同一个目标上继续重试。
+//
+// **刻意不回写 key 健康**（不 MarkSuccess 也不 MarkFailure）：实测这类空响应来自
+// 上游网关的瞬时抖动（同一 key 的相邻请求均正常），把一次抖动折算到 key 头上会让
+// 整个账号进冷却，代价远大于收益。它与非 200 的区别也正在此：非 200 能归因到 key
+// 或余额，空 200 归因不到。
+func (h *Handler) recordEmptyCompletionAnomaly(
+	context *RequestContext,
+	key config.KeyConfig,
+	statusCode int,
+	content []byte,
+	durationMS int64,
+	retried bool,
+) {
+	status := statusCode
+	h.recordMetric(context, key, MetricRecord{
+		StatusCode:   &status,
+		Usage:        h.extractUsage(content),
+		Retried:      retried,
+		Failed:       true,
+		DurationMS:   durationMS,
+		FirstTokenMS: durationMS,
+	})
+	h.logEmptyCompletion(context, key, statusCode, durationMS, retried)
+}
+
+// logEmptyCompletion 把一次「2xx 空响应」记成 WARNING。
+//
+// 与 logUpstreamNotOK 成对：那条管非 200，这条管「200 但什么都没回」。没有这条
+// 日志，空响应在日志里完全不可见——调用方那边只有一句「响应中没有 choices」，
+// 从这里往回追的人需要能看到它落在了哪个 provider / key / 上游模型上。
+func (h *Handler) logEmptyCompletion(
+	context *RequestContext,
+	key config.KeyConfig,
+	statusCode int,
+	durationMS int64,
+	retried bool,
+) {
+	h.logger.Warn("上游返回空响应（响应中没有 choices），已按故障处理",
+		"status", statusCode,
+		"model_id", context.ModelID,
+		"requested_model_id", context.RequestedModelID,
+		"key_name", key.Name,
+		"provider", key.Provider,
+		"base_url", key.BaseURL,
+		"upstream_model", upstreamModelOr(context.ModelID, key.UpstreamModel),
+		"workspace", context.Workspace,
+		"path", "/v1/"+context.Path,
+		"retried", retried,
+		"duration_ms", durationMS)
 }
 
 // logBalanceExhausted 记录一次「账号余额不足，已自动限流」。
