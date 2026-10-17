@@ -41,6 +41,7 @@ const PAGES = [
   { file: "pages/activity.js", label: "用量统计" },
   { file: "pages/cost.js", label: "成本" },
   { file: "pages/overview.js", label: "概览" },
+  { file: "pages/status.js", label: "状态监控" },
   { file: "pages/workspaces.js", label: "工作空间" },
 ];
 

@@ -64,6 +64,7 @@ When working with Large Language Models (LLMs) across various projects and devel
 - 📊 **Observability & Live Cost Estimation**:
   - Track real-time RPM, TPM, success rates, latency percentiles, and Time-To-First-Token (TTFT).
   - Sankey traffic flow visualization (Workspace → Requested Model → Real Model → Provider → Upstream Key → Upstream Model).
+  - Status monitoring page: a health heatmap matrix by provider / upstream model / upstream key (success rate, TTFT and cache hit rate), with error-reason breakdown and per-model details.
   - Dynamic token cost estimation in USD powered by [models.dev](https://models.dev).
 - 🔌 **One-Click Client Integrations**: Automatic configuration generation and rollback for Claude Code, Codex, and Pi Agent.
 

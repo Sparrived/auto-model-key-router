@@ -11,6 +11,7 @@ import { icon } from "./icons.js";
 import { getThemePreference, getResolvedTheme, cycleTheme, onThemeChange, THEMES } from "./theme.js";
 
 import { renderOverview } from "./pages/overview.js";
+import { renderStatus } from "./pages/status.js";
 import { renderActivity } from "./pages/activity.js";
 import { renderWorkspaces } from "./pages/workspaces.js";
 import { renderLogs } from "./pages/logs.js";
@@ -27,6 +28,7 @@ import { renderSettings } from "./pages/settings.js";
 export const PAGES = [
   { group: "监控", items: [
     { id: "overview", label: "概览", icon: "overview", render: renderOverview },
+    { id: "status", label: "状态监控", icon: "monitor", render: renderStatus },
     { id: "activity", label: "用量统计", icon: "activity", render: renderActivity },
     { id: "accounts", label: "账号资源", icon: "gauge", render: renderAccounts },
     { id: "workspaces", label: "工作空间", icon: "layers", render: renderWorkspaces },
@@ -47,10 +49,10 @@ export const PAGES = [
 ];
 
 // 指标轮询节奏（毫秒）：概览/用量统计要看趋势，日志页自己管轮询，其余放慢。
-const METRICS_INTERVAL = { overview: 10000, activity: 15000, workspaces: 20000, default: 30000 };
+const METRICS_INTERVAL = { overview: 10000, status: 15000, activity: 15000, workspaces: 20000, default: 30000 };
 // 订阅 onTick 的页面：监控页重新取数，集成页只同步连接与鉴权状态。
 // 不在这里的页面只在强制刷新时整块重绘。
-const TICK_PAGES = new Set(["overview", "activity", "workspaces", "integrations"]);
+const TICK_PAGES = new Set(["overview", "status", "activity", "workspaces", "integrations"]);
 const HEALTH_INTERVAL = 5000;
 
 export const store = {

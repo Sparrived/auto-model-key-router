@@ -174,6 +174,18 @@ export const api = {
     return request(`/ui/filtered-metrics.json?${params}`);
   },
 
+  // 状态监控读数：KPI 快照 + 趋势序列 + 渠道健康矩阵 + 错误归因一次取回，共用同一个
+  // 时间窗与筛选条件，同屏数字因此自洽。挂在 /ui/ 下且要完整鉴权：它是本项目自有的
+  // 聚合读数（/metrics 系列是与参照实现对齐的已发布形状，不能加 group_by 这类参数）。
+  //
+  // group_by 决定矩阵行的粒度（provider / provider_model / provider_key），切换它要
+  // 重新请求而不是本地重排——行是由服务端聚合出来的。
+  statusMonitor: ({ hours = 24, groupBy = "provider", accessKeyIds = [], providerIds = [] } = {}) => {
+    const params = new URLSearchParams({ hours: String(hours), group_by: groupBy });
+    appendFilterParams(params, { accessKeyIds, providerIds });
+    return request(`/ui/status-monitor.json?${params}`);
+  },
+
   // 价格目录（models.dev）：由服务端缓存并定期刷新，挂在 WebUI 前缀下。
   // **不鉴权**——内容是 models.dev 的公开数据，静态资源本身也是公开的。
   // 服务端还没取到目录时回 503，由 webui/pricing.js 吞掉并降级成"无定价"。

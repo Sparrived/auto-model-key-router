@@ -1975,3 +1975,146 @@ details > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-of
   }
   .skel { background: var(--ui-surface-soft); }
 }
+
+/* ══ 状态监控：渠道健康矩阵 ══
+ *
+ * 矩阵是这页的主视图：行 = 渠道，列 = 时间桶，颜色 = 健康分档。
+ *
+ * 布局取舍：
+ *   - 用 flex 行而不是 CSS grid：列数由后端桶数决定（1 小时窗口配 30 秒桶是 121 列，
+ *     24 小时配 10 分钟桶是 145 列），grid 要在每行声明 N 条轨道，每次轮询重建都跟着
+ *     重新解析；flex 里每格固定宽度即可。
+ *   - 固定格宽 + 横向滚动：格子要保持可悬停的最小尺寸，不能为了塞进卡片把一两百列压成 1px。
+ *   - 行标签列 sticky：横向滚动时渠道名始终可见，否则滚到右边就不知道这行是谁。
+ *   - 纵向限高（560px）：provider_model / provider_key 维度下可能有几十行，把整页撑到
+ *     几屏会让人找不到下面的趋势、错误原因与模型明细卡。
+ *   - 表头 sticky top：纵向滚动时时间轴还在。 */
+.status-matrix-scroll {
+  position: relative;
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid var(--ui-divider);
+  border-radius: 14px;
+  background: var(--ui-surface);
+  scrollbar-width: thin;
+}
+.status-matrix {
+  --status-cell-w: 13px;
+  --status-cell-h: 18px;
+  --status-label-w: 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: max-content;
+  padding: 8px 12px 10px 0;
+}
+.status-matrix-axis,
+.status-matrix-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.status-matrix-axis {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--ui-surface);
+  box-shadow: 0 1px 0 var(--ui-divider);
+}
+.status-row-head,
+.status-row-label {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  flex: 0 0 var(--status-label-w);
+  width: var(--status-label-w);
+  min-width: 0;
+  padding: 2px 12px;
+  background: var(--ui-surface);
+  box-shadow: 1px 0 0 var(--ui-divider);
+}
+/* 时间轴那一格同时是"横向 sticky"与"纵向 sticky"的交点，层级要高于普通行标签。 */
+.status-row-head { z-index: 6; font-size: 11px; color: var(--ui-text-muted); }
+.status-row-label { display: flex; align-items: center; gap: 8px; }
+.status-row-text { display: flex; flex-direction: column; min-width: 0; }
+.status-row-name {
+  font-size: 12px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.status-row-meta {
+  font-size: 10px; color: var(--ui-text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.status-band-dot {
+  width: 8px; height: 8px; flex: none; border-radius: 50%;
+  background: var(--ui-text-muted);
+}
+.status-cells { display: flex; align-items: center; gap: 2px; flex: none; }
+/* 时间轴格子与数据格同宽，标签才会落在正确的列上；文字允许溢出到相邻空列，
+ * 步长（最多 8 个标签）保证相邻标签不会真的撞上。 */
+.status-axis-cell {
+  flex: 0 0 var(--status-cell-w);
+  width: var(--status-cell-w);
+  height: 14px; line-height: 14px;
+  font-size: 10px; color: var(--ui-text-muted);
+  white-space: nowrap; overflow: visible;
+}
+.status-cell {
+  display: block;
+  flex: 0 0 var(--status-cell-w);
+  width: var(--status-cell-w);
+  height: var(--status-cell-h);
+  border-radius: 3px;
+  background: var(--ui-surface-soft);
+  transition: outline-color var(--dur) var(--ease);
+}
+.status-cell:hover { outline: 2px solid var(--ui-text); outline-offset: -1px; }
+/* 分档色：颜色不是唯一信息（title 与图例里都写了数值与阈值），但同一屏里
+ * 必须能一眼分出"绿/黄/红"。无流量用中灰、样本不足用浅灰+描边，两者不靠
+ * 明度差区分而是靠"有没有边框"，在深色主题下也不会糊在一起。 */
+.status-cell.band-good, .status-legend-swatch.band-good { background: var(--tone-good); }
+.status-cell.band-warn, .status-legend-swatch.band-warn { background: var(--tone-warn); }
+.status-cell.band-bad, .status-legend-swatch.band-bad { background: var(--tone-bad); }
+.status-cell.band-unknown, .status-legend-swatch.band-unknown {
+  background: var(--ui-surface-soft);
+  box-shadow: inset 0 0 0 1px var(--ui-divider);
+}
+.status-cell.band-no-traffic, .status-legend-swatch.band-no-traffic { background: var(--ui-divider); }
+/* 累加中的尾桶天然偏低：降低透明度，避免被读成"流量突然掉了"。 */
+.status-cell.is-partial { opacity: 0.45; }
+.status-band-dot.band-good { background: var(--tone-good); }
+.status-band-dot.band-warn { background: var(--tone-warn); }
+.status-band-dot.band-bad { background: var(--tone-bad); }
+.status-band-dot.band-unknown { background: var(--ui-text-muted); opacity: 0.5; }
+.status-band-dot.band-no-traffic { background: var(--ui-divider); }
+.status-legend {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px 16px;
+  margin-top: 12px;
+  font-size: 11px; color: var(--ui-text-muted);
+}
+.status-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.status-legend-swatch {
+  display: inline-block;
+  width: 11px; height: 11px; flex: none;
+  border-radius: 3px;
+  background: var(--ui-surface-soft);
+}
+.status-legend-swatch.is-partial { opacity: 0.45; }
+.status-matrix-toolbar { margin-bottom: 8px; }
+.status-matrix-hint { font-size: 12px; margin-bottom: 12px; }
+/* 错误原因：每档一行"标签 + 次数/占比 + 横条"，横条长度就是占失败数的比例。 */
+.status-error-row { display: flex; flex-direction: column; gap: 5px; }
+
+@media (max-width: 860px) {
+  /* 窄屏收窄行标签列、缩小格子：一次能看到的列数多一点，同时保证渠道名还读得全。 */
+  .status-matrix {
+    --status-cell-w: 11px;
+    --status-cell-h: 16px;
+    --status-label-w: 150px;
+  }
+  .status-matrix-scroll { max-height: 420px; }
+  .status-row-name { font-size: 11px; }
+  .status-row-meta { font-size: 9px; }
+}
