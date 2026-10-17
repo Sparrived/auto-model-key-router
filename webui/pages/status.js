@@ -1,9 +1,13 @@
 // 状态监控：渠道健康矩阵看板。
 //
-// 这一页回答的是"现在谁不太行"：把窗口切成一列列时间桶，每个渠道一行，按健康分
-// 给格子着色。同屏的四块材料（KPI、矩阵、趋势、错误原因、模型明细）都来自**同一次**
-// /ui/status-monitor.json 请求，因此时间窗、筛选条件与桶宽天然一致——把它们拆成
-// 多条接口取数，迟早会出现"矩阵是 24 小时、趋势图是 1 小时"这类对不上号的读数。
+// 这一页有两组读数、各自回答不同问题：
+//   - KPI / 趋势 / 错误原因 / 模型明细跟随页头所选时间窗，来自一次
+//     /ui/status-monitor.json 请求；
+//   - 渠道健康矩阵固定"最近 12 小时、每格 15 分钟"，单独一次同接口请求（显式传
+//     bucket_seconds=900）；后端回 48+1 列（首桶对齐到桶边界），列宽在卡片内
+//     自适应铺满，整块矩阵始终完整可见、没有横向滚动条。
+// 矩阵独立窗口是刻意的：健康矩阵看的是"最近这段有没有反复抖动"，窗口固定才能横向
+// 比较各渠道；把桶宽交给时间窗选择器会在 1 小时下退化成 4 格、7 天下变成几百格。
 //
 // 矩阵的着色口径在 webui/status-math.js：页面只负责画，阈值与分档由纯函数给出，
 // node 探针能直接断言同一套判据。
@@ -37,6 +41,12 @@ const TREND_MODES = [
 ];
 
 const TREND_MODE_MAP = Object.fromEntries(TREND_MODES.map((item) => [item.id, item]));
+
+// 矩阵固定窗口：最近 12 小时、15 分钟一格。12h × 3600 / 900 = 48，后端再加首桶边界
+// 对齐的一列，实际是 49 列；49 列用 1fr 铺满卡片，桌面与手机都不需要横向滚动。
+const MATRIX_HOURS = 12;
+const MATRIX_BUCKET_SECONDS = 15 * 60;
+const MATRIX_RANGE_LABEL = "最近 12 小时";
 
 // 模型明细表的列。sortValue 与 render 同源：排序键就是显示值，点两下列头不会
 // 出现"按一个数排、看到的是另一个数"的错觉。
@@ -91,6 +101,10 @@ const state = {
   dataKey: null,
   error: null,
   at: null,
+  // 矩阵单独一次请求：固定 12 小时 / 15 分钟桶，窗口不跟随页头时间窗。
+  matrix: null,
+  matrixKey: null,
+  matrixError: null,
   sort: { key: "requests", direction: "desc" },
 };
 
@@ -134,6 +148,11 @@ function filterKeyOf(store) {
 
 function scopeKey() {
   return `${state.hours}:${state.groupBy}:${filterKeyOf(xtxRef?.store)}`;
+}
+
+// 矩阵固定窗口，只受维度与全局筛选影响，不含页头时间窗。
+function matrixScopeKey() {
+  return `${state.groupBy}:${filterKeyOf(xtxRef?.store)}`;
 }
 
 function windowRpm(requests) {
@@ -180,6 +199,9 @@ function snapshotCacheRate(total) {
 
 // —— 取数 ——
 //
+// 并发两次请求：第一次跟随页头时间窗（KPI/趋势/错误/模型），第二次是矩阵固定窗口
+// （12 小时 / 15 分钟桶）。两次都用同一个 group_by 与全局筛选，行与渠道口径一致。
+//
 // silent 只被 onTick 使用：轮询在途时直接返回，不叠请求、不显示"正在读取"——
 // 10 秒一次的自动刷新不该让界面闪。用户操作走默认值，永远立即发新请求。
 async function load({ silent = false } = {}) {
@@ -193,26 +215,44 @@ async function load({ silent = false } = {}) {
   // 归属键必须在**发请求前**取好并与 scopeKey() 同格式：请求回来时 store 可能又变了
   // （用户切到筛选），用那一刻的值会给数据贴上错误的归属。
   const filterKey = filterKeyOf(xtxRef?.store);
+  const matrixKey = `${groupBy}:${filterKey}`;
+  const [pageResult, matrixResult] = await Promise.allSettled([
+    api.statusMonitor({ hours, groupBy, accessKeyIds, providerIds }),
+    api.statusMonitor({
+      hours: MATRIX_HOURS,
+      bucketSeconds: MATRIX_BUCKET_SECONDS,
+      groupBy,
+      accessKeyIds,
+      providerIds,
+    }),
+  ]);
+  // 过期响应：期间用户又换了窗口/维度/筛选，丢弃。没有这道闸，慢请求回来会把
+  // 新条件的页面覆盖成旧数据——而且看起来完全正常，最难排查。
   try {
-    const data = await api.statusMonitor({ hours, groupBy, accessKeyIds, providerIds });
-    // 过期响应：期间用户又换了窗口/维度/筛选，丢弃。没有这道闸，慢请求回来会把
-    // 新条件的页面覆盖成旧数据——而且看起来完全正常，最难排查。
     if (token !== requestToken) return;
-    state.data = data;
-    state.dataKey = `${hours}:${groupBy}:${filterKey}`;
-    state.error = null;
-    state.at = new Date().toISOString();
-  } catch (error) {
-    if (token !== requestToken) return;
-    state.error = errorText(error);
+    if (pageResult.status === "fulfilled") {
+      state.data = pageResult.value;
+      state.dataKey = `${hours}:${groupBy}:${filterKey}`;
+      state.error = null;
+      state.at = new Date().toISOString();
+    } else {
+      state.error = errorText(pageResult.reason);
+    }
+    if (matrixResult.status === "fulfilled") {
+      state.matrix = matrixResult.value;
+      state.matrixKey = matrixKey;
+      state.matrixError = null;
+    } else {
+      state.matrixError = errorText(matrixResult.reason);
+    }
   } finally {
     if (token === requestToken) inflight = false;
   }
   draw();
 }
 
-// resetData 丢掉与旧条件绑定的读数。切条件后先清空再取数：异步延迟的几百毫秒里，
-// 屏幕上不能还留着上一组条件的矩阵——那比骨架更容易被当成新读数。
+// resetData / resetMatrix 丢掉与旧条件绑定的读数。切条件后先清空再取数：异步延迟的
+// 几百毫秒里，屏幕上不能还留着上一组条件的矩阵——那比骨架更容易被当成新读数。
 function resetData() {
   state.data = null;
   state.dataKey = null;
@@ -220,7 +260,22 @@ function resetData() {
   state.at = null;
 }
 
-function reloadAndDraw() {
+function resetMatrix() {
+  state.matrix = null;
+  state.matrixKey = null;
+  state.matrixError = null;
+}
+
+// 维度与全局筛选会同时改变矩阵行和 KPI，两部分都要重取；时间窗只影响跟随窗口的
+// 那半屏读数，矩阵窗口固定，不必清空重取。
+function reloadAllAndDraw() {
+  resetData();
+  resetMatrix();
+  draw();
+  load();
+}
+
+function reloadPageAndDraw() {
   resetData();
   draw();
   load();
@@ -235,6 +290,7 @@ export function renderStatus(context) {
   }
   // 全局筛选可能是在别的页面改的：归属不符就先清掉，避免用旧条件下的矩阵冒充新筛选。
   if (state.data && state.dataKey !== scopeKey()) resetData();
+  if (state.matrix && state.matrixKey !== matrixScopeKey()) resetMatrix();
   // 同步首绘必须绕过"已挂载"守卫（app.js 先拿节点、后 mount）；有缓存时先把缓存
   // 画出来，再在后台静默换成新数据，首绘不闪骨架。
   draw(true);
@@ -258,12 +314,13 @@ function pageHead() {
         onClick: () => load(),
       }),
       // 全局筛选与时间窗并排：两者回答的都是"这批读数覆盖什么"。
-      // 筛选变化会同时改变矩阵行与 KPI，必须立即重取，且旧读数先清掉。
-      metricFilterBar(store, reloadAndDraw),
+      // 筛选变化会同时改变矩阵行与 KPI，必须立即重取，且旧读数先清掉；时间窗只影响
+      // 跟随窗口的 KPI/趋势/错误/模型，矩阵固定 12 小时，无需清空。
+      metricFilterBar(store, reloadAllAndDraw),
       segmented(
         TIME_RANGES.map((range) => ({ id: range.hours, label: range.short, title: range.label })),
         state.hours,
-        (id) => { state.hours = Number(id); reloadAndDraw(); },
+        (id) => { state.hours = Number(id); reloadPageAndDraw(); },
         { "aria-label": "选择统计窗口" },
       ),
     ),
@@ -314,10 +371,15 @@ function kpiTiles(data) {
 // —— 健康矩阵 ——
 
 // matrixContext 汇总矩阵渲染需要的一次性派生值：列数、时间轴、桶宽。
+// 矩阵数据来自固定窗口的第二次请求，不从 state.data 取，因此窗口口径不会被页头
+// 时间窗影响。
 function matrixContext(data) {
-  const rows = Array.isArray(data.matrix?.rows) ? data.matrix.rows : [];
-  const columns = rows.reduce((max, row) => Math.max(max, row.cells?.length || 0), 0);
-  const points = data.series?.points || [];
+  const rows = Array.isArray(data?.matrix?.rows) ? data.matrix.rows : [];
+  const points = data?.series?.points || [];
+  // 列数优先从行里推（矩阵行才是着色对象）；空库没有行时退回序列点数，
+  // 这样空态脚注仍能写出真实窗口列数，而不是「共 0 列」。
+  const columns = rows.reduce((max, row) => Math.max(max, row.cells?.length || 0), 0)
+    || points.length;
   const firstCells = rows[0]?.cells || [];
   // 时间轴优先用 series.points 的 started_at：后端保证它与矩阵同一桶网格；
   // 序列缺失时退回第一行的 cells（每格都带 started_at）。两者都缺就是空列。
@@ -326,23 +388,23 @@ function matrixContext(data) {
   return {
     rows,
     columns,
-    groupBy: data.matrix?.group_by || data.group_by || state.groupBy,
-    bucketSeconds: bucketSecondsOf(data),
+    groupBy: data?.matrix?.group_by || data?.group_by || state.groupBy,
+    bucketSeconds: bucketSecondsOf(data) || MATRIX_BUCKET_SECONDS,
     timestamps,
-    truncated: number(data.matrix?.rows_truncated),
-    totalRequests: number(data.snapshot?.total?.requests),
+    truncated: number(data?.matrix?.rows_truncated),
+    totalRequests: number(data?.snapshot?.total?.requests),
   };
 }
 
-function matrixCard(data) {
-  const ctx = matrixContext(data);
+function matrixCard() {
+  const ctx = matrixContext(state.matrix);
   const controls = h("div.toolbar.status-matrix-toolbar", {},
     h("span.toolbar-label", "维度"),
     segmented(
       GROUP_BY_MODES.map((item) => ({ id: item.id, label: item.label, title: item.hint })),
       state.groupBy,
       // 维度是后端聚合口径，切换必须重取；这里不能只重着色。
-      (id) => { state.groupBy = id; reloadAndDraw(); },
+      (id) => { state.groupBy = id; reloadAllAndDraw(); },
       { "aria-label": "选择矩阵维度" },
     ),
     h("span.spacer"),
@@ -357,41 +419,62 @@ function matrixCard(data) {
   );
 
   const head = cardHead("渠道健康矩阵",
-    badge(rangeLabel(), "muted"),
+    badge(MATRIX_RANGE_LABEL, "muted"),
     badge(`${bucketLabelOf(ctx.bucketSeconds)}/格`, "muted"),
   );
 
   let body;
-  if (!ctx.totalRequests) {
-    body = empty("窗口内没有请求，健康矩阵暂时没有可着色的格子。", {
+  if (!state.matrix) {
+    // 矩阵是独立请求：页面其余部分已经有数时它也可能单独失败，所以这里单独给
+    // 重试入口，而不是让整页退化成错误态。
+    body = state.matrixError
+      ? empty("矩阵读取失败。", {
+          icon: "alert",
+          hint: state.matrixError,
+          action: buttonNode("重试", {
+            variant: "secondary", small: true, iconName: "refresh",
+            onClick: () => load(),
+          }),
+        })
+      : skeleton("chart");
+  } else if (!ctx.totalRequests) {
+    body = empty("最近 12 小时没有请求，健康矩阵暂时没有可着色的格子。", {
       icon: "activity",
-      hint: "把时间窗拉长，或等下一次轮询。",
+      hint: "等下一次轮询；上方 KPI / 趋势仍按所选时间窗统计。",
     });
   } else if (!ctx.rows.length) {
     // 有请求却没有任何行：多为历史行缺少供应商归因。空态要说明原因，
     // 否则会被当成"页面没取到数"。
-    body = empty("窗口内有请求，但没有任何可归因的渠道数据。", {
+    body = empty("最近 12 小时有请求，但没有任何可归因的渠道数据。", {
       icon: "providers",
       hint: "历史行可能缺少供应商 / 模型归因，无法分组。",
     });
   } else {
     body = h("div.stack", {},
-      h("div.status-matrix-scroll", {},
-        h("div.status-matrix", {
-          role: "img",
-          "aria-label": matrixAriaLabel(ctx),
-        },
-          matrixAxis(ctx),
-          ctx.rows.map((row) => matrixRow(row, ctx)),
-        ),
+      h("div.status-matrix", {
+        role: "img",
+        "aria-label": matrixAriaLabel(ctx),
+      },
+        matrixAxis(ctx),
+        ctx.rows.map((row) => matrixRow(row, ctx)),
       ),
       matrixLegend(),
     );
   }
 
+  // 刷新失败但手里还有上一轮矩阵：不能让它继续冒充最新数据。矩阵卡内给一条
+  // warn（与整页刷新失败的提示同一口径），矩阵保留在下方供对照；轮询会自动重试。
+  if (state.matrix && state.matrixError) {
+    body = h("div.stack", {},
+      notice(`矩阵刷新失败，下方是上次成功读数：${state.matrixError}`, "warn"),
+      body,
+    );
+  }
+
   return card(head, controls,
     h("p.muted.status-matrix-hint", {},
-      `按「${HEALTH_MODE_MAP[state.healthMode]?.label || "综合"}」着色：${HEALTH_MODE_MAP[state.healthMode]?.hint || ""}`),
+      `按「${HEALTH_MODE_MAP[state.healthMode]?.label || "综合"}」着色：${HEALTH_MODE_MAP[state.healthMode]?.hint || ""}`
+      + " 矩阵固定展示最近 12 小时、每格 15 分钟，列宽随卡片铺满，不需要横向滚动。"),
     body,
     matrixFoot(ctx),
   );
@@ -401,27 +484,29 @@ function matrixAriaLabel(ctx) {
   const { good, warn } = HEALTH_THRESHOLDS;
   return `渠道健康矩阵，${formatCount(ctx.rows.length)} 行 × ${formatCount(ctx.columns)} 列，`
     + `按${HEALTH_MODE_MAP[state.healthMode]?.label || "综合"}健康分着色，`
-    + `最近 ${rangeLabel()}；绿色表示健康（≥${good} 分），黄色表示注意（${warn}–${good - 1}），`
+    + `固定展示${MATRIX_RANGE_LABEL}、每格 ${bucketLabelOf(ctx.bucketSeconds)}；`
+    + `绿色表示健康（≥${good} 分），黄色表示注意（${warn}–${good - 1}），`
     + `红色表示异常（<${warn}），灰色表示无流量或样本不足。`;
 }
 
-// 时间轴标签：每格只有十几像素，逐格写时刻会糊成一条，所以定一个步长稀疏标注。
-// 步长同时受"最多 8 个标签"和"至少 60px 间距"约束，短窗口下不会挤在一起。
+// 时间轴标签：每格只有十几像素，逐格写时刻会糊成一条，所以按步长稀疏标注。
+// 标签用绝对定位落在对应列的起点，间距由列宽自适应；520px 以下只留一半标签，
+// 避免窄屏上文字互相压住。
 function matrixAxis(ctx) {
   const { columns, bucketSeconds, timestamps } = ctx;
   const stride = Math.max(4, Math.ceil(columns / 8));
   const spanSeconds = columns * bucketSeconds;
-  const cells = [];
-  for (let index = 0; index < columns; index += 1) {
-    const showLabel = index % stride === 0;
+  const labels = [];
+  for (let index = 0; index < columns; index += stride) {
     const at = timestamps[index];
-    cells.push(h("span.status-axis-cell", {}, showLabel && at
-      ? formatAxisTime(at, spanSeconds)
-      : null));
+    if (!at) continue;
+    labels.push(h("span.status-axis-label", {
+      style: { left: `${(index / Math.max(columns, 1)) * 100}%` },
+    }, formatAxisTime(at, spanSeconds)));
   }
   return h("div.status-matrix-axis", { "aria-hidden": "true" },
     h("span.status-row-head", {}, "渠道"),
-    h("div.status-cells", {}, cells),
+    h("div.status-axis-track", {}, labels),
   );
 }
 
@@ -460,7 +545,11 @@ function matrixRow(row, ctx) {
 
   return h("div.status-matrix-row", {},
     labelNode,
-    h("div.status-cells", {}, cellNodes),
+    // 每行用同一套列模板：49 列等分剩余宽度（minmax(0,1fr) 允许收缩），
+    // 因此矩阵宽度天然等于卡片宽度，不会撑出横向滚动条。
+    h("div.status-cells", {
+      style: { gridTemplateColumns: `repeat(${Math.max(ctx.columns, 1)}, minmax(0, 1fr))` },
+    }, cellNodes),
   );
 }
 
@@ -491,15 +580,16 @@ function bandHintText(band) {
 
 function matrixFoot(ctx) {
   const notes = [
-    `${bucketLabelOf(ctx.bucketSeconds)}/格，窗口内共 ${formatCount(ctx.columns)} 个时间桶；`,
+    `每格 ${bucketLabelOf(ctx.bucketSeconds)}，矩阵固定${MATRIX_RANGE_LABEL}（与上方时间窗无关），共 ${formatCount(ctx.columns)} 列；`,
+    "首列向前对齐到桶边界，可能包含窗口起点前不到一格的数据。",
     `每格请求数 ≥ ${MIN_HEALTH_SAMPLES} 次才参与着色，样本不足显示为浅灰。`,
   ];
   if (ctx.truncated > 0) {
     // rows_truncated 是后端主动截断的行数：不提示的话，用户会以为"矩阵里就是全部渠道"，
     // 而正确读法是"还有 N 行没画出来"。
-    notes.push(`矩阵一次最多显示固定行数，另有 ${formatCount(ctx.truncated)} 行未显示——可按供应商筛选或缩短时间窗收窄范围。`);
+    notes.push(`矩阵一次最多显示固定行数，另有 ${formatCount(ctx.truncated)} 行未显示——可按供应商筛选收窄范围。`);
   }
-  return h("div.card-foot", {}, notes.join(" "));
+  return h("div.card-foot", {}, notes.join(""));
 }
 
 // —— 健康趋势 ——
@@ -641,12 +731,12 @@ function draw(firstPaint = false) {
         hint: "检查 AMKR 服务是否在线后重试。",
         action: buttonNode("重试", {
           variant: "secondary", small: true, iconName: "refresh",
-          onClick: () => reloadAndDraw(),
+          onClick: () => reloadAllAndDraw(),
         }),
       }));
     } else {
       children.push(statSkeleton(4));
-      children.push(card(cardHead("渠道健康矩阵"), skeleton("chart")));
+      children.push(card(cardHead("渠道健康矩阵", badge(MATRIX_RANGE_LABEL, "muted")), skeleton("chart")));
     }
     render(host, children);
     return;
@@ -654,8 +744,8 @@ function draw(firstPaint = false) {
 
   children.push(kpiTiles(data));
   children.push(h("div.grid-12", {},
-    // 矩阵是主卡，独占整行：桶一多就需要横向滚动，半宽放不下。
-    h("div.col-12", {}, matrixCard(data)),
+    // 矩阵是主卡，独占整行：49 列在整行宽度里铺开，列宽随卡片自适应，不横向滚动。
+    h("div.col-12", {}, matrixCard()),
     // 趋势与错误原因各半宽：同一个窗口的两个侧面，并排才好对照"成功率掉了"是否
     // 对应某类错误上涨。<=860px 时两张卡都会塌成整行。
     h("div.col-6", {}, trendCard(data)),

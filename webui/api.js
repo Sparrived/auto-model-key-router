@@ -180,8 +180,11 @@ export const api = {
   //
   // group_by 决定矩阵行的粒度（provider / provider_model / provider_key），切换它要
   // 重新请求而不是本地重排——行是由服务端聚合出来的。
-  statusMonitor: ({ hours = 24, groupBy = "provider", accessKeyIds = [], providerIds = [] } = {}) => {
+  statusMonitor: ({ hours = 24, groupBy = "provider", bucketSeconds = 0, accessKeyIds = [], providerIds = [] } = {}) => {
     const params = new URLSearchParams({ hours: String(hours), group_by: groupBy });
+    // bucket_seconds 可选：状态页矩阵固定 15 分钟桶（12 小时 = 49 列），显式传入后
+    // 后端不再按窗口自动挑桶；KPI/趋势那次请求仍不带它，保持自动桶。
+    if (bucketSeconds > 0) params.set("bucket_seconds", String(bucketSeconds));
     appendFilterParams(params, { accessKeyIds, providerIds });
     return request(`/ui/status-monitor.json?${params}`);
   },

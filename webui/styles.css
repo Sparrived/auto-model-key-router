@@ -1979,63 +1979,43 @@ details > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-of
 /* ══ 状态监控：渠道健康矩阵 ══
  *
  * 矩阵是这页的主视图：行 = 渠道，列 = 时间桶，颜色 = 健康分档。
+ * 窗口固定为最近 12 小时、每格 15 分钟（后端回 48+1 列），列宽在卡片内等分。
  *
  * 布局取舍：
- *   - 用 flex 行而不是 CSS grid：列数由后端桶数决定（1 小时窗口配 30 秒桶是 121 列，
- *     24 小时配 10 分钟桶是 145 列），grid 要在每行声明 N 条轨道，每次轮询重建都跟着
- *     重新解析；flex 里每格固定宽度即可。
- *   - 固定格宽 + 横向滚动：格子要保持可悬停的最小尺寸，不能为了塞进卡片把一两百列压成 1px。
- *   - 行标签列 sticky：横向滚动时渠道名始终可见，否则滚到右边就不知道这行是谁。
- *   - 纵向限高（560px）：provider_model / provider_key 维度下可能有几十行，把整页撑到
- *     几屏会让人找不到下面的趋势、错误原因与模型明细卡。
- *   - 表头 sticky top：纵向滚动时时间轴还在。 */
-.status-matrix-scroll {
-  position: relative;
-  max-height: 560px;
-  overflow: auto;
-  border: 1px solid var(--ui-divider);
-  border-radius: 14px;
-  background: var(--ui-surface);
-  scrollbar-width: thin;
-}
+ *   - 用 CSS grid + minmax(0, 1fr)：49 列等分卡片宽度，桌面约 20px/格、手机
+ *     约 4px/格，都是能看出色带的短线；固定格宽必然在窄屏撑出横向滚动条。
+ *   - 卡片内部不设横向/纵向滚动：整块矩阵始终完整可见。行多了（provider_model
+ *     维度下最多 60 行）整卡向下长高，由页面滚动，和页面其它卡片一致。
+ *   - 行标签列固定宽度，860px / 520px 两档收窄；窄屏隐藏行摘要（悬停 title 里
+ *     仍有完整数字），把宽度留给时间格子。
+ *   - 时间轴标签绝对定位在对应列的左缘，与数据列同宽，因此时刻始终对齐格子。 */
 .status-matrix {
-  --status-cell-w: 13px;
   --status-cell-h: 18px;
-  --status-label-w: 210px;
+  --status-label-w: 190px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: max-content;
-  padding: 8px 12px 10px 0;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--ui-divider);
+  border-radius: 14px;
+  background: var(--ui-surface);
 }
 .status-matrix-axis,
 .status-matrix-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--status-label-w) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  min-height: 30px;
+  min-height: 26px;
 }
-.status-matrix-axis {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  background: var(--ui-surface);
-  box-shadow: 0 1px 0 var(--ui-divider);
-}
+/* 时间轴与行标签列都不 sticky：没有横向/纵向滚动，sticky 只会多出层级与遮挡。 */
+.status-matrix-axis { box-shadow: 0 1px 0 var(--ui-divider); }
 .status-row-head,
 .status-row-label {
-  position: sticky;
-  left: 0;
-  z-index: 4;
-  flex: 0 0 var(--status-label-w);
-  width: var(--status-label-w);
   min-width: 0;
-  padding: 2px 12px;
-  background: var(--ui-surface);
-  box-shadow: 1px 0 0 var(--ui-divider);
+  padding: 2px 2px 2px 0;
 }
-/* 时间轴那一格同时是"横向 sticky"与"纵向 sticky"的交点，层级要高于普通行标签。 */
-.status-row-head { z-index: 6; font-size: 11px; color: var(--ui-text-muted); }
+.status-row-head { font-size: 11px; color: var(--ui-text-muted); }
 .status-row-label { display: flex; align-items: center; gap: 8px; }
 .status-row-text { display: flex; flex-direction: column; min-width: 0; }
 .status-row-name {
@@ -2050,21 +2030,25 @@ details > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-of
   width: 8px; height: 8px; flex: none; border-radius: 50%;
   background: var(--ui-text-muted);
 }
-.status-cells { display: flex; align-items: center; gap: 2px; flex: none; }
-/* 时间轴格子与数据格同宽，标签才会落在正确的列上；文字允许溢出到相邻空列，
- * 步长（最多 8 个标签）保证相邻标签不会真的撞上。 */
-.status-axis-cell {
-  flex: 0 0 var(--status-cell-w);
-  width: var(--status-cell-w);
-  height: 14px; line-height: 14px;
+/* 时间轴轨道与数据列同宽同 gap，标签按列百分比定位。 */
+.status-axis-track { position: relative; height: 16px; min-width: 0; }
+.status-axis-label {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
   font-size: 10px; color: var(--ui-text-muted);
-  white-space: nowrap; overflow: visible;
+  white-space: nowrap;
+}
+.status-cells {
+  display: grid;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
 }
 .status-cell {
   display: block;
-  flex: 0 0 var(--status-cell-w);
-  width: var(--status-cell-w);
   height: var(--status-cell-h);
+  min-width: 0;
   border-radius: 3px;
   background: var(--ui-surface-soft);
   transition: outline-color var(--dur) var(--ease);
@@ -2108,13 +2092,18 @@ details > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-of
 .status-error-row { display: flex; flex-direction: column; gap: 5px; }
 
 @media (max-width: 860px) {
-  /* 窄屏收窄行标签列、缩小格子：一次能看到的列数多一点，同时保证渠道名还读得全。 */
-  .status-matrix {
-    --status-cell-w: 11px;
-    --status-cell-h: 16px;
-    --status-label-w: 150px;
-  }
-  .status-matrix-scroll { max-height: 420px; }
+  /* 窄屏收窄行标签列、缩小格子与间隙：49 列仍要完整可见，且渠道名还读得全。 */
+  .status-matrix { --status-cell-h: 16px; --status-label-w: 150px; }
+  .status-matrix-axis, .status-matrix-row { gap: 6px; }
+  .status-cells { gap: 1px; }
   .status-row-name { font-size: 11px; }
   .status-row-meta { font-size: 9px; }
+}
+
+@media (max-width: 520px) {
+  /* 手机宽度下 49 个格子只有几像素，行摘要先隐藏（title 里仍保留），
+   * 时间轴也只留一半标签，免得文字互相压住。 */
+  .status-matrix { --status-cell-h: 14px; --status-label-w: 108px; padding: 6px 8px 8px; }
+  .status-row-meta { display: none; }
+  .status-axis-label:nth-of-type(even) { display: none; }
 }

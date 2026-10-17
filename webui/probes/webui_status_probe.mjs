@@ -8,11 +8,14 @@
 //      阈值挪 1 分，界面照样"看起来正常"，只有逐格比对才能发现。
 //   2. 错误归因六类：2xx 只计成功、无状态码 = failures − 非 2xx 状态码（不为负）、
 //      3xx 不硬塞进「其它 4xx」。
-//   3. 页面行为：矩阵格数 = 行数 × 列数；三种行身份（供应商 / 供应商·模型 /
-//      供应商·Key）；健康显示切换只重着色**不重取**；维度切换必须带 group_by 重新取数；
-//      全局筛选以**重复 provider_id** 透传；空库空态；接口 500 只出错误通知不抛异常；
-//      onTick 静默重取。
-//   4. **颜色不是唯一信息**：每个格子的 title 必须含请求数 / 成功率 / 首字 / 缓存率与
+//   3. **双请求**：页面每次 load 并发两次同一接口——跟随页头时间窗的页面请求（不带
+//      bucket_seconds）驱动 KPI / 趋势 / 错误 / 模型明细，固定 12 小时、15 分钟桶的
+//      矩阵请求（bucket_seconds=900，49 列）只驱动矩阵。矩阵窗口与页头时间窗解耦，
+//      切时间窗不改矩阵徽标；切维度 / 筛选两路都要重取。
+//   4. 页面行为：矩阵 3 行 × 49 列 = 147 格、每行 cells 定长 49、没有横向滚动容器、
+//      列模板 49 等分、时间轴 7 个标签；健康显示切换只重着色不重取；重复 provider_id
+//      透传；空库 / 仅矩阵失败 / 有请求但无法归因 / 整页失败四种空态；onTick 两路都重取。
+//   5. **颜色不是唯一信息**：每个格子的 title 必须含请求数 / 成功率 / 首字 / 缓存率与
 //      健康分，图例必须有文字阈值——色弱用户与只读到 title 的读屏用户都拿得到结论。
 //
 // 用法：node webui/probes/webui_status_probe.mjs（有失败时退出码 1）。
@@ -140,13 +143,19 @@ const filterChip = (root, dimension, value) => {
 };
 
 // —— 假 fetch ——
-// 三种响应形态：正常读数（按 group_by 给不同行身份）、空库、接口 500。
-// 每次 /ui/status-monitor.json 的查询参数都记下来，断言请求侧的口径。
+// 页面每次 load 并发两次同一接口：
+//   - 页面请求（不带 bucket_seconds）：跟随页头时间窗，驱动 KPI / 趋势 / 错误 / 模型明细；
+//   - 矩阵请求（bucket_seconds=900）：固定 12 小时 / 15 分钟一格，只驱动渠道健康矩阵。
+// 这里按 bucket_seconds 是否存在分流，并把每次查询参数记下来供请求侧断言。
 const requests = [];
 const statusQueries = [];
 const unexpected = [];
-let mode = "normal"; // normal | normal2 | empty | error
+// normal | empty | matrix-error（仅矩阵 500）| matrix-rows-empty | error（两路都失败）
+let mode = "normal";
+// 0 正常 / 1 轮询后页面请求换成 16 次全成功 / 2 矩阵被 60 行上限截断
 let version = 0;
+// 0 行 A 缓存率 0%（健康分 60）/ 1 行 A 缓存率 100%（健康分 80）：供「矩阵恢复后数据已更新」断言。
+let matrixRevision = 0;
 
 const jsonResponse = (payload) => ({
   ok: true,
@@ -214,7 +223,13 @@ const rowsFor = (groupBy) => {
   ];
 };
 
-const WINDOW = { from: "2026-07-13T04:00:00+08:00", to: "2026-07-14T04:00:00+08:00", hours: 24 };
+// 页面请求的窗口以服务端回显为准：窗口小时数跟着请求走，页面才能算对 RPM 与标注。
+const pageWindow = (hours) => ({
+  from: "2026-07-13T04:00:00+08:00",
+  to: "2026-07-14T04:00:00+08:00",
+  hours,
+});
+const PAGE_BUCKET_SECONDS = 3600;
 
 const seriesPoints = () => [
   {
@@ -262,10 +277,12 @@ const totalOf = ({ requests, successes, failures, promptTokens, cachedTokens, av
   status_codes: { "200": successes, "429": 2, "500": failures - 2 },
 });
 
-const payloadOf = ({ groupBy, total, rows, points, truncated = 0 }) => {
+const pagePayload = ({
+  groupBy, hours, total, points = seriesPoints(), models, truncated = 0,
+}) => {
   const snapshot = {
     count_semantics: "upstream_attempt",
-    window: WINDOW,
+    window: pageWindow(hours),
     started_at: "2026-07-14T03:00:00+08:00",
     database_path: "/tmp/metrics.db",
     rate_window_seconds: 60,
@@ -274,49 +291,172 @@ const payloadOf = ({ groupBy, total, rows, points, truncated = 0 }) => {
     router_status: "red",
     active_requests: 0,
     total,
-    models: {
+    models: models || {
       "model-x": { requests: 6, successes: 3, failures: 3, prompt_tokens: 100, cached_tokens: 0, total_first_token_ms: 24000, total_duration_ms: 300 },
       "model-y": { requests: 2, successes: 1, failures: 1, prompt_tokens: 60, cached_tokens: 40, total_first_token_ms: 200, total_duration_ms: 100 },
     },
   };
   return {
     count_semantics: "upstream_attempt",
-    window: WINDOW,
+    window: pageWindow(hours),
     filters: { provider_ids: [], access_key_ids: [] },
     group_by: groupBy,
-    bucket_seconds: 3600,
+    bucket_seconds: PAGE_BUCKET_SECONDS,
     snapshot,
-    series: { bucket_seconds: 3600, points },
-    matrix: { group_by: groupBy, rows, rows_truncated: truncated },
+    series: { bucket_seconds: PAGE_BUCKET_SECONDS, points },
+    matrix: { group_by: groupBy, rows: rowsFor(groupBy), rows_truncated: truncated },
   };
 };
 
-const normalPayload = (groupBy, variant = version) => {
+const normalPagePayload = (hours, groupBy, variant = version) => {
   const big = variant === 1;
   const total = big
     ? totalOf({ requests: 16, successes: 16, failures: 0, promptTokens: 320, cachedTokens: 160, avgFirstTokenMS: 1000 })
     : totalOf({ requests: 8, successes: 4, failures: 4, promptTokens: 160, cachedTokens: 40, avgFirstTokenMS: 3000 });
   if (big) total.status_codes = { "200": 16 };
-  return payloadOf({
+  return pagePayload({
     groupBy,
+    hours,
     total,
-    rows: rowsFor(groupBy),
     points: seriesPoints(),
-    // variant=2 模拟后端 60 行截断：页面必须把「还有 N 行没画」说出来。
+    // variant=2 模拟矩阵被 60 行上限截断：页面必须把「还有 N 行没画」说出来。
     truncated: variant === 2 ? 5 : 0,
   });
 };
 
-const emptyPayload = () => payloadOf({
-  groupBy: "provider",
+const emptyPagePayload = (hours, groupBy = "provider") => pagePayload({
+  groupBy,
+  hours,
   total: totalOf({ requests: 0, successes: 0, failures: 0, promptTokens: 0, cachedTokens: 0, avgFirstTokenMS: 0 }),
-  rows: [],
-  points: [
-    { started_at: BUCKET_STARTS[0], ended_at: BUCKET_STARTS[1], complete: true, requests: 0, successes: 0, failures: 0, retries: 0, prompt_tokens: 0, cached_tokens: 0, total_first_token_ms: 0, total_duration_ms: 0 },
-    { started_at: BUCKET_STARTS[1], ended_at: BUCKET_STARTS[2], complete: true, requests: 0, successes: 0, failures: 0, retries: 0, prompt_tokens: 0, cached_tokens: 0, total_first_token_ms: 0, total_duration_ms: 0 },
-    { started_at: BUCKET_STARTS[2], ended_at: BUCKET_STARTS[3], complete: false, requests: 0, successes: 0, failures: 0, retries: 0, prompt_tokens: 0, cached_tokens: 0, total_first_token_ms: 0, total_duration_ms: 0 },
-  ],
+  models: {},
+  points: BUCKET_STARTS.slice(0, 3).map((start, index) => ({
+    started_at: start,
+    ended_at: BUCKET_STARTS[index + 1],
+    complete: index < 2,
+    requests: 0, successes: 0, failures: 0, retries: 0,
+    prompt_tokens: 0, cached_tokens: 0, total_first_token_ms: 0, total_duration_ms: 0,
+  })),
 });
+
+// —— 矩阵请求 fixture：固定 12 小时 / 15 分钟桶 / 49 列 ——
+// 首列对齐桶边界（16:00 是 15 分钟边界），之后每列 900 秒；列数 49 = 48 个整桶 + 首桶。
+const MATRIX_HOURS = 12;
+const MATRIX_BUCKET_SECONDS = 900;
+const MATRIX_COLUMNS = 49;
+const MATRIX_WINDOW = {
+  from: "2026-07-13T16:00:00+08:00",
+  to: "2026-07-14T04:00:00+08:00",
+  hours: MATRIX_HOURS,
+};
+
+const pad2 = (value) => String(value).padStart(2, "0");
+const beijingIso = (ms) => {
+  const moment = new Date(ms + 8 * 3600 * 1000);
+  return `${moment.getUTCFullYear()}-${pad2(moment.getUTCMonth() + 1)}-${pad2(moment.getUTCDate())}`
+    + `T${pad2(moment.getUTCHours())}:${pad2(moment.getUTCMinutes())}:${pad2(moment.getUTCSeconds())}+08:00`;
+};
+const MATRIX_STARTS = Array.from({ length: MATRIX_COLUMNS + 1 },
+  (_, index) => beijingIso(Date.parse(MATRIX_WINDOW.from) + index * MATRIX_BUCKET_SECONDS * 1000));
+
+const matrixCell = (index, stats = {}) => ({
+  started_at: MATRIX_STARTS[index],
+  ended_at: MATRIX_STARTS[index + 1],
+  complete: index < MATRIX_COLUMNS - 1,
+  requests: 0, successes: 0, failures: 0,
+  prompt_tokens: 0, cached_tokens: 0,
+  total_first_token_ms: 0, total_duration_ms: 0,
+  ...stats,
+});
+
+const matrixRowCells = (overrides = []) => {
+  const cells = Array.from({ length: MATRIX_COLUMNS }, (_, index) => matrixCell(index));
+  for (const [index, stats] of overrides) cells[index] = matrixCell(index, stats);
+  return cells;
+};
+
+// 与页面请求同一套行身份与总量（8 次请求）：矩阵三行（含 provider_id=null 的未归属行）。
+// 行 A 的 3 次请求成功率 100%、平均首字 8000ms → 综合 60 分（warn）、错误率 100 分（good）；
+// 行 B 的 3 次全失败 → 0 分（bad）；行 C 只有 2 次（< 门槛）→ unknown。
+const matrixRowsFor = (groupBy, updated = matrixRevision > 0) => {
+  const aCells = matrixRowCells([[0, {
+    requests: 3, successes: 3, failures: 0,
+    prompt_tokens: 100,
+    // 恢复用例：缓存率 0% → 100%，行 A 健康分 60 → 80，用来证明画出的是新响应而不是旧数据。
+    cached_tokens: updated ? 100 : 0,
+    total_first_token_ms: 24000, total_duration_ms: 300,
+  }]]);
+  const bCells = matrixRowCells([[0, {
+    requests: 3, successes: 0, failures: 3,
+    total_duration_ms: 0,
+  }]]);
+  const cCells = matrixRowCells([[1, {
+    requests: 2, successes: 1, failures: 1,
+    prompt_tokens: 60, cached_tokens: 40,
+    total_first_token_ms: 200, total_duration_ms: 100,
+  }]]);
+  if (groupBy === "provider_model") {
+    return [{ provider_id: "prov-a", upstream_model_id: "model-x", key_name: null, cells: aCells }];
+  }
+  if (groupBy === "provider_key") {
+    return [{ provider_id: "prov-a", upstream_model_id: null, key_name: "key-main", cells: aCells }];
+  }
+  return [
+    { provider_id: "prov-a", upstream_model_id: null, key_name: null, cells: aCells },
+    { provider_id: "prov-b", upstream_model_id: null, key_name: null, cells: bCells },
+    { provider_id: null, upstream_model_id: null, key_name: null, cells: cCells },
+  ];
+};
+
+const matrixSeriesPoints = ({ empty = false } = {}) => Array.from(
+  { length: MATRIX_COLUMNS },
+  (_, index) => {
+    const stats = empty || index > 1
+      ? { requests: 0, successes: 0, failures: 0, prompt_tokens: 0, cached_tokens: 0, total_first_token_ms: 0, total_duration_ms: 0 }
+      : index === 0
+        ? { requests: 6, successes: 3, failures: 3, prompt_tokens: 100, cached_tokens: 0, total_first_token_ms: 24000, total_duration_ms: 300 }
+        : { requests: 2, successes: 1, failures: 1, prompt_tokens: 60, cached_tokens: 40, total_first_token_ms: 200, total_duration_ms: 100 };
+    return {
+      started_at: MATRIX_STARTS[index],
+      ended_at: MATRIX_STARTS[index + 1],
+      complete: index < MATRIX_COLUMNS - 1,
+      retries: 0,
+      ...stats,
+    };
+  },
+);
+
+const matrixPayload = (groupBy, { rows, empty = false } = {}) => {
+  const total = empty
+    ? totalOf({ requests: 0, successes: 0, failures: 0, promptTokens: 0, cachedTokens: 0, avgFirstTokenMS: 0 })
+    : totalOf({ requests: 8, successes: 4, failures: 4, promptTokens: 160, cachedTokens: 40, avgFirstTokenMS: 3000 });
+  const snapshot = {
+    count_semantics: "upstream_attempt",
+    window: MATRIX_WINDOW,
+    started_at: "2026-07-14T03:00:00+08:00",
+    database_path: "/tmp/metrics.db",
+    rate_window_seconds: 60,
+    current_rpm: 2,
+    current_tpm: total.prompt_tokens,
+    router_status: "red",
+    active_requests: 0,
+    total,
+    models: {},
+  };
+  return {
+    count_semantics: "upstream_attempt",
+    window: MATRIX_WINDOW,
+    filters: { provider_ids: [], access_key_ids: [] },
+    group_by: groupBy,
+    bucket_seconds: MATRIX_BUCKET_SECONDS,
+    snapshot,
+    series: { bucket_seconds: MATRIX_BUCKET_SECONDS, points: matrixSeriesPoints({ empty }) },
+    matrix: {
+      group_by: groupBy,
+      rows: rows === undefined ? matrixRowsFor(groupBy) : rows,
+      rows_truncated: version === 2 ? 5 : 0,
+    },
+  };
+};
 
 global.fetch = async (url) => {
   const target = String(url);
@@ -332,23 +472,34 @@ global.fetch = async (url) => {
   }
   if (target.startsWith("/ui/status-monitor.json")) {
     const parsed = new URL(target, "http://probe.local");
+    const bucketSeconds = parsed.searchParams.get("bucket_seconds");
+    const hours = parsed.searchParams.get("hours");
+    const groupBy = parsed.searchParams.get("group_by") || "provider";
     statusQueries.push({
       url: target,
       params: parsed.searchParams,
-      hours: parsed.searchParams.get("hours"),
-      groupBy: parsed.searchParams.get("group_by"),
+      hours,
+      groupBy,
+      bucketSeconds,
       providerId: parsed.searchParams.getAll("provider_id"),
       accessKeyId: parsed.searchParams.getAll("access_key_id"),
     });
-    if (mode === "error") {
-      return {
-        ok: false,
-        status: 500,
-        async text() { return JSON.stringify({ detail: "boom" }); },
-      };
+    const fail = (detail) => ({
+      ok: false,
+      status: 500,
+      async text() { return JSON.stringify({ detail }); },
+    });
+    // 两路都失败：整页退化成错误态（矩阵卡不画）。
+    if (mode === "error") return fail("boom");
+    // bucket_seconds 是否存在是两路请求的稳定区分：矩阵请求显式固定 15 分钟桶。
+    if (bucketSeconds !== null) {
+      if (mode === "matrix-error") return fail("matrix boom");
+      if (mode === "empty") return jsonResponse(matrixPayload(groupBy, { rows: [], empty: true }));
+      if (mode === "matrix-rows-empty") return jsonResponse(matrixPayload(groupBy, { rows: [] }));
+      return jsonResponse(matrixPayload(groupBy));
     }
-    if (mode === "empty") return jsonResponse(emptyPayload());
-    return jsonResponse(normalPayload(parsed.searchParams.get("group_by") || "provider"));
+    if (mode === "empty") return jsonResponse(emptyPagePayload(Number(hours) || 24, groupBy));
+    return jsonResponse(normalPagePayload(Number(hours) || 24, groupBy));
   }
   unexpected.push(target);
   return { ok: false, status: 404, async text() { return JSON.stringify({ detail: "unexpected" }); } };
@@ -560,16 +711,46 @@ host.isConnected = true;
 await settle();
 
 const statusCallCount = () => statusQueries.length;
-const lastStatusQuery = () => statusQueries[statusQueries.length - 1] || {};
+// 页面请求不带 bucket_seconds，矩阵请求带 bucket_seconds=900：按这个特征取最近一次，
+// 不依赖两路请求谁先落地。
+const lastQuery = (isMatrix) => [...statusQueries].reverse()
+  .find((query) => (query.bucketSeconds !== null) === isMatrix) || {};
 const statTiles = () => byClass(host, "stat");
 const statText = (index) => statTiles()[index]?.textContent || "";
 const matrixCells = () => byClass(host, "status-cell");
 const rowNames = () => byClass(host, "status-row-name").map((node) => node.textContent);
 const cellTitle = (index) => String(matrixCells()[index]?.attrs?.title || "");
+const cardByTitle = (title) => findAll(host, (node) => hasClass(node, "card")
+  && findAll(node, (child) => child.tagName === "h3" && child.textContent === title).length > 0)[0];
+// 卡片头徽标文案：用来断言「矩阵写死 12 小时 / 15 分钟，其余跟随页头时间窗」。
+const cardHeadBadges = (title) => {
+  const card = cardByTitle(title);
+  const head = card ? findAll(card, (node) => hasClass(node, "card-head"))[0] : null;
+  return head ? findAll(head, (node) => hasClass(node, "badge")).map((node) => node.textContent) : [];
+};
+// 卡片范围内的 notice / 脚注：矩阵刷新失败提示必须长在矩阵卡里，而不是整页顶部。
+const cardNotices = (title, tone) => {
+  const card = cardByTitle(title);
+  return card
+    ? findAll(card, (node) => hasClass(node, "notice") && hasClass(node, `tone-${tone}`))
+    : [];
+};
+const cardFootText = (title) => {
+  const card = cardByTitle(title);
+  return card
+    ? findAll(card, (node) => hasClass(node, "card-foot")).map((node) => node.textContent).join(" ")
+    : "";
+};
+const matrixRows = () => byClass(host, "status-matrix-row");
 
-// 首屏：矩阵 3 行 × 4 列、行身份与行摘要、KPI 数字都对。
-check("page_first_fetch", statusCallCount() === 1, String(statusCallCount()));
-eq("page_first_fetch_query", [lastStatusQuery().hours, lastStatusQuery().groupBy], ["24", "provider"]);
+// 首屏：恰好两次请求——页面请求跟随页头 24 小时，矩阵请求固定 12 小时 / 900 秒桶。
+eq("page_first_fetch_count", statusCallCount(), 2);
+eq("page_first_fetch_page_query",
+  [statusQueries[0]?.hours, statusQueries[0]?.groupBy, statusQueries[0]?.bucketSeconds],
+  ["24", "provider", null]);
+eq("page_first_fetch_matrix_query",
+  [statusQueries[1]?.hours, statusQueries[1]?.groupBy, statusQueries[1]?.bucketSeconds],
+  ["12", "provider", "900"]);
 check("page_no_unexpected_requests", unexpected.length === 0, unexpected.join(" , "));
 eq("page_kpi_tile_count", statTiles().length, 4);
 check("page_kpi_success_rate",
@@ -586,15 +767,34 @@ check("page_kpi_window_rpm",
     statText(3).includes("8 次请求 / 24 小时") && statText(3).includes("次/分"),
   statText(3));
 
-eq("page_matrix_row_count", byClass(host, "status-matrix-row").length, 3);
-eq("page_matrix_cell_count_is_rows_times_columns", matrixCells().length, 3 * 4);
+// 矩阵只吃第二次响应：3 行 × 49 列、每行定长、49 等分铺满、无滚动容器。
+eq("page_matrix_row_count", matrixRows().length, 3);
+eq("page_matrix_cell_count_is_rows_times_columns", matrixCells().length, 3 * 49);
+eq("page_matrix_cells_per_row",
+  byClass(host, "status-cells").map((node) => node.children.length), [49, 49, 49]);
+eq("page_matrix_no_scroll_container", byClass(host, "status-matrix-scroll").length, 0);
+eq("page_matrix_cells_grid_template",
+  byClass(host, "status-cells").map((node) => node.style.gridTemplateColumns),
+  Array(3).fill("repeat(49, minmax(0, 1fr))"));
+eq("page_matrix_axis_track_exists", byClass(host, "status-axis-track").length, 1);
+eq("page_matrix_axis_label_count", byClass(host, "status-axis-label").length, 7);
+// 轴标签来自**矩阵响应**的 series.points（页面请求的 4 个点从 00:00 起）：49 列步长 7，
+// 标签落在 0/7/14/21/28/35/42 列，首列是桶边界 16:00，而不是页面窗口的第一个点。
+eq("page_matrix_axis_labels_from_matrix_series",
+  byClass(host, "status-axis-label").map((node) => node.textContent),
+  ["16:00", "17:45", "19:30", "21:15", "23:00", "00:45", "02:30"]);
+// 矩阵卡头徽标固定为 12 小时 / 15 分钟一格，不随页头时间窗变化。
+eq("page_matrix_badges_fixed", cardHeadBadges("渠道健康矩阵"), ["最近 12 小时", "15 分钟/格"]);
+check("page_matrix_hint_fixed_window",
+  findText(host, "矩阵固定展示最近 12 小时、每格 15 分钟"));
 eq("page_row_labels_provider", rowNames(), ["prov-a", "prov-b", "未归属"]);
-check("page_row_summary_has_score", byClass(host, "status-row-meta")[0]?.textContent.includes("健康分 60"),
+check("page_row_summary_has_score",
+  String(byClass(host, "status-row-meta")[0]?.textContent || "").includes("健康分 60"),
   byClass(host, "status-row-meta")[0]?.textContent);
 check("page_row_summary_unknown_samples",
-  byClass(host, "status-row-meta")[2]?.textContent.includes("样本不足"),
+  String(byClass(host, "status-row-meta")[2]?.textContent || "").includes("样本不足"),
   byClass(host, "status-row-meta")[2]?.textContent);
-// 分档色落位：prov-a 综合 60 → warn；prov-b 0 → bad；2 次行 → unknown；空桶 → no-traffic。
+// 分档色落位：prov-a 综合 60 → warn；prov-b 0 → bad；2 次行 → unknown；其余 144 格无流量。
 const cellBands = matrixCells().map((node) =>
   ["good", "warn", "bad", "unknown", "no-traffic"].find((band) => hasClass(node, `band-${band}`)) || null);
 eq("page_cell_band_distribution", {
@@ -602,7 +802,7 @@ eq("page_cell_band_distribution", {
   bad: cellBands.filter((band) => band === "bad").length,
   unknown: cellBands.filter((band) => band === "unknown").length,
   "no-traffic": cellBands.filter((band) => band === "no-traffic").length,
-}, { warn: 1, bad: 1, unknown: 1, "no-traffic": 9 });
+}, { warn: 1, bad: 1, unknown: 1, "no-traffic": 144 });
 // 颜色不是唯一信息：每格 title 都含请求数 / 成功率 / 首字 / 缓存率；图例是文字阈值。
 check("page_every_cell_title_has_numbers", matrixCells().every((_, index) => {
   const title = cellTitle(index);
@@ -615,13 +815,17 @@ check("page_legend_is_text_not_color_only",
     findText(host, "异常（<50）") && findText(host, "样本不足（<3 次）") &&
     findText(host, "无流量（无请求）") && findText(host, "累加中的尾桶（读数偏低）"));
 check("page_matrix_aria_label_has_shape",
-  String(byClass(host, "status-matrix")[0]?.attrs?.["aria-label"] || "").includes("3 行 × 4 列"),
+  String(byClass(host, "status-matrix")[0]?.attrs?.["aria-label"] || "").includes("3 行 × 49 列") &&
+    String(byClass(host, "status-matrix")[0]?.attrs?.["aria-label"] || "").includes("最近 12 小时"),
   byClass(host, "status-matrix")[0]?.attrs?.["aria-label"]);
 check("page_matrix_foot_states_grid",
-  findText(host, "4 个时间桶") && findText(host, "≥ 3 次才参与着色"));
-// 桶宽以服务端回声为准：矩阵按「N/格」、趋势按「N/点」标注。
+  findText(host, "共 49 列") && findText(host, "矩阵固定最近 12 小时") &&
+    findText(host, "≥ 3 次才参与着色"));
+// 桶宽以服务端回声为准：矩阵固定 15 分钟/格，趋势仍跟随页面请求的 1 小时/点。
 check("page_bucket_badges_from_echo",
-  findText(host, "1 小时/格") && findText(host, "1 小时/点"));
+  findText(host, "15 分钟/格") && findText(host, "1 小时/点"));
+// 趋势卡徽标跟随页头时间窗（与矩阵的固定窗口形成对照）。
+eq("page_trend_badges_follow_window", cardHeadBadges("健康趋势"), ["24 小时", "1 小时/点"]);
 // 趋势图真的画了（同步首帧）：metrics 在 svg 的 aria-label 里。
 check("page_trend_chart_drawn",
   findAll(host, (node) => node.tagName === "svg" && String(node.attrs?.["aria-label"] || "").includes("成功率趋势")).length === 1);
@@ -661,57 +865,135 @@ eq("page_health_switch_back_no_refetch", statusCallCount(), fetchBeforeHealthSwi
 check("page_health_switch_back_restored", hasClass(matrixCells()[0], "band-warn"),
   matrixCells()[0]?.className);
 
-// 维度切换：必须带 group_by 重新取数，行身份跟着变。
+// 时间窗切换：页面请求改成 1 小时，矩阵请求仍固定 12 小时 / 900 秒；矩阵徽标不动，
+// KPI / 趋势 / 错误 / 模型跟着新窗口走。
+const fetchBeforeWindowSwitch = statusCallCount();
+click(segmentButton(host, "选择统计窗口", "1h"));
+await settle();
+eq("page_window_switch_request_count", statusCallCount(), fetchBeforeWindowSwitch + 2);
+eq("page_window_switch_page_hours", lastQuery(false).hours, "1");
+eq("page_window_switch_matrix_fixed",
+  [lastQuery(true).hours, lastQuery(true).bucketSeconds], ["12", "900"]);
+eq("page_window_switch_matrix_badges", cardHeadBadges("渠道健康矩阵"), ["最近 12 小时", "15 分钟/格"]);
+eq("page_window_switch_trend_badges", cardHeadBadges("健康趋势"), ["1 小时", "1 小时/点"]);
+eq("page_window_switch_error_badges", cardHeadBadges("错误原因"), ["1 小时", "4 次失败"]);
+eq("page_window_switch_model_badges", cardHeadBadges("模型明细"), ["2 个模型", "1 小时"]);
+check("page_window_switch_kpi_hours", statText(3).includes("8 次请求 / 1 小时"), statText(3));
+eq("page_window_switch_matrix_cells", matrixCells().length, 3 * 49);
+// 切回 24 小时：矩阵仍固定 12 小时。
+click(segmentButton(host, "选择统计窗口", "24h"));
+await settle();
+eq("page_window_switch_back", [lastQuery(false).hours, lastQuery(true).hours], ["24", "12"]);
+eq("page_window_switch_back_badges", cardHeadBadges("健康趋势"), ["24 小时", "1 小时/点"]);
+
+// 维度切换：矩阵行由服务端聚合，两路请求都必须带新 group_by。
+const fetchBeforeDimension = statusCallCount();
 click(segmentButton(host, "选择矩阵维度", "供应商·模型"));
 await settle();
-check("page_dimension_model_refetch",
-  statusCallCount() === fetchBeforeHealthSwitch + 1 && lastStatusQuery().groupBy === "provider_model",
-  `${statusCallCount()} / ${lastStatusQuery().groupBy}`);
+eq("page_dimension_model_request_count", statusCallCount(), fetchBeforeDimension + 2);
+eq("page_dimension_model_page_group", lastQuery(false).groupBy, "provider_model");
+eq("page_dimension_model_matrix_group", lastQuery(true).groupBy, "provider_model");
 eq("page_dimension_model_labels", rowNames(), ["prov-a / model-x"]);
-eq("page_dimension_model_cells", matrixCells().length, 1 * 4);
+eq("page_dimension_model_cells", matrixCells().length, 1 * 49);
 click(segmentButton(host, "选择矩阵维度", "供应商·Key"));
 await settle();
-check("page_dimension_key_refetch", lastStatusQuery().groupBy === "provider_key", lastStatusQuery().groupBy);
+eq("page_dimension_key_page_group", lastQuery(false).groupBy, "provider_key");
+eq("page_dimension_key_matrix_group", lastQuery(true).groupBy, "provider_key");
 eq("page_dimension_key_labels", rowNames(), ["prov-a / key-main"]);
-eq("page_dimension_key_cells", matrixCells().length, 1 * 4);
+eq("page_dimension_key_cells", matrixCells().length, 1 * 49);
 click(segmentButton(host, "选择矩阵维度", "供应商"));
 await settle();
-check("page_dimension_back_refetch", lastStatusQuery().groupBy === "provider", lastStatusQuery().groupBy);
-eq("page_dimension_back_cells", matrixCells().length, 3 * 4);
+eq("page_dimension_back_page_group", lastQuery(false).groupBy, "provider");
+eq("page_dimension_back_matrix_group", lastQuery(true).groupBy, "provider");
+eq("page_dimension_back_cells", matrixCells().length, 3 * 49);
 
-// 全局筛选：两个供应商各点一次 → 请求里出现两个重复的 provider_id；
-// 再加一把访问密钥 → access_key_id 也透传。
+// 全局筛选：两个供应商各点一次 → 两路请求里都出现两个重复的 provider_id；
+// 再加一把访问密钥 → access_key_id 也两路透传，矩阵窗口不变。
 click(filterChip(host, "provider", "prov-a"));
 await settle();
-eq("page_filter_provider_single", lastStatusQuery().providerId, ["prov-a"]);
+eq("page_filter_provider_single",
+  [lastQuery(false).providerId, lastQuery(true).providerId], [["prov-a"], ["prov-a"]]);
 click(filterChip(host, "provider", "prov-b"));
 await settle();
-eq("page_filter_provider_repeated", lastStatusQuery().providerId, ["prov-a", "prov-b"]);
+eq("page_filter_provider_repeated",
+  [lastQuery(false).providerId, lastQuery(true).providerId],
+  [["prov-a", "prov-b"], ["prov-a", "prov-b"]]);
 check("page_filter_repeated_in_url",
-  lastStatusQuery().url.includes("provider_id=prov-a&provider_id=prov-b"), lastStatusQuery().url);
+  String(lastQuery(false).url || "").includes("provider_id=prov-a&provider_id=prov-b") &&
+    String(lastQuery(true).url || "").includes("provider_id=prov-a&provider_id=prov-b"),
+  `${lastQuery(false).url} / ${lastQuery(true).url}`);
 click(filterChip(host, "access-key", "ak1"));
 await settle();
-eq("page_filter_access_key", lastStatusQuery().accessKeyId, ["ak1"]);
-eq("page_filter_provider_still_repeated", lastStatusQuery().providerId, ["prov-a", "prov-b"]);
+eq("page_filter_access_key",
+  [lastQuery(false).accessKeyId, lastQuery(true).accessKeyId], [["ak1"], ["ak1"]]);
+eq("page_filter_provider_still_repeated", lastQuery(true).providerId, ["prov-a", "prov-b"]);
+eq("page_filter_matrix_fixed_window",
+  [lastQuery(true).hours, lastQuery(true).bucketSeconds], ["12", "900"]);
 
-// 空库空态：不再画格子，KPI 显示 "—"，并说明原因。
+// 空库空态：两路都空。KPI 显示 "—"，矩阵卡说明「最近 12 小时没有请求」。
 mode = "empty";
 const fetchBeforeEmpty = statusCallCount();
 click(buttonWithText(host, "刷新"));
 await settle();
-check("page_empty_refetched", statusCallCount() === fetchBeforeEmpty + 1, String(statusCallCount()));
+eq("page_empty_request_count", statusCallCount(), fetchBeforeEmpty + 2);
 eq("page_empty_no_cells", matrixCells().length, 0);
+eq("page_empty_matrix_badges", cardHeadBadges("渠道健康矩阵"), ["最近 12 小时", "15 分钟/格"]);
 check("page_empty_reason",
-  findText(host, "窗口内没有请求，健康矩阵暂时没有可着色的格子。"), "");
+  findText(host, "最近 12 小时没有请求，健康矩阵暂时没有可着色的格子。"));
 check("page_empty_kpi_dash", statText(0).includes("窗口内无请求") && statText(0).includes("—"), statText(0));
 check("page_empty_trend_reason", findText(host, "窗口内没有请求，趋势暂时没有可画的读数。"));
 check("page_empty_error_card", findText(host, "窗口内没有失败请求。"));
+check("page_empty_model_reason", findText(host, "窗口内没有模型调用记录。"));
+// 空库没有行时列数退回 series.points（49）：脚注必须写「共 49 列」，不能是误导性的「共 0 列」。
+check("empty_matrix_foot_columns",
+  cardFootText("渠道健康矩阵").includes("共 49 列") &&
+    !cardFootText("渠道健康矩阵").includes("共 0 列"),
+  cardFootText("渠道健康矩阵"));
 
-// 接口 500：只出现错误通知、不抛异常；切窗口先清掉旧读数（这里没有旧读数）。
+// 仅矩阵 500：页面其余部分正常，只有矩阵卡退化成可重试的错误空态。
+// 用切维度触发（切维度会先清空两路旧读数，矩阵确实处于「没有数据」），避免拿上一轮
+// 矩阵冒充失败态。
+mode = "matrix-error";
+const fetchBeforeMatrixError = statusCallCount();
+click(segmentButton(host, "选择矩阵维度", "供应商·模型"));
+await settle();
+eq("page_matrix_error_request_count", statusCallCount(), fetchBeforeMatrixError + 2);
+eq("page_matrix_error_matrix_group", lastQuery(true).groupBy, "provider_model");
+check("page_matrix_error_no_page_error", byClass(host, "notice").length === 0,
+  byClass(host, "notice").map((node) => node.className).join(" , "));
+check("page_matrix_error_kpi_ok", statText(0).includes("50.0%"), statText(0));
+check("page_matrix_error_empty", findText(host, "矩阵读取失败。"));
+check("page_matrix_error_hint", findText(host, "AMKR 请求失败（HTTP 500）: matrix boom"));
+eq("page_matrix_error_no_cells", matrixCells().length, 0);
+check("page_matrix_error_frame_kept", cardHeadBadges("渠道健康矩阵"), ["最近 12 小时", "15 分钟/格"]);
+check("page_matrix_error_retry", Boolean(buttonWithText(host, "重试")));
+// 恢复：点矩阵卡里的重试，矩阵重绘而页面其余部分不受影响。
+mode = "normal";
+click(buttonWithText(host, "重试"));
+await settle();
+eq("page_matrix_error_recovered_cells", matrixCells().length, 1 * 49);
+eq("page_matrix_error_recovered_badges", cardHeadBadges("渠道健康矩阵"), ["最近 12 小时", "15 分钟/格"]);
+// 回到 provider 维度，后续空态 / 整页失败用例沿用三行矩阵。
+click(segmentButton(host, "选择矩阵维度", "供应商"));
+await settle();
+eq("page_matrix_error_back_cells", matrixCells().length, 3 * 49);
+
+// 有请求但矩阵没有任何行（历史行缺少归因）：空态要说清原因，而不是「没有请求」。
+mode = "matrix-rows-empty";
+click(buttonWithText(host, "刷新"));
+await settle();
+check("page_matrix_rows_empty_reason",
+  findText(host, "最近 12 小时有请求，但没有任何可归因的渠道数据。"));
+eq("page_matrix_rows_empty_cells", matrixCells().length, 0);
+check("page_matrix_rows_empty_kpi_ok", statText(0).includes("50.0%"), statText(0));
+
+// 整页接口 500：只出现错误通知、不抛异常；切窗口先清掉旧读数（这里没有旧读数）。
 mode = "error";
+const fetchBeforeError = statusCallCount();
 click(segmentButton(host, "选择统计窗口", "1h"));
 await settle();
-eq("page_error_refetched_hours", lastStatusQuery().hours, "1");
+eq("page_error_request_count", statusCallCount(), fetchBeforeError + 2);
+eq("page_error_refetched_hours", lastQuery(false).hours, "1");
 const errorNotice = findAll(host, (node) => hasClass(node, "notice") && hasClass(node, "tone-error"))[0];
 check("page_error_notice", Boolean(errorNotice), byClass(host, "notice").map((node) => node.className).join(" , "));
 check("page_error_notice_text",
@@ -721,34 +1003,77 @@ eq("page_error_alert_role", errorNotice?.attrs?.role, "alert");
 eq("page_error_no_cells", matrixCells().length, 0);
 check("page_error_retry_entry", Boolean(buttonWithText(host, "重试") && findText(host, "暂时读不到状态监控数据。")));
 
-// 恢复：点重试后重新取数并画出读数。
+// 恢复：点重试后重新取数并画出读数（页面窗口已是 1 小时，矩阵仍 12 小时）。
 mode = "normal";
 click(buttonWithText(host, "重试"));
 await settle();
-check("page_recover_fetched", lastStatusQuery().hours === "1" && matrixCells().length === 3 * 4,
-  `${lastStatusQuery().hours} / ${matrixCells().length}`);
+check("page_recover_fetched", lastQuery(false).hours === "1" && matrixCells().length === 3 * 49,
+  `${lastQuery(false).hours} / ${matrixCells().length}`);
 
-// onTick：页面注册的静默重取回调必须真的重新取数（不叠请求、不闪骨架由代码路径保证）。
+// onTick：页面注册的静默重取回调必须两路都重取（不叠请求、不闪骨架由代码路径保证）。
 eq("page_on_tick_registered", ticks.length, 1);
-version = 1; // 下一次响应换成 16 次请求、16 成功的读数
+version = 1; // 下一次页面响应换成 16 次请求、16 成功的读数
 const fetchBeforeTick = statusCallCount();
 await ticks[0]();
 await settle();
-check("page_on_tick_refetched", statusCallCount() === fetchBeforeTick + 1, String(statusCallCount()));
+eq("page_on_tick_request_count", statusCallCount(), fetchBeforeTick + 2);
+eq("page_on_tick_page_hours", lastQuery(false).hours, "1");
+eq("page_on_tick_matrix_fixed",
+  [lastQuery(true).hours, lastQuery(true).bucketSeconds], ["12", "900"]);
 check("page_on_tick_updated_kpi",
   statText(0).includes("100%") && statText(0).includes("16 成功 · 0 失败"), statText(0));
 check("page_on_tick_cache_updated", statText(2).includes("50.0%"), statText(2));
 check("page_on_tick_no_error_notice", byClass(host, "notice").length === 0,
   byClass(host, "notice").map((node) => node.className).join(" , "));
+eq("page_on_tick_matrix_cells", matrixCells().length, 3 * 49);
 
-// 行截断：后端只回前 60 行时，页面必须把「还有 N 行未显示」说出来，
+// 行截断：矩阵被 60 行上限截断时，页面必须把「还有 N 行未显示」说出来，
 // 否则用户会把被截掉的渠道读成「不存在」。
 version = 2;
 click(buttonWithText(host, "刷新"));
 await settle();
 check("page_rows_truncated_notice",
   findText(host, "另有 5 行未显示"), byClass(host, "status-matrix-foot")[0]?.textContent);
-check("page_rows_truncated_keeps_cells", matrixCells().length === 3 * 4, String(matrixCells().length));
+check("page_rows_truncated_keeps_cells", matrixCells().length === 3 * 49, String(matrixCells().length));
+
+// 矩阵刷新失败但手里还有上一轮矩阵：卡内必须出现 warn 提示（与整页刷新失败同一口径），
+// 旧矩阵保留在下方供对照，而不是静默冒充最新数据。页面请求正常 → KPI 不受影响。
+version = 0;
+click(buttonWithText(host, "刷新"));
+await settle();
+const stalePreconditionClean = matrixCells().length === 3 * 49 &&
+  cardNotices("渠道健康矩阵", "warn").length === 0;
+mode = "matrix-error"; // 只让矩阵请求 500，页面请求仍 200
+const fetchBeforeStale = statusCallCount();
+click(buttonWithText(host, "刷新"));
+await settle();
+const staleWarn = cardNotices("渠道健康矩阵", "warn");
+const staleWarnText = String(staleWarn[0]?.textContent || "");
+const staleErrorNotices = byClass(host, "notice").filter((node) => hasClass(node, "tone-error"));
+check("stale_matrix_warn",
+  stalePreconditionClean &&
+    statusCallCount() === fetchBeforeStale + 2 &&
+    staleWarn.length === 1 &&
+    staleWarnText.includes("矩阵刷新失败，下方是上次成功读数：") &&
+    staleWarnText.includes("AMKR 请求失败（HTTP 500）: matrix boom") &&
+    statText(0).includes("50.0%") &&
+    matrixCells().length === 3 * 49 &&
+    staleErrorNotices.length === 0,
+  `${staleWarnText} / cells=${matrixCells().length} / ${statText(0)} / errNotices=${staleErrorNotices.length}`);
+
+// 恢复：矩阵请求成功后 warn 消失，矩阵重绘成新响应（行 A 缓存率 100% → 健康分 80），
+// 证明画的是新数据而不是上一轮缓存。
+mode = "normal";
+matrixRevision = 1;
+await ticks[0]();
+await settle();
+check("stale_matrix_recovered",
+  cardNotices("渠道健康矩阵", "warn").length === 0 &&
+    matrixCells().length === 3 * 49 &&
+    cellTitle(0).includes("健康分 80") &&
+    String(byClass(host, "status-row-meta")[0]?.textContent || "").includes("健康分 80"),
+  `warn=${cardNotices("渠道健康矩阵", "warn").length} / cells=${matrixCells().length}`
+    + ` / ${cellTitle(0)} / ${byClass(host, "status-row-meta")[0]?.textContent}`);
 
 // —— 结果 ——
 let failures = 0;
