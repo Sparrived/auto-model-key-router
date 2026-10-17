@@ -15,7 +15,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go" alt="Go Version" />
-  <img src="https://img.shields.io/badge/Release-v6.9.0-blue?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Release-v6.9.1-blue?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Platform-Windows%20|%20macOS%20|%20Linux-lightgrey?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/Docker-GHCR%20Ready-2496ED?style=flat-square&logo=docker" alt="Docker" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License" />
@@ -128,7 +128,7 @@ curl -fsSL https://raw.githubusercontent.com/Sparrived/auto-model-key-router/mas
 
 > 默认安装至 `/usr/local/bin`（若无 root 权限自动降级至 `~/.local/bin`）。支持通过环境变量指定版本与路径：
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Sparrived/auto-model-key-router/master/scripts/install.sh | sh -s -- --version 6.9.0
+> curl -fsSL https://raw.githubusercontent.com/Sparrived/auto-model-key-router/master/scripts/install.sh | sh -s -- --version 6.9.1
 > ```
 
 #### Windows (PowerShell)
