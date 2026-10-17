@@ -182,12 +182,14 @@ func TestStatusMonitorMatrix(t *testing.T) {
 	const hours = 24.0
 	value := statusMonitorValue(t, store, StatusMonitorParams{Hours: hours, BucketSeconds: 3600})
 
-	// —— 三份读数共用同一个窗口：合计必须相等 ——
+	// —— 三份读数共用同一个窗口：窗口起点对齐桶边界时合计必须相等 ——
+	// 定点时钟取正点，窗口起点也落在桶边界上；未对齐时首桶会多看窗口前的记录，
+	// 这条等式不成立（见 docs/API.md 的「桶网格从桶边界起算」）。
 	if got := snapshotTotalRequests(t, value); got != 7 {
 		t.Errorf("snapshot.total.requests = %d，期望 7", got)
 	}
 	if got := seriesRequests(t, value); got != 7 {
-		t.Errorf("series 各桶 requests 合计 = %d，期望 7（与 snapshot 同一个窗口）", got)
+		t.Errorf("series 各桶 requests 合计 = %d，期望 7（窗口对齐桶边界时与 snapshot 相等）", got)
 	}
 	if got := statusMatrixRequests(t, value); got != 7 {
 		t.Errorf("matrix 可见格 requests 合计 = %d，期望 7（未截断时应与 series 相同）", got)
@@ -404,7 +406,7 @@ func TestStatusMonitorFilters(t *testing.T) {
 			t.Errorf("%s: snapshot.total.requests = %d，期望 %d", testCase.name, got, testCase.want)
 		}
 		if got := seriesRequests(t, value); got != testCase.want {
-			t.Errorf("%s: series 各桶 requests 合计 = %d，期望 %d（与 snapshot 同一个窗口）",
+			t.Errorf("%s: series 各桶 requests 合计 = %d，期望 %d（定点时钟下窗口对齐桶边界，与 snapshot 相等）",
 				testCase.name, got, testCase.want)
 		}
 		if got := statusMatrixRequests(t, value); got != testCase.want {
