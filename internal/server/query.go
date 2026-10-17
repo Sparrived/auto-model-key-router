@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/metrics"
 )
 
 // 本文件复刻 FastAPI + Pydantic v2 对**查询参数**的解析与校验。
@@ -152,6 +153,37 @@ var filteredMetricsParams = []qParam{
 	{name: "all_history", kind: qBool, def: qBoolFalse},
 	{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
 	{name: "limit", kind: qInt, def: qInt0, ge: qInt0, le: qInt200},
+}
+
+// statusGroupByLiterals 是状态监控矩阵 group_by 的取值域。
+//
+// 直接引用 metrics 包的常量而不是再抄一遍字面量：这三个值是**对外契约**，服务端校验
+// 与指标层的分组实现必须认同同一组字符串，抄两份迟早会漂移成「校验通过但指标层
+// 报错」这种最难查的错。
+var statusGroupByLiterals = []string{
+	metrics.StatusGroupByProvider,
+	metrics.StatusGroupByProviderModel,
+	metrics.StatusGroupByProviderKey,
+}
+
+// statusMonitorParams 是 GET /ui/status-monitor.json 的签名。
+//
+// 两个筛选维度与 /ui/filtered-metrics.json 逐字同义（可重复出现、维度内 OR、维度间
+// AND、都可省），hours 的上界也一致（8760）。与 filtered-metrics 的差别有两处：
+//
+//   - **没有 all_history**：矩阵把窗口切成桶，没有起点就没有列，因此窗口恒封口；
+//   - **多了 group_by**：矩阵的行身份由它决定（供应商 / 供应商+上游模型 /
+//     供应商+上游 Key），缺省 provider。
+//
+// bucket_seconds 同样默认 0 = 自动：`?bucket_seconds=0` 这种显式传法照旧 422——
+// 「自动」是没说，不是说了个 0（validateQuery 与 Pydantic 都不校验缺省值）。
+var statusMonitorParams = []qParam{
+	listTextParam("provider_id"),
+	listTextParam("access_key_id"),
+	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
+	{name: "group_by", kind: qLiteral, def: canonical.NewString(metrics.StatusGroupByProvider),
+		literals: statusGroupByLiterals},
 }
 
 // accessKeyUsageParams 是 GET /ui/access-key-usage.json（访客看板）的签名。
@@ -626,6 +658,15 @@ func (r *queryResult) boolValue(name string) bool {
 // 调用方以为它们有区别。
 func (r *queryResult) stringList(name string) []string {
 	return r.values[name].texts
+}
+
+// stringValue 返回一个字符串 / Literal 参数的值。
+//
+// 只用于**声明了缺省值**的那一个 Literal（目前只有 status-monitor 的 group_by）：
+// 缺省时 defaultValue 已经把 def 里的字符串放进 queryValue.text，因此这里不需要
+// 判空分支。可空字符串参数请用 optionalString——那条路径的 nil 表示「请求里没给」。
+func (r *queryResult) stringValue(name string) string {
+	return r.values[name].text
 }
 
 // optionalString 返回可空字符串参数；缺省或 null 时返回 nil。

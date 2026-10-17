@@ -96,6 +96,7 @@ x-api-key: your-local-api-key
 | `GET` | `/ui/access-key-usage.json` | 访问密钥 | 只回**这把**访问密钥自己的用量、按模型/供应商/上游模型的拆分与最近调用，供访客看板 `/ui/guest.html`（需 `webui_enabled`） |
 | `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`）；可用 `provider_id` / `access_key_id` 收窄（两个参数都可重复出现，维度内 OR、维度间 AND） |
 | `GET` | `/ui/filtered-metrics.json` | 仅本地 | **按供应商 / 访问密钥筛选**的整页读数：概览（与 `/metrics` 同形）+ 趋势 + 明细，三份共用同一时间窗口（需 `webui_enabled`；两个筛选参数都可重复出现） |
+| `GET` | `/ui/status-monitor.json` | 仅本地 | **渠道健康矩阵**：概览（与 `/metrics` 同形）+ 趋势 + 按渠道维度 × 时间片分组的请求矩阵，三份共用同一时间窗口（需 `webui_enabled`；筛选参数可重复出现，`group_by` 选行维度） |
 | `GET` | `/ui/update/status` | 无 | 报告本构建是否具备自更新能力及当前版本，供 WebUI 决定是否显示「立即更新」 |
 | `POST` | `/ui/update/apply` | 仅本地 | 执行自更新：下载并校验新版、就地替换、启动收尾助手重启服务 |
 | `GET` | `/api/logs` | 仅本地 | 读取日志文件尾部（默认最后 64 KiB） |
@@ -119,7 +120,8 @@ x-api-key: your-local-api-key
 - **本项目自有的读数**（价格目录 `/ui/pricing.json`、模型类型 `/ui/model-kinds.json`、自更新入口、
   工作空间用量
   `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`、按 Key 用量
-  `/ui/key-usage.json`、按供应商 / 访问密钥筛选的整页读数 `/ui/filtered-metrics.json`）挂在 `/ui/` 前缀下：它们与
+  `/ui/key-usage.json`、按供应商 / 访问密钥筛选的整页读数 `/ui/filtered-metrics.json`、
+  状态监控的渠道健康矩阵 `/ui/status-monitor.json`）挂在 `/ui/` 前缀下：它们与
   `/api` 面在语义上不连续，挂 `/ui/` 既落在那份已发布清单之外，也让「不开 WebUI 就没有这些读数」
   顺理成章。其中「按 Key 用量」与「按供应商 / 访问密钥筛选」尤其不能并进 `/metrics`——那份读数的
   **形状与查询参数都已发布**，而「按供应商 + Key 名」这个组合分组不是参照实现的口径，
@@ -1976,6 +1978,70 @@ http://127.0.0.1:8000/ui/
 - **`bucket_seconds` 默认自动**：`/metrics/series` 要求调用方自己按跨度挑桶（`hours=24` 配 60 秒桶是 1441 点，超过 500 的上限直接 `422`）。整页读数默认由服务端挑最小的合适桶，真实桶宽在响应里回显；显式给值时仍走 `/metrics/series` 那一套，点数超限回 `422`（`{"error":{"message":"time series cannot exceed 500 points"}}`），**不**静默换一个更粗的桶。
 - **`all_history` 下的趋势**：`series` 没有「不限窗口」的形态（点是从起点零填充出来的），因此按**这组条件自己的**最早一条记录折算跨度选桶，而不是用全库跨度——否则趋势图开头会多出一大段与这组条件无关的空桶。
 - **归属口径**：只认「谁**发起**的这次请求」（`request_access_key` 旁挂表）。完整权限、工作空间凭据写入的行以及升级前的历史行没有访问密钥归属，任何按 key 的筛选都不会把它们算进去（与 `/ui/access-key-usage.json` 同一口径）；按供应商筛选则只看 `provider_id` 列，没有供应商归因的行同样不会被算进去。
+
+### `GET /ui/status-monitor.json`
+
+**渠道健康矩阵**：概览、趋势与「渠道 × 时间片」的请求矩阵三份**共用同一时间窗口**，供 WebUI 的「状态监控」页。`/metrics` 的 `providers` / `upstream_models` 只给窗口内各维度的**合计**——一家合计看着还行、最近 10 分钟却全是 500 的渠道，在合计里只是成功率低了一格；这里把每个渠道在每个时间片里的请求数、成功/失败数、token 与耗时铺成一张表，异常是**看得见的格子**。
+
+**只认完整权限**：矩阵暴露全实例每个渠道的健康状况（配置结构的投影），与 `/metrics` 同级；访问密钥与工作空间的面板 key / 推理 key 一律 `401`。
+
+| 参数 | 类型 | 默认 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选供应商；同一参数重复出现 = 维度内 OR（`provider_id IN (…)`）。全部可省 |
+| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选访问密钥（配置里的 key_id，不是明文 key）；语义与校验同上，归属取自 `request_access_key` 旁挂表 |
+| `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口。这条读数**没有** `all_history`：矩阵把窗口切成桶，没有起点就没有列 |
+| `bucket_seconds` | integer | `0`（自动） | 显式给值时 `15..86400` | 桶宽。自动时由服务端按窗口跨度从 `[30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400]` 里挑最小的、使列数 `ceil(hours*3600/bucket)+1` 不超过 180 的那个；梯级不够（窗口超过约半年）时按整天继续放大。显式值点数超上限回 `422`（`time series cannot exceed 500 points`），不静默换更粗的桶 |
+| `group_by` | string | `provider` | `provider` \| `provider_model` \| `provider_key` | 矩阵的行身份：只按供应商 / 按「供应商 + 上游模型」/ 按「供应商 + 上游 Key」 |
+
+两个筛选维度之间是 **AND**，都与 `/ui/filtered-metrics.json` 完全同义：`?provider_id=openai&provider_id=azure&access_key_id=ak1` 是「ak1 打到这两家的量」，且三份读数（含矩阵的行集合）一并收窄；两个维度都可省，都不给就是全实例读数。参数校验与其它读数同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。
+
+响应（`Content-Type: application/json`）：
+
+```json
+{
+  "count_semantics": "upstream_attempt",
+  "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24},
+  "filters": {"provider_ids": ["openai"], "access_key_ids": ["ak1"]},
+  "group_by": "provider",
+  "bucket_seconds": 600,
+  "snapshot": {"total": {"requests": 12, "...": "..."}, "current_rpm": 2, "...": "..."},
+  "series": {
+    "bucket_seconds": 600,
+    "points": [{"started_at": "2026-01-01T00:00:00+08:00", "ended_at": "2026-01-01T00:10:00+08:00",
+                "complete": true, "requests": 3, "...": "..."}]
+  },
+  "matrix": {
+    "group_by": "provider",
+    "rows": [
+      {"provider_id": "openai", "upstream_model_id": null, "key_name": null,
+       "cells": [{"started_at": "2026-01-01T00:00:00+08:00", "ended_at": "2026-01-01T00:10:00+08:00",
+                  "complete": true, "requests": 2, "successes": 1, "failures": 1,
+                  "prompt_tokens": 340, "cached_tokens": 120,
+                  "total_first_token_ms": 80, "total_duration_ms": 900}]},
+      {"provider_id": null, "upstream_model_id": null, "key_name": null, "cells": ["..."]}
+    ],
+    "rows_truncated": 0
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `snapshot` | 与 `GET /metrics` **完全同形**（含 `count_semantics` / `window` / `started_at` / `database_path` / `rate_window_seconds` / `current_rpm` / `current_tpm` / 九个分组），但全部分组、总量与 rate 窗口都收窄到这组条件 |
+| `series` | 点与 `GET /metrics/series` **完全同形**（直接复用同一个取数函数），桶宽在 `bucket_seconds` 里回显 |
+| `matrix.group_by` | 回显行身份的选择 |
+| `matrix.rows` | 按 `(维度…, bucket)` 分组后的矩阵；**行按窗口内总 `requests` 降序**，同量时按身份字典序（`null` 排最前）。最多 60 行 |
+| `matrix.rows_truncated` | 被 60 行上限截掉的行数（`0` 表示没有截断） |
+| `matrix.rows[].provider_id` / `upstream_model_id` / `key_name` | 行身份三键**恒在**；不属于当前 `group_by` 的字段是 `null`（不是缺键）。`provider_id` 为 `null` 的行是**未归属**的历史行，界面显示「未归属」而不是丢弃它们 |
+| `matrix.rows[].cells` | 与 `series.points` **逐列对齐**的定长数组；每个格子只含 `started_at` / `ended_at` / `complete` / `requests` / `successes` / `failures` / `prompt_tokens` / `cached_tokens` / `total_first_token_ms` / `total_duration_ms` 十个字段（平均耗时、缓存率、成功率都可由界面从这些原始计数算出，回 20 键完整字典只会让约一万个格子的载荷翻倍）。空桶给零值而不是缺格，尾部未走完的桶 `complete` 为 `false` |
+
+几点刻意的取舍：
+
+- **与 `/metrics`、`/ui/filtered-metrics.json` 的关系**：`snapshot` 与 `/metrics` 同形、`series` 与 `/metrics/series` 同形，都是已发布形状的直接复用；`matrix` 是本项目自有的口径（参照实现没有状态看板）。与 `/ui/filtered-metrics.json` 的区别在**问题**：那份回答「按这组条件筛选后整页读数长什么样」（含最近明细，可选 `all_history`），这份回答「哪些渠道在哪个时间片不健康」（恒定窗口、按渠道分组）。两者筛选语义与同窗口约定一致，因此不合并。
+- **三份读数一次取完**：服务端一次定下 `now` 与窗口起点，`snapshot` / `series` / `matrix` 共用；整桶窗口（如 24 小时配 600 秒桶）下 `series` 各桶 `requests` 合计与 `snapshot.total.requests` 相等，矩阵某一列的合计与 `series` 对应点位相同（在 60 行截断之前）。`series` 始终统计**全部行**（含被截断行与未归属行）——否则趋势图的总量会随着矩阵截断悄悄变小。
+- **桶网格从桶边界起算**：`series` / `matrix` 的首桶向前对齐到桶边界（与 `/metrics/series` 的行为一致），因此非整桶窗口的首桶可能包含窗口起点前不到一个桶的记录，而 `snapshot` 严格从 `hours` 起算。整桶窗口（如 24 小时配 600 秒桶）下两者逐条相等。
+- **为什么挂在 `/ui/` 而不是给 `/metrics` 加字段**：`/metrics` 系列的响应形状与查询参数都已发布，渠道健康矩阵是本项目自有的读数，因此单独一条 `/ui` 路由，落在所有已发布清单之外（与 `/ui/filtered-metrics.json`、`/ui/key-usage.json` 同一条理由）。
+- **非 GET 一律 `405`**（`Allow: GET`），与其它 `/ui` 读数一致。
 
 ### `GET /ui/pricing.json`
 

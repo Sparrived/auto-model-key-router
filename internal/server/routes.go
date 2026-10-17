@@ -86,6 +86,10 @@ func (a *App) buildHandler() http.Handler {
 		// 趋势 + 明细三份同窗口的读数。过滤能力只在这里开放，/metrics 系列的查询
 		// 参数不动。
 		mux.HandleFunc(path+filteredMetricsPath, a.handleFilteredMetrics)
+		// 状态监控的渠道健康矩阵（理由见 status_monitor.go）：概览 + 趋势 + 按渠道
+		// 分组的桶矩阵，三份共用同一个 now 与窗口。与 filtered-metrics 同属本项目
+		// 自有的读数，因此同样挂在 /ui/ 之下。
+		mux.HandleFunc(path+statusMonitorPath, a.handleStatusMonitor)
 		a.webuiMounted = true
 	}
 
