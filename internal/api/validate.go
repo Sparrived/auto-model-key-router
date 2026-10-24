@@ -302,6 +302,18 @@ var specCPAInstances = newModelSpec("CPAInstances",
 	req("instances", kindAnyDict),
 )
 
+// specCPAUseResetCredit 是消费一张重置卡的请求体。
+//
+// 默认不指定 credit_id：服务端读一遍当前卡片，挑最快过期的那张。credit_id 只用于
+// 「我在界面上明确点了某一张」或客户端重试时钉住同一张；request_id 是幂等键，重试时
+// 原样带回，避免网络抖动把一张已经用掉的卡再花一次。
+var specCPAUseResetCredit = newModelSpec("CPAUseResetCredit",
+	req("instance", kindStr).minLenOf(1),
+	req("auth_index", kindStr).minLenOf(1),
+	nul("credit_id", kindStr).minLenOf(1),
+	nul("request_id", kindStr).minLenOf(1),
+)
+
 // —— 访问密钥（Go 侧新增，取代已删除的访客模式）——
 
 // specAccessKeyCreate 是新建访问密钥请求体。

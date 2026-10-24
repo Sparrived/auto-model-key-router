@@ -127,8 +127,9 @@ type cpaInstanceAccountReport struct {
 
 // cpaAccount 是一个账号在账号资源页上的全部读数。
 //
-// 只搬运看板要用的字段，**原样丢弃** CPA 条目里的 id_token（JWT claims）、path、
-// size 等：那些是 CPA 本地排查用的，没有必要进浏览器。
+// 只搬运看板要用的字段，**不向浏览器暴露** CPA 条目里的 id_token（JWT claims）、path、
+// size 等：那些是 CPA 本地排查用的。id_token 里的 chatgpt_account_id 只在服务端代查
+// Codex 重置卡时使用（见 cpa_reset_credits.go），不会出现在响应里。
 type cpaAccount struct {
 	AuthIndex     string            `json:"auth_index"`
 	Name          string            `json:"name"`
@@ -162,6 +163,9 @@ type cpaAccount struct {
 	ServerTimeOffsetMs int64           `json:"server_time_offset_ms,omitempty"`
 	Cooldowns          json.RawMessage `json:"cooldowns,omitempty"`
 	QuotaError         string          `json:"quota_error,omitempty"`
+	// chatGPTAccountID 只用于服务端代查/消费 Codex 重置卡，不进 JSON：它不是看板读数，
+	// 泄漏给浏览器也没有用途。
+	chatGPTAccountID string
 }
 
 // cpaQuotaMetric 是归一化额度里的一个数值项，对齐 CPA 的 pluginapi.QuotaMetric。
@@ -566,8 +570,8 @@ func cpaErrorText(raw []byte) string {
 
 // cpaAuthFilesPage 是 GET /v0/management/auth-files 的响应。
 //
-// 只声明用得到的字段：CPA 的条目还有 path/size/id_token 等一长串，json 解码会忽略
-// 未声明的键，而搬运它们到浏览器没有任何用处。
+// 只声明用得到的字段：CPA 的条目还有 path/size 等一长串，json 解码会忽略未声明的键。
+// id_token 是例外——它不返回给浏览器，但 Codex 重置卡需要里面的 chatgpt_account_id。
 type cpaAuthFilesPage struct {
 	ObservedAt string             `json:"observed_at"`
 	Files      []cpaAuthFileEntry `json:"files"`
@@ -596,6 +600,11 @@ type cpaAuthFileEntry struct {
 	// RecentRequests 是 CPA 自己维护的十分钟桶，随 auth-files 一起回，不需要额外请求。
 	RecentRequests []cpaRecentRequest `json:"recent_requests"`
 	Cooldowns      json.RawMessage    `json:"cooldowns"`
+	// IDToken 是 CPA 从 Codex id_token 里解出的 claims（只有 codex 会带）。这里保留原始
+	// JSON 而不是声明具体 struct：不同 CPA 版本可能给对象或原始 JWT，声明太窄会让整份
+	// auth-files 解码失败，连带账号看板一起坏掉。AMKR 只用 chatgpt_account_id 代查重置卡，
+	// 不把它透传到看板响应里。
+	IDToken json.RawMessage `json:"id_token"`
 }
 
 // cpaQuotaObservation 是 CPA 采到的被动额度快照。

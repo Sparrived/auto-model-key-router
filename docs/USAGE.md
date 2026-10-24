@@ -229,12 +229,21 @@ Key** 就会自动出现在看板上，用的是那个供应商自己的 `api_ke
 额外请求）。重置倒计时按 CPA 报来的 `serverTimeOffsetMs` 校正过——对端与本地时钟不一致时倒计时
 不会跟着偏；订阅条目没有这个字段，因为那两家不汇报时差。
 
-**额度从哪来**：AMKR 不自己请求上游，只问 CPA 与各订阅端点：
+**额度从哪来**：额度部分 AMKR 不自己请求上游，只问 CPA 与各订阅端点：
 
 | 来源 | 说明 |
 | --- | --- |
 | `CPA 采集`（被动） | CPA 从上游响应头抄下来的快照（Anthropic 的 `anthropic-ratelimit-unified-*`、Codex 的 `x-codex-*`），不额外发请求。**多数 CPA 安装只有这一条**：它不需要装任何插件，只要账号真的发过请求 |
 | `现场查询` | CPA 有额度提供者时，AMKR 为每个账号单独问一次 `quota/fetch`，拿到归一化结果（窗口 + 数值项 + 订阅档位 + 时钟偏移）。订阅供应商的用量也标成这一种（OpenCode Go 问 `/v1/usage`，Command Code 问 `/alpha/billing/credits` 等四个端点）。同一账号两者都有时以现场值为准 |
+
+**重置卡是另一条通道**：额度只说明「还剩多少」，重置卡说明「还能手动恢复几次、分别什么时候
+过期」。CPA 不采集这项，所以 AMKR 通过 CPA 的 `api-call` 用账号凭据代问上游（Claude 与 Codex
+两家），只读接口是 `GET /api/cpa-reset-credits`，消费接口是 `POST /api/cpa-reset-credits/use`
+（默认选**最快过期**的可用卡）。这条通道会真实请求上游、消费会改变账号状态，且 Codex 的查询
+端点本身限流，不适合高频轮询；详细字段与错误见 [`docs/API.md`](API.md) 的「CPA 重置卡接口」。
+Claude 的重置卡可能被 Anthropic 按 surface 门禁限定在 Claude.ai 网页端，OAuth 接口会如实返回
+`eligible=false`，AMKR 不会伪造可兑换状态；若该账号的 Juniper 会话重置仍可用，会继续返回
+`juniper_tide` 卡。
 
 订阅这一侧上游给的是**已用**百分数，AMKR 翻成**剩余**再画：上游说 42% 已用，看板显示 58%
 剩余。窗口名认不出的原样保留（`5h` / `weekly` / `monthly` 会归一成「5 小时」/「7 天」/「30 天」）。

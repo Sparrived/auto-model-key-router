@@ -82,6 +82,8 @@ x-api-key: your-local-api-key
 | `POST` | `/api/access-keys/{key_id}/rotate` | 仅本地 | 换掉该访问密钥的明文（旧 key 立即失效）；新 key 仅在本次响应返回 |
 | `GET/PUT` | `/api/cpa-instances` | 仅本地 | 列出或**整体替换** CPA 实例清单（配置键 `cpa_instances`；响应含管理密钥明文，故要求完整权限） |
 | `GET` | `/api/cpa-accounts` | 仅本地 | 服务端扇出各 CPA 实例的账号与额度读数（只读、不缓存） |
+| `GET` | `/api/cpa-reset-credits` | 仅本地 | 服务端扇出各 CPA 实例的 Claude / Codex 重置卡读数（只读、不缓存） |
+| `POST` | `/api/cpa-reset-credits/use` | 仅本地 | 消费一张重置卡；默认选**最快过期**的可用卡（会真实改变上游账号状态） |
 | `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
 | `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
 | `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 GitHub Releases 版本检查 |
@@ -1675,6 +1677,103 @@ CPA 侧的口径与边界：
 额度通道的来路与官方程度（哪些 provider 有得读、哪些只能靠本地语言服务器、哪些订阅端的用量
 接口是官方文档里的、哪些是从社区实现反推的）见
 [`docs/SUBSCRIPTION-QUOTA.md`](SUBSCRIPTION-QUOTA.md)。
+
+### CPA 重置卡接口
+
+额度回答「还剩多少」，重置卡回答「还能手动恢复几次、每次什么时候过期」。CPA 自己不采集也不
+暴露后者，所以 AMKR 借 CPA 的 `POST /v0/management/api-call`，用该账号的凭据代打上游的账号
+接口。目前覆盖两家：
+
+| 供应商 | 读取 | 消费 |
+| --- | --- | --- |
+| `codex` | `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits` | `POST .../rate-limit-reset-credits/consume`，body 含 `credit_id` 与 `redeem_request_id` |
+| `claude` | `GET https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1`，没有可兑换项时再问 `?at_wall=1&skip_spend=1` | `POST https://api.anthropic.com/api/organizations/{org}/reset_rate_limits`，`program` 为 `cedar_ember` / `juniper_tide` |
+
+```bash
+# 读取全部实例的重置卡（按最快过期排序）
+curl http://127.0.0.1:8000/api/cpa-reset-credits \
+  -H "Authorization: Bearer your-local-api-key"
+
+# 使用一张：不传 credit_id 时自动选最快过期的可用卡
+curl -X POST http://127.0.0.1:8000/api/cpa-reset-credits/use \
+  -H "Authorization: Bearer your-local-api-key" -H "Content-Type: application/json" \
+  -d '{"instance":"cpa-gpt","auth_index":"0"}'
+```
+
+`GET /api/cpa-reset-credits` 只返回 `claude` / `codex` 账号（其它 provider 没有这套接口），
+形状如下：
+
+```json
+{
+  "fetched_at": "2026-01-01T00:00:00Z",
+  "instances": [
+    {"id": "cpa-gpt", "label": "GPT", "base_url": "http://127.0.0.1:8320", "ok": true,
+     "accounts": [
+       {"auth_index": "0", "name": "codex.json", "provider": "codex", "email": "a@example.com",
+        "status": "active", "disabled": false, "unavailable": false,
+        "reset_credits": {
+          "provider": "codex", "available_count": 2, "redeemable_count": 2, "eligible": true,
+          "credits": [
+            {"id": "RateLimitResetCredit_...", "program": "codex_rate_limits", "status": "available",
+             "remaining_count": 1, "granted_at": "2026-10-01T00:00:00Z",
+             "expires_at": "2026-10-31T00:00:00Z", "usable": true}
+          ]
+        }}
+     ]},
+    {"id": "cpa-b", "label": "备用 CPA", "ok": false, "error": "无法连接 CPA: ...", "accounts": []}
+  ]
+}
+```
+
+- **`available_count` 是未过期卡上的剩余次数，不是卡片张数**：Claude 的一张 grant 可能带多次
+  `resets_left`。`credits[]` 恒为数组，按 `expires_at` 升序，没有到期时间的排在最后。
+  `redeemable_count` 是**此刻就能消费**的次数（Claude Cedar 只有 `next_grant_id` 指向的那张算数，
+  Juniper 可用时固定为 `juniper_tide`），`next_credit_id` 指向上游指定的下一张卡或程序名；界面
+  若要显示「现在能点几次」，用前两个字段而不是 `available_count`。`cooldown_until` 是上游给出的
+  冷却结束时间（Claude 的 `next_available_at` / `cooldown_until`），没有则为空。
+- **`program`** 是上游的卡类型：Codex 恒为 `codex_rate_limits`；Claude 为 `cedar_ember`
+  （保存在账号里的重置卡）或 `juniper_tide`（会话限额的周期性重置）。
+- **`usable`** 表示服务端此刻允许消费；`status` 为 `available` / `redeemed` / `expired` /
+  `paused` / `unavailable`。`eligible=false` 时 `reason` 带上游原话（例如 Claude 的
+  `surface`，表示这张卡只在 Claude.ai 网页端可用，OAuth 接口不能兑换）。
+- **Codex 账号必须有 `id_token.chatgpt_account_id`**（CPA 的 auth-files 会带）。缺这个字段的
+  条目依然会出现在列表里，但该账号的 `reset_credits.error` 会说明原因，不影响其它账号。
+- **失败逐实例、逐账号隔离**：实例连不上只让该实例 `ok=false`；单个账号读失败只写该账号的
+  `reset_credits.error`。整次扇出共用 60 秒预算，单账号 20 秒超时。
+- **不缓存、不轮询**：每次调用都是真实的上游请求。Codex 的这个端点本身会限流（429），频繁刷新
+  会被上游拒绝；看板应在进入页面或用户点「刷新」时取一次。
+- **只读**：这条 GET 不改变 CPA 或上游账号状态。
+
+`POST /api/cpa-reset-credits/use` 的请求体：
+
+```json
+{"instance": "cpa-gpt", "auth_index": "0", "credit_id": "可选", "request_id": "可选"}
+```
+
+不传 `credit_id` 时，服务端重新读取该账号的卡，按 **`expires_at` 最早优先**（无到期时间的最后）
+挑一张 `usable=true` 的卡消费。传 `credit_id` 只认指定的卡；传 `request_id` 会把同一个幂等键
+带给上游，客户端在网络错误后重试时应同时带上**同一个 `credit_id` 与 `request_id`**，避免把另一张
+卡再花一次。Claude 的 `juniper_tide` 消费接口不接受幂等键，这类响应不会回显 `request_id`，重试
+前应重新读取卡片状态。同一实例、同一账号的读卡→选卡→消费由服务端串行处理，避免并发请求同时
+挑中同一张卡。
+
+```json
+{"instance":"cpa-gpt","auth_index":"0","provider":"codex",
+ "request_id":"4f2c...","credit":{"id":"RateLimitResetCredit_...","program":"codex_rate_limits",
+ "status":"available","remaining_count":1,"expires_at":"2026-10-31T00:00:00Z","usable":true},
+ "outcome":"reset","cleared":[]}
+```
+
+`outcome` 取值：`reset`（已重置）、`nothing_to_reset`（当前没有需要重置的限额）、`no_credit`
+（没有可用卡，HTTP 仍为 200，`reason` 会带上游原因，例如 `surface`）、`already_redeemed`
+（该卡已被用掉）。读卡或上游消费失败返回 `502`；实例或账号不存在、指定 `credit_id` 不存在
+返回 `404`；实例配置不完整、供应商不支持，或指定的卡当前不可用返回 `409`。
+
+> **Claude 的 surface 门禁**：Anthropic 可能把「Reset for free」限定在 Claude.ai 网页端，
+> 同样的 OAuth 凭据通过 `api.anthropic.com` 查询会得到 `eligible=false, reason="surface"`。
+> 这不是 AMKR 的解析问题，也不是可以绕过的客户端限制；接口会如实返回原因。若该账号的
+> Juniper 会话重置仍可用，会继续返回 `juniper_tide` 的卡，否则不会伪造一张可兑换的卡。
+> Codex 不受此限制，但要求账号的 `id_token` 里有 ChatGPT account id。
 
 ## 状态码与错误格式
 
