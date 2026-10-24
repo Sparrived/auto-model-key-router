@@ -2,6 +2,80 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **CPA 账号资源新增重置卡读数与消费接口。** `GET /api/cpa-reset-credits` 通过 CPA 的
+  `api-call` 代问 Claude / Codex 的账号接口，返回每个账号还能手动恢复几次、每张卡的到期时间
+  与当前是否可用；卡片按最快过期排序，实例与账号级失败互相隔离，不缓存、不轮询。
+  `POST /api/cpa-reset-credits/use` 默认挑**最快过期**的可用卡消费（Claude 会先取组织 ID，
+  Codex 从 CPA 的 `id_token.chatgpt_account_id` 取账号头），支持可选的 `credit_id` /
+   `request_id` 以便重试时钉住同一张卡；消费结果以 `reset` / `nothing_to_reset` / `no_credit` /
+  `already_redeemed` 回给调用方。同一账号的读卡、选卡、消费按账号串行，避免并发双花；Claude 的
+  `surface` 门禁如实返回，若 Juniper 会话重置可用则继续返回，不伪造可兑换状态。
+  只新增两条 Go 侧路由，不改 `cpa-accounts` 的既有响应形状。
+- **访问密钥列表展示上一次调用时间（北京时间）。** `GET /api/access-keys` 的目录条目新增
+  `last_used_at`，取当前指标库中该密钥最近一次已记录的上游尝试（包含失败），不受统计窗口或
+  筛选影响。没有记录时显示「暂无调用记录」，旧后端或未装配指标读数时显示「后端未提供」。
+  改名、启停与轮换保留同一密钥 ID 的调用历史；不新增配置字段、表或请求路径写入。
+- **统计读数的筛选维度从两个扩到七个。** `/ui/filtered-metrics.json`、`/ui/key-usage.json` 与
+  `/ui/status-monitor.json` 在 `provider_id` / `access_key_id` 之后新增五个可省的筛选参数：
+  `model_id`（解析后的本地路由模型，可重复）、`upstream_key`（上游 Key，可重复，每项是
+  `["<provider_id>","<key_name>"]` 形式的 JSON 数组——供应商 ID 与 Key 名都可能含任何分隔符，
+  而 Key 名只在同一家供应商内唯一，必须成对）、`workspace`（工作空间归属，可重复）、
+  `caller_type`（`local` / `workspace` / `access_key`，可重复）与 `success`（只看成功或只看失败）。
+  语义不变：维度内 OR、维度间 AND，多对上游 Key 是成对 OR 而不是笛卡尔积；全都不给时 SQL 与
+  之前逐字节相同。校验先于鉴权，非法项回单条 `422`（`upstream_key` 形状不对是 `value_error`、
+  `caller_type` 越界是 `literal_error`，`input` 是出错那一项的原文）。
+  - filtered-metrics 与 status-monitor 的 `filters` 回显随之扩展（**追加在既有两个键之后**）：
+    `model_ids`、`upstream_keys`（`{provider_id, key_name}` 对象数组）、`workspaces`、
+    `caller_types` 未设时是 `[]`，`success` 未设时是 `null`。
+  - 存储层把一路摊开的 `providerIDs, accessKeyIDs` 参数对收成一个 `metrics.Dimensions`，所有取数
+    路径（snapshot 上卷、rate 窗口、趋势、明细、Key 拆分、状态矩阵、失败状态码）共用同一套条件与
+    顺序。`success` 维度与状态监控「只看失败」的条件并存：筛成功时 `failure_status_codes` 是 `{}`。
+  - 工作空间旁挂表补一条 `idx_request_workspace` 索引（按空间筛选是「先按 workspace 选行」，
+    没有索引就是全表扫）；`request_metrics` 的建表原文与 7 条索引一字未动。
+  - `/metrics`、`/metrics/series`、`/metrics/requests` 不认这些参数（按未知参数忽略），参数、SQL
+    与响应形状都不变。
+- **新增 `GET /ui/metric-dimensions.json`：筛选器选项。** 时间窗口内指标库里**实际出现过**的供应商、
+  模型、请求模型名、上游 Key、访问密钥（附配置里的显示名，已删除的为 `null`）、工作空间与调用方
+  档位，各带请求数，按请求数降序。选项刻意**不随当前筛选收窄**——否则选了一个模型，别的模型就从
+  列表里消失，筛选器把自己锁死；调用方档位恒列出三档（没有流量给 0）。只接受 `hours` /
+  `all_history`，完整权限，一次扫描上卷出七份列表。
+- **新增 `GET /ui/usage-breakdown.json`：按一个维度拆分的趋势。** `group_by` 可选 `model`、
+  `requested_model`、`provider`、`upstream_model`、`upstream_key`、`access_key`、`workspace`、
+  `caller_type`、`status`、`api_format`；按 `rank_by`（`requests` / `tokens`）取前 `limit` 组
+  （缺省 8，至多 50），每组给 `key`、与 `/metrics` 分组同形的 `stats` 和十条与 `buckets` 等长的
+  **合计**序列（耗时也是合计，界面据此算加权平均），其余组并成 `other`，`total_groups` 是截断前
+  的组数。筛选参数、`hours` / `all_history` / `bucket_seconds` 与 filtered-metrics 完全同义，并且
+  **共用同一张桶网格**：同一组参数下全部分组与 `other` 逐桶相加等于 filtered-metrics 的 `series`。
+  WebUI 可以据此画堆叠面积图与每行的迷你折线，替代一排各自独立的排行卡片。
+  - 顺带补上「按上游模型算成本」的缺口：`/metrics` 的 `upstream_models` / `providers` 分组沿用
+    参照实现口径，要求 `pool_name` 非空，而 v4 配置写入的 `pool_name` 恒为 `NULL`，这两个分组在
+    新数据上永远是空的。那是已发布形状、口径不改；新读数的 `upstream_model` 按
+    `(provider_id, upstream_model_id)` 分组，不看 `pool_name`。没有归属的行自成 `null` 一组，
+    各组加起来对得上总量。
+- **WebUI 重写为 React + TypeScript + Vite。** 配置页从「整页重绘 + 行内大表单」改为
+  列表 + 详情 + 侧滑编辑抽屉，访问密钥权限编辑改为「不限制 / 指定清单 / 全部禁止」三态；监控页
+  去掉重复图表，用量统计以可切换维度的拆分趋势为主角，七个筛选维度（供应商 / 模型 / 上游
+  Key / 访问密钥 / 工作空间 / 调用方 / 结果）写进 URL 并在监控页之间保留；成本改按上游模型
+  计价，修复 v4 数据下快照分组为空导致排行与金额永远算不出的问题；成功率、缓存率按 0–1
+  比值绘制，坐标轴不再放大 100 倍；成本页恢复自动刷新。开发方式改为源码
+  在 `web/`、Vite 产物在 `webui/` 入库，旧版 node 探针改为 Vitest，CI 用
+  `git status --porcelain -- webui` 校验产物与源码一致；Go 构建与运行时仍不需要 Node。
+
+### 修复
+
+- **下游取消不再误罚上游 Key。** 停止后续重试、协议回退与备选调用；取消和下游写失败中性释放
+  Key，不触发冷却，日志与真正的上游故障分开。已发生调用的指标仍保留状态码、失败事实与已知用量。
+- **聊天 SSE 按业务结果判定成功。** 识别上游错误事件、空流与未完整结束，原生和协议转换路径
+  都不再把异常 EOF 合成为成功收尾。响应头发出后无法改写 HTTP 状态或安全重放，改为发送对应协议
+  的流式错误；工具调用、推理内容与正常 usage 尾帧仍可正常处理。连接池与超时配置不变。
+- **状态监控不再把 2xx 失败归成「连接失败」。** 新增同窗口、同筛选的 `failure_status_codes`
+  精确分组，将响应异常与真正未收到上游状态码分开；旧后端缺数据时明确提示，不推测原因。不改表结构。
+- **`PUT /api/routes/{id}` 请求体 `id: null`（未改名）时不再返回 500。** 原先请求里的 `id`
+  为空时，配置其实已经写入磁盘，却在后续响应处理中触发 500，调用方会误以为保存失败并重试；
+  现在 `id: null` 等同于不改名，写入成功后正常返回，不产生重复写入。
+
 ### 变更
 
 - **删除模型路由只清理「失去最后一个绑定」的供应商 Key，仍在服务其他路由的 Key 原样保留。**
