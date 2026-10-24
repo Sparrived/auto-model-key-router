@@ -10,6 +10,8 @@ export interface PanelProps {
   busy?: boolean;
   /** false 时内容贴边；头部与底部仍有内边距，用于表格/列表这类需要满宽的面板。 */
   padding?: boolean;
+  /** true 时面板吃满栅格行高：内容区占满剩余空间，footer 贴在底边，同一行两栏因此上下对齐。 */
+  fill?: boolean;
   className?: string;
   children?: ReactNode;
 }
@@ -28,6 +30,7 @@ export function Panel({
   footer,
   busy = false,
   padding = true,
+  fill = false,
   className,
   children,
 }: PanelProps) {
@@ -36,7 +39,11 @@ export function Panel({
   return (
     <section
       aria-busy={busy || undefined}
-      className={cn("relative rounded-panel border border-rule bg-panel", className)}
+      className={cn(
+        "relative rounded-panel border border-rule bg-panel",
+        fill && "flex min-h-0 flex-col",
+        className,
+      )}
     >
       {busy ? (
         <>
@@ -76,6 +83,7 @@ export function Panel({
         className={cn(
           "transition-opacity duration-200",
           padding ? (hasHeader ? "p-4 pt-3" : "p-4") : "p-0",
+          fill && "flex min-h-0 flex-1 flex-col",
           busy && "opacity-60",
         )}
       >

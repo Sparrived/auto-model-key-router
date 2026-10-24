@@ -684,9 +684,10 @@ function OverviewPage() {
         />
       </MetricStrip>
 
-      <div className="grid min-w-0 grid-cols-12 items-start gap-4">
+      <div className="grid min-w-0 grid-cols-12 items-stretch gap-4">
         <Panel
           className="col-span-12 min-w-0 lg:col-span-8"
+          fill
           title="路由流向"
           description="调用名 → 路由模型 → 上游 Key；线宽随窗口用量变化"
           actions={
@@ -712,24 +713,30 @@ function OverviewPage() {
             ariaLabel="调用名到路由模型到上游 Key 的路由流向"
             emptyText="当前筛选窗口内没有可归因的路由流量"
           />
-          <p className="mt-2 text-[11px] text-ink-3">点击路由模型可按模型筛选；点击上游 Key 可按上下游 Key 筛选。调用名层只用于定位，不写筛选。</p>
+          <p className="mt-auto pt-2 text-[11px] text-ink-3">点击路由模型可按模型筛选；点击上游 Key 可按上下游 Key 筛选。调用名层只用于定位，不写筛选。</p>
         </Panel>
 
         <Panel
           className="col-span-12 min-w-0 lg:col-span-4"
+          fill
           title="需要关注"
           description={<span title="矩阵检查范围">{`按健康分升序 · ${rangeLabel(state.range)}`}</span>}
           actions={<Badge tone={attention.length ? "warn" : "good"}>{attention.length ? `${attention.length} 个渠道` : "健康"}</Badge>}
           busy={statusQuery.isFetching}
           footer={
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 rounded-control text-[12px] text-ink-2 transition-colors hover:text-ink"
-              onClick={() => navigate("/status")}
-            >
-              打开状态监控查看全部渠道
-              <ChevronRight aria-hidden className="size-3.5" />
-            </button>
+            <div className="space-y-2">
+              <p className="text-[11px] leading-5 text-ink-3">
+                健康分综合成功率、首字延迟与缓存命中；分数越低越需要优先处理。
+              </p>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded-control text-[12px] text-ink-2 transition-colors hover:text-ink"
+                onClick={() => navigate("/status")}
+              >
+                打开状态监控查看全部渠道
+                <ChevronRight aria-hidden className="size-3.5" />
+              </button>
+            </div>
           }
         >
           {statusQuery.isError ? (
@@ -782,9 +789,6 @@ function OverviewPage() {
               </div>
             </div>
           ) : null}
-          <p className="mt-3 border-t border-rule pt-2 text-[11px] leading-5 text-ink-3">
-            健康分综合成功率、首字延迟与缓存命中；分数越低越需要优先处理。
-          </p>
         </Panel>
       </div>
 
