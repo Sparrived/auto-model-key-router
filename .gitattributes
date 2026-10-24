@@ -40,3 +40,11 @@ internal/wsproxy/testdata/** -text
 # 没有既有的 CRLF .go 文件会被改写，所以不会产生大 diff——这正是上面那段说明里
 # 拒绝全仓库 *.py/*.go 策略的理由，对 *.go 不成立。
 *.go text eol=lf
+
+# WebUI 构建产物必须逐字节稳定：webui/ 由 Vite 生成、提交入库，再被 //go:embed
+# 原样嵌入二进制。禁止 Git 做换行转换，避免 Windows 与 Linux 检出的文件内容不同，
+# 导致构建产物一致性检查出现假失败。linguist 标记为生成文件，代码审查时折叠。
+webui/** -text linguist-generated=true
+
+# package-lock.json 是生成文件，不参与 diff 阅读；依赖变化看 npm ci / 锁文件摘要即可。
+web/package-lock.json -diff

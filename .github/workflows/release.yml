@@ -53,29 +53,39 @@ jobs:
         # 不做任何网络访问。
         run: go test ./...
 
-      - name: WebUI 资产检查（node）
-        # 前端资产经 //go:embed 编进二进制，源码正确性仍单独验一遍。
-        # 与 ci.yml 同一套检查；探针清单必须与 webui/probes/ 保持一致，漏掉一个等于
-        # 发布门禁比 CI 松——那种缺口只会在发布后才被发现。
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 与 ci.yml 同一 Node 基线；缓存 key 取 web/package-lock.json。
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: web
+        run: npm ci
+
+      - name: TypeScript 类型检查
+        working-directory: web
+        run: npm run typecheck
+
+      - name: 前端测试（Vitest）
+        working-directory: web
+        run: npm test
+
+      - name: 构建 WebUI
+        # 构建产物会写到仓库根 webui/，Go 的 //go:embed 用的是这份资产。
+        working-directory: web
+        run: npm run build
+
+      - name: 检查 webui/ 与 web/ 源码一致
+        # 发布门禁与 ci.yml 相同：产物必须与源码同一次构建一致，不能把旧界面打进 tag。
         run: |
-          node scripts/webui_module_check.mjs
-          node webui/probes/webui_chart_probe.mjs
-          node webui/probes/webui_tip_probe.mjs
-          node webui/probes/webui_chart_sizing_probe.mjs
-          node webui/probes/webui_auth_probe.mjs
-          node webui/probes/webui_pricing_probe.mjs
-          node webui/probes/webui_providers_probe.mjs
-          node webui/probes/webui_routing_probe.mjs
-          node webui/probes/webui_model_impact_probe.mjs
-          node webui/probes/webui_unified_probe.mjs
-          node webui/probes/webui_panel_probe.mjs
-          node webui/probes/webui_layout_probe.mjs
-          node webui/probes/webui_status_probe.mjs
-          node webui/probes/webui_guest_probe.mjs
-          node webui/probes/webui_accesskeys_probe.mjs
-          node webui/probes/webui_accounts_probe.mjs
-          node webui/probes/webui_model_kinds_probe.mjs
-          node webui/probes/webui_playground_probe.mjs
+          if [ -n "$(git status --porcelain -- webui)" ]; then
+            echo "webui/ 与 web/ 源码不一致：请在 web/ 下运行 npm run build 后提交 webui/" >&2
+            git status --porcelain -- webui >&2
+            exit 1
+          fi
 
   # ---- 容器镜像 ----
   #

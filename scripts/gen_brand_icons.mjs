@@ -1,8 +1,12 @@
-// 一次性生成器：从 simple-icons / lobehub 拉取常见供应商图标路径，产出 webui/brand-icons.js。
+// 一次性生成器：从 simple-icons / lobehub 拉取常见供应商图标路径，产出
+// web/src/lib/brand-shapes.generated.ts 的数据部分。
 //
 // 保留它的唯一理由是记录图标的来源与许可（simple-icons 为 CC0，@lobehub/icons 为 MIT），
-// 否则内联进 brand-icons.js 的那堆 path 数据就成了无出处的魔数。产物是源码，运行期
+// 否则内联进品牌图标模块的那堆 path 数据就成了无出处的魔数。产物是源码，运行期
 // 绝不联网：WebUI 必须离线可用。改图标集时重跑本脚本，再提交产物。
+//
+// 生成文件只含 BRAND_SHAPES 与 PROVIDER_PRESETS；brand-icons.tsx 的 React 渲染函数与
+// 品牌匹配逻辑不在这里重写，该文件只从本生成文件导入这两项数据。
 //
 // 用法：node scripts/gen_brand_icons.mjs
 
@@ -79,91 +83,43 @@ for (const brand of missing) {
 }
 
 const out = [];
-out.push("// 常见供应商的品牌图标与预置信息。");
+out.push("// 本文件由 scripts/gen_brand_icons.mjs 生成，请勿手改。");
 out.push("//");
 out.push("// 图标取自 simple-icons（CC0）与 @lobehub/icons（MIT）的官方矢量，按 24×24 网格");
-out.push("// 抽出单条 path 内联于此：WebUI 必须离线可用，不能依赖 CDN、图标字体或网络请求。");
-out.push("// 与 icons.js 那套描边图标不同，品牌标志是填充路径，所以另有一套渲染函数。");
+out.push("// 抽出单条 path 内联于此。运行期绝不联网，WebUI 离线可用。");
 out.push("//");
-out.push("// 本文件由 scripts/gen_brand_icons.mjs 生成；要改图标集请改那个脚本后重跑。");
+out.push("// 来源：");
+out.push("//   simple-icons: https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/");
+out.push("//   @lobehub/icons: https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@latest/icons/");
+out.push('//');
+out.push("// 本文件只负责数据；brand-icons.tsx 从这里导入 BRAND_SHAPES 与 PROVIDER_PRESETS。");
 out.push("");
-out.push('import { svg } from "./dom.js";');
-out.push('import { icon } from "./icons.js";');
+out.push("export interface ProviderPreset {");
+out.push("  id: string;");
+out.push("  label: string;");
+out.push("  brand: string;");
+out.push("  baseUrl: string;");
+out.push("  host: string;");
+out.push("  keys: string[];");
+out.push("}");
 out.push("");
 out.push("// 品牌 -> 单条 path 的 d 属性（viewBox 均为 0 0 24 24）。");
-out.push("const BRAND_SHAPES = {");
+out.push("export const BRAND_SHAPES: Record<string, string> = {");
 for (const [brand, d] of Object.entries(shapes)) {
   out.push(`  ${brand}:`);
   out.push(`    "${d}",`);
 }
 out.push("};");
 out.push("");
-out.push("// 预置供应商：点一下即可填好名称与地址。");
-out.push("//");
-out.push("// 只收录「base_url + AMKR 默认路由路径」能拼出正确上游端点的供应商。Gemini、");
-out.push("// Perplexity、智谱 的 OpenAI 兼容端点不在 /v1 之下（Perplexity 是 /chat/completions），");
-out.push("// 预置它们会拼出错误路径，反而比不预置更难排查，因此刻意留空给用户手填。");
-out.push("export const PROVIDER_PRESETS = [");
+out.push("// 预置供应商：只收录「base_url + AMKR 默认路由路径」能拼出正确上游端点的供应商。");
+out.push("// Gemini、Perplexity、智谱的兼容端点不在 /v1 之下，刻意不预置，留给用户手填。");
+out.push("export const PROVIDER_PRESETS: ProviderPreset[] = [");
 for (const preset of PRESETS) {
   out.push(`  { id: "${preset.id}", label: "${preset.label}", brand: "${preset.brand}", baseUrl: "${preset.baseUrl}", host: "${preset.host}", keys: [${preset.keys.map((key) => `"${key}"`).join(", ")}] },`);
 }
 out.push("];");
 out.push("");
-out.push("// 品牌图标：填充路径，颜色继承 currentColor。未知品牌返回 null，由调用方回退。");
-out.push("export function brandIcon(brand, props = {}) {");
-out.push("  const d = BRAND_SHAPES[brand];");
-out.push("  if (!d) return null;");
-out.push('  const { size = 20, class: className, title } = props;');
-out.push('  const node = svg("svg", {');
-out.push('    viewBox: "0 0 24 24",');
-out.push('    fill: "currentColor",');
-out.push("    width: size,");
-out.push("    height: size,");
-out.push('    class: `brand-icon${className ? ` ${className}` : ""}`,');
-out.push('    "aria-hidden": title ? null : "true",');
-out.push('    role: title ? "img" : null,');
-out.push('    "aria-label": title || null,');
-out.push("  });");
-out.push('  if (title) node.append(svg("title", {}, title));');
-out.push('  node.append(svg("path", { d }));');
-out.push("  return node;");
-out.push("}");
-out.push("");
-out.push("// 从 base_url 的 host（含非默认端口）或供应商 id 猜品牌，猜不中返回 null。");
-out.push("//");
-out.push("// 顺序是关键：先按 host 精确匹配（同家供应商常被改名），再退回按 id 子串匹配，");
-out.push("// 这样 `openai-backup`、`my-deepseek` 这类自定义命名也能拿到对的图标。");
-out.push("export function brandForProvider(id, baseUrl) {");
-out.push("  const host = hostOf(baseUrl);");
-out.push("  if (host) {");
-out.push("    for (const preset of PROVIDER_PRESETS) {");
-out.push("      if (host === preset.host || host.endsWith(`.${preset.host}`)) return preset.brand;");
-out.push("    }");
-out.push("  }");
-out.push('  const key = String(id || "").toLowerCase();');
-out.push("  if (key) {");
-out.push("    for (const preset of PROVIDER_PRESETS) {");
-out.push("      if (preset.keys.some((token) => key.includes(token))) return preset.brand;");
-out.push("    }");
-out.push("  }");
-out.push("  return null;");
-out.push("}");
-out.push("");
-out.push("// host 保留非默认端口：本地部署正是靠端口区分 Ollama / LM Studio / vLLM。");
-out.push("function hostOf(baseUrl) {");
-out.push("  try {");
-out.push('    return new URL(String(baseUrl || "")).host.toLowerCase();');
-out.push("  } catch {");
-out.push('    return "";');
-out.push("  }");
-out.push("}");
-out.push("");
-out.push("// 供应商图标：认得出品牌就用品牌标志，否则回退到通用的机架图标。");
-out.push("export function providerIcon(id, baseUrl, props = {}) {");
-out.push('  return brandIcon(brandForProvider(id, baseUrl), props) || icon("providers", props);');
-out.push("}");
-out.push("");
 
-const target = path.resolve(import.meta.dirname, "../webui/brand-icons.js");
+const target = path.resolve(import.meta.dirname, "../web/src/lib/brand-shapes.generated.ts");
 writeFileSync(target, out.join("\n"), "utf8");
 console.log(`\n已写入 ${target}`);

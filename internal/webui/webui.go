@@ -32,11 +32,11 @@ const IndexFile = "index.html"
 
 // probesDir 是只供开发/CI 使用的探针目录（webui/probes/*.mjs），**不对外服务**。
 //
-// 这些 .mjs 是 webui/ 的开发期回归测试：CI 用 node 从**仓库检出**里逐个运行它们
-// （.github/workflows/ci.yml 的 webui 作业），浏览器从不加载——webui/ 下没有任何
-// 资产 import probes/。但资产的发布物是整个 webui/ 目录，//go:embed webui 又无法按
-// 子目录排除（embed 只支持「全部」或「跳过点/下划线开头的文件」），因此它们会被编进
-// 二进制并随 /ui/ 一起公开可取。
+// v7 起 webui/ 是 web/ 的 Vite 构建产物（每次构建清空重建），测试改在 web/ 下用
+// Vitest 跑，产物里已经没有 probes/。这道闸仍然保留：资产的发布物是整个 webui/
+// 目录，//go:embed webui 又无法按子目录排除（embed 只支持「全部」或「跳过点/下划线
+// 开头的文件」），哪天有人把开发期脚本放回 webui/，它会被编进二进制并随 /ui/ 一起
+// 公开可取。
 //
 // 这是纯粹的信息暴露：探针里逐条写着 WebUI 的鉴权流程、面板 key 的存放与不存放规则
 // 以及各页面的内部结构（静态资产本身已公开，探针额外给出的是「我们怎么测它」）。对

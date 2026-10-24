@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <title>AMKR 访问密钥看板</title>
+    <script>
+      // 独立入口不读取任何 localStorage；只按系统偏好设置首帧深浅色。
+      (function () {
+        try {
+          var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme-preference", "system");
+        } catch (error) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/entries/guest.tsx"></script>
+  </body>
+</html>

@@ -17,6 +17,8 @@ router-config.json
 .idea/
 *.swp
 *.swo
+# 代理工具的本机启动配置（含本机绝对路径与临时 exe/npm 命令），只对本人有意义。
+.claude/
 
 # Logs
 *.log
@@ -44,3 +46,7 @@ data/
 /amkr.exe
 # 根目录下的其它构建产物：调试时 go build -o xxx.exe 常落在仓库根，git add -A 会顺手带上。# 用通配覆盖，而不是逐个补名字——名字是临时起的，补不完。
 /*.exe
+# WebUI 源码工程（web/）：依赖与旧版参照副本不入库
+web/node_modules/
+web/legacy/
+web/coverage/

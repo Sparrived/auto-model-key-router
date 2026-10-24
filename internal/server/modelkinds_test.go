@@ -272,7 +272,7 @@ func TestModelKindsEndpointAbsentWithoutWebUI(t *testing.T) {
 // TestModelKindsEndpointFollowsMountPrefix 断言嵌入宿主时读数跟着挂载前缀走。
 //
 // 路由用 webui.Path(MountPrefix) 拼前缀（嵌入后是 /amkr/ui），而 WebUI 自己的请求是按
-// location.pathname 反推前缀的（webui/api.js 的 apiBase）——两边必须一致。
+// location.pathname 反推前缀的（web/src/lib/api.ts 的 apiBase）——两边必须一致。
 func TestModelKindsEndpointFollowsMountPrefix(t *testing.T) {
 	fetch, _ := stubPricingFetch(t, modelKindCatalog)
 	app := newTestAppWith(t, t.TempDir(), appFixture{

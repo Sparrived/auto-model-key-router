@@ -1,0 +1,242 @@
+/*
+ * AMKR WebUI 设计令牌（v7「调度台」）。
+ *
+ * 规则：颜色只表达数据与状态；骨架（按钮、边框、导航）一律墨色系。
+ * 浅色写在 :root，深色同时写在显式 [data-theme="dark"] 与系统深色媒体查询里；
+ * 后者带 :not([data-theme="light"])，保证用户显式选浅色时系统深色不覆盖。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* —— 骨架 —— */
+  --paper: #f2f3f1;
+  --panel: #fcfcfb;
+  --sunken: #f6f7f5;
+  --raised: #ffffff;
+  --rule: #e0e2de;
+  --rule-strong: #c9ccc6;
+  --ink: #16191d;
+  --ink-2: #4f555c;
+  --ink-3: #6f757c;
+
+  /* —— 主色（默认「墨」）—— */
+  --accent: #1f2328;
+  --on-accent: #fcfcfb;
+  --accent-hover: #33393f;
+  --select: rgba(22, 25, 29, 0.06);
+  --hover: rgba(22, 25, 29, 0.04);
+  --focus: #2a78d6;
+
+  /* —— 状态色：标记固定不随主题变，文字/底色分深浅 —— */
+  --good: #0ca30c;
+  --warn: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --neutral: #a2a8ae;
+
+  --good-ink: #1d6b1d;
+  --warn-ink: #8a5a00;
+  --serious-ink: #a4461f;
+  --critical-ink: #b42f2f;
+  --neutral-ink: #6f757c;
+
+  --good-bg: #e6f4e6;
+  --warn-bg: #fdf3dc;
+  --serious-bg: #fcebe3;
+  --critical-bg: #f9e3e3;
+  --neutral-bg: #eef0ee;
+
+  /* —— 分类色：按实体固定顺序分配，第 9 个以后并入「其他」—— */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+  --series-other: #a2a8ae;
+
+  /* —— 顺序蓝阶（热力图）：0 用 --sunken，未覆盖用斜纹 —— */
+  --seq-1: #eef4fc;
+  --seq-2: #cde2fb;
+  --seq-3: #86b6ef;
+  --seq-4: #3987e5;
+  --seq-5: #1c5cab;
+  --seq-6: #0d366b;
+
+  /* —— 字体 —— */
+  --font-sans: "IBM Plex Sans", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, monospace;
+
+  /* —— 字号阶 —— */
+  --text-axis: 11px;
+  --text-meta: 12px;
+  --text-dense: 13px;
+  --text-body: 14px;
+  --text-page: 20px;
+  --text-kpi: 28px;
+  --text-hero: 44px;
+
+  /* —— 圆角：按层级区分 —— */
+  --corner-chip: 6px;
+  --corner-control: 8px;
+  --corner-panel: 12px;
+  --corner-dialog: 16px;
+  --corner-pill: 999px;
+
+  /* —— 层次：面板无阴影，只有浮层/抽屉/对话框有 —— */
+  --shadow-float: 0 12px 32px -12px rgba(16, 20, 24, 0.28), 0 0 0 1px var(--rule);
+
+  /* —— 动效 —— */
+  --motion-hover: 120ms;
+  --motion-panel: 200ms;
+  --motion-row: 150ms;
+
+  /* —— 布局 —— */
+  --sidebar-width: 224px;
+  --sidebar-collapsed: 64px;
+  --content-max: 1600px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --paper: #121518;
+  --panel: #1a1d21;
+  --sunken: #15181b;
+  --raised: #22262b;
+  --rule: #2b3035;
+  --rule-strong: #3a4047;
+  --ink: #eceeea;
+  --ink-2: #b4b9be;
+  --ink-3: #8a9097;
+
+  --accent: #eceeea;
+  --on-accent: #121518;
+  --accent-hover: #ffffff;
+  --select: rgba(236, 238, 234, 0.07);
+  --hover: rgba(236, 238, 234, 0.05);
+  --focus: #5598e7;
+
+  --good-ink: #5fd05f;
+  --warn-ink: #f5c04a;
+  --serious-ink: #f09a76;
+  --critical-ink: #ec7171;
+  --neutral-ink: #8a9097;
+
+  --good-bg: rgba(12, 163, 12, 0.14);
+  --warn-bg: rgba(250, 178, 25, 0.14);
+  --serious-bg: rgba(236, 131, 90, 0.14);
+  --critical-bg: rgba(208, 59, 59, 0.16);
+  --neutral-bg: rgba(255, 255, 255, 0.06);
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #5f666d;
+
+  --seq-1: #1b2430;
+  --seq-2: #184f95;
+  --seq-3: #256abf;
+  --seq-4: #3987e5;
+  --seq-5: #86b6ef;
+  --seq-6: #cde2fb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --paper: #121518;
+    --panel: #1a1d21;
+    --sunken: #15181b;
+    --raised: #22262b;
+    --rule: #2b3035;
+    --rule-strong: #3a4047;
+    --ink: #eceeea;
+    --ink-2: #b4b9be;
+    --ink-3: #8a9097;
+
+    --accent: #eceeea;
+    --on-accent: #121518;
+    --accent-hover: #ffffff;
+    --select: rgba(236, 238, 234, 0.07);
+    --hover: rgba(236, 238, 234, 0.05);
+    --focus: #5598e7;
+
+    --good-ink: #5fd05f;
+    --warn-ink: #f5c04a;
+    --serious-ink: #f09a76;
+    --critical-ink: #ec7171;
+    --neutral-ink: #8a9097;
+
+    --good-bg: rgba(12, 163, 12, 0.14);
+    --warn-bg: rgba(250, 178, 25, 0.14);
+    --serious-bg: rgba(236, 131, 90, 0.14);
+    --critical-bg: rgba(208, 59, 59, 0.16);
+    --neutral-bg: rgba(255, 255, 255, 0.06);
+
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+    --series-other: #5f666d;
+
+    --seq-1: #1b2430;
+    --seq-2: #184f95;
+    --seq-3: #256abf;
+    --seq-4: #3987e5;
+    --seq-5: #86b6ef;
+    --seq-6: #cde2fb;
+  }
+}
+
+/* —— 主色预设：每套各自给出深浅两色下的 accent / on-accent / hover —— */
+:root[data-accent="cobalt"] {
+  --accent: #2a5bd7;
+  --on-accent: #ffffff;
+  --accent-hover: #244fc0;
+}
+
+:root[data-theme="dark"][data-accent="cobalt"] {
+  --accent: #6d93f0;
+  --on-accent: #121518;
+  --accent-hover: #89a9f4;
+}
+
+:root[data-accent="pine"] {
+  --accent: #17795e;
+  --on-accent: #ffffff;
+  --accent-hover: #12634d;
+}
+
+:root[data-theme="dark"][data-accent="pine"] {
+  --accent: #3fb58f;
+  --on-accent: #121518;
+  --accent-hover: #5cc6a4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"])[data-accent="cobalt"] {
+    --accent: #6d93f0;
+    --on-accent: #121518;
+    --accent-hover: #89a9f4;
+  }
+
+  :root:not([data-theme="light"])[data-accent="pine"] {
+    --accent: #3fb58f;
+    --on-accent: #121518;
+    --accent-hover: #5cc6a4;
+  }
+}

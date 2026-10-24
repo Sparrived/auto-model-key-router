@@ -1,0 +1,203 @@
+/* 只引入 latin 子集：中文回落系统字体，避免把整套 CJK 字体打进构建产物。 */
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+@import "tailwindcss";
+@import "./tokens.css";
+
+/*
+ * 把设计令牌映射成 Tailwind 的工具类命名空间：
+ *   bg-panel / text-ink-2 / border-rule / text-good-ink / bg-series-1 / rounded-panel
+ * 颜色类引用 CSS 变量，深浅色与主色切换时无需重新生成样式。
+ */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-sunken: var(--sunken);
+  --color-raised: var(--raised);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-select: var(--select);
+  --color-hover: var(--hover);
+  --color-focus: var(--focus);
+
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-serious: var(--serious);
+  --color-critical: var(--critical);
+  --color-neutral: var(--neutral);
+  --color-good-ink: var(--good-ink);
+  --color-warn-ink: var(--warn-ink);
+  --color-serious-ink: var(--serious-ink);
+  --color-critical-ink: var(--critical-ink);
+  --color-neutral-ink: var(--neutral-ink);
+  --color-good-bg: var(--good-bg);
+  --color-warn-bg: var(--warn-bg);
+  --color-serious-bg: var(--serious-bg);
+  --color-critical-bg: var(--critical-bg);
+  --color-neutral-bg: var(--neutral-bg);
+
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-series-5: var(--series-5);
+  --color-series-6: var(--series-6);
+  --color-series-7: var(--series-7);
+  --color-series-8: var(--series-8);
+  --color-series-other: var(--series-other);
+
+  --color-seq-1: var(--seq-1);
+  --color-seq-2: var(--seq-2);
+  --color-seq-3: var(--seq-3);
+  --color-seq-4: var(--seq-4);
+  --color-seq-5: var(--seq-5);
+  --color-seq-6: var(--seq-6);
+
+  --radius-chip: var(--corner-chip);
+  --radius-control: var(--corner-control);
+  --radius-panel: var(--corner-panel);
+  --radius-dialog: var(--corner-dialog);
+  --radius-pill: var(--corner-pill);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --text-axis: var(--text-axis);
+  --text-meta: var(--text-meta);
+  --text-dense: var(--text-dense);
+  --text-body: var(--text-body);
+  --text-title: 16px;
+  --text-page: var(--text-page);
+  --text-kpi: var(--text-kpi);
+  --text-hero: var(--text-hero);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    line-height: 1.25;
+  }
+
+  /* 标识符（模型 ID、Key 名、路径、指纹）一律等宽：调用方要逐字看清。 */
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--select);
+  }
+
+  /* 细滚动条：默认宽度会挤占密集表格的横向空间。 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-strong) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--rule-strong);
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--ink-3);
+  }
+}
+
+/*
+ * 弹层动画放在全局样式里：Radix 的 Overlay 与 Content 是各自独立的 Presence，
+ * 遮罩可能比面板更晚结束退场。关键帧若写在 Content 内部，Content 先卸载会把
+ * 关键帧一起带走，遮罩就永远等不到 animationend，留下一个拦截点击的全屏层。
+ */
+@keyframes amkr-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes amkr-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes amkr-dialog-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes amkr-dialog-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+}
+@keyframes amkr-sheet-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes amkr-sheet-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes amkr-sheet-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes amkr-sheet-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+@keyframes amkr-stream-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 动效是提示而不是装饰：用户要求减少动态时全部关掉，包括抽屉/对话框的进出。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -13,7 +13,7 @@ import (
 // RepairTasks / RepairUnifiedModel 三处、各有边界情形。所以这里不去重写规则，而是
 // **对比一次写操作前后的两份配置**——预演看到的就是真写会发生的。
 //
-// 供 WebUI 弹二次确认用（见 webui/model-impact.js）。清理本身在 references.go。
+// 供 WebUI 弹二次确认用（见 web/src/lib/model-impact.ts）。清理本身在 references.go。
 
 // ReferenceListChange 描述一次写操作从一份清单里摘掉了哪些名字。
 type ReferenceListChange struct {

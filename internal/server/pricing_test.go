@@ -196,7 +196,7 @@ func TestPricingEndpointAbsentWithoutWebUI(t *testing.T) {
 //
 // 路由用的是 webui.Path(MountPrefix) 拼出来的前缀（嵌入宿主时是 /amkr/ui），若这里写死
 // "/ui/" 就会只在独立运行时可用、嵌入后 404——而 WebUI 自己的请求是按 location.pathname
-// 反推前缀的（webui/api.js 的 apiBase），两边必须一致。
+// 反推前缀的（web/src/lib/api.ts 的 apiBase），两边必须一致。
 func TestPricingEndpointFollowsMountPrefix(t *testing.T) {
 	fetch, _ := stubPricingFetch(t, endpointCatalog)
 	app := newTestAppWith(t, t.TempDir(), appFixture{

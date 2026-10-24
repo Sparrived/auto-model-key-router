@@ -1889,7 +1889,7 @@ http://127.0.0.1:8000/ui/
 
 > 面板页与后台 WebUI **同源**，因此它的凭据走 URL fragment（`#k=…`）而**绝不**碰
 > `localStorage`（那里存着后台的管理 key），也**绝不**发送 `X-AMKR-Workspace`。
-> 三条都由 `webui/probes/webui_panel_probe.mjs` 断言。
+> 三条都由 `web/src/standalone/panel/panel.test.tsx` 断言。
 
 ### `GET /ui/workspace-usage.json`
 
@@ -2431,7 +2431,7 @@ http://127.0.0.1:8000/ui/
 
 > 与 `/ui/pricing.json` 的 `503` **刻意不同**：没有价格时算出来的成本是错的（会把一切算成免费），必须响亮失败；而没有目录时名字规则仍然给出有价值的判定，只是精度下降。把"精度下降"报成 503 会让界面在服务刚启动的那几秒里完全没有类型可用。
 
-> 单次查询上限 200 个名字，是因为它服务的是「渲染前问一句」这个用法；WebUI 自己按 100 个一批发（见 `webui/model-kinds.js` 的 `chunkModelIDs`），留出三倍余量给 URL 编码后的长度。
+> 单次查询上限 200 个名字，是因为它服务的是「渲染前问一句」这个用法；WebUI 自己按 100 个一批发（见 `web/src/lib/model-kinds.ts` 的 `chunkModelIDs`），留出三倍余量给 URL 编码后的长度。
 
 ### 成本估算口径
 

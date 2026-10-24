@@ -490,9 +490,12 @@ go build ./cmd/amkr
 # Run all unit tests
 go test ./...
 
-# Validate WebUI ES modules and probe test suite
-node scripts/webui_module_check.mjs
-for p in webui/probes/*.mjs; do node "$p" || break; done
+# Frontend development (Node.js 22+; the runtime still does not need Node)
+cd web
+npm ci
+npm run dev      # proxies to http://127.0.0.1:18900 by default; override with AMKR_DEV_TARGET
+npm test         # Vitest
+npm run build    # updates the repository-root webui/; commit the generated assets
 ```
 
 ---

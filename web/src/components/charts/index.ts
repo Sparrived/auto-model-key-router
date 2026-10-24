@@ -1,0 +1,31 @@
+// T2 图表组件库入口。业务页优先从这里导入，避免记住每个文件名。
+
+export { ChartFrame } from "./ChartFrame";
+export type { ChartFrameProps } from "./ChartFrame";
+export { ChartTooltip } from "./ChartTooltip";
+export type { ChartTooltipProps, TooltipRow } from "./ChartTooltip";
+export { Legend } from "./Legend";
+export type { LegendItem, LegendProps } from "./Legend";
+export { TimeSeriesChart } from "./TimeSeriesChart";
+export type { ReferenceLine, TimeSeriesChartProps, TimeSeriesVariant } from "./TimeSeriesChart";
+export { StackedColumns } from "./StackedColumns";
+export type { StackedColumnsProps } from "./StackedColumns";
+export { SmallMultiples } from "./SmallMultiples";
+export type { SmallMultiplePanel, SmallMultiplesProps } from "./SmallMultiples";
+export { Sparkline } from "./Sparkline";
+export type { SparklineProps } from "./Sparkline";
+export { RankBars } from "./RankBars";
+export type { RankBarItem, RankBarsProps } from "./RankBars";
+export { ShareBar } from "./ShareBar";
+export type { ShareBarItem, ShareBarProps } from "./ShareBar";
+export { Heatmap } from "./Heatmap";
+export type { HeatmapDay, HeatmapPoint, HeatmapProps } from "./Heatmap";
+export { HealthMatrix } from "./HealthMatrix";
+export type { HealthMatrixCell, HealthMatrixColumn, HealthMatrixProps, HealthMatrixRow } from "./HealthMatrix";
+export { FlowMap } from "./FlowMap";
+export type { FlowMapProps } from "./FlowMap";
+export { Meter } from "./Meter";
+export type { MeterProps } from "./Meter";
+export { useChartSize } from "./useChartSize";
+export type { ChartSize } from "./useChartSize";
+export type { ChartSeries, TimeBucket } from "./chart-utils";

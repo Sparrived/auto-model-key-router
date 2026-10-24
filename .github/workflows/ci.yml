@@ -5,7 +5,8 @@ name: CI
 #   * go    —— gofmt / go vet / go test。涵盖配置读写、canonical 序列化、key 选择、
 #              代理改写等模块的行为用例（差分语料已随 Python 参照实现的退役一并删除，
 #              不再有逐字节回放；见 CHANGELOG 的「退役冻结语料」一条）。
-#   * webui —— 前端资产的 ES 模块加载检查与全部口径探针（清单即下面逐个点名的步骤）。
+#   * webui —— React + TypeScript 源码的类型检查、Vitest、Vite 构建，以及构建产物
+#              是否已按源码提交的一致性门禁。
 #
 # 触发：推送到主分支（master）与所有 PR。刻意不加 paths 过滤 —— 任何文件都可能
 # 引入漂移（改实现影响行为用例、改 Dockerfile 影响打包等），漏跑等于没门禁。
@@ -25,17 +26,15 @@ permissions:
 
 jobs:
   webui:
-    name: WebUI 资产检查（node）
+    name: WebUI 构建与产物一致性（node）
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
-    # Python 退役后，前端资产（webui/）仍是随包发布的共享资产，它们的正确性不能只
-    # 靠"没改过"来保证。这里用一组独立的 node 探针把它锁住：每个探针只管一个口径，
-    # 失败时自己退出非 0。
+    # 新版 WebUI 的源码在 web/，`vite build` 写到仓库根的 webui/，后者再被 Go 的
+    # //go:embed 原样打进二进制。因此前端不能只验「源码能跑」：还要证明提交入库的产物
+    # 与当前源码一致，否则发出去的二进制会带着旧界面。
     #
-    # 为什么必须单独跑 module check：探针只 import app.js / api.js / charts.js /
-    # chart-math.js 及其传递依赖，**入口 main.js 不被任何探针加载**——它出错
-    # （拼错导入、语法错）在其它检查里是盲区，而它坏了整站白屏。
+    # 所有 node 命令都在 web/ 下跑；锁文件是依赖的唯一来源，CI 用 npm ci 复现安装。
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,118 +42,38 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          # 模块检查依赖 import.meta.dirname，需要 node >= 20.11。
+          # 与 web/package.json 的 Vite 版本匹配；Node 22 是当前 LTS 基线。
           node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
-      - name: ES 模块加载检查
-        # 逐个 import webui/ 下的全部 ES 模块，抓语法错误与 import 图断裂。
-        run: node scripts/webui_module_check.mjs
+      - name: 安装前端依赖
+        # npm ci 严格按 package-lock.json 安装，不更新锁文件，保证 CI 与本地一致。
+        working-directory: web
+        run: npm ci
 
-      - name: 图表口径探针
-        # 用 DOM 垫片 + 假 fetch 校验图表数值口径，不依赖真实网络或本机服务。
-        run: node webui/probes/webui_chart_probe.mjs
+      - name: TypeScript 类型检查
+        working-directory: web
+        run: npm run typecheck
 
-      - name: 提示框探针
-        run: node webui/probes/webui_tip_probe.mjs
+      - name: 前端测试（Vitest）
+        working-directory: web
+        run: npm test
 
-      - name: 图表首帧宽度探针
-        # 锁住"图表往中间挤一下又复原"的内缩闪烁：页面都是先建节点、后挂载，若构造时就
-        # 按兜底宽度画了首帧，挂载后 <svg> 被 CSS 拉满容器、viewBox 却仍是旧宽度，
-        # preserveAspectRatio 会把整幅图居中等比缩到中间，下一帧才弹回满宽。
-        # 这个探针必须自带 DOM 垫片（脱文档节点量不到宽度 + RO 异步回调），
-        # 上面两个探针都覆盖不到这条路径。
-        run: node webui/probes/webui_chart_sizing_probe.mjs
+      - name: 构建 WebUI
+        # 产物写到仓库根的 webui/；Go 侧 //go:embed webui 直接嵌入，运行时不需要 Node。
+        working-directory: web
+        run: npm run build
 
-      - name: 鉴权探针
-        # 不传场景名 = 逐个场景各起一个子进程跑全量（模块级 state 不能跨场景复用）。
-        # 传错场景名会以退出码 2 失败，不会静默空转。
-        run: node webui/probes/webui_auth_probe.mjs
-
-      - name: 成本口径探针
-        # 锁住成本公式：缓存 token 不能重复计费；拿不到单价必须回 null 而不是 0
-        # （0 会被读成"免费"）；模型名匹配要穿透日期后缀与供应商前缀。
-        run: node webui/probes/webui_pricing_probe.mjs
-
-      - name: 供应商页探针
-        # 锁住左侧竖向导航与预置：标签页条不能被改回来、预置地址必须与后端
-        # 默认路由拼得起来、品牌识别不能被单字符品牌名（xAI）误伤。
-        # 同一份探针还锁「服务模型」卡片按类型分组与筛选：分组必须用主标签（一个模型
-        # 只进一组）、筛选只改显示绝不动勾选、卡片文本仍恰好是模型名。
-        run: node webui/probes/webui_providers_probe.mjs
-
-      - name: 模型类型口径探针
-        # 类型判定在服务端（internal/modelkind），前端只做归一化 / 分组 / 切块。这三件
-        # 错了都表现为"看起来正常但分错了"：载荷形状不对时不返回 null 会把"没答上来"
-        # 画成"全部未分类"；分组用 kinds 全集会让多能力模型出现在两个组里；切块少问
-        # 一段就只有一段没有类型，既无报错也无人发现。
-        run: node webui/probes/webui_model_kinds_probe.mjs
-
-      - name: 模型路由页探针
-        # 同一套左侧竖向导航：模型列表也要竖排在左栏、旧的横排标签页条不能回来，
-        # 且切换模型/展开编辑器时右侧详情要跟着换。
-        run: node webui/probes/webui_routing_probe.mjs
-
-      - name: 模型改动连带影响探针
-        # 模型改动会连带改掉别处的引用（访问密钥清单、工作空间清单、任务、unified_model），
-        # 所以写之前必须先预演（dry_run=1）再弹二次确认。这里锁的是顺序与措辞：预演要
-        # 用同一组参数、确认之前一个字节都不能落盘（取消 = 什么都没发生）、没有连带
-        # 变动时不弹框直接写。
-        run: node webui/probes/webui_model_impact_probe.mjs
-
-      - name: 统一模型页探针
-        # 锁住统一模型页的四条静默故障：保存成功后 saving 必须复位（否则下一次点
-        # 「编辑」拿到的是一整个禁用、按钮写着「正在保存」的表单，页面从此存不进任何
-        # 改动）、保存失败的原因必须画在当前页面上（写进被重画掉的旧节点就等于没有）、
-        # 每次进入页面都要重新取数（模型与 config_revision 会被供应商页改掉），以及
-        # unified 指向已删除的模型时必须回落成可用模型而不是把它原样发出去。
-        run: node webui/probes/webui_unified_probe.mjs
-
-      - name: 可嵌入面板探针
-        # 锁住面板的三条安全规则：凭据只从 URL fragment 取、绝不碰 localStorage
-        # （与管理面同源，共享存储会互相覆盖凭据）、绝不发 X-AMKR-Workspace
-        # （空间由 key 钉死）。面板会被嵌进第三方后台，这三条是它的全部安全边界。
-        run: node webui/probes/webui_panel_probe.mjs
-
-      - name: 看板栅格探针
-        # 锁住"每一排都排满"：空轨是 CSS 栅格的产物，DOM 垫片没有 CSS 引擎量不到，
-        # 所以它直接读 styles.css 的断点定义与页面里声明的卡片/瓦片/列数，按 max-width
-        # 级联算一遍。列数除不尽（孤儿瓦片）与半宽卡落单（空轨）都会在这里失败。
-        run: node webui/probes/webui_layout_probe.mjs
-
-      - name: 状态监控页探针
-        # 渠道健康矩阵的口径层与页面行为：健康分最容易被悄悄改坏的不是配色而是阈值——
-        # 80/50 两条分档线、首字 1.5s/8s 与缓存率 30% 锚点、<3 次一律 unknown、综合权重里
-        # 缺读数按 0。页面侧锁矩阵格数 = 行数 × 列数、三种行身份、健康显示切换只重着色
-        # 不重取、维度切换必带 group_by、全局筛选以重复 provider_id 透传，以及空态 / 500
-        # 错误态与 onTick 静默重取。每格 title 必须带数值：颜色不能是唯一信息。
-        run: node webui/probes/webui_status_probe.mjs
-
-      - name: 访客看板探针
-        # 访客看板是**唯一**把访问密钥交给浏览器并长期保存的地方，因此它锁的是安全
-        # 边界而不是外观：绝不读写管理面的 localStorage 键（共用会让两边互相踢下
-        # 线）、绝不自己指定密钥或工作空间、绝不发写请求、明文 key 绝不上页，以及
-        # 401（请重填）与 403（已被停用，去找管理员）必须给出不同指引。
-        run: node webui/probes/webui_guest_probe.mjs
-
-      - name: 访问密钥探针
-        # 访问密钥是发给**外部使用者**的凭据，两份清单（供应商 / 模型）是它唯一的权限收窄
-        # 手段，而三态里「不限制」与「一个都不许」是两个相反的授权。这里锁两件事：界面
-        # 上没有可以手写清单的文本框（名字要能直接勾选），以及提交体里的三态逐字节正确
-        # ——把「全部取消勾选」折叠成「不限制」会让一条禁令静默失效。
-        run: node webui/probes/webui_accesskeys_probe.mjs
-
-      - name: 账号资源探针
-        # 账号资源页是**唯一**由服务端代问第三方（CPA）管理面的地方，所以它锁的是取数
-        # 路径与额度口径：浏览器绝不直接访问 CPA、进页面不把管理密钥拉下来、一次刷新
-        # 只发一次请求（这一页不轮询），以及额度横条画的是**剩余**比例（20% / 5% 两档
-        # 分档）——画成已用会把 18% 剩余读成「还早」，整页结论反过来。另外钉住账号只以
-        # 卡片列出（表格视图与它的切换按钮已移除），以及故障隔离：一个实例连不上时，
-        # 另一个实例的账号照常列出。
-        run: node webui/probes/webui_accounts_probe.mjs
-
-      - name: 试验场探针
-        # 试验场页面测试：同步渲染、标签切换、对话主视图、流式响应解析与状态清理
-        run: node webui/probes/webui_playground_probe.mjs
+      - name: 检查 webui/ 与 web/ 源码一致
+        # vite build 会 emptyOutDir 后重新生成 webui/。构建后工作区仍有改动，说明源码变了
+        # 但产物没提交；CI 不允许这种漂移，直接给出可执行的修复命令。
+        run: |
+          if [ -n "$(git status --porcelain -- webui)" ]; then
+            echo "webui/ 与 web/ 源码不一致：请在 web/ 下运行 npm run build 后提交 webui/" >&2
+            git status --porcelain -- webui >&2
+            exit 1
+          fi
 
   go:
     name: Go 静态检查与测试

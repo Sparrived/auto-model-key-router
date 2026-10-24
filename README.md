@@ -495,9 +495,12 @@ go build ./cmd/amkr
 # 运行完整单元测试套件
 go test ./...
 
-# 前端 ES 模块与探针校验（改动 webui/ 时推荐）
-node scripts/webui_module_check.mjs
-for p in webui/probes/*.mjs; do node "$p" || break; done
+# 前端开发（Node.js 22+；运行时仍不需要 Node）
+cd web
+npm ci
+npm run dev      # 默认代理到 http://127.0.0.1:18900，可用 AMKR_DEV_TARGET 改目标
+npm test         # Vitest
+npm run build    # 更新仓库根 webui/，产物需一并提交
 ```
 
 ---

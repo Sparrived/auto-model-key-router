@@ -2,27 +2,39 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#f1f5f9" />
-    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <!-- 嵌入方的面板不该被搜索引擎收录：地址里带着凭据的 fragment，收录后可能
-         经由结果页外泄。noindex 只影响索引，不影响正常嵌入。 -->
-    <meta name="robots" content="noindex, nofollow" />
-    <title>AMKR 工作空间面板</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <title>AMKR 工作空间</title>
     <script>
-      (function() {
+      // 独立入口不读取任何 localStorage；只按系统偏好设置首帧深浅色。
+      (function () {
         try {
-          var params = new URLSearchParams(window.location.search);
-          var theme = params.get("theme") || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-          document.documentElement.setAttribute("data-theme", theme);
-        } catch (e) {}
+          var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme-preference", "system");
+        } catch (error) {}
       })();
     </script>
+    <script type="module" crossorigin src="./assets/panel-CuoqFkco.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/styles-Dsb790cm.js">
+    <link rel="modulepreload" crossorigin href="./assets/Empty-BWpE7n2u.js">
+    <link rel="modulepreload" crossorigin href="./assets/Spinner-J2gQSnKd.js">
+    <link rel="modulepreload" crossorigin href="./assets/chart-utils-DqRApCCA.js">
+    <link rel="modulepreload" crossorigin href="./assets/RankBars-CXGeFHk7.js">
+    <link rel="modulepreload" crossorigin href="./assets/copy-CCwV6rIb.js">
+    <link rel="modulepreload" crossorigin href="./assets/plus-C1JTHays.js">
+    <link rel="modulepreload" crossorigin href="./assets/trash-BIwNmgq5.js">
+    <link rel="modulepreload" crossorigin href="./assets/Field-4p7GJvMY.js">
+    <link rel="modulepreload" crossorigin href="./assets/Input-NswdWJna.js">
+    <link rel="modulepreload" crossorigin href="./assets/Panel-gfjVJcxp.js">
+    <link rel="modulepreload" crossorigin href="./assets/Segmented-CwdeePXE.js">
+    <link rel="modulepreload" crossorigin href="./assets/chevron-down-BaDWSd68.js">
+    <link rel="modulepreload" crossorigin href="./assets/Select-D30OYm0a.js">
+    <link rel="modulepreload" crossorigin href="./assets/useChartSize-DQnPzroH.js">
+    <link rel="modulepreload" crossorigin href="./assets/FlowMap-oxINbVxF.js">
+    <link rel="stylesheet" crossorigin href="./assets/styles-CYE7eR6i.css">
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="./panel-main.js"></script>
+    <div id="root"></div>
   </body>
 </html>

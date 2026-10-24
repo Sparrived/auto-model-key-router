@@ -2,45 +2,37 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#f1f5f9" />
-    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <!-- 与工作空间面板同一理由：这一页是凭据入口，不该被搜索引擎收录。 -->
-    <meta name="robots" content="noindex, nofollow" />
-    <title>AMKR 访客看板</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <title>AMKR 访问密钥看板</title>
     <script>
-      (function() {
+      // 独立入口不读取任何 localStorage；只按系统偏好设置首帧深浅色。
+      (function () {
         try {
-          var pref = localStorage.getItem("amkr.theme") || "system";
-          var theme = pref;
-          if (pref === "system") {
-            theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-          }
-          document.documentElement.setAttribute("data-theme-preference", pref);
-          document.documentElement.setAttribute("data-theme", theme);
-          if (theme === "custom") {
-            var raw = localStorage.getItem("amkr.themeCustom");
-            if (raw) {
-              var c = JSON.parse(raw);
-              if (c) {
-                if (c.canvas) document.documentElement.style.setProperty("--ui-canvas", c.canvas);
-                if (c.surface) document.documentElement.style.setProperty("--ui-surface", c.surface);
-                if (c.action) document.documentElement.style.setProperty("--ui-action", c.action);
-                if (c.text) {
-                  document.documentElement.style.setProperty("--ui-text", c.text);
-                  document.documentElement.style.setProperty("--ui-text-on-canvas", c.text);
-                }
-              }
-            }
-          }
-        } catch (e) {}
+          var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme-preference", "system");
+        } catch (error) {}
       })();
     </script>
+    <script type="module" crossorigin src="./assets/guest-pHmfgSU7.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/styles-Dsb790cm.js">
+    <link rel="modulepreload" crossorigin href="./assets/Empty-BWpE7n2u.js">
+    <link rel="modulepreload" crossorigin href="./assets/Spinner-J2gQSnKd.js">
+    <link rel="modulepreload" crossorigin href="./assets/chart-utils-DqRApCCA.js">
+    <link rel="modulepreload" crossorigin href="./assets/RankBars-CXGeFHk7.js">
+    <link rel="modulepreload" crossorigin href="./assets/Field-4p7GJvMY.js">
+    <link rel="modulepreload" crossorigin href="./assets/Input-NswdWJna.js">
+    <link rel="modulepreload" crossorigin href="./assets/Panel-gfjVJcxp.js">
+    <link rel="modulepreload" crossorigin href="./assets/Segmented-CwdeePXE.js">
+    <link rel="modulepreload" crossorigin href="./assets/chevron-down-BaDWSd68.js">
+    <link rel="modulepreload" crossorigin href="./assets/Select-D30OYm0a.js">
+    <link rel="modulepreload" crossorigin href="./assets/storage-JpV9Gi3V.js">
+    <link rel="modulepreload" crossorigin href="./assets/pricing-BzBm9Bz7.js">
+    <link rel="modulepreload" crossorigin href="./assets/Badge-BhYZHqMG.js">
+    <link rel="stylesheet" crossorigin href="./assets/styles-CYE7eR6i.css">
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="./guest-main.js"></script>
+    <div id="root"></div>
   </body>
 </html>
