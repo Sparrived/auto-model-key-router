@@ -532,9 +532,13 @@ func (s *Server) handleUpdateRoute(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return 0, nil, err
 		}
-		name, ok := stringOrDefault(updates, "id", routeID)
-		if !ok {
-			return 0, nil, &pyValueError{message: "路由不存在: null"}
+		// 显式 `"id": null` 与不传 id 同义：都是「不改名」。上面的 UpdateModel 经 optString
+		// 已经这么理解它（null 不改名），这里必须用同一口径取最终名字——曾经用
+		// stringOrDefault 把 null 当成「名字是 null」，导致配置已落盘、响应却回 500
+		// 「路由不存在: null」，而 WebUI 未改名时正是发 id: null。
+		name := routeID
+		if newID := optString(updates, "id"); newID != nil {
+			name = *newID
 		}
 		routesValue, err := rawRoutes(data)
 		if err != nil {

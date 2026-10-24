@@ -97,6 +97,27 @@ func TestUpdateRouteWithoutTargetsFieldKeepsThem(t *testing.T) {
 	}
 }
 
+// TestUpdateRouteWithNullIDKeepsName 钉住「`"id": null` = 不改名」。
+//
+// WebUI 保存未改名的路由时发的就是 id: null。服务端曾把它当成「新名字叫 null」去取
+// 响应，配置已经写进去了却回 500，用户看到的是「保存失败」而实际已保存。
+func TestUpdateRouteWithNullIDKeepsName(t *testing.T) {
+	server, _ := workspaceServer(t)
+
+	recorder := callRoutesWrite(t, server, http.MethodPut, "/api/routes/model-a",
+		`"id":null,"aliases":["alias-null-id"]}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("id 为 null 时状态码 = %d，期望 200（body=%s）", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"id":"model-a"`) {
+		t.Errorf("id 为 null 时应保持原名 model-a: %s", body)
+	}
+	if !strings.Contains(body, `"alias-null-id"`) {
+		t.Errorf("同一请求里的别名改动未生效: %s", body)
+	}
+}
+
 // TestRouteTargetAcceptsUpstreamNameAheadOfRouteID 钉住「上游名与路由名解耦」。
 //
 // 这是这次改造要支持的核心用法：外部只有一个名字（路由 ID），而上游各叫各的。把一个
