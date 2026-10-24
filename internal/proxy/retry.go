@@ -47,6 +47,12 @@ func (h *Handler) handleSingleTarget(context *RequestContext) attempt {
 	var lastError attempt
 
 	for attemptIndex := 0; attemptIndex < context.Attempts; attemptIndex++ {
+		if downstreamCanceled(context) {
+			if lastError != nil {
+				return lastError
+			}
+			return downstreamCancellationResult()
+		}
 		selected, selectionError := h.selectKey(context, excluded)
 		if selectionError != nil {
 			// 候选全被「余额不足」限流，而这次请求**已经拿到过上游的真实响应**
@@ -100,8 +106,8 @@ func (h *Handler) runAttempt(
 		defer context.pool().ReleaseKey(context.ModelID, key.Name)
 	}
 	if outcome.retryErr != nil {
-		if !outcome.retrySameKey && !rotatesKeys(context) {
-			// 首字节超时且重试不会换 Key：直接返回失败，见函数顶部说明。
+		if downstreamCanceled(context) || (!outcome.retrySameKey && !rotatesKeys(context)) {
+			// 下游已结束，或首字节超时且不会换 Key：直接返回，不再开下一轮。
 			return outcome.retryErr, nil
 		}
 		return nil, outcome.retryErr
@@ -190,6 +196,9 @@ func internalErrorResult(message string) *attemptResult {
 //
 // 移植 proxy_handler.py:439。这是全链路最长的一段，分支顺序不可交换。
 func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, attemptIndex int) attemptOutcome {
+	if downstreamCanceled(context) {
+		return attemptOutcome{response: downstreamCancellationResult()}
+	}
 	upstreamRoutes := context.Config.UpstreamRoutesForBaseURL(key.BaseURL)
 	upstreamModelID := upstreamModelOr(context.ModelID, key.UpstreamModel)
 
@@ -206,6 +215,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			// 能力探测在**请求路径上惰性执行**：这是新 base_url 的首次请求额外付出的
 			// 1~2 次（计费的）上游调用。正结果永久缓存，负结果 600s/60s 过期。
 			supported, reason := h.probeNativeMessages(context, key, upstreamModelID, nativeRoutePath)
+			if downstreamCanceled(context) {
+				return attemptOutcome{response: downstreamCancellationResult()}
+			}
 			_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
 			nativeSupport = &supported
 		}
@@ -214,6 +226,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		nativeSupport := context.pool().SupportsNativeEndpoint(key.BaseURL, nativeRoutePath)
 		if nativeSupport == nil {
 			supported, reason := h.probeNativeResponses(context, key, upstreamModelID, nativeRoutePath)
+			if downstreamCanceled(context) {
+				return attemptOutcome{response: downstreamCancellationResult()}
+			}
 			_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
 			nativeSupport = &supported
 		}
@@ -269,9 +284,14 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	response, sendErr := h.sendUpstream(context, upstreamURL, headers, upstreamBody)
 	finished := context.now()
 	if sendErr != nil {
-		name, retrySameKey := classifyOutcome(sendErr)
 		durationMS := elapsedMS(started, finished)
-		h.recordUpstreamFailure(context, key, durationMS, true)
+		if downstreamCanceled(context) {
+			h.recordDownstreamCancellation(context, key, nil, nil, durationMS)
+			return attemptOutcome{response: downstreamCancellationResult()}
+		}
+		name, retrySameKey := classifyOutcome(sendErr)
+		retried := attemptIndex+1 < context.Attempts && (retrySameKey || rotatesKeys(context))
+		h.recordUpstreamFailure(context, key, durationMS, retried)
 		return attemptOutcome{
 			retryErr:     jsonResult(http.StatusBadGateway, jsonErrorResponse("上游请求失败: "+name)),
 			retrySameKey: retrySameKey,
@@ -282,6 +302,11 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	if useNative && isUnsupportedEndpointStatus(response.StatusCode) {
 		content, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
+		if downstreamCanceled(context) {
+			h.recordDownstreamCancellation(context, key, &response.StatusCode, content, durationMS)
+			return attemptOutcome{response: errorResponseFromContent(
+				response.StatusCode, content, context.Path == "messages")}
+		}
 		h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 			content, durationMS, true, false)
 		h.logNativeFallback(key, response.StatusCode, upstreamURL, upstreamPath)
@@ -310,9 +335,14 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			context, fallbackURL, upstreamHeaders(context, key.APIKey), fallbackBody)
 		fallbackFinished := context.now()
 		if fallbackErr != nil {
-			name, retrySameKey := classifyOutcome(fallbackErr)
 			fallbackDuration := elapsedMS(fallbackStarted, fallbackFinished)
-			h.recordUpstreamFailure(context, key, fallbackDuration, true)
+			if downstreamCanceled(context) {
+				h.recordDownstreamCancellation(context, key, nil, nil, fallbackDuration)
+				return attemptOutcome{response: downstreamCancellationResult()}
+			}
+			name, retrySameKey := classifyOutcome(fallbackErr)
+			retried := attemptIndex+1 < context.Attempts && (retrySameKey || rotatesKeys(context))
+			h.recordUpstreamFailure(context, key, fallbackDuration, retried)
 			return attemptOutcome{
 				retryErr:     jsonResult(http.StatusBadGateway, jsonErrorResponse("上游请求失败: "+name)),
 				retrySameKey: retrySameKey,
@@ -328,6 +358,11 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	if IsRetryableStatus(response.StatusCode) && attemptIndex+1 < context.Attempts {
 		content, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
+		if downstreamCanceled(context) {
+			h.recordDownstreamCancellation(context, key, &response.StatusCode, content, durationMS)
+			return attemptOutcome{response: errorResponseFromContent(
+				response.StatusCode, content, context.Path == "messages")}
+		}
 		h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 			content, durationMS, true, false)
 		return attemptOutcome{
@@ -340,6 +375,11 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	if context.IsStream && response.StatusCode >= 400 {
 		content, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
+		if downstreamCanceled(context) {
+			h.recordDownstreamCancellation(context, key, &response.StatusCode, content, durationMS)
+			return attemptOutcome{response: errorResponseFromContent(
+				response.StatusCode, content, context.Path == "messages")}
+		}
 		h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 			content, durationMS, false, false)
 		return attemptOutcome{response: errorResponseFromContent(
@@ -354,6 +394,12 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	// 全部透传族——判据是「这条路径的请求体会被方言改写吗」，而它正是 route kind）。
 	if response.StatusCode == 400 && proxysupport.RequestRouteKind(context.Path) == "default" {
 		content, _ := io.ReadAll(response.Body)
+		if downstreamCanceled(context) {
+			_ = response.Body.Close()
+			h.recordDownstreamCancellation(context, key, &response.StatusCode, content, durationMS)
+			return attemptOutcome{response: errorResponseFromContent(
+				response.StatusCode, content, context.Path == "messages")}
+		}
 		if proxysupport.IsToolError(content) {
 			h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 				content, durationMS, true, false)
@@ -392,6 +438,11 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			} else {
 				retryContent, _ := io.ReadAll(retryResponse.Body)
 				_ = retryResponse.Body.Close()
+				if downstreamCanceled(context) {
+					h.recordDownstreamCancellation(context, key, &retryResponse.StatusCode, retryContent, retryDuration)
+					return attemptOutcome{response: errorResponseFromContent(
+						response.StatusCode, content, context.Path == "messages")}
+				}
 				h.recordUpstreamResponse(context, key, retryResponse.StatusCode,
 					retryResponse.Header, retryContent, retryDuration, false, false)
 				return attemptOutcome{response: errorResponseFromContent(
@@ -590,6 +641,9 @@ func (h *Handler) logNativeFallback(key config.KeyConfig, statusCode int, url, u
 //
 // 本函数只负责第一层；第二、三层在 pumpUpstream 里。
 func (h *Handler) sendUpstream(context *RequestContext, upstreamURL string, headers map[string]string, body []byte) (*http.Response, error) {
+	if err := contextOf(context.Request).Err(); err != nil {
+		return nil, err
+	}
 	if !context.upstreamCalls.take() {
 		return nil, &upstreamCapError{message: context.upstreamCalls.exhaustedMessage()}
 	}
@@ -738,6 +792,10 @@ func (h *Handler) recordUpstreamResponse(
 	failed bool,
 ) {
 	status := statusCode
+	if downstreamCanceled(context) {
+		h.recordDownstreamCancellation(context, key, &status, content, durationMS)
+		return
+	}
 	h.recordMetric(context, key, MetricRecord{
 		StatusCode:   &status,
 		Usage:        h.extractUsage(content),
@@ -1003,11 +1061,39 @@ func (h *Handler) extractUsage(content []byte) *canonical.Value {
 	return h.extract(parseJSONOrNil(content))
 }
 
-// recordUpstreamFailure 写一条「上游请求失败」的指标行并记一次 key 失败。
-//
-// 这条路径上 duration_ms 与 first_token_ms **同为**耗时（proxy_handler.py:549-562），
-// 因为没有任何字节回来。
+// downstreamCanceled 只看入站请求，不能把上游自己的超时当成客户端取消。
+func downstreamCanceled(context *RequestContext) bool {
+	return contextOf(context.Request).Err() != nil
+}
+
+func downstreamCancellationResult() *attemptResult {
+	return jsonResult(http.StatusBadGateway, jsonErrorResponse("下游请求已取消"))
+}
+
+// recordDownstreamCancellation 保留已发生调用的状态与用量，但不改写 key 健康。
+func (h *Handler) recordDownstreamCancellation(context *RequestContext, key config.KeyConfig, statusCode *int, content []byte, durationMS int64) {
+	h.recordMetric(context, key, MetricRecord{
+		StatusCode:   statusCode,
+		Usage:        h.extractUsage(content),
+		Failed:       true,
+		DurationMS:   durationMS,
+		FirstTokenMS: durationMS,
+	})
+	h.logger.Info("downstream request canceled",
+		"error", contextOf(context.Request).Err(),
+		"model_id", context.ModelID,
+		"key_name", key.Name,
+		"provider", key.Provider,
+		"path", "/v1/"+context.Path,
+		"duration_ms", durationMS)
+}
+
+// recordUpstreamFailure 写失败指标；只有上游失败才惩罚 key，下游取消中性释放。
 func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyConfig, durationMS int64, retried bool) {
+	if downstreamCanceled(context) {
+		h.recordDownstreamCancellation(context, key, nil, nil, durationMS)
+		return
+	}
 	h.recordMetric(context, key, MetricRecord{
 		StatusCode:   nil,
 		Retried:      retried,

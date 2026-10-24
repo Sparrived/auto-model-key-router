@@ -463,6 +463,131 @@ func TestRetryPolicyThreeRegimes(t *testing.T) {
 	})
 }
 
+type requestClientFunc func(*http.Request) (*http.Response, error)
+
+func (f requestClientFunc) Do(r *http.Request) (*http.Response, error)       { return f(r) }
+func (f requestClientFunc) DoStream(r *http.Request) (*http.Response, error) { return f(r) }
+func (f requestClientFunc) CloseIdleConnections()                            {}
+
+type responseReadFunc func([]byte) (int, error)
+
+func (f responseReadFunc) Read(p []byte) (int, error) { return f(p) }
+
+func TestDownstreamCancellationStopsRetriesWithoutPenalizingKeys(t *testing.T) {
+	for _, item := range []struct {
+		name   string
+		path   string
+		status int
+		body   string
+		before bool
+	}{
+		{name: "发送前取消", path: "chat/completions", before: true},
+		{name: "发送中取消", path: "chat/completions"},
+		{name: "状态码重试前取消", path: "chat/completions", status: 503, body: `{"error":{"message":"busy"},"usage":{"prompt_tokens":3}}`},
+		{name: "原生回退前取消", path: "messages", status: 404, body: `{"error":{"message":"not found"}}`},
+		{name: "工具重试前取消", path: "chat/completions", status: 400, body: `{"error":{"message":"unsupported tool type"}}`},
+		{name: "响应体读取中取消", path: "chat/completions", status: 200, body: `{"usage":{"prompt_tokens":3}}`},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			cfg := &config.RouterConfig{
+				MaxRetries: 2, KeyFailureThreshold: 1,
+				Models: []config.ModelConfig{
+					testModel("vendor-model", []config.KeyConfig{testKey("k1", "https://upstream.test"), testKey("k2", "https://upstream.test")},
+						func(m *config.ModelConfig) { m.RoutingMode = "priority"; m.NativeFirst = true }),
+					testModel("backup", []config.KeyConfig{testKey("backup-key", "https://backup.test")}),
+				},
+				UnifiedModel: &config.UnifiedModelConfig{Default: config.RoutePlan{
+					Primary: config.RouteTarget{Model: "vendor-model"}, Fallback: &config.RouteTarget{Model: "backup"},
+				}},
+			}
+			logger, logs := capturingLogger()
+			env := newTestEnv(t, cfg, Options{Logger: logger})
+			_ = env.pool.UpdateNativeEndpoint("https://upstream.test", true, "/v1/messages", "supported")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			env.resources.HTTPClient = requestClientFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if item.status == 0 {
+					cancel()
+					return nil, r.Context().Err()
+				}
+				return &http.Response{StatusCode: item.status, Header: http.Header{"Content-Type": {"application/json"}},
+					Body: io.NopCloser(responseReadFunc(func(p []byte) (int, error) {
+						cancel()
+						return copy(p, item.body), ctx.Err()
+					}))}, nil
+			})
+			if item.before {
+				cancel()
+			}
+			req := httptest.NewRequest(http.MethodPost, "http://testserver/v1/"+item.path,
+				strings.NewReader(`{"model":"unified-model","messages":[],"max_tokens":8,"tools":[{"type":"web_search"}]}`)).WithContext(ctx)
+			req.Header.Set("Authorization", "Bearer "+cfg.LocalAPIKey)
+			env.handler.Handle(httptest.NewRecorder(), req, item.path)
+			wantCalls := 1
+			if item.before {
+				wantCalls = 0
+			}
+			if calls != wantCalls {
+				t.Fatalf("取消后不应重试或走备选，上游调用数=%d want=%d", calls, wantCalls)
+			}
+			for model, keys := range map[string][]string{"vendor-model": {"k1", "k2"}, "backup": {"backup-key"}} {
+				for _, key := range keys {
+					if env.pool.IsCoolingDown(model, key) || env.pool.ActiveCount(model, key) != 0 {
+						t.Fatalf("下游取消不应惩罚或占用 %s/%s", model, key)
+					}
+				}
+			}
+			if env.resources.ActiveLeases() != 0 {
+				t.Fatal("取消后租约未释放")
+			}
+			records := env.metrics.take()
+			if len(records) != wantCalls {
+				t.Fatalf("指标行数=%d want=%d", len(records), wantCalls)
+			}
+			if wantCalls == 0 {
+				return
+			}
+			if !records[0].Failed || records[0].Retried {
+				t.Fatalf("取消仍记失败且未重试: %+v", records[0])
+			}
+			if item.status == 0 {
+				if records[0].StatusCode != nil {
+					t.Fatal("发送失败不可伪造上游状态码")
+				}
+			} else if records[0].StatusCode == nil || *records[0].StatusCode != item.status {
+				t.Fatalf("应保留上游状态%d: %+v", item.status, records[0])
+			}
+			if strings.Contains(item.body, "usage") && records[0].Usage.Lookup("prompt_tokens").Num != "3" {
+				t.Fatalf("取消不能丢失已收到用量: %+v", records[0].Usage)
+			}
+			if !strings.Contains(logs.String(), "downstream request canceled") {
+				t.Fatal("取消应有独立INFO日志")
+			}
+		})
+	}
+}
+
+func TestUpstreamTimeoutStillPenalizesKeyWithoutSameKeyRetry(t *testing.T) {
+	cfg := simpleChatConfig()
+	cfg.MaxRetries, cfg.KeyFailureThreshold = 2, 1
+	env := newTestEnv(t, cfg, Options{})
+	calls := 0
+	env.resources.HTTPClient = requestClientFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, context.DeadlineExceeded
+	})
+	response := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
+	records := env.metrics.take()
+	if response.Code != 502 || calls != 1 || !env.pool.IsCoolingDown("vendor-model", "k1") {
+		t.Fatalf("真正上游超时仍失败且不原地重试: status=%d calls=%d cooling=%v", response.Code, calls, env.pool.IsCoolingDown("vendor-model", "k1"))
+	}
+	if len(records) != 1 || !records[0].Failed || records[0].Retried || records[0].StatusCode != nil {
+		t.Fatalf("超时指标不应谎报已重试: %+v", records)
+	}
+}
+
 // TestRetryableStatusCodesInclude401And403 固化「401/403 可重试（会换 key）」这条
 // 与直觉相反的契约。
 func TestRetryableStatusCodesInclude401And403(t *testing.T) {
@@ -711,6 +836,9 @@ func TestMetricsRowForConnectionFailure(t *testing.T) {
 	if !first.Failed || !first.Retried {
 		t.Fatalf("连接失败应记 failed=true retried=true，实得 %+v", first)
 	}
+	if records[len(records)-1].Retried {
+		t.Fatal("最后一次连接失败没有后续重试，不应记 retried=true")
+	}
 	if first.FirstTokenMS != first.DurationMS {
 		t.Fatalf("first_token_ms 应等于 duration_ms: %d vs %d", first.FirstTokenMS, first.DurationMS)
 	}
@@ -759,7 +887,7 @@ func TestLeaseReleasedOnEveryExitPath(t *testing.T) {
 			stream: true,
 			route:  "/v1/chat/completions",
 			path:   "chat/completions",
-			step:   sseStep("data: {}\n\n", "data: [DONE]\n\n"),
+			step:   sseStep("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", "data: [DONE]\n\n"),
 		},
 		{
 			name:  "非流式上游失败",
@@ -856,11 +984,8 @@ func (w *failingWriter) Flush() {}
 // 这是迁移方案 §Phase 3 明确要求新增的两个测试之一：Go 里下游写失败会短路读取
 // 循环，但收尾（写指标、回写健康、释放 key）必须照样执行。
 //
-// **未能与参照实现比对的一点**：下游断开时参照实现记的 failed 是 true 还是 false，取决于
-// Starlette/anyio 抛的是 Exception（被 `except Exception` 捕获 ⇒ true）还是
-// BaseException（GeneratorExit / CancelledError，不被捕获 ⇒ false）。本包按 true
-// 处理（把「写不出去」视为失败），因为更保守、也更能被监控看到。要钉死这一点需要
-// 在真实 uvicorn 上做一次提前断开的端到端实验，属未验证项。
+// 下游断开仍留下 failed=true 的事实记录，但不归罪于上游 key；健康中性与租约
+// 释放必须独立于下游是否还能收到响应。
 func TestStreamLeaseReleasedWhenDownstreamDisconnects(t *testing.T) {
 	env := newTestEnv(t, simpleChatConfig(), Options{
 		BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
@@ -898,7 +1023,7 @@ func TestStreamLeaseReleasedWhenDownstreamDisconnects(t *testing.T) {
 func TestShutdownWithActiveStreamDoesNotDeadlock(t *testing.T) {
 	env := newTestEnv(t, simpleChatConfig(), Options{
 		BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
-	env.route("/v1/chat/completions", sseStep("data: {\"a\":1}\n\n"))
+	env.route("/v1/chat/completions", sseStep("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", "data: [DONE]\n\n"))
 
 	released := make(chan struct{})
 	writer := &blockingWriter{started: make(chan struct{}), release: released}
@@ -1018,8 +1143,8 @@ func TestStreamingTimeoutRegimes(t *testing.T) {
 		})
 		recorder := env.request(http.MethodPost, "chat/completions",
 			`{"model":"vendor-model","messages":[],"stream":true}`, nil)
-		if recorder.Body.Len() != 0 {
-			t.Fatalf("首块超时不应转发任何字节，实得 %q", recorder.Body.String())
+		if !strings.Contains(recorder.Body.String(), "upstream_stream_error") || strings.Contains(recorder.Body.String(), "data: {}") {
+			t.Fatalf("首块超时只应返回安全SSE错误，不能转发迟到块，实得 %q", recorder.Body.String())
 		}
 		records := env.metrics.take()
 		if len(records) != 1 || !records[0].Failed {
@@ -1035,8 +1160,8 @@ func TestStreamingTimeoutRegimes(t *testing.T) {
 		cfg.StreamIdleTimeout = 0.08
 		env.resync()
 
-		// 三块，每块之间 50ms（小于 idle 80ms），总耗时 150ms——远超 idle 窗口。
-		// 若总时长有上限，第三块之后就会被截断；实测不会被截断，因此三块都到达。
+		// 三个内容块 + 终止帧，内容块间隔 50ms（小于 idle 80ms），总耗时 100ms。
+		// 总耗时超过 idle 窗口仍应完整到达，只有块间空闲才受它约束。
 		env.route("/v1/chat/completions", upstreamStep{
 			Status:  200,
 			Headers: map[string]string{"content-type": "text/event-stream"},
@@ -1044,9 +1169,10 @@ func TestStreamingTimeoutRegimes(t *testing.T) {
 				delay time.Duration
 				data  []byte
 			}{
-				{data: []byte("data: {\"i\":1}\n\n")},
-				{delay: 50 * time.Millisecond, data: []byte("data: {\"i\":2}\n\n")},
-				{delay: 50 * time.Millisecond, data: []byte("data: {\"i\":3}\n\n")},
+				{data: []byte("data: {\"i\":1,\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n")},
+				{delay: 50 * time.Millisecond, data: []byte("data: {\"i\":2,\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n")},
+				{delay: 50 * time.Millisecond, data: []byte("data: {\"i\":3,\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n\n")},
+				{data: []byte("data: [DONE]\n\n")},
 			}},
 		})
 		recorder := env.request(http.MethodPost, "chat/completions",

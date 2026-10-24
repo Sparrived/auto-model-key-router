@@ -43,7 +43,7 @@ func (h *Handler) handle(w http.ResponseWriter, request *http.Request, path stri
 	}
 	result := h.handleSingleTarget(prepared)
 	status := result.statusCode()
-	if !IsRetryableStatus(status) {
+	if downstreamCanceled(prepared) || !IsRetryableStatus(status) {
 		result.writeTo(w)
 		return
 	}
@@ -101,6 +101,10 @@ func (h *Handler) writeTaskFallback(w http.ResponseWriter, prepared *RequestCont
 // 这里（它既不能用 unified-model 也不能用任务，见 prepare 的两处 403），但把口径留成
 // 「总数」会在将来放开任一入口时静默绕过供应商清单。这里与主路径用同一个判据。
 func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, result attempt, target config.RouteTarget) {
+	if downstreamCanceled(prepared) {
+		result.writeTo(w)
+		return
+	}
 	pool := prepared.pool()
 	fallbackKeyCount := pool.KeyCountFor(target.Model, prepared.AccessKey)
 	if fallbackKeyCount == 0 {

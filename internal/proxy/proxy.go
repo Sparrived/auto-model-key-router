@@ -10,10 +10,9 @@
 //  1. **重试预算三档**（runtime.RetryPolicy）：指定 key / only_first / 单 key
 //     ⇒ max_retries+1；否则 ⇒ key 数量（即只轮换一遍、没有额外重试）。
 //     401/403 **可重试**，会换 key（streaming.py:17）。
-//  2. **一旦下游开始收到字节就永不重试**：响应头已经写出去，任何中途失败都只能
-//     静默终止流（proxy_handler.py:1137）。因此流式尝试的 key 释放**只**由
-//     runtime.StreamLifecycle.Finish 承担（proxy_handler.py:1148、1307、1400），
-//     普通路径由 defer 承担。
+//  2. **一旦下游开始收到字节就永不重试**：聊天 SSE 中途失败发协议错误事件而非
+//     静默伪装成功；下游取消与上游故障分开记账。流式尝试的 key 释放**只**由
+//     streamLifecycle.Finish 承担，普通路径由 defer 承担。
 //  3. **冷却过滤是软的**：可用集合为空时回退到「只排除 excluded」的集合，
 //     冷却中的 key 仍可能被再次选中（key_pool.py:214）。这是刻意的降级。
 //     唯一的例外是**余额不足**：欠费账号不参与这条软回退，宁可回 503 也不再打它一次

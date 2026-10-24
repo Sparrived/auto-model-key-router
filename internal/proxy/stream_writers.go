@@ -11,15 +11,8 @@ import (
 // 本文件是三个流式转发状态机。它们共同的结构是：pumpUpstream 负责超时、观察
 // 首字节、收尾；每个 writer 只负责「一块上游数据 → 若干下游字节」。
 //
-// 三处与参照实现一致的可观测行为，改掉任何一条都会改变下游看到的字节：
-//
-//  1. **每个事件后都 Flush**（参照实现是 `await asyncio.sleep(0)`，
-//     proxy_handler.py:1130）。Go 里对应 http.Flusher。
-//  2. **未完成的事件不外发**：SSE 路径只在下游攒够一个完整事件（`\n\n` 或
-//     `\r\n\r\n`）时才写；流结束时残余的**未完成事件被丢弃**，但非 SSE 的残余会
-//     原样吐出（proxy_handler.py:1133）。
-//  3. `first_token_ms` 记录的是**上游首字节**时间，由 pumpUpstream 在转发前
-//     ObserveChunk 决定，不在这里。
+// 每个事件后 Flush。聊天 SSE 的错误与完成判定由 pumpUpstream 统一处理，失败时
+// 丢弃残片而不补成功收尾；first_token_ms 同样由 pumpUpstream 观察上游首字节。
 
 // streamWriter 是三种流式转发的统一接口。
 type streamWriter interface {
@@ -28,11 +21,11 @@ type streamWriter interface {
 	// 只有 Anthropic 重建流需要它：message_start 必须在**任何**上游字节之前发出
 	// （proxy_handler.py:1217），否则首块超时这类失败路径留下的下游字节会与参照
 	// 实现不同。其余两种是空操作。
-	begin(w http.ResponseWriter)
-	// push 处理一块上游数据并转发；返回 false 表示应终止（下游写失败或转换失败）。
-	push(w http.ResponseWriter, chunk []byte) bool
+	begin(w http.ResponseWriter) error
+	// push 区分下游写失败与上游转换失败，避免把客户端断开记到 key 健康上。
+	push(w http.ResponseWriter, chunk []byte) error
 	// flush 处理流**正常结束**时的残余缓冲与收尾事件。
-	flush(w http.ResponseWriter)
+	flush(w http.ResponseWriter) error
 	// abort 处理流因错误终止时的残余。
 	//
 	// 两者的区别是参照实现里一个有、一个没有的分支：_stream_upstream 在 except
@@ -98,26 +91,33 @@ func (s *rawStream) absorbUsage(chunk []byte) {
 	}
 }
 
-func (s *rawStream) begin(_ http.ResponseWriter) {}
+func (s *rawStream) begin(_ http.ResponseWriter) error { return nil }
 
-// abort 在错误路径上同样外发残余缓冲（对齐 proxy_handler.py:1138）。
-func (s *rawStream) abort(w http.ResponseWriter) { s.flush(w) }
+// 失败时丢弃未完成事件，避免它与随后发出的错误帧拼成一个无效事件。
+func (s *rawStream) abort(_ http.ResponseWriter) {
+	if s.splitter != nil {
+		s.splitter.clear()
+	}
+}
 
 // push 转发一块：SSE 路径按事件切分，其余原样吐出。
 //
 // usage 抽取排在转发**之前**，与参照实现的 `_stream_usage` 调用位置一致
 // （proxy_handler.py:1123）：下游写失败时该块已经计过 usage，行为可比。
-func (s *rawStream) push(w http.ResponseWriter, chunk []byte) bool {
+func (s *rawStream) push(w http.ResponseWriter, chunk []byte) error {
 	s.absorbUsage(chunk)
 	if s.isSSE {
 		for _, event := range s.splitter.push(chunk) {
 			if !writeBytes(w, event) {
-				return false
+				return errDownstreamWrite
 			}
 		}
-		return true
+		return nil
 	}
-	return writeBytes(w, chunk)
+	if !writeBytes(w, chunk) {
+		return errDownstreamWrite
+	}
+	return nil
 }
 
 // flush 处理流结束时的残余。
@@ -125,12 +125,16 @@ func (s *rawStream) push(w http.ResponseWriter, chunk []byte) bool {
 // 参照实现只对 SSE 路径保留残余并外发（proxy_handler.py:1133）；非 SSE 路径的
 // 数据在 push 里已经全部吐出，没有残余。注意这里外发的是**未完成事件**（可能不含
 // `\n\n`），与「一个完整 SSE 事件」不同——参照实现就是这么写的。
-func (s *rawStream) flush(w http.ResponseWriter) {
+func (s *rawStream) flush(w http.ResponseWriter) error {
 	if s.splitter == nil || len(s.splitter.pending()) == 0 {
-		return
+		return nil
 	}
-	_ = writeBytes(w, s.splitter.pending())
+	ok := writeBytes(w, s.splitter.pending())
 	s.splitter.clear()
+	if !ok {
+		return errDownstreamWrite
+	}
+	return nil
 }
 
 // anthropicStream 把上游 OpenAI SSE 重建为 Anthropic Messages SSE。
@@ -160,20 +164,23 @@ func newAnthropicStream(lifecycle *streamLifecycle, _ func() time.Time) *anthrop
 // abort 不做任何事：转换流的收尾事件在参照实现里位于 try 内，异常会整段跳过。
 func (s *anthropicStream) abort(_ http.ResponseWriter) {}
 
-func (s *anthropicStream) begin(w http.ResponseWriter) {
-	_ = writeSSE(w, "message_start", anthropicMessageStart(s.lifecycle.requestedModelID))
+func (s *anthropicStream) begin(w http.ResponseWriter) error {
+	if !writeSSE(w, "message_start", anthropicMessageStart(s.lifecycle.requestedModelID)) {
+		return errDownstreamWrite
+	}
+	return nil
 }
 
 // push 处理一块上游数据。
-func (s *anthropicStream) push(w http.ResponseWriter, chunk []byte) bool {
+func (s *anthropicStream) push(w http.ResponseWriter, chunk []byte) error {
 	events, usage := s.state.Push(chunk)
 	s.absorbUsage(usage)
 	for _, event := range events {
 		if !writeBytes(w, event) {
-			return false
+			return errDownstreamWrite
 		}
 	}
-	return true
+	return nil
 }
 
 // absorbUsage 合并本块解析出的 usage。
@@ -184,42 +191,37 @@ func (s *anthropicStream) absorbUsage(usage *canonical.Value) {
 	s.lifecycle.SetUsage(mergeUsage(s.lifecycle.Usage(), usage))
 }
 
-// flush 处理残余行并发出收尾事件。
-//
-// 移植 proxy_handler.py:1247-1298，顺序不可交换：
-//  1. 残余行（补一个换行再解析）；
-//  2. 文本块未收尾则补 content_block_stop；
-//  3. 工具块收尾（FinishTools）；
-//  4. **一个 content 块都没有**时补一对空文本块的 start+stop——否则 Anthropic
-//     客户端拿到的是一个没有任何 content 的消息；
-//  5. message_delta（stop_reason 与 usage）+ message_stop。
-func (s *anthropicStream) flush(w http.ResponseWriter) {
+// flush 仅在上游完整结束且已转换出内容后收尾，空输出不能补成成功消息。
+func (s *anthropicStream) flush(w http.ResponseWriter) error {
+	if s.state.NextContentIndex == 0 && len(s.state.ToolCalls) == 0 {
+		return errEmptyStream
+	}
 	events, usage := s.state.Finish()
 	s.absorbUsage(usage)
 	for _, event := range events {
 		if !writeBytes(w, event) {
-			return
+			return errDownstreamWrite
 		}
 	}
 
 	state := s.state
 	if state.TextIndex != nil && !state.TextStopped {
 		if !writeSSE(w, "content_block_stop", anthropicContentBlockStop(*state.TextIndex)) {
-			return
+			return errDownstreamWrite
 		}
 		state.TextStopped = true
 	}
 	for _, event := range state.FinishTools() {
 		if !writeBytes(w, event) {
-			return
+			return errDownstreamWrite
 		}
 	}
 	if state.NextContentIndex == 0 {
 		if !writeSSE(w, "content_block_start", anthropicEmptyTextBlock()) {
-			return
+			return errDownstreamWrite
 		}
 		if !writeSSE(w, "content_block_stop", anthropicContentBlockStop(0)) {
-			return
+			return errDownstreamWrite
 		}
 	}
 	stopReason := state.StopReason
@@ -230,9 +232,11 @@ func (s *anthropicStream) flush(w http.ResponseWriter) {
 			stopReason = "end_turn"
 		}
 	}
-	_ = writeSSE(w, "message_delta",
-		anthropicMessageDelta(stopReason, s.lifecycle.Usage()))
-	_ = writeSSE(w, "message_stop", anthropicMessageStop())
+	if !writeSSE(w, "message_delta", anthropicMessageDelta(stopReason, s.lifecycle.Usage())) ||
+		!writeSSE(w, "message_stop", anthropicMessageStop()) {
+		return errDownstreamWrite
+	}
+	return nil
 }
 
 // responsesStream 把上游 OpenAI SSE 重建为 Responses SSE。
@@ -255,24 +259,21 @@ func newResponsesStream(lifecycle *streamLifecycle, _ func() time.Time) *respons
 // abort 不做任何事：见 anthropicStream.abort。
 func (s *responsesStream) abort(_ http.ResponseWriter) {}
 
-func (s *responsesStream) begin(_ http.ResponseWriter) {}
+func (s *responsesStream) begin(_ http.ResponseWriter) error { return nil }
 
 // push 处理一块上游数据。
-func (s *responsesStream) push(w http.ResponseWriter, chunk []byte) bool {
+func (s *responsesStream) push(w http.ResponseWriter, chunk []byte) error {
 	events, usage, err := s.state.Push(chunk)
 	if err != nil {
-		// ResponsesUsage 的转换错误（无法转成数字的 usage 字段）在参照实现里会从
-		// generator 冒泡，被 except 捕获后**静默截断整条流**。这里用 push 返回
-		// false 表达同一结果（pump 会记 failed 并写日志）。
-		return false
+		return errStreamConversion
 	}
 	s.absorbUsage(usage)
 	for _, event := range events {
 		if !writeBytes(w, event) {
-			return false
+			return errDownstreamWrite
 		}
 	}
-	return true
+	return nil
 }
 
 // absorbUsage 合并本块解析出的 usage。
@@ -289,16 +290,18 @@ func (s *responsesStream) absorbUsage(usage *canonical.Value) {
 //  1. 残余行（补一个换行再解析）；
 //  2. 每个累积的 output item 一个 response.output_item.done；
 //  3. response.completed（带 id / model / usage）。
-func (s *responsesStream) flush(w http.ResponseWriter) {
+func (s *responsesStream) flush(w http.ResponseWriter) error {
+	if !hasStreamContent(s.state.OutputItems()) {
+		return errEmptyStream
+	}
 	events, usage, err := s.state.Flush()
 	if err != nil {
-		// 与 push 里的转换错误同样处理：静默截断，不再产出收尾事件。
-		return
+		return errStreamConversion
 	}
 	s.absorbUsage(usage)
 	for _, event := range events {
 		if !writeBytes(w, event) {
-			return
+			return errDownstreamWrite
 		}
 	}
 	outputItems := s.state.OutputItems()
@@ -306,15 +309,18 @@ func (s *responsesStream) flush(w http.ResponseWriter) {
 		for index, item := range outputItems.Items() {
 			if !writeSSE(w, "response.output_item.done",
 				responsesOutputItemDone(int64(index), item)) {
-				return
+				return errDownstreamWrite
 			}
 		}
 	}
 	completed, usageErr := responsesCompleted(s.lifecycle.requestedModelID, s.lifecycle.Usage())
 	if usageErr != nil {
-		return
+		return errStreamConversion
 	}
-	_ = writeSSE(w, "response.completed", completed)
+	if !writeSSE(w, "response.completed", completed) {
+		return errDownstreamWrite
+	}
+	return nil
 }
 
 // --- SSE 载荷构造 ---

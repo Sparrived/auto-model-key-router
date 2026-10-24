@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,10 +15,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 )
 
-// errDownstreamWrite 表示下游写失败（客户端断开或写出错）。
-//
-// 它只在 pump 内部用于短路循环；不需要与上游错误区分，因为两者的收尾完全相同：
-// 静默终止 + 记 failed（proxy_handler.py:1137）。
+// errDownstreamWrite 短路流转发；下游写失败记失败，但不能惩罚上游 Key。
 var errDownstreamWrite = errors.New("下游写入失败")
 
 // streamResponse 是待执行的流式响应。
@@ -25,8 +23,7 @@ var errDownstreamWrite = errors.New("下游写入失败")
 // 与参照实现的结构差异：Python 的 StreamingResponse 拿着一个 async generator，
 // body 在框架消费时才被拉取；Go 的 http.ResponseWriter 必须在同一个 goroutine 里
 // 写，因此这里把「状态码 + 响应头」与「写函数」打包成一个值，由 Handle 立刻执行。
-// 可观测语义完全一致：**状态码与响应头在下游收到任何字节之前就已确定**，中途失败
-// 只能静默终止（proxy_handler.py:1137）。
+// 状态码与响应头在下游收到任何字节之前就已确定；中途失败只能通过协议内错误通知。
 type streamResponse struct {
 	code      int
 	headers   map[string]string
@@ -94,10 +91,17 @@ func (h *Handler) bufferedResponse(
 	attemptIndex int,
 ) (*attemptResult, *attemptResult) {
 	content, readErr := readResponseBody(response)
+	if downstreamCanceled(context) {
+		h.recordDownstreamCancellation(context, key, &response.StatusCode, content, durationMS)
+		return jsonResult(http.StatusBadGateway, jsonErrorResponse("下游请求已取消")), nil
+	}
 	if readErr != nil {
-		// 响应体读到一半断开：参照实现会抛 httpx.RequestError 并冒泡，这里折算成
-		// 502——与「上游无响应」时的形状一致。
-		h.recordUpstreamFailure(context, key, durationMS, false)
+		// 已拿到的上游状态和部分 usage 仍是事实，不能退回“无状态码”。
+		h.recordMetric(context, key, MetricRecord{
+			StatusCode: &response.StatusCode, Usage: h.extractUsage(content), Failed: true,
+			DurationMS: durationMS, FirstTokenMS: durationMS,
+		})
+		context.pool().MarkFailure(context.ModelID, key.Name, &response.StatusCode, nil)
 		if response.StatusCode != http.StatusOK {
 			// 状态码已经拿到了、只是体没读完：非 200 的口径仍要留痕。原因只能是读
 			// 失败本身——上游原文已经不可用（这就是本分支的处境）。
@@ -355,9 +359,9 @@ func upstreamContentType(headers http.Header) string {
 // runtime.IterStreamBytes 正是这套语义的实现（它对每一块派生带超时的子 context，
 // 父 context 的错误优先返回），所以这里只做编排。
 //
-// 错误处理与参照实现一致（proxy_handler.py:1137、1299、1392）：先把残余缓冲冲给
-// 下游（非 SSE 路径会原样吐出，SSE 路径**丢弃**未完成的事件）、把错误写进日志，
-// 然后**静默结束**——不写错误帧，因为响应头已经发出去了。
+// 聊天 SSE 除传输错误外还检查业务完成标记：失败时丢弃残片、不补成功收尾，
+// 按入站协议发安全错误事件。原生上游错误事件不重复发送，下游取消只记 INFO。
+// 非 SSE 和非聊天端点继续字节透传，不套用聊天完成标记。
 //
 // 最后无条件调用 lifecycle.Finish：它是流式尝试**唯一**的 key 释放路径。
 func (h *Handler) pumpUpstream(
@@ -370,47 +374,152 @@ func (h *Handler) pumpUpstream(
 	mediaType string,
 	w http.ResponseWriter,
 ) {
-	// 开场事件必须在下游开始读上游**之前**发出：参照实现在任何上游字节到来之前就
-	// yield 了 Anthropic 的 message_start（proxy_handler.py:1217），因此首块超时
-	// 这类失败也会在下游留下一个 message_start。
-	stream.begin(w)
-	failed := false
-	err := runtime.IterStreamBytes(
-		contextOf(context.Request), runtime.NewBodyStreamReader(response.Body),
-		firstByteDeadline, idleTimeout,
-		func(chunk []byte) error {
-			// first_token_ms 记录的是**上游首字节**时间，不是下游首事件时间
-			// （proxy_handler.py:1122、1238、1350 都在转发前 observe）。
-			lifecycle.ObserveChunk(len(chunk))
-			if !stream.push(w, chunk) {
-				return errDownstreamWrite
+	var outcome *streamOutcome
+	if checkStreamOutcome(context.Path, mediaType) {
+		outcome = &streamOutcome{}
+	}
+	_, rawStreamWriter := stream.(*rawStream)
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(mediaType, ";")[0]))
+	inspectJSON := rawStreamWriter && (baseType == "application/json" || strings.HasSuffix(baseType, "+json")) &&
+		(context.Path == "chat/completions" || context.Path == "messages" || context.Path == "responses")
+	// shortcut: JSON fallback只观察1MiB，超限原样透传但不宣称成功、不惩罚Key；需支持更大JSON时改为增量解析。
+	var jsonBody []byte
+	jsonTooLarge := false
+	deliveredTerminal := false
+	forward := func(event []byte) error {
+		outcome.observe(event)
+		lifecycle.SetUsage(mergeUsage(lifecycle.Usage(), protocol.ExtractUsage(outcome.payload)))
+		if outcome.failure != nil {
+			// 原生错误事件只透传一次；转换流则由下面按入站协议发安全错误。
+			if _, raw := stream.(*rawStream); raw {
+				if err := stream.push(w, event); err != nil {
+					return err
+				}
+				outcome.forwardedError = true
 			}
-			return nil
-		})
-	if err != nil {
-		failed = true
-		payload := lifecycle.ErrorPayload(err, mediaType)
-		h.logger.Warn("upstream stream error",
-			"error_type", payload["error_type"],
-			"error", payload["error"],
-			"model_id", payload["model_id"],
-			"requested_model_id", payload["requested_model_id"],
-			"key_name", payload["key_name"],
-			"upstream", payload["upstream"],
-			"status_code", payload["status_code"],
-			"content_type", payload["content_type"],
-			"chunks", payload["chunks"],
-			"bytes", payload["bytes"],
-			"duration_ms", payload["duration_ms"])
+			return outcome.failure
+		}
+		if outcome.terminal && !outcome.content {
+			return errEmptyStream
+		}
+		if !rawStreamWriter && outcome.payload != nil {
+			event = normalizedConversionEvent(outcome.payload)
+		}
+		if err := stream.push(w, event); err != nil {
+			return err
+		}
+		if rawStreamWriter && outcome.complete() {
+			deliveredTerminal = true
+		}
+		return nil
 	}
-	if failed {
-		// 错误路径：只有原样转发流会把 SSE 残余吐出去；两个转换流**不补**收尾事件
-		// （参照实现里那些事件在 try 内、循环之后，异常会整段跳过）。
+	err := stream.begin(w)
+	if err == nil {
+		err = runtime.IterStreamBytes(
+			contextOf(context.Request), runtime.NewBodyStreamReader(response.Body),
+			firstByteDeadline, idleTimeout,
+			func(chunk []byte) error {
+				lifecycle.ObserveChunk(len(chunk))
+				if inspectJSON && !jsonTooLarge {
+					if len(jsonBody)+len(chunk) > 1<<20 {
+						jsonTooLarge = true
+						jsonBody = nil
+					} else {
+						jsonBody = append(jsonBody, chunk...)
+					}
+				}
+				if outcome == nil {
+					return stream.push(w, chunk)
+				}
+				for _, event := range outcome.splitter.push(chunk) {
+					if err := forward(event); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+	}
+	if err == nil && outcome != nil {
+		if pending := outcome.splitter.pending(); len(pending) > 0 {
+			// 接受 EOF 前省略空行的完整最后事件；半截 JSON 仍无法证明成功。
+			err = forward(append(append([]byte(nil), pending...), '\n', '\n'))
+			outcome.splitter.clear()
+		}
+		if err == nil {
+			err = outcome.eofError()
+		}
+	}
+	if err == nil && inspectJSON {
+		payload := parseJSONOrNil(jsonBody)
+		lifecycle.SetUsage(mergeUsage(lifecycle.Usage(), protocol.ExtractUsage(payload)))
+		switch {
+		case jsonTooLarge:
+			err = errStreamConversion
+		case payload == nil || payload.Lookup("error").Truthy() || payload.Lookup("response").Lookup("error").Truthy():
+			err = errUpstreamStream
+		case !hasStreamContent(payload.Lookup("content")) && !hasStreamContent(payload.Lookup("output")) &&
+			!hasStreamContent(payload.Lookup("response").Lookup("output")):
+			valid := false
+			for _, choice := range protocol.OpenaiChoices(payload) {
+				valid = valid || hasStreamContent(choice.Lookup("message").Lookup("content")) ||
+					choice.Lookup("message").Lookup("tool_calls").Truthy() || choice.Lookup("message").Lookup("refusal").Truthy() ||
+					choice.Lookup("finish_reason").PyStr() == "content_filter"
+			}
+			if !valid {
+				err = errEmptyStream
+			}
+		}
+	}
+	if deliveredTerminal && outcome.failure == nil && errors.Is(err, io.ErrUnexpectedEOF) {
+		err = nil
+	}
+	downstreamEnded := downstreamCanceled(context) || errors.Is(err, errDownstreamWrite)
+	if downstreamCanceled(context) && deliveredTerminal && errors.Is(err, contextOf(context.Request).Err()) && outcome.failure == nil {
+		// 只有已成功下发终止事件后的取消才是正常提前关闭；写失败永远不是成功。
+		err = nil
+	}
+	if downstreamEnded && err == nil && !deliveredTerminal {
+		err = contextOf(context.Request).Err()
+		if err == nil {
+			err = errDownstreamWrite
+		}
+	}
+	if err == nil && !downstreamEnded {
+		err = stream.flush(w)
+		downstreamEnded = downstreamCanceled(context) || errors.Is(err, errDownstreamWrite)
+	}
+	if err != nil || downstreamEnded {
 		stream.abort(w)
-	} else {
-		stream.flush(w)
 	}
-	lifecycle.Finish(failed, response.Body)
+	if err != nil && outcome != nil && !downstreamEnded && !outcome.forwardedError {
+		writeStreamError(w, context.Path)
+	}
+	if err != nil || downstreamEnded {
+		logErr := err
+		if logErr == nil {
+			logErr = contextOf(context.Request).Err()
+			if logErr == nil {
+				logErr = errDownstreamWrite
+			}
+		}
+		payload := lifecycle.ErrorPayload(logErr, mediaType)
+		log := h.logger.Warn
+		message := "upstream stream error"
+		if downstreamEnded {
+			log = h.logger.Info
+			message = "downstream stream ended"
+		} else if outcome != nil && outcome.neutralHealth {
+			log = h.logger.Info
+			message = "upstream response incomplete"
+		}
+		log(message,
+			"error_type", payload["error_type"], "error", payload["error"],
+			"model_id", payload["model_id"], "requested_model_id", payload["requested_model_id"],
+			"key_name", payload["key_name"], "upstream", payload["upstream"],
+			"status_code", payload["status_code"], "content_type", payload["content_type"],
+			"chunks", payload["chunks"], "bytes", payload["bytes"], "duration_ms", payload["duration_ms"])
+	}
+	lifecycle.Finish(err != nil, response.Body, downstreamEnded || (outcome != nil && outcome.neutralHealth) || jsonTooLarge)
 }
 
 // sseEventSplitter 按 SSE 事件边界切分字节流。

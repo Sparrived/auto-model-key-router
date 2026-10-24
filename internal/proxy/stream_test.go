@@ -25,14 +25,8 @@ func (r *breakingReader) Read(p []byte) (int, error) {
 
 func (r *breakingReader) Close() error { return nil }
 
-// TestMidStreamErrorTerminatesSilently 固化「下游已开始收字节后永不重试，中途错误
-// 静默终止 SSE、不发错误帧」（proxy_handler.py:1137、1299、1392）。
-//
-// 三件事一起断言，缺一条都会让行为看起来「变好了」但实际与参照实现不同：
-//  1. 已经转发的完整事件仍然到达下游；
-//  2. **没有**任何错误帧（`event: error` / 上游错误 JSON）被写下去；
-//  3. 收尾照样执行：指标记 failed=true、key 在途计数归零、租约释放。
-func TestMidStreamErrorTerminatesSilently(t *testing.T) {
+// 已开始的流不重放，但必须告诉客户端失败，不能静默变成一个正常 HTTP EOF。
+func TestMidStreamErrorEmitsErrorFrame(t *testing.T) {
 	env := newTestEnv(t, simpleChatConfig(), Options{
 		BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
 	env.route("/v1/chat/completions", upstreamStep{
@@ -48,11 +42,8 @@ func TestMidStreamErrorTerminatesSilently(t *testing.T) {
 		t.Fatalf("状态码: got %d want 200（响应头已写出，不能再改）", recorder.Code)
 	}
 	body := recorder.Body.String()
-	if body != "data: {\"i\":1}\n\n" {
-		t.Fatalf("应转发已收到的完整事件且不发错误帧，实得 %q", body)
-	}
-	if strings.Contains(body, "error") {
-		t.Fatalf("中途错误不得写错误帧，实得 %q", body)
+	if !strings.HasPrefix(body, "data: {\"i\":1}\n\n") || strings.Count(body, "upstream_stream_error") != 1 {
+		t.Fatalf("应保留已到达事件并仅发一次安全错误帧，实得 %q", body)
 	}
 
 	records := env.metrics.take()
@@ -95,7 +86,7 @@ func TestMidStreamErrorDoesNotRetryOnAnotherKey(t *testing.T) {
 	recorder := env.request(http.MethodPost, "chat/completions",
 		`{"model":"vendor-model","messages":[],"stream":true}`, nil)
 
-	if recorder.Body.String() != "data: {\"i\":1}\n\n" {
+	if !strings.HasPrefix(recorder.Body.String(), "data: {\"i\":1}\n\n") || !strings.Contains(recorder.Body.String(), "upstream_stream_error") {
 		t.Fatalf("下游字节: %q", recorder.Body.String())
 	}
 	if len(env.transport.calls) != 1 {
@@ -104,11 +95,8 @@ func TestMidStreamErrorDoesNotRetryOnAnotherKey(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamMidStreamErrorEmitsNoErrorFrame 覆盖转换流的同一语义。
-//
-// Anthropic 重建流在失败前已经发出 message_start，中途错误同样只静默终止：
-// 不补 content_block_stop、不发 message_delta / message_stop。
-func TestAnthropicStreamMidStreamErrorEmitsNoErrorFrame(t *testing.T) {
+// 转换流遇上游错误发入站协议错误，不补成功收尾。
+func TestAnthropicStreamMidStreamErrorEmitsErrorFrame(t *testing.T) {
 	env := newTestEnv(t, simpleChatConfig(), Options{
 		BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
 	env.route("/v1/chat/completions", upstreamStep{
@@ -229,6 +217,152 @@ func TestRawStreamExtractsUsageAcrossChunks(t *testing.T) {
 	}
 	if got := usage.Lookup("completion_tokens").PyStr(); got != "8" {
 		t.Fatalf("completion_tokens: got %s want 8", got)
+	}
+}
+
+// 一个协议表覆盖真实客户端需要区分的成功、错误与非完整结束，不增加临时测试文件。
+func TestStreamBusinessOutcomes(t *testing.T) {
+	text := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+	finish := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	done := "data: [DONE]\n\n"
+	errFrame := "event: error\ndata: {\"error\":{\"message\":\"private-detail\"},\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n"
+	for _, tc := range []struct {
+		name, path, body, media string
+		native, failed          bool
+		want                    string
+	}{
+		{"empty", "chat/completions", "", "", false, true, "upstream_stream_error"},
+		{"heartbeat_malformed", "chat/completions", ": ping\n\nevent: ping\n\ndata: nope\n\n", "", false, true, "upstream_stream_error"},
+		{"missing_terminal", "chat/completions", text, "", false, true, "upstream_stream_error"},
+		{"done_no_output", "chat/completions", done, "", false, true, "upstream_stream_error"},
+		{"normal_finish_usage_done", "chat/completions", text + finish + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n" + done, "", false, false, "hi"},
+		{"normal_finish_only", "chat/completions", text + finish, "", false, false, "hi"},
+		{"raw_error_once", "chat/completions", errFrame + done, "", false, true, "private-detail"},
+		{"convert_error", "messages", errFrame + done, "", false, true, "upstream_stream_error"},
+		{"convert_multidata", "messages", "data: {\"choices\": [\ndata: {\"delta\":{\"content\":\"hi\"}}]}\n\n" + done, "", false, false, "hi"},
+		{"convert_no_repeat_done", "responses", text + done, "", false, false, "hi"},
+		{"convert_refusal", "responses", "data: {\"choices\":[{\"delta\":{\"refusal\":\"cannot help\"},\"finish_reason\":\"stop\"}]}\n\n", "", false, false, "cannot help"},
+		{"convert_old_tool", "responses", "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup\",\"arguments\":\"{}\"}},\"finish_reason\":\"function_call\"}]}\n\n", "", false, false, "lookup"},
+		{"unsupported_reasoning_conversion", "messages", "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thought\"},\"finish_reason\":\"stop\"}]}\n\n", "", false, true, "upstream_stream_error"},
+		{"content_filter", "messages", "data: {\"choices\":[{\"finish_reason\":\"content_filter\"}]}\n\n", "", false, false, "message_stop"},
+		{"native_anthropic_tool", "messages", "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"name\":\"lookup\",\"input\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "", true, false, "tool_use"},
+		{"native_responses_final_output", "responses", "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}]}}\n\n", "", true, false, "response.completed"},
+		{"native_responses_failed", "responses", "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n", "", true, true, "response.failed"},
+		{"raw_multidata_usage", "chat/completions", text + finish + "data: {\"choices\":[],\ndata: \"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n" + done, "", false, false, "hi"},
+		{"json_error", "chat/completions", "{\"error\":{\"message\":\"private-detail\"},\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}", "application/json", false, true, "private-detail"},
+		{"json_empty", "chat/completions", "", "application/json", false, true, ""},
+		{"json_normal_no_terminal", "chat/completions", "{\"choices\":[{\"message\":{\"content\":\"hi\"}}]}", "application/json", false, false, "hi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := simpleChatConfig()
+			cfg.Models[0].NativeFirst = tc.native
+			env := newTestEnv(t, cfg, Options{})
+			path := "/v1/chat/completions"
+			if tc.path == "responses" {
+				_ = env.pool.UpdateNativeEndpoint("https://upstream.test", tc.native, "v1/responses", "test")
+			}
+			if tc.native {
+				path = "/v1/" + tc.path
+				_ = env.pool.UpdateNativeEndpoint("https://upstream.test", true, strings.TrimPrefix(path, "/"), "test")
+			}
+			media := tc.media
+			if media == "" {
+				media = "text/event-stream"
+			}
+			env.route(path, upstreamStep{Status: 200, Headers: map[string]string{"content-type": media}, Reader: &chunkedReader{chunks: []string{tc.body[:len(tc.body)/2], tc.body[len(tc.body)/2:]}}})
+			result := env.request(http.MethodPost, tc.path, `{"model":"vendor-model","messages":[{"role":"user","content":"hi"}],"stream":true}`, nil)
+			body := result.Body.String()
+			records := env.metrics.take()
+			if result.Code != 200 || len(records) != 1 || records[0].Failed != tc.failed || records[0].Retried || *records[0].StatusCode != 200 {
+				t.Fatalf("status=%d records=%+v body=%s", result.Code, records, body)
+			}
+			if !strings.Contains(body, tc.want) || len(env.transport.calls) != 1 {
+				t.Fatalf("body=%q calls=%d", body, len(env.transport.calls))
+			}
+			if tc.failed && !tc.native && tc.path != "chat/completions" && (strings.Contains(body, "message_stop") || strings.Contains(body, "response.completed") || strings.Contains(body, "private-detail")) {
+				t.Fatalf("转换失败不得成功收尾或泄露上游detail: %s", body)
+			}
+			if tc.name == "raw_error_once" && (strings.Count(body, "event: error") != 1 || strings.Contains(body, "upstream_stream_error") || strings.Contains(body, "[DONE]")) {
+				t.Fatalf("错误必须仅转发一次: %s", body)
+			}
+			if tc.name == "convert_no_repeat_done" && strings.Count(body, `"delta":"hi"`) != 1 {
+				t.Fatalf("DONE不得重复上一delta: %s", body)
+			}
+			if strings.HasPrefix(media, "application/json") && body != tc.body {
+				t.Fatalf("JSON必须保持原始体: %s", body)
+			}
+			if strings.Contains(tc.body, `"prompt_tokens":3`) && (records[0].Usage.Lookup("prompt_tokens").PyStr() != "3" || records[0].Usage.Lookup("completion_tokens").PyStr() != "1") {
+				t.Fatalf("错误事件、多行data和JSON也应保留已知usage: %+v", records[0])
+			}
+		})
+	}
+	if checkStreamOutcome("audio/speech", "text/event-stream") || checkStreamOutcome("chat/completions", "application/octet-stream") {
+		t.Fatal("非聊天/非SSE不应套用终止判定")
+	}
+}
+
+type streamHealthProbe struct {
+	KeyPool
+	failures, successes, releases int
+}
+
+func (p *streamHealthProbe) MarkFailure(string, string, *int, *float64) { p.failures++ }
+func (p *streamHealthProbe) MarkSuccess(string, string)                 { p.successes++ }
+func (p *streamHealthProbe) ReleaseKey(model, key string) {
+	p.releases++
+	p.KeyPool.ReleaseKey(model, key)
+}
+
+type rejectingTerminalWriter struct{ *httptest.ResponseRecorder }
+
+func (w rejectingTerminalWriter) Write(b []byte) (int, error) {
+	if strings.Contains(string(b), "finish_reason") {
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseRecorder.Write(b)
+}
+
+func TestTerminalWriteFailureIsNotSuccessOrKeyFailure(t *testing.T) {
+	env := newTestEnv(t, simpleChatConfig(), Options{})
+	probe := &streamHealthProbe{KeyPool: env.pool}
+	env.resources.KeyPool = probe
+	env.route("/v1/chat/completions", sseStep("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n"))
+	w := rejectingTerminalWriter{httptest.NewRecorder()}
+	req := httptest.NewRequest(http.MethodPost, "http://testserver/v1/chat/completions", strings.NewReader(`{"model":"vendor-model","messages":[],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer local-key")
+	env.handler.Handle(w, req, "chat/completions")
+	records := env.metrics.take()
+	if len(records) != 1 || !records[0].Failed || probe.failures != 0 || probe.successes != 0 || probe.releases != 1 {
+		t.Fatalf("records=%+v health=%+v", records, probe)
+	}
+}
+
+func TestControlledIncompleteDoesNotPunishKey(t *testing.T) {
+	env := newTestEnv(t, simpleChatConfig(), Options{})
+	_ = env.pool.UpdateNativeEndpoint("https://upstream.test", true, "v1/responses", "test")
+	probe := &streamHealthProbe{KeyPool: env.pool}
+	env.resources.KeyPool = probe
+	frame := "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"
+	env.route("/v1/responses", sseStep(frame))
+	result := env.request(http.MethodPost, "responses", `{"model":"vendor-model","input":"hi","stream":true}`, nil)
+	records := env.metrics.take()
+	if result.Body.String() != frame || len(records) != 1 || !records[0].Failed || probe.failures != 0 || probe.successes != 0 || probe.releases != 1 {
+		t.Fatalf("body=%s records=%+v health=%+v", result.Body.String(), records, probe)
+	}
+}
+
+func TestStreamJSONObservationLimitLeavesKeyNeutral(t *testing.T) {
+	env := newTestEnv(t, simpleChatConfig(), Options{})
+	probe := &streamHealthProbe{KeyPool: env.pool}
+	env.resources.KeyPool = probe
+	body := `{"choices":[{"message":{"content":"` + strings.Repeat("x", 1<<20) + `"}}]}`
+	env.route("/v1/chat/completions", upstreamStep{
+		Status: 200, Headers: map[string]string{"content-type": "application/json"}, Body: body,
+	})
+	result := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model","stream":true}`, nil)
+	records := env.metrics.take()
+	if result.Body.String() != body || len(records) != 1 || !records[0].Failed || probe.failures != 0 || probe.successes != 0 || probe.releases != 1 || env.resources.ActiveLeases() != 0 {
+		t.Fatalf("JSON观察超限应原样透传、健康中性并释放资源: records=%+v health=%+v", records, probe)
 	}
 }
 

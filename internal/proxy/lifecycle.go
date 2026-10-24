@@ -137,7 +137,7 @@ func (l *streamLifecycle) ErrorPayload(err error, contentType string) map[string
 //  4. 最后关闭响应体。
 //
 // 幂等：sync.Once 保证只执行一次。
-func (l *streamLifecycle) Finish(failed bool, responseBody io.Closer) {
+func (l *streamLifecycle) Finish(failed bool, responseBody io.Closer, neutralHealth bool) {
 	l.finishOnce.Do(func() {
 		l.mu.Lock()
 		usage := l.usage
@@ -168,6 +168,8 @@ func (l *streamLifecycle) Finish(failed bool, responseBody io.Closer) {
 
 		if l.keyPool != nil {
 			switch {
+			case neutralHealth:
+				// 下游结束或受控预算/策略终止不能证明 key 好坏，也不能抹掉已有冷却。
 			case failed || IsRetryableStatus(l.statusCode):
 				// retry_after 交给调用方解析：流式收尾时上游响应体可能已被关闭，
 				// 但响应头仍在（参照实现读的是 response.headers）。
@@ -204,6 +206,12 @@ func errorTypeName(err error) string {
 		return "ReadTimeout"
 	}
 	switch {
+	case errors.Is(err, errUpstreamStream):
+		return "UpstreamStreamError"
+	case errors.Is(err, errEmptyStream), errors.Is(err, errIncompleteStream), errors.Is(err, errStreamConversion):
+		return "RemoteProtocolError"
+	case errors.Is(err, errDownstreamWrite):
+		return "DownstreamWriteError"
 	case errors.Is(err, context.Canceled):
 		return "CancelledError"
 	case errors.Is(err, context.DeadlineExceeded):
