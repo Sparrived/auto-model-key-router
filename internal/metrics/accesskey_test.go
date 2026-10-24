@@ -33,6 +33,43 @@ func recordAccessKey(t *testing.T, store *Store, accessKeyID, workspace, modelID
 	}
 }
 
+func TestAccessKeyLastUsed(t *testing.T) {
+	store := tempStore(t)
+	lastUsed, err := store.AccessKeyLastUsed()
+	if err != nil || len(lastUsed) != 0 {
+		t.Fatalf("空库最近调用 = %v, err=%v", lastUsed, err)
+	}
+
+	start := beijingTime(t, "2026-10-12T12:00:00+08:00")
+	for _, entry := range []struct {
+		id     string
+		offset time.Duration
+		failed bool
+	}{
+		{"trial", 0, false},
+		{"other", time.Hour, false},
+		{"trial", 2 * time.Hour, false},
+		{"trial", 2*time.Hour + time.Microsecond, true},
+		{"", 3 * time.Hour, false},
+	} {
+		installClock(t, start.Add(entry.offset))
+		if err := store.Record(RecordParams{
+			ModelID: "model", KeyName: "key", AccessKeyID: entry.id, Failed: entry.failed,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installClock(t, start.Add(48*time.Hour))
+	lastUsed, err = store.AccessKeyLastUsed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lastUsed) != 2 || lastUsed["trial"] != formatISO(start.Add(2*time.Hour+time.Microsecond)) ||
+		lastUsed["other"] != formatISO(start.Add(time.Hour)) {
+		t.Fatalf("最近调用 = %v，必须隔离密钥、包含失败与窗口外记录，并取同秒内最后一次写入", lastUsed)
+	}
+}
+
 // TestAccessKeyUsageIsolatesKeys 是本功能的**核心断言**：两把访问密钥的用量必须
 // 互不串味。
 //

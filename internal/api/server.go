@@ -98,6 +98,8 @@ type Server struct {
 	// KeyStats 对应 metrics.key_stats。internal/metrics 由另一个 agent 在写，本包
 	// 不依赖它，只留这个接缝。
 	KeyStats func(modelID, keyName string, hours *float64) (*canonical.Value, error)
+	// AccessKeyLastUsed 读取访问密钥的最近调用时间；nil 表示未装配指标读数。
+	AccessKeyLastUsed func() (map[string]string, error)
 	// UUIDHex 生成 32 位十六进制，对应 `uuid.uuid4().hex`（探测 id 与导入备份
 	// 文件名后缀都用它）。nil 表示用密码学随机数；注入固定值是为了让测试能对 id
 	// 做断言。

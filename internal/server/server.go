@@ -246,12 +246,13 @@ func New(options Options) (*App, error) {
 	app.wsProxy = &wsproxy.Handler{Proxy: app.proxy.Handle, Logger: options.Logger}
 
 	app.api = &api.Server{
-		ConfigPath:    app.configPath,
-		Reload:        app.reload,
-		CurrentConfig: func() *config.RouterConfig { return app.manager.Current().Config },
-		Authorizer:    options.Authorizer,
-		CheckUpdate:   options.CheckUpdate,
-		KeyStats:      app.keyStats,
+		ConfigPath:        app.configPath,
+		Reload:            app.reload,
+		CurrentConfig:     func() *config.RouterConfig { return app.manager.Current().Config },
+		Authorizer:        options.Authorizer,
+		CheckUpdate:       options.CheckUpdate,
+		KeyStats:          app.keyStats,
+		AccessKeyLastUsed: app.accessKeyLastUsed,
 		// 运维面（7 条路由）与 /api/tool 的读数。OpsEnabled 为零值时 api 一条 ops
 		// 路由都不注册（落进兜底 404），因此**必须**显式传入，否则 /api/logs 等
 		// URL 在装配后的服务上完全不可达。
@@ -326,6 +327,20 @@ func (a *App) keyStats(modelID, keyName string, hours *float64) (*canonical.Valu
 		return nil, errors.New("server: 指标库未装配")
 	}
 	return adapter.store.KeyStats(modelID, keyName, hours)
+}
+
+func (a *App) accessKeyLastUsed() (map[string]string, error) {
+	// 持有租约直到查询结束，避免并发热换库关闭正在读取的指标库。
+	lease, err := a.manager.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	store := metricsStoreOf(lease.Resources)
+	if store == nil {
+		return nil, errors.New("server: 指标库未装配")
+	}
+	return store.AccessKeyLastUsed()
 }
 
 // currentMetricsAdapter 返回**当前代**的指标适配器。

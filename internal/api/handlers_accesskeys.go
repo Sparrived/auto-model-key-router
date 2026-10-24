@@ -119,8 +119,22 @@ func (s *Server) handleListAccessKeys(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
+		items := accessKeyCatalog(cfg)
+		if s.AccessKeyLastUsed != nil {
+			lastUsed, err := s.AccessKeyLastUsed()
+			if err != nil {
+				return nil, err
+			}
+			for _, entry := range items.Arr {
+				lastUsedAt := canonical.NewNull()
+				if at, ok := lastUsed[entry.Lookup("id").StringValue()]; ok {
+					lastUsedAt = canonical.NewString(at)
+				}
+				entry.SetKey("last_used_at", lastUsedAt)
+			}
+		}
 		return withRevision(data, objectOf(
-			canonical.ObjectPair{Key: "access_keys", Value: accessKeyCatalog(cfg)},
+			canonical.ObjectPair{Key: "access_keys", Value: items},
 		))
 	})
 }

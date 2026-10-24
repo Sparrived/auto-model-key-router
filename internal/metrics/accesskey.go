@@ -22,6 +22,29 @@ import (
 // 读数**——访问密钥不绑定工作空间，一把 key 的流量会散在多个 workspace 值里，
 // 按 workspace 过滤答不出「这把 key 用了多少」。
 
+// AccessKeyLastUsed 返回每把访问密钥最近一次已记录的上游尝试时间，含失败，不限统计窗口。
+func (s *Store) AccessKeyLastUsed() (map[string]string, error) {
+	// 与最近调用一致按写入序取最后一条，避免 ISO 整秒/微秒混写时 MAX(created_at) 的字典序误判。
+	rows, err := s.db().Query(
+		"SELECT a.access_key_id, m.created_at FROM" +
+			" (SELECT access_key_id, MAX(request_id) AS request_id FROM request_access_key GROUP BY access_key_id) a" +
+			" JOIN request_metrics m ON m.id = a.request_id",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	lastUsed := map[string]string{}
+	for rows.Next() {
+		var id, createdAt string
+		if err := rows.Scan(&id, &createdAt); err != nil {
+			return nil, err
+		}
+		lastUsed[id] = createdAt
+	}
+	return lastUsed, rows.Err()
+}
+
 // AccessKeyUsageParams 是访问密钥读数的参数。
 //
 // Hours 为 nil 表示不设时间窗口（对应 /metrics 的 all_history）。
@@ -55,7 +78,7 @@ const MaxAccessKeyRecentLimit = 200
 //   - model_id：本地路由名，回答「用了哪些模型」——这是调用方自己配的名字；
 //   - provider_id：回答「打到哪些供应商」；
 //   - upstream_model_id：真正发给上游的模型名，**唯一能与价格目录对上的字段**
-//     （见 webui/pricing.js 的 requestCost 注释）。看板的「花费」必须按它分组求和，
+//     （见 web/src/lib/pricing.ts 的 requestCost 注释）。看板的「花费」必须按它分组求和，
 //     否则只能拿本地路由名去猜单价。代价是这一维通常比前两维多几项，但那是真实
 //     数据，而把成本算错更糟。
 //

@@ -131,6 +131,39 @@ func TestAccessKeyListNeverLeaksPlaintext(t *testing.T) {
 	}
 }
 
+func TestAccessKeyListLastUsed(t *testing.T) {
+	server, path := accessKeyServer(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.AccessKeyLastUsed = func() (map[string]string, error) {
+		return map[string]string{"trial": "2026-10-14T15:20:30+08:00", "deleted": "2026-10-14T16:00:00+08:00"}, nil
+	}
+	response := callAccessKeys(t, server, http.MethodGet, "/api/access-keys", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d: %s", response.Code, response.Body.String())
+	}
+	keys := decodeObject(t, response)["access_keys"].([]any)
+	if len(keys) != 2 {
+		t.Fatalf("目录不应包含已删除的密钥: %v", keys)
+	}
+	if at := keys[0].(map[string]any)["last_used_at"]; at != "2026-10-14T15:20:30+08:00" {
+		t.Errorf("最近调用时间 = %v", at)
+	}
+	if at, present := keys[1].(map[string]any)["last_used_at"]; !present || at != nil {
+		t.Errorf("无调用记录应显式返回 null: %v", keys[1])
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("读取调用时间不应修改配置, err=%v", err)
+	}
+	server.AccessKeyLastUsed = func() (map[string]string, error) { return nil, os.ErrClosed }
+	if response := callAccessKeys(t, server, http.MethodGet, "/api/access-keys", ""); response.Code != http.StatusInternalServerError {
+		t.Fatalf("指标读取失败不能伪装成无调用记录: %d %s", response.Code, response.Body.String())
+	}
+}
+
 // TestAccessKeyScopeTriState 断言两份清单的三态在响应里可区分。
 //
 // 「省略」（不限制）与「空数组」（一个都不许）是**不同**的授权状态，列表与单条响应都
