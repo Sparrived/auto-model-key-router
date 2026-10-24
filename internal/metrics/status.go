@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 // 拼成一个响应（与 filteredmetrics.go 同一条理由）：
 //
 //   - snapshot：与 GET /metrics 同形，窗口内这组条件下的总量与九个分组；
+//   - failure_status_codes：仅失败记录的精确状态码分组，不从状态码总量推测错误原因；
 //   - series：与 GET /metrics/series 的点**完全同形**的趋势；
 //   - matrix：按渠道维度（供应商 / 供应商 + 上游模型 / 供应商 + 上游 Key）分组、
 //     按与 series **同一个桶网格**铺开的请求数、成功数、失败数、token 与耗时。
@@ -63,10 +65,9 @@ type StatusMonitorParams struct {
 	// GroupBy 是矩阵的行身份，取值见 StatusGroupBy* 常量；空串按缺省值
 	// StatusGroupByProvider 处理（服务端总归会填上缺省值，存储层不依赖这一点）。
 	GroupBy string
-	// ProviderIDs / AccessKeyIDs 与 filtered metrics 同一套语义：维度内 OR、维度间
-	// AND，都为空 = 全实例读数。三份读数（含 matrix 的行集合）一并收窄。
-	ProviderIDs  []string
-	AccessKeyIDs []string
+	// Dimensions 与 filtered metrics 同一套语义（见 dimensions.go）：维度内 OR、维度间
+	// AND，全部为空 = 全实例读数。四份读数（含 matrix 的行集合与失败状态码）一并收窄。
+	Dimensions
 }
 
 // 矩阵的分组维度。这三个字符串是**对外契约**（查询参数 group_by 的取值域），
@@ -110,7 +111,7 @@ const (
 //
 //	{
 //	  count_semantics, window: {from, to, hours},
-//	  filters: {provider_ids: [...], access_key_ids: [...]},
+//	  filters: {…与 /ui/filtered-metrics.json 同形，见 dimensionsEcho…},
 //	  group_by, bucket_seconds,
 //	  snapshot: {…与 GET /metrics 完全同形…},
 //	  series: {bucket_seconds, points: [与 /metrics/series 同形的点]},
@@ -173,12 +174,12 @@ func (s *Store) StatusMonitor(params StatusMonitorParams) (*canonical.Value, err
 	firstEpoch := bucketEpoch(windowStart, bucketSeconds)
 	lastEpoch := bucketEpoch(now, bucketSeconds)
 
-	snapshot, err := s.snapshotSync(&params.Hours, nil, now, params.ProviderIDs, params.AccessKeyIDs)
+	snapshot, err := s.snapshotSync(&params.Hours, nil, now, params.Dimensions)
 	if err != nil {
 		return nil, err
 	}
 	points, err := s.seriesPoints(
-		queryFilter{ProviderIDs: params.ProviderIDs, AccessKeyIDs: params.AccessKeyIDs},
+		queryFilter{Dimensions: params.Dimensions},
 		bucketSeconds,
 		firstEpoch,
 		now,
@@ -191,6 +192,10 @@ func (s *Store) StatusMonitor(params StatusMonitorParams) (*canonical.Value, err
 		return nil, err
 	}
 	rows, rowsTruncated := statusMatrixValue(groupBy, groups, firstEpoch, lastEpoch, bucketSeconds, now)
+	failureStatusCodes, err := s.statusFailureCodes(params, windowStart, now)
+	if err != nil {
+		return nil, err
+	}
 
 	return canonical.NewObjectOf(
 		canonical.ObjectPair{Key: "count_semantics", Value: canonical.NewString(CountSemantics)},
@@ -199,13 +204,11 @@ func (s *Store) StatusMonitor(params StatusMonitorParams) (*canonical.Value, err
 			canonical.ObjectPair{Key: "to", Value: canonical.NewString(formatISO(now))},
 			canonical.ObjectPair{Key: "hours", Value: canonical.NewFloat(params.Hours)},
 		)},
-		canonical.ObjectPair{Key: "filters", Value: canonical.NewObjectOf(
-			canonical.ObjectPair{Key: "provider_ids", Value: stringArray(params.ProviderIDs)},
-			canonical.ObjectPair{Key: "access_key_ids", Value: stringArray(params.AccessKeyIDs)},
-		)},
+		canonical.ObjectPair{Key: "filters", Value: dimensionsEcho(params.Dimensions)},
 		canonical.ObjectPair{Key: "group_by", Value: canonical.NewString(groupBy)},
 		canonical.ObjectPair{Key: "bucket_seconds", Value: canonical.NewIntValue(bucketSeconds)},
 		canonical.ObjectPair{Key: "snapshot", Value: snapshot},
+		canonical.ObjectPair{Key: "failure_status_codes", Value: failureStatusCodes},
 		canonical.ObjectPair{Key: "series", Value: canonical.NewObjectOf(
 			canonical.ObjectPair{Key: "bucket_seconds", Value: canonical.NewIntValue(bucketSeconds)},
 			canonical.ObjectPair{Key: "points", Value: points},
@@ -216,6 +219,40 @@ func (s *Store) StatusMonitor(params StatusMonitorParams) (*canonical.Value, err
 			canonical.ObjectPair{Key: "rows_truncated", Value: canonical.NewIntValue(rowsTruncated)},
 		)},
 	), nil
+}
+
+// statusFailureCodes 只聚合真实失败；200 断流与 NULL 状态码不能靠总数相减区分。
+//
+// 「只看失败」用的是 metricFilter 的**单值** Success（固定 false），与 Dimensions.Success
+// 是两个独立条件：调用方筛 success=true 时两条同时成立，结果是空对象——成功的请求里
+// 本来就没有失败状态码，这是正确答案（见 dimensions.go 文件头）。
+func (s *Store) statusFailureCodes(params StatusMonitorParams, start, now time.Time) (*canonical.Value, error) {
+	since, until := formatISO(start), formatISO(now)
+	failed := false
+	where, args := (metricFilter{
+		SinceCreatedAt: &since, UntilCreatedAt: &until, Success: &failed,
+		Dimensions: params.Dimensions,
+	}).sql()
+	rows, err := s.readDB.Query("SELECT status_code, COUNT(*) FROM request_metrics"+where+
+		" GROUP BY status_code ORDER BY status_code", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := canonical.NewObject()
+	for rows.Next() {
+		var status sql.NullInt64
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		key := "none"
+		if status.Valid {
+			key = strconv.FormatInt(status.Int64, 10)
+		}
+		result.Obj.Set(key, canonical.NewIntValue(count))
+	}
+	return result, rows.Err()
 }
 
 // statusDimensions 把 group_by 映射成 SQL 分组列。
@@ -276,7 +313,7 @@ type statusMatrixGroup struct {
 // statusMatrixGroups 用一次 SQL 扫描取出矩阵的全部格子，并按行聚好。
 //
 // 与 seriesPoints 一样：分桶表达式放进 SELECT、窗口与筛选条件放进 WHERE，参数顺序
-// （先分桶的 4 个锚点/宽度参数，再窗口参数，最后两个筛选维度）与 seriesPoints 逐字
+// （先分桶的 4 个锚点/宽度参数，再窗口参数，最后是多值筛选维度）与 seriesPoints 逐字
 // 相同——两份读数因此落在同一个桶网格上。GROUP BY 用别名 bucket_epoch（SQLite 允许
 // 在 GROUP BY 里引用结果别名，seriesPoints 同样这么写）。
 func (s *Store) statusMatrixGroups(
@@ -292,8 +329,7 @@ func (s *Store) statusMatrixGroups(
 	whereSQL, parameters := metricFilter{
 		SinceCreatedAt: &startStr,
 		UntilCreatedAt: &untilStr,
-		ProviderIDs:    params.ProviderIDs,
-		AccessKeyIDs:   params.AccessKeyIDs,
+		Dimensions:     params.Dimensions,
 	}.sql()
 
 	columnSQL := strings.Join(dimensions, ", ")

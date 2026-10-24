@@ -8,7 +8,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 )
 
-// 本文件回答「**按供应商 / 按访问密钥筛选后**这一页该看到什么」：概览读数（snapshot）、
+// 本文件回答「**按一组维度筛选后**这一页该看到什么」：概览读数（snapshot）、
 // 趋势（series）与最近明细（requests）三份同窗口的读数拼成一个响应（**有意增补**：参照
 // 实现既没有供应商筛选也没有访问密钥，没有可比对的 oracle）。
 //
@@ -26,12 +26,14 @@ import (
 // 的 filters 回显也是已发布字节）。因此过滤能力只对本项目自有的读数开放，单独一条 /ui
 // 路由，与 keyusage.go、accesskey.go 同一条理由。
 //
-// # 两个维度的语义
+// # 维度的语义
 //
-// **维度内多选是 OR、维度间是 AND**：同一参数重复出现收成 `IN (?, …)`，两个维度同时
-// 出现则是两组条件同时成立（`provider_id IN (?) AND id IN (SELECT …)`）。
+// 维度最早只有供应商与访问密钥两个，现在是 Dimensions 的七个（供应商、访问密钥、模型、
+// 上游 Key、工作空间、调用方档位、成败，见 dimensions.go）。**维度内多选是 OR、维度间是
+// AND**：同一参数重复出现收成 `IN (?, …)`，多个维度同时出现则是几组条件同时成立
+// （`provider_id IN (?) AND id IN (SELECT …)`）。
 //
-// 两个维度都不给 = 全实例读数（与 /metrics 系列等价）。这条路径**保留**着，不是为了给
+// 全部维度都不给 = 全实例读数（与 /metrics 系列等价）。这条路径**保留**着，不是为了给
 // 界面用（界面不会这么发），而是因为「不筛」与「筛一个不存在的值」必须是两件不同的事：
 // 前者该回全量，后者该回空。
 //
@@ -51,7 +53,7 @@ const maxFilteredMetricsItems = 200
 // minSeriesBucketSeconds 是自动桶的下限，与 /metrics/series 的 bucket_seconds 下界一致。
 const minSeriesBucketSeconds = 15
 
-// FilteredMetricsParams 是「按供应商 / 访问密钥筛选的整页读数」的参数。
+// FilteredMetricsParams 是「按一组维度筛选的整页读数」的参数。
 type FilteredMetricsParams struct {
 	// Hours 为 nil 表示不设时间窗口（对应 /metrics 的 all_history）。
 	Hours *float64
@@ -60,13 +62,12 @@ type FilteredMetricsParams struct {
 	// Limit 是 requests 明细的条数；0 表示不要明细（响应里 requests 为 null），
 	// 大于 0 时沿用 request_history 的 limit 语义（1..200）。
 	Limit int64
-	// ProviderIDs / AccessKeyIDs 是两个筛选维度：各自内部是「或」的一组取值，两组之间
-	// 是「与」。都为空 = 不筛（全实例读数），此时 SQL 与响应和没有这两个维度时一致。
+	// Dimensions 是筛选维度：每个维度内部是「或」的一组取值，维度之间是「与」。全部为空
+	// = 不筛（全实例读数），此时 SQL 与没有这些维度时一致（filters 回显全是空数组与 null）。
 	//
-	// 访问密钥的归属读自 request_access_key 旁挂表：完整权限、工作空间凭据写入的行以及
-	// 历史行都没有归属，因此不会被任何一把 key 算进去（与 accesskey.go 同一口径）。
-	ProviderIDs  []string
-	AccessKeyIDs []string
+	// 访问密钥 / 工作空间的归属读自旁挂表：没有归属的行（完整权限、历史行等）不会被任何
+	// 一把 key、任何一个空间算进去（与 accesskey.go、workspace.go 同一口径）。
+	Dimensions
 }
 
 // FilteredMetrics 返回这组筛选条件下的概览、趋势与（可选的）最近明细。
@@ -75,15 +76,16 @@ type FilteredMetricsParams struct {
 //
 //	{
 //	  count_semantics, window: {from, to, hours},
-//	  filters: {provider_ids: [...], access_key_ids: [...]},
+//	  filters: {provider_ids, access_key_ids, model_ids, upstream_keys: [{provider_id, key_name}],
+//	            workspaces, caller_types, success},
 //	  snapshot: {…与 GET /metrics 完全同形，但全部分组/总量/rate 窗口都收窄到这些条件…},
 //	  series: {bucket_seconds, points: [与 /metrics/series 同形的点]},
 //	  requests: null | {items: [与 /metrics/requests 同形的条目],
 //	                    next_before_id, total_items}
 //	}
 //
-// filters 回显**筛选值本身**（两个数组，未筛的维度是空数组）：界面据此回显当前条件，
-// 不必把 URL 再解析一遍。
+// filters 回显**筛选值本身**（见 dimensionsEcho：未筛的列表维度是空数组，未筛的 success
+// 是 null）：界面据此回显当前条件，不必把 URL 再解析一遍。
 //
 // snapshot 直接复用 snapshotSync 的整份响应（含 started_at / database_path /
 // active_requests）：同形比精简更值钱——界面渲染概览的那套代码可以原样复用。
@@ -114,7 +116,7 @@ func (s *Store) FilteredMetrics(params FilteredMetricsParams) (*canonical.Value,
 
 	// 三份读数共用同一个 now：snapshotSync 与 requestHistorySync 都从这里拿到同一个
 	// 封口（created_at <= now），series 的最后一个桶也以它收尾。
-	snapshot, err := s.snapshotSync(params.Hours, nil, now, params.ProviderIDs, params.AccessKeyIDs)
+	snapshot, err := s.snapshotSync(params.Hours, nil, now, params.Dimensions)
 	if err != nil {
 		return nil, err
 	}
@@ -128,10 +130,9 @@ func (s *Store) FilteredMetrics(params FilteredMetricsParams) (*canonical.Value,
 	requests := canonical.NewNull()
 	if params.Limit > 0 {
 		history, err := s.requestHistorySync(RequestHistoryParams{
-			Hours:        params.Hours,
-			ProviderIDs:  params.ProviderIDs,
-			AccessKeyIDs: params.AccessKeyIDs,
-			Limit:        params.Limit,
+			Hours:      params.Hours,
+			Dimensions: params.Dimensions,
+			Limit:      params.Limit,
 		}, now)
 		if err != nil {
 			return nil, err
@@ -152,10 +153,7 @@ func (s *Store) FilteredMetrics(params FilteredMetricsParams) (*canonical.Value,
 			canonical.ObjectPair{Key: "to", Value: canonical.NewString(formatISO(now))},
 			canonical.ObjectPair{Key: "hours", Value: hoursValue(params.Hours)},
 		)},
-		canonical.ObjectPair{Key: "filters", Value: canonical.NewObjectOf(
-			canonical.ObjectPair{Key: "provider_ids", Value: stringArray(params.ProviderIDs)},
-			canonical.ObjectPair{Key: "access_key_ids", Value: stringArray(params.AccessKeyIDs)},
-		)},
+		canonical.ObjectPair{Key: "filters", Value: dimensionsEcho(params.Dimensions)},
 		canonical.ObjectPair{Key: "snapshot", Value: snapshot},
 		canonical.ObjectPair{Key: "series", Value: canonical.NewObjectOf(
 			canonical.ObjectPair{Key: "bucket_seconds", Value: canonical.NewIntValue(bucketSeconds)},
@@ -167,7 +165,7 @@ func (s *Store) FilteredMetrics(params FilteredMetricsParams) (*canonical.Value,
 
 // stringArray 把筛选值渲染成 JSON 数组；空维度是空数组而不是 null。
 //
-// 界面据这两个数组回显当前筛选条件，空维度必须是 `[]`（「这个维度不设限」）：给 null
+// 界面据这些数组回显当前筛选条件，空维度必须是 `[]`（「这个维度不设限」）：给 null
 // 会让读端在两处各写一次判空，而且「没筛」与「筛了空列表」在响应里也就分不开了。
 func stringArray(values []string) *canonical.Value {
 	items := make([]*canonical.Value, 0, len(values))
@@ -191,76 +189,94 @@ func objectField(object *canonical.Value, key string) *canonical.Value {
 
 // filteredSeries 取 series 部分的桶宽与点数组，窗口与 snapshot 相同（同一个 now）。
 //
-// hours 给了就用 hours；all_history 时用**这组条件自己的**最早一条记录折算跨度——
-// series 没有「不限窗口」的形态（点是从起点零填充出来的，必须有起点），而一组筛选结果
-// 有多长只有库里知道。
+// 桶网格由 seriesGrid 定下（UsageBreakdown 用的是同一个函数，两份读数的桶因此逐个对齐）；
+// 这里只负责「没有网格时给空数组」与取点。
 func (s *Store) filteredSeries(params FilteredMetricsParams, now time.Time) (int64, *canonical.Value, error) {
-	var start time.Time
-	// 点数上限的判据与 TimeSeries 相同（ceil(跨度/桶宽) + 1 > 上限），只是 hours 分支
-	// 直接用调用方给的 hours、all_history 分支用数据里真实的跨度。
-	var spanSeconds float64
-	if params.Hours != nil {
-		start = addHours(now, *params.Hours)
-		spanSeconds = *params.Hours * 3600
-	} else {
-		earliest, found, err := s.firstFilteredSecond(params.ProviderIDs, params.AccessKeyIDs, now)
-		if err != nil {
-			return 0, nil, err
-		}
-		if !found {
-			// 这组条件一条记录都没有：空窗口是合法状态，给空数组而不是报错——与
-			// snapshot / requests 在空库上的行为一致。
-			bucketSeconds := params.BucketSeconds
-			if bucketSeconds == 0 {
-				bucketSeconds = minSeriesBucketSeconds
-			}
-			return bucketSeconds, canonical.NewArray(), nil
-		}
-		start = fromUnix(earliest)
-		spanSeconds = float64(unixSecondsTruncated(now) - earliest)
+	bucketSeconds, firstEpoch, found, err := s.seriesGrid(params.Hours, params.BucketSeconds, params.Dimensions, now)
+	if err != nil {
+		return 0, nil, err
 	}
-
-	bucketSeconds := params.BucketSeconds
-	if bucketSeconds == 0 {
-		bucketSeconds = autoSeriesBucket(spanSeconds)
-	} else {
-		// hours 分支直接用调用方给的值（别用 spanSeconds/3600 回转，浮点往返会在
-		// 边界上差一个点）；all_history 分支没有 hours 可用，用数据真实跨度折算。
-		hours := spanSeconds / 3600
-		if params.Hours != nil {
-			hours = *params.Hours
-		}
-		if seriesPointLimitExceeded(hours, bucketSeconds) {
-			// 显式给了桶宽就照它算，超上限报错而不是静默换一个更粗的桶：调用方以为拿到
-			// 了 60 秒的桶、实际拿到 15 分钟的，比一句明确的拒绝糟糕得多（与
-			// /metrics/series 同一取舍）。
-			return 0, nil, formatValidationError("time series cannot exceed %d points", MaxSeriesPoints)
-		}
+	if !found {
+		// 这组条件一条记录都没有：空窗口是合法状态，给空数组而不是报错——与
+		// snapshot / requests 在空库上的行为一致。
+		return bucketSeconds, canonical.NewArray(), nil
 	}
-
-	points, err := s.seriesPoints(
-		queryFilter{ProviderIDs: params.ProviderIDs, AccessKeyIDs: params.AccessKeyIDs},
-		bucketSeconds,
-		bucketEpoch(start, bucketSeconds),
-		now,
-	)
+	points, err := s.seriesPoints(queryFilter{Dimensions: params.Dimensions}, bucketSeconds, firstEpoch, now)
 	if err != nil {
 		return 0, nil, err
 	}
 	return bucketSeconds, points, nil
 }
 
+// seriesGrid 定下 /ui 趋势读数的桶网格：桶宽与首桶起点（已按桶对齐）。
+//
+// hours 给了就用 hours；all_history（hours 为 nil）时用**这组条件自己的**最早一条记录
+// 折算跨度——series 没有「不限窗口」的形态（点是从起点零填充出来的，必须有起点），而一组
+// 筛选结果有多长只有库里知道。第三个返回值为 false 表示 all_history 下这组条件一条记录都
+// 没有：此时没有网格，桶宽回调用方给的值（自动时回下限 15 秒），调用方给空序列。
+//
+// requested 为 0 表示自动（autoSeriesBucket）；大于 0 时照它算，点数超上限报
+// ValidationError 而不是静默换一个更粗的桶。FilteredMetrics 与 UsageBreakdown 都走这里：
+// 「同一组参数得到同一张网格」只有共用一处实现才成立。
+func (s *Store) seriesGrid(
+	hours *float64,
+	requested int64,
+	dims Dimensions,
+	now time.Time,
+) (bucketSeconds, firstEpoch int64, found bool, err error) {
+	var start time.Time
+	// 点数上限的判据与 TimeSeries 相同（ceil(跨度/桶宽) + 1 > 上限），只是 hours 分支
+	// 直接用调用方给的 hours、all_history 分支用数据里真实的跨度。
+	var spanSeconds float64
+	if hours != nil {
+		start = addHours(now, *hours)
+		spanSeconds = *hours * 3600
+	} else {
+		earliest, exists, err := s.firstFilteredSecond(dims, now)
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if !exists {
+			bucketSeconds = requested
+			if bucketSeconds == 0 {
+				bucketSeconds = minSeriesBucketSeconds
+			}
+			return bucketSeconds, 0, false, nil
+		}
+		start = fromUnix(earliest)
+		spanSeconds = float64(unixSecondsTruncated(now) - earliest)
+	}
+
+	bucketSeconds = requested
+	if bucketSeconds == 0 {
+		bucketSeconds = autoSeriesBucket(spanSeconds)
+	} else {
+		// hours 分支直接用调用方给的值（别用 spanSeconds/3600 回转，浮点往返会在
+		// 边界上差一个点）；all_history 分支没有 hours 可用，用数据真实跨度折算。
+		spanHours := spanSeconds / 3600
+		if hours != nil {
+			spanHours = *hours
+		}
+		if seriesPointLimitExceeded(spanHours, bucketSeconds) {
+			// 显式给了桶宽就照它算，超上限报错而不是静默换一个更粗的桶：调用方以为拿到
+			// 了 60 秒的桶、实际拿到 15 分钟的，比一句明确的拒绝糟糕得多（与
+			// /metrics/series 同一取舍）。
+			return 0, 0, false, formatValidationError("time series cannot exceed %d points", MaxSeriesPoints)
+		}
+	}
+	return bucketSeconds, bucketEpoch(start, bucketSeconds), true, nil
+}
+
 // firstFilteredSecond 取这组筛选条件在窗口内最早一条记录的 unix 秒。
 //
 // 用 SQLite 的 strftime('%s') 而不是把 created_at 文本解析回 time.Time：分桶表达式
 // 本来就是这么算的（见 bucketSQL），两边必须用同一套秒定义，否则桶边界会位移。这里
-// 复用 metricFilter 拼条件，省得把两个维度的条件再抄一遍。
-func (s *Store) firstFilteredSecond(providerIDs, accessKeyIDs []string, until time.Time) (int64, bool, error) {
+// 复用 metricFilter 拼条件，省得把各维度的条件再抄一遍。
+func (s *Store) firstFilteredSecond(dims Dimensions, until time.Time) (int64, bool, error) {
 	untilStr := formatISO(until)
 	whereSQL, parameters := metricFilter{
 		UntilCreatedAt: &untilStr,
-		ProviderIDs:    providerIDs,
-		AccessKeyIDs:   accessKeyIDs,
+		Dimensions:     dims,
 	}.sql()
 	var epoch sql.NullInt64
 	err := s.db().QueryRow(

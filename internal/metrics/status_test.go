@@ -400,7 +400,7 @@ func TestStatusMonitorFilters(t *testing.T) {
 	for _, testCase := range cases {
 		value := statusMonitorValue(t, store, StatusMonitorParams{
 			Hours: hours, BucketSeconds: 3600,
-			ProviderIDs: testCase.providerIDs, AccessKeyIDs: testCase.accessKeyIDs,
+			Dimensions: Dimensions{ProviderIDs: testCase.providerIDs, AccessKeyIDs: testCase.accessKeyIDs},
 		})
 		if got := snapshotTotalRequests(t, value); got != testCase.want {
 			t.Errorf("%s: snapshot.total.requests = %d，期望 %d", testCase.name, got, testCase.want)
@@ -568,6 +568,46 @@ func TestStatusMonitorAutoBucket(t *testing.T) {
 	}
 	if validation.Message != "time series cannot exceed 500 points" {
 		t.Errorf("错误文本 = %q，期望与 /metrics/series 一致", validation.Message)
+	}
+}
+
+func TestStatusMonitorFailureStatusCodes(t *testing.T) {
+	store := tempStore(t)
+	seedStatusMonitor(t, store)
+	ok, redirect := int64(200), int64(302)
+	provider := "prov-a"
+	for _, record := range []RecordParams{
+		{ModelID: "empty", KeyName: "k", ProviderID: &provider, AccessKeyID: "ak1", StatusCode: &ok, Failed: true},
+		{ModelID: "redirect", KeyName: "k", ProviderID: &provider, AccessKeyID: "ak1", StatusCode: &redirect},
+	} {
+		if err := store.Record(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, testCase := range []struct {
+		name   string
+		params StatusMonitorParams
+		want   string
+	}{
+		{"all", StatusMonitorParams{Hours: 24}, `{"none":1,"200":1,"500":1}`},
+		{"provider", StatusMonitorParams{Hours: 24, Dimensions: Dimensions{ProviderIDs: []string{"prov-a"}}}, `{"200":1,"500":1}`},
+		{"key", StatusMonitorParams{Hours: 24, Dimensions: Dimensions{AccessKeyIDs: []string{"ak2"}}}, `{}`},
+		{"matching key", StatusMonitorParams{Hours: 24, Dimensions: Dimensions{AccessKeyIDs: []string{"ak1"}}}, `{"200":1,"500":1}`},
+		{"intersection", StatusMonitorParams{Hours: 24, Dimensions: Dimensions{ProviderIDs: []string{"prov-b"}, AccessKeyIDs: []string{"ak1"}}}, `{}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			value := statusMonitorValue(t, store, testCase.params)
+			got := canonical.DumpsOrdered(statusMonitorField(t, value, "failure_status_codes"))
+			if got != testCase.want {
+				t.Fatalf("失败分组 = %s，期望 %s", got, testCase.want)
+			}
+		})
+	}
+	// 窗口外的 200 失败不污染分组；旧快照的状态码合计仍保持原协议。
+	installClock(t, beijingTime(t, "2026-07-15T13:00:00+08:00"))
+	value := statusMonitorValue(t, store, StatusMonitorParams{Hours: 24})
+	if got := canonical.DumpsOrdered(statusMonitorField(t, value, "failure_status_codes")); got != `{}` {
+		t.Fatalf("窗口外失败不应计入: %s", got)
 	}
 }
 

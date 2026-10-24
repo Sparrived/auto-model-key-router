@@ -169,13 +169,13 @@ func (g *snapshotGroups) targets() []rollupTarget {
 // 时间边界与参照实现一致（`created_at >= ?` / `created_at <= ?`），为 nil 表示不设该
 // 边界（all_history 与内部 since 都是这种形态）。
 //
-// providerIDs / accessKeyIDs 非空时只统计这些供应商 / 这些访问密钥发起的请求（维度内
-// OR、维度间 AND），两者都为空时 SQL 与加这两个参数之前逐字节相同。用子查询而不是
-// JOIN：这条扫描的主表是裸 `request_metrics`，加 JOIN 会动到既有 SQL 的形状（与
-// stats.go 的 metricFilter 同一处理，条件形状也共用 appendDimensionFilters）。
+// dims 非空时只统计符合这组多值维度的请求（维度内 OR、维度间 AND，见 dimensions.go），
+// 全部为空时 SQL 与加这些维度之前逐字节相同。旁挂表维度用子查询而不是 JOIN：这条扫描
+// 的主表是裸 `request_metrics`，加 JOIN 会动到既有 SQL 的形状（与 stats.go 的
+// metricFilter 同一处理，条件形状也共用 appendDimensionFilters）。
 func (s *Store) snapshotRollup(
 	sinceCreatedAt, untilCreatedAt *string,
-	providerIDs, accessKeyIDs []string,
+	dims Dimensions,
 ) (*snapshotGroups, error) {
 	groups := newSnapshotGroups()
 
@@ -189,7 +189,7 @@ func (s *Store) snapshotRollup(
 		filters = append(filters, "created_at <= ?")
 		parameters = append(parameters, *untilCreatedAt)
 	}
-	filters, parameters = appendDimensionFilters(filters, parameters, providerIDs, accessKeyIDs)
+	filters, parameters = appendDimensionFilters(filters, parameters, dims)
 	whereSQL := ""
 	if len(filters) > 0 {
 		whereSQL = " WHERE " + strings.Join(filters, " AND ")

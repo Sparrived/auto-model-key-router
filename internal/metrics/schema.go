@@ -100,6 +100,20 @@ const createWorkspaceTableSQL = `
             )
             `
 
+// createWorkspaceIndexSQL 给工作空间旁挂表的 workspace 列建索引。
+//
+// 早先这张表只按 request_id 一对一 JOIN（workspace.go 的读数先走 rowid、JOIN 之后才看
+// `w.workspace`），不需要别的索引。/ui 读数的多值筛选改变了访问模式：按工作空间筛是
+// 「先选出这些空间的 request_id」（`id IN (SELECT request_id FROM request_workspace
+// WHERE workspace IN (…))`，见 dimensions.go），没有索引就是整张旁挂表全扫——与
+// createAccessKeyIndexSQL 同一条理由。
+//
+// 建在旁挂表上是安全的：request_metrics 的建表原文与 7 条索引一字未动，sqlite_master 里
+// 只多一条本包自己的索引条目，旧二进制打开新库照常读写。
+const createWorkspaceIndexSQL = `
+        CREATE INDEX IF NOT EXISTS idx_request_workspace ON request_workspace(workspace)
+        `
+
 // insertWorkspaceSQL 写入一行工作空间归属，对应每次 record() 的第二次写入。
 const insertWorkspaceSQL = `
         INSERT OR REPLACE INTO request_workspace (request_id, workspace) VALUES (?, ?)
@@ -142,8 +156,9 @@ const insertAccessKeySQL = `
 
 // createAccessKeyIndexSQL 给访问密钥旁挂表的查找列建索引。
 //
-// 与 request_workspace 的差别：那张表按 request_id 一对一 JOIN，工作空间的过滤发生在
-// **JOIN 之后**（`w.workspace = ?`），SQLite 仍会先走 rowid。而访问密钥读数是
+// 与 request_workspace 当初的差别：那张表的工作空间读数按 request_id 一对一 JOIN，过滤
+// 发生在 **JOIN 之后**（`w.workspace = ?`），SQLite 仍会先走 rowid（它后来因为 /ui 的
+// 按空间筛选也补了索引，见 createWorkspaceIndexSQL）。而访问密钥读数是
 // 「先按 access_key_id 选出这把 key 的行」（accesskey.go 的 accessKeyWindow），
 // 没有索引就是整张旁挂表全扫——看板每次刷新都付这个代价。
 //

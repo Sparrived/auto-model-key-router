@@ -48,9 +48,8 @@ func (a *App) handleStatusMonitor(w http.ResponseWriter, r *http.Request) {
 			Hours:         result.floatValue("hours"),
 			BucketSeconds: result.intValue("bucket_seconds"),
 			GroupBy:       result.stringValue("group_by"),
-			// 两个维度都可省：都不给就是全实例读数（与 filtered-metrics 一致）。
-			ProviderIDs:  result.stringList("provider_id"),
-			AccessKeyIDs: result.stringList("access_key_id"),
+			// 七个维度都可省：都不给就是全实例读数（与 filtered-metrics 一致）。
+			Dimensions: result.dimensions(),
 		})
 		if err != nil {
 			// hours/bucket 之类的质量问题在存储层还有一道防御性校验：翻译成 422，

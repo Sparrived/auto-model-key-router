@@ -94,9 +94,11 @@ x-api-key: your-local-api-key
 | `GET` | `/ui/model-kinds.json` | 无 | 逐个模型回答「它是什么类型」（文本/图像/视频/语音/嵌入/重排），供 WebUI 把服务模型卡片分组（需 `webui_enabled`） |
 | `GET` | `/ui/workspace-usage.json` | 仅本地 | 按工作空间拆分的用量读数与请求流向，供 WebUI 的「工作空间」页（需 `webui_enabled`） |
 | `GET` | `/ui/access-key-usage.json` | 访问密钥 | 只回**这把**访问密钥自己的用量、按模型/供应商/上游模型的拆分与最近调用，供访客看板 `/ui/guest.html`（需 `webui_enabled`） |
-| `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`）；可用 `provider_id` / `access_key_id` 收窄（两个参数都可重复出现，维度内 OR、维度间 AND） |
-| `GET` | `/ui/filtered-metrics.json` | 仅本地 | **按供应商 / 访问密钥筛选**的整页读数：概览（与 `/metrics` 同形）+ 趋势 + 明细，三份共用同一时间窗口（需 `webui_enabled`；两个筛选参数都可重复出现） |
-| `GET` | `/ui/status-monitor.json` | 仅本地 | **渠道健康矩阵**：概览（与 `/metrics` 同形）+ 趋势 + 按渠道维度 × 时间片分组的请求矩阵，三份共用同一时间窗口（需 `webui_enabled`；筛选参数可重复出现，`group_by` 选行维度） |
+| `GET` | `/ui/key-usage.json` | 仅本地 | 按**上游 Key**（供应商 + Key 名）、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页（需 `webui_enabled`）；可用七个[筛选维度参数](#ui-读数的筛选维度参数)收窄（维度内 OR、维度间 AND） |
+| `GET` | `/ui/filtered-metrics.json` | 仅本地 | **按一组维度筛选**的整页读数：概览（与 `/metrics` 同形）+ 趋势 + 明细，三份共用同一时间窗口（需 `webui_enabled`；七个[筛选维度参数](#ui-读数的筛选维度参数)） |
+| `GET` | `/ui/status-monitor.json` | 仅本地 | **渠道健康矩阵**：概览（与 `/metrics` 同形）+ 趋势 + 按渠道维度 × 时间片分组的请求矩阵，三份共用同一时间窗口（需 `webui_enabled`；七个[筛选维度参数](#ui-读数的筛选维度参数)，`group_by` 选行维度） |
+| `GET` | `/ui/metric-dimensions.json` | 仅本地 | **筛选器选项**：窗口内指标库里实际出现过的供应商、模型、请求模型名、上游 Key、访问密钥、工作空间与调用方档位及各自请求数（需 `webui_enabled`；**不**随筛选收窄） |
+| `GET` | `/ui/usage-breakdown.json` | 仅本地 | **按一个维度拆分的趋势**：前 N 组各自的总量与逐桶序列 + 其余并成的 `other`，与 `/ui/filtered-metrics.json` 同一套筛选与同一张桶网格（需 `webui_enabled`；`group_by` 选拆分维度） |
 | `GET` | `/ui/update/status` | 无 | 报告本构建是否具备自更新能力及当前版本，供 WebUI 决定是否显示「立即更新」 |
 | `POST` | `/ui/update/apply` | 仅本地 | 执行自更新：下载并校验新版、就地替换、启动收尾助手重启服务 |
 | `GET` | `/api/logs` | 仅本地 | 读取日志文件尾部（默认最后 64 KiB） |
@@ -120,8 +122,9 @@ x-api-key: your-local-api-key
 - **本项目自有的读数**（价格目录 `/ui/pricing.json`、模型类型 `/ui/model-kinds.json`、自更新入口、
   工作空间用量
   `/ui/workspace-usage.json`、访问密钥用量 `/ui/access-key-usage.json`、按 Key 用量
-  `/ui/key-usage.json`、按供应商 / 访问密钥筛选的整页读数 `/ui/filtered-metrics.json`、
-  状态监控的渠道健康矩阵 `/ui/status-monitor.json`）挂在 `/ui/` 前缀下：它们与
+  `/ui/key-usage.json`、按一组维度筛选的整页读数 `/ui/filtered-metrics.json`、
+  状态监控的渠道健康矩阵 `/ui/status-monitor.json`、筛选器选项 `/ui/metric-dimensions.json`、
+  按维度拆分的趋势 `/ui/usage-breakdown.json`）挂在 `/ui/` 前缀下：它们与
   `/api` 面在语义上不连续，挂 `/ui/` 既落在那份已发布清单之外，也让「不开 WebUI 就没有这些读数」
   顺理成章。其中「按 Key 用量」与「按供应商 / 访问密钥筛选」尤其不能并进 `/metrics`——那份读数的
   **形状与查询参数都已发布**，而「按供应商 + Key 名」这个组合分组不是参照实现的口径，
@@ -1874,6 +1877,42 @@ http://127.0.0.1:8000/ui/
 
 被停用的密钥回 `403`（`访问密钥已被停用`），与「凭据不认识」的 `401` 刻意区分：停用是可恢复的，认错凭据不是。
 
+### `/ui` 读数的筛选维度参数
+
+`/ui/key-usage.json`、`/ui/filtered-metrics.json`、`/ui/status-monitor.json` 与 `/ui/usage-breakdown.json` 四条读数共用同一组**筛选维度**参数（服务端同一份声明、存储层同一个 `metrics.Dimensions`），语义与校验完全一致：
+
+| 参数 | 类型 | 默认 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 转发到的供应商（`provider_id IN (…)`）。`provider_id` 为空的历史行不会被选中 |
+| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | **发起**请求的访问密钥（配置里的 key_id，不是明文 key），归属取自 `request_access_key` 旁挂表 |
+| `model_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | **解析后的本地路由模型**（别名、任务名都已归一），不是请求里写的名字（那是 `requested_model_id`） |
+| `upstream_key` | JSON 数组字符串，**可重复** | 无 | 每一项恰好是两个非空字符串的 JSON 数组 `["<provider_id>","<key_name>"]`，每部分 `1..512` 字符 | 实际转发用的上游 Key。必须**成对**：`key_name` 只在同一个供应商内唯一；多对之间是 OR（`(provider_id = ? AND key_name = ?) OR …`），**不是**「供应商 IN × Key 名 IN」的笛卡尔积 |
+| `workspace` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 工作空间归属（`request_workspace` 旁挂表）；没有归属的行不属于任何空间，不会被兜底算进 `default` |
+| `caller_type` | string，**可重复** | 无 | 每一项 `local` \| `workspace` \| `access_key` | 调用方档位（`caller_type IN (…)`），取值域与 `/metrics/requests` 的 `caller_type` 相同 |
+| `success` | boolean | 无（不筛） | Pydantic 宽松布尔（`true`/`false`/`1`/`0`/`yes`/`no`…） | 只看成功（`success=1`）或只看失败（`success=0`）；不给 = 不按成败筛 |
+
+- **维度内 OR、维度间 AND**：同一参数重复出现是「这几个值之一」，不同参数同时出现是「几组条件同时成立」。全部都不给 = 全实例读数，此时 SQL 与没有这些参数时逐字节相同。
+- **为什么 `upstream_key` 用 JSON 数组**：供应商 ID 与 Key 名都是配置里的任意字符串，任何分隔符（`/`、`:`、`|`）都可能出现在其中；JSON 字符串的转义规则现成且无歧义。URL 里记得转义：`?upstream_key=%5B%22openai%22%2C%22main%22%5D` 即 `["openai","main"]`。
+- **校验先于鉴权、逐项校验**：任一项非法就回 `422`，`detail` 只有一条，`loc` 是 `["query", <参数名>]`，`input` 是**出错那一项**的原文。空串是 `string_too_short`、超长是 `string_too_long`、`caller_type` 越界是 `literal_error`（`ctx.expected` 为 `'local', 'workspace' or 'access_key'`）、`success` 不是布尔是 `bool_parsing`；`upstream_key` 形状不对（不是 JSON、不是数组、不是两项、元素不是字符串、有空串或超长）一律是 `value_error`，不带 `ctx`：
+
+```json
+{"detail": [{"type": "value_error", "loc": ["query", "upstream_key"],
+  "msg": "Value error, upstream_key must be a JSON array of exactly two non-empty strings [\"<provider_id>\",\"<key_name>\"], each at most 512 characters",
+  "input": "openai/main"}]}
+```
+
+- **与参照实现那几个单值过滤参数的关系**：`/metrics/requests` 与 `/metrics/series` 的 `model_id` / `caller_type` / `success` 等是**已发布的单值参数**（重复出现取末位、生成 `= ?`），与这里的多值维度互不相干；`/metrics` 系列不认上表任何一个多值参数（传了按未知参数忽略，响应逐字节不变）。
+
+`/ui/filtered-metrics.json`、`/ui/status-monitor.json` 与 `/ui/usage-breakdown.json` 在响应的 `filters` 里**回显**这组条件（`/ui/key-usage.json` 没有 `filters` 字段）。键序固定，未设的列表维度是 `[]`，未设的 `success` 是 `null`（它是三态，`[]` 表达不了）；`upstream_keys` 回成对象数组，按名字取值更不容易读反：
+
+```json
+"filters": {
+  "provider_ids": ["openai"], "access_key_ids": [], "model_ids": ["gpt-4o-mini"],
+  "upstream_keys": [{"provider_id": "openai", "key_name": "main"}],
+  "workspaces": ["teamA"], "caller_types": ["access_key", "local"], "success": null
+}
+```
+
 ### `GET /ui/key-usage.json`
 
 按**上游 Key**、模型 × 上游 Key 与**访问密钥**拆分的用量，供 WebUI 的「用量统计」页使用。**只认完整权限**：内容反映全实例的 Key 使用情况（配置结构的投影），与 `/metrics` 同级；访问密钥与工作空间的面板 key / 推理 key 一律 `401`。
@@ -1884,12 +1923,11 @@ http://127.0.0.1:8000/ui/
 | --- | --- | --- | --- | --- |
 | `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
 | `all_history` | boolean | `false` | — | 为真时忽略 `hours`，统计全部历史（此时 `window.from` 为 `null`） |
-| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 可选：只统计**这些供应商**的请求（同一参数重复出现 = 维度内 OR，即 `provider_id IN (…)`） |
-| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 可选：只统计**这些访问密钥发起**的请求（同上，归属取自 `request_access_key` 旁挂表） |
+| `provider_id` / `access_key_id` / `model_id` / `upstream_key` / `workspace` / `caller_type` / `success` | — | 无 | 见[筛选维度参数](#ui-读数的筛选维度参数) | 可选：只统计符合这组条件的请求 |
 
-两个维度之间是 **AND**：`?provider_id=openai&access_key_id=ak1` 是「ak1 打到 openai 的那些请求」。三份拆分与 `unattributed` 一并收窄——`upstream_keys` / `model_keys` 因此回答「这组条件都打到哪些上游 Key 上」，`unattributed` 则是「这组条件里没有上游归属的那些行」。两个参数都不传时与加它们之前完全一致。
+维度之间是 **AND**：`?provider_id=openai&access_key_id=ak1` 是「ak1 打到 openai 的那些请求」。三份拆分与 `unattributed` 一并收窄——`upstream_keys` / `model_keys` 因此回答「这组条件都打到哪些上游 Key 上」，`unattributed` 则是「这组条件里没有上游归属的那些行」。全部参数都不传时与加它们之前完全一致。
 
-参数校验与 `/metrics` 同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。多值参数逐项校验：任一项非法（超 512 字符或空串）就回 `422`，`input` 是**那一项**的原文（空串是 `string_too_short`，`input` 为 `""`）。
+参数校验与 `/metrics` 同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。多值参数逐项校验：任一项非法就回 `422`，`input` 是**那一项**的原文（空串是 `string_too_short`，`input` 为 `""`）。
 
 `access_key_id` 的语义是「谁**发起**的这次请求」（`request_access_key` 旁挂表），不是「用了哪把上游 Key」，两者互不嵌套：一把访问密钥的流量会打到多把上游 Key 上，反之亦然。完整权限与工作空间凭据写入的行没有访问密钥归属，任何一次筛选都不会把它们算进去。
 
@@ -1930,20 +1968,19 @@ http://127.0.0.1:8000/ui/
 
 ### `GET /ui/filtered-metrics.json`
 
-**按供应商 / 访问密钥筛选**的整页读数：概览、趋势与最近明细三份**共用同一时间窗口**，供 WebUI 的概览 / 用量统计页做全局筛选时一次取完。
+**按一组维度筛选**的整页读数：概览、趋势与最近明细三份**共用同一时间窗口**，供 WebUI 的概览 / 用量统计页做全局筛选时一次取完。
 
 **只认完整权限**：内容是全实例读数按这组条件筛选的结果（配置结构的投影），与 `/metrics` 同级；访问密钥与工作空间的面板 key / 推理 key 一律 `401`。要「看自己那一把」的调用方请用 `/ui/access-key-usage.json`——那条只认访问密钥凭据，也不接受任何指定别人 key 的参数。
 
 | 参数 | 类型 | 默认 | 约束 | 说明 |
 | --- | --- | --- | --- | --- |
-| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选供应商；同一参数重复出现 = 维度内 OR（`provider_id IN (…)`）。全部可省 |
-| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选访问密钥（配置里的 key_id，不是明文 key）；语义与校验同上，归属取自 `request_access_key` 旁挂表 |
+| `provider_id` / `access_key_id` / `model_id` / `upstream_key` / `workspace` / `caller_type` / `success` | — | 无 | 见[筛选维度参数](#ui-读数的筛选维度参数) | 七个筛选维度，全部可省 |
 | `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
 | `all_history` | boolean | `false` | — | 为真时忽略 `hours`（`window.from` 与 `window.hours` 为 `null`） |
 | `bucket_seconds` | integer | `0`（自动） | 显式给值时 `15..86400` | 趋势图的桶宽 |
 | `limit` | integer | `0` | `0..200` | 明细条数；`0` 表示不要明细（`requests` 为 `null`） |
 
-两个维度之间是 **AND**：`?provider_id=openai&provider_id=azure&access_key_id=ak1` 是「ak1 打到这两家的量」。两个维度**都可省**：都不给就是全实例读数（与 `/metrics` 系列等价，前端不会这么发）——这条路径必须留着，因为「不筛」与「筛一个不存在的值」是两件不同的事：前者回全量，后者回空。
+维度之间是 **AND**：`?provider_id=openai&provider_id=azure&access_key_id=ak1` 是「ak1 打到这两家的量」，`?model_id=gpt-4o&success=false` 是「gpt-4o 的失败请求」。维度**都可省**：都不给就是全实例读数（与 `/metrics` 系列等价，前端不会这么发）——这条路径必须留着，因为「不筛」与「筛一个不存在的值」是两件不同的事：前者回全量，后者回空。
 
 参数校验与其它读数同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。多值参数逐项校验：任一项非法（超 512 字符或空串）就回 `422`，`input` 是**那一项**的原文（空串是 `string_too_short`，`input` 为 `""`）。
 
@@ -1953,7 +1990,8 @@ http://127.0.0.1:8000/ui/
 {
   "count_semantics": "upstream_attempt",
   "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24},
-  "filters": {"provider_ids": ["openai", "azure"], "access_key_ids": ["ak1"]},
+  "filters": {"provider_ids": ["openai", "azure"], "access_key_ids": ["ak1"], "model_ids": [],
+              "upstream_keys": [], "workspaces": [], "caller_types": [], "success": null},
   "snapshot": {"count_semantics": "upstream_attempt", "window": {"...": "..."}, "started_at": "…",
                "database_path": "…", "rate_window_seconds": 60, "current_rpm": 2, "current_tpm": 300,
                "active_requests": 0, "total": {"requests": 2, "...": "..."},
@@ -1976,12 +2014,12 @@ http://127.0.0.1:8000/ui/
 | `snapshot.active_requests` | **唯一的例外，刻意保持全局**：进程内的在途请求数，按定义无法按筛选条件拆分 |
 | `series` | 点与 `GET /metrics/series` 同形；窗口与 `snapshot` 相同（同一个 `now`），因此各桶 `requests` 合计与 `snapshot.total.requests` 对得上 |
 | `requests` | `limit=0` 时为 `null`（「这次没要明细」与「要了但一条都没有」要分得开）；否则 `items` 与 `GET /metrics/requests` 的条目同形，含服务端补的 `access_key_id` / `access_key_name` |
-| `filters` | 回显筛选值本身，两个数组（未筛的维度是空数组）。**不含**显示名——筛选值是调用方传进来的条件，页面上的筛选器本来就渲染着名字；`items` 里的 `access_key_name` 是另一回事（那条明细要直接画到请求流上） |
+| `filters` | 回显筛选值本身（键序与取值见[筛选维度参数](#ui-读数的筛选维度参数)：未筛的列表维度是空数组，未筛的 `success` 是 `null`）。**不含**显示名——筛选值是调用方传进来的条件，页面上的筛选器本来就渲染着名字；`items` 里的 `access_key_name` 是另一回事（那条明细要直接画到请求流上） |
 | `window` | 与 `/metrics` 同义：`all_history` 时 `from` 为 `null` |
 
 几点刻意的取舍：
 
-- **为什么不给 `/metrics` 加参数**：那三条路由是对照参照实现的读数，**响应形状与查询参数都已发布**（连响应里 `filters` 回显的键序都是发布字节）。给它们加 `access_key_id`、或者把 `provider_id` 从等值改成 `IN`，都改了契约；而这两个筛选维度是本项目自有的能力，因此单独一条 `/ui` 路由，落在所有已发布清单之外。给 `/metrics` 传 `access_key_id` 会被当作未知参数**忽略**（与参照实现的 FastAPI 行为一致）。
+- **为什么不给 `/metrics` 加参数**：那三条路由是对照参照实现的读数，**响应形状与查询参数都已发布**（连响应里 `filters` 回显的键序都是发布字节）。给它们加 `access_key_id`、或者把 `provider_id` / `model_id` 从等值改成 `IN`，都改了契约；而这些多值筛选维度是本项目自有的能力，因此单独一条 `/ui` 路由，落在所有已发布清单之外。给 `/metrics` 传 `access_key_id` 会被当作未知参数**忽略**（与参照实现的 FastAPI 行为一致）。
 - **同名参数重复出现 = 维度内多选**：单值参数在查询串里只能表达一个值，「这几家的量之和」用重复参数表达最直接（`?provider_id=a&provider_id=b`），服务端收成 `IN (?, …)`、值走参数绑定。其它参数一律保持 `FastAPI` 的「取末位」语义——那是已发布行为。
 - **三份读数一次取完**：分三次请求会让「概览说 12 次、趋势图加起来 11 次」无法归因——窗口边界各差一点，或者两次请求之间又落进来一行。服务端一次定下 `now` 与窗口起点，三份取数共用。
 - **`bucket_seconds` 默认自动**：`/metrics/series` 要求调用方自己按跨度挑桶（`hours=24` 配 60 秒桶是 1441 点，超过 500 的上限直接 `422`）。整页读数默认由服务端挑最小的合适桶，真实桶宽在响应里回显；显式给值时仍走 `/metrics/series` 那一套，点数超限回 `422`（`{"error":{"message":"time series cannot exceed 500 points"}}`），**不**静默换一个更粗的桶。
@@ -1996,13 +2034,12 @@ http://127.0.0.1:8000/ui/
 
 | 参数 | 类型 | 默认 | 约束 | 说明 |
 | --- | --- | --- | --- | --- |
-| `provider_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选供应商；同一参数重复出现 = 维度内 OR（`provider_id IN (…)`）。全部可省 |
-| `access_key_id` | string，**可重复** | 无 | 每一项 `1..512` 字符 | 筛选访问密钥（配置里的 key_id，不是明文 key）；语义与校验同上，归属取自 `request_access_key` 旁挂表 |
+| `provider_id` / `access_key_id` / `model_id` / `upstream_key` / `workspace` / `caller_type` / `success` | — | 无 | 见[筛选维度参数](#ui-读数的筛选维度参数) | 七个筛选维度，全部可省 |
 | `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口。这条读数**没有** `all_history`：矩阵把窗口切成桶，没有起点就没有列 |
 | `bucket_seconds` | integer | `0`（自动） | 显式给值时 `15..86400` | 桶宽。自动时由服务端按窗口跨度从 `[30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400]` 里挑最小的、使列数 `ceil(hours*3600/bucket)+1` 不超过 180 的那个；梯级不够（窗口超过约半年）时按整天继续放大。显式值点数超上限回 `422`（`time series cannot exceed 500 points`），不静默换更粗的桶 |
 | `group_by` | string | `provider` | `provider` \| `provider_model` \| `provider_key` | 矩阵的行身份：只按供应商 / 按「供应商 + 上游模型」/ 按「供应商 + 上游 Key」 |
 
-两个筛选维度之间是 **AND**，都与 `/ui/filtered-metrics.json` 完全同义：`?provider_id=openai&provider_id=azure&access_key_id=ak1` 是「ak1 打到这两家的量」，且三份读数（含矩阵的行集合）一并收窄；两个维度都可省，都不给就是全实例读数。参数校验与其它读数同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。
+筛选维度之间是 **AND**，都与 `/ui/filtered-metrics.json` 完全同义：`?provider_id=openai&provider_id=azure&access_key_id=ak1` 是「ak1 打到这两家的量」，且四份读数（含矩阵的行集合与 `failure_status_codes`）一并收窄；维度都可省，都不给就是全实例读数。`failure_status_codes` 自带「只看失败」这个条件，与 `success` 维度**并存**：`?success=true` 时它是 `{}`——成功的请求里本来就没有失败状态码。参数校验与其它读数同序：**先校验参数、后校验凭据**，因此 `hours=0` 不带凭据返回 `422` 而不是 `401`。
 
 响应（`Content-Type: application/json`）：
 
@@ -2010,10 +2047,12 @@ http://127.0.0.1:8000/ui/
 {
   "count_semantics": "upstream_attempt",
   "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24},
-  "filters": {"provider_ids": ["openai"], "access_key_ids": ["ak1"]},
+  "filters": {"provider_ids": ["openai"], "access_key_ids": ["ak1"], "model_ids": [],
+              "upstream_keys": [], "workspaces": [], "caller_types": [], "success": null},
   "group_by": "provider",
   "bucket_seconds": 600,
   "snapshot": {"total": {"requests": 12, "...": "..."}, "current_rpm": 2, "...": "..."},
+  "failure_status_codes": {"200": 2, "500": 1, "none": 1},
   "series": {
     "bucket_seconds": 600,
     "points": [{"started_at": "2026-01-01T00:00:00+08:00", "ended_at": "2026-01-01T00:10:00+08:00",
@@ -2037,6 +2076,7 @@ http://127.0.0.1:8000/ui/
 | 字段 | 说明 |
 | --- | --- |
 | `snapshot` | 与 `GET /metrics` **完全同形**（含 `count_semantics` / `window` / `started_at` / `database_path` / `rate_window_seconds` / `current_rpm` / `current_tpm` / 九个分组），但全部分组、总量与 rate 窗口都收窄到这组条件 |
+| `failure_status_codes` | 同一窗口与筛选下，仅 `success=0` 的上游状态码计数；`"none"` 表示真正未收到状态码，空集合为 `{}`。`"200"` 等 2xx 失败单列为响应异常，不由包含成功请求的 `snapshot.total.status_codes` 相减推算。下游取消也可能记失败，不等同于上游故障；历史数据不猜具体原因 |
 | `series` | 点与 `GET /metrics/series` **完全同形**（直接复用同一个取数函数），桶宽在 `bucket_seconds` 里回显 |
 | `matrix.group_by` | 回显行身份的选择 |
 | `matrix.rows` | 按 `(维度…, bucket)` 分组后的矩阵；**行按窗口内总 `requests` 降序**，同量时按身份字典序（`null` 排最前）。最多 60 行 |
@@ -2051,6 +2091,117 @@ http://127.0.0.1:8000/ui/
 - **桶网格从桶边界起算**：`series` / `matrix` 的首桶向前对齐到桶边界（与 `/metrics/series` 的行为一致），因此非对齐窗口的首桶可能包含窗口起点前不到一个桶的记录，而 `snapshot` 严格从 `hours` 起算。只有当窗口起点正好落在桶边界上时两者才逐条相等——`hours` 与桶宽整除并不够（对齐按绝对时间算，例如 24 小时配 600 秒桶在 19:56 起算仍会错开 4 分钟）；线上看到的差异通常就是首桶那一点窗口前流量。
 - **为什么挂在 `/ui/` 而不是给 `/metrics` 加字段**：`/metrics` 系列的响应形状与查询参数都已发布，渠道健康矩阵是本项目自有的读数，因此单独一条 `/ui` 路由，落在所有已发布清单之外（与 `/ui/filtered-metrics.json`、`/ui/key-usage.json` 同一条理由）。
 - **非 GET 一律 `405`**（`Allow: GET`），与其它 `/ui` 读数一致。
+
+### `GET /ui/metric-dimensions.json`
+
+**筛选器选项**：时间窗口内指标库里**实际出现过**的各维度取值与各自请求数，供 WebUI 渲染筛选器的下拉选项。**只认完整权限**（选项本身就是全实例的配置投影），与 `/metrics` 同级；访问密钥与工作空间凭据一律 `401`。
+
+| 参数 | 类型 | 默认 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
+| `all_history` | boolean | `false` | — | 为真时忽略 `hours`（`window.from` 与 `window.hours` 为 `null`） |
+
+**刻意不接受任何筛选维度参数**（传了按未知参数忽略）：选项必须是不筛的读数——若按当前条件收窄，选了「模型 A」以后其它模型就从列表里消失，想改成「A 或 B」时 B 已经不在了，筛选器会把自己锁死。参数校验先于鉴权（`hours=0` 不带凭据是 `422`）。
+
+```json
+{
+  "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24.0},
+  "providers": [{"id": "openai", "requests": 120}, {"id": "azure", "requests": 30}],
+  "models": [{"id": "gpt-4o-mini", "requests": 100}, {"id": "gpt-4o", "requests": 50}],
+  "requested_models": [{"id": "fast", "requests": 90}, {"id": "gpt-4o", "requests": 60}],
+  "upstream_keys": [{"provider_id": "openai", "key_name": "main", "requests": 110},
+                    {"provider_id": "azure", "key_name": "main", "requests": 30}],
+  "access_keys": [{"id": "ak1", "name": "试用账号 A", "requests": 40}, {"id": "ak9", "name": null, "requests": 2}],
+  "workspaces": [{"name": "default", "requests": 140}, {"name": "teamA", "requests": 10}],
+  "caller_types": [{"id": "local", "requests": 108}, {"id": "access_key", "requests": 42}, {"id": "workspace", "requests": 0}]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| 各列表的顺序 | 按 `requests` **降序**、同量按 id（`upstream_keys` 是 `(provider_id, key_name)`）**升序**：流量大的选项排前面，同量时顺序稳定 |
+| `providers` / `upstream_keys` | 不含 `provider_id` 为空的历史行——那种行筛不出来（`IN (…)` 对 NULL 恒不成立），列成选项只会让人筛出一张空图。`upstream_keys` 成对给出，直接对应 `upstream_key` 参数 |
+| `models` / `requested_models` | 分别对应 `model_id`（解析后的本地路由模型）与请求里写的模型名；后者目前只作展示，不是筛选参数 |
+| `access_keys[].name` | 服务端按**当前配置**补的显示名；配置里已经没有（或没写名字）的 key 为 `null`，不回填 id |
+| `workspaces` | 只列有归属的行（`request_workspace` 旁挂表）；键名是 `name` 而不是 `id`，与工作空间在配置里的写法一致 |
+| `caller_types` | **恒列出** `local` / `workspace` / `access_key` 三档（没有流量的档给 `0`），取值域就是 `caller_type` 参数的取值域；库里残留的其它取值（已删除的 `visitor` 档）不列——它们不是合法的筛选值 |
+
+一次 SQL 扫描（窗口内按全部维度列组合 `GROUP BY`，两张旁挂表 `LEFT JOIN`）后在服务端上卷成七份列表，不是七次扫描。非 GET 一律 `405`（`Allow: GET`）。
+
+### `GET /ui/usage-breakdown.json`
+
+**按一个维度拆分的趋势**：窗口内按 `group_by` 分组，取前 `limit` 组各自的总量与逐桶序列，其余并成 `other`，供 WebUI 画堆叠面积图与每行的迷你折线（替代一排各自独立的排行卡片）。**只认完整权限**，与 `/metrics` 同级；访问密钥与工作空间凭据一律 `401`。
+
+| 参数 | 类型 | 默认 | 约束 | 说明 |
+| --- | --- | --- | --- | --- |
+| `provider_id` / `access_key_id` / `model_id` / `upstream_key` / `workspace` / `caller_type` / `success` | — | 无 | 见[筛选维度参数](#ui-读数的筛选维度参数) | 七个筛选维度，全部可省 |
+| `hours` | number | `24` | `> 0` 且 `<= 8760` | 统计窗口 |
+| `all_history` | boolean | `false` | — | 为真时忽略 `hours`；桶网格按**这组条件自己的**最早一条记录折算跨度（与 `/ui/filtered-metrics.json` 相同） |
+| `bucket_seconds` | integer | `0`（自动） | 显式给值时 `15..86400` | 桶宽；自动与点数上限的规则与 `/ui/filtered-metrics.json` 完全相同（显式值超 500 点回 `422` `time series cannot exceed 500 points`） |
+| `group_by` | string | `model` | 见下表 | 按哪个维度拆 |
+| `rank_by` | string | `requests` | `requests` \| `tokens` | 按窗口内总请求数还是总 `total_tokens` 排名 |
+| `limit` | integer | `8` | `1..50` | 保留前几组，其余并进 `other` |
+
+| `group_by` | 分组列 | `key` 对象 |
+| --- | --- | --- |
+| `model` | `model_id`（解析后的本地路由模型） | `{"model_id"}` |
+| `requested_model` | `requested_model_id`（请求里写的名字） | `{"requested_model_id"}` |
+| `provider` | `provider_id`；`null` = 未归属的历史行 | `{"provider_id"}` |
+| `upstream_model` | `(provider_id, upstream_model_id)`，**不要求** `pool_name` | `{"provider_id", "upstream_model_id"}` |
+| `upstream_key` | `(provider_id, key_name)` | `{"provider_id", "key_name"}` |
+| `access_key` | `request_access_key.access_key_id`；`null` = 不是访问密钥发起的请求 | `{"access_key_id", "access_key_name"}`（名字由服务端按配置补，未知或 `null` id 时为 `null`） |
+| `workspace` | `request_workspace.workspace`；`null` = 没有工作空间归属 | `{"workspace"}` |
+| `caller_type` | `caller_type` | `{"caller_type"}` |
+| `status` | `status_code`（整数）；`null` = 没拿到上游响应 | `{"status_code"}` |
+| `api_format` | `request_shape.api_format`（入站 API 路径）；`null` = 没有形态记录 | `{"api_format"}` |
+
+响应（`Content-Type: application/json`）：
+
+```json
+{
+  "count_semantics": "upstream_attempt",
+  "window": {"from": "2026-01-01T00:00:00+08:00", "to": "2026-01-02T00:00:00+08:00", "hours": 24.0},
+  "group_by": "upstream_model",
+  "rank_by": "requests",
+  "bucket_seconds": 180,
+  "filters": {"provider_ids": [], "access_key_ids": [], "model_ids": [], "upstream_keys": [],
+              "workspaces": [], "caller_types": [], "success": null},
+  "buckets": [{"started_at": "2026-01-01T00:00:00+08:00", "complete": true},
+              {"started_at": "2026-01-01T00:03:00+08:00", "complete": true}, "…",
+              {"started_at": "2026-01-02T00:00:00+08:00", "complete": false}],
+  "groups": [
+    {"key": {"provider_id": "openai", "upstream_model_id": "gpt-4o-mini"},
+     "stats": {"requests": 100, "successes": 98, "failures": 2, "total_tokens": 52000, "...": "...",
+               "status_codes": {"200": 98, "429": 2}},
+     "series": {"requests": [3, 0, "…", 1], "successes": [3, 0, "…", 1], "failures": [0, 0, "…", 0],
+                "retries": [0, 0, "…", 0], "prompt_tokens": [900, 0, "…", 300],
+                "completion_tokens": [120, 0, "…", 40], "total_tokens": [1020, 0, "…", 340],
+                "cached_tokens": [0, 0, "…", 0], "duration_ms": [2400, 0, "…", 700],
+                "first_token_ms": [600, 0, "…", 150]}}
+  ],
+  "other": {"group_count": 3, "stats": {"requests": 12, "...": "..."}, "series": {"requests": [0, 1, "…", 0], "...": "..."}},
+  "total_groups": 4
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `buckets` | 桶网格：与同一组参数下 `/ui/filtered-metrics.json` 的 `series.points` **逐个对应**（同一个 `started_at`、同一个 `complete`，同一套首桶对齐与零填充）；最后一个还在填充的桶 `complete` 为 `false` |
+| `groups` | 前 `limit` 组，按 `rank_by` 降序；同量时按 `key` 升序决胜（逐列比较，`null` 排最前，`status_code` 按数值） |
+| `groups[].stats` | 与 `/metrics` 各分组同形（`UsageStats` 的 20 个键，含 `status_codes`） |
+| `groups[].series` | 十条与 `buckets` **等长**的稠密数组，空桶给 `0`。给的是**合计**：`duration_ms` / `first_token_ms` 是该桶耗时之和而不是平均——平均值不能跨桶、跨组相加，界面要画「按请求数加权的平均耗时」只能从合计除出来 |
+| `other` | 被截掉的那些组并成一份（`stats` 逐组折叠、`status_codes` 逐码相加，`series` 逐桶相加），`group_count` 是并进来的组数；没有被截掉的组时为 `null` |
+| `total_groups` | 截断之前的组数 |
+| `filters` | 回显筛选条件，与 `/ui/filtered-metrics.json` 同形 |
+| `window` | 与 `/ui/filtered-metrics.json` 同义：`from` 是 `now - hours`（`all_history` 时为 `null`） |
+
+几点刻意的取舍：
+
+- **与 `/ui/filtered-metrics.json` 逐桶可加**：两条读数用同一个函数定桶网格、用同一套筛选条件取数，因此同一组参数下，全部 `groups` 与 `other` 的序列逐桶相加**等于** `series.points` 对应点位。`stats` 与 `series` 都覆盖整张桶网格（从 `buckets[0].started_at` 起），所以每组 `stats.requests` 恒等于它 `series.requests` 的合计；首桶向前对齐到桶边界，因此可能比 `window.from` 多看不到一个桶宽的记录——与 `filtered-metrics` 的 `series` 完全同一口径（`snapshot` 则严格从 `window.from` 起算）。
+- **`upstream_model` 不看 `pool_name`**：`/metrics` 的 `upstream_models` / `providers` 是参照实现的口径，要求 `provider_id`、`pool_name`、`upstream_model_id` 三列全非空；v4 配置下写入的 `pool_name` 恒为 `NULL`，于是那两个分组在新数据上**永远是空的**，按上游模型算成本无从下手。那两个分组是已发布形状、口径不能改，因此在这条新读数上按 `(provider_id, upstream_model_id)` 分组修掉这个缺口。
+- **没有归属的行自成一组**（`null` 键）而不是被丢掉：否则各组加起来对不上总量，缺的那一截没有出处。
+- **一次 SQL 扫描**：按「分组列 + 桶 + `status_code`」`GROUP BY` 一次，在服务端折成每组总量与每组每桶的格子；`status_code` 进分组键是为了让 `stats.status_codes` 不必再扫一遍。
+- **参数校验先于鉴权**；`group_by` / `rank_by` 越界是 `literal_error`，`limit` 越界是 `greater_than_equal` / `less_than_equal`。非 GET 一律 `405`（`Allow: GET`）。
 
 ### `GET /ui/pricing.json`
 

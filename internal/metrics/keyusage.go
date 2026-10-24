@@ -52,13 +52,11 @@ import (
 // Hours 为 nil 表示不设时间窗口（对应 /metrics 的 all_history）。
 type KeyUsageParams struct {
 	Hours *float64
-	// ProviderIDs / AccessKeyIDs 非空时把三份拆分与 unattributed 都收窄到这些供应商 /
-	// 这些访问密钥发起的请求（本项目新增的全局筛选，供「用量统计」页用）。维度内 OR、
-	// 维度间 AND。
+	// Dimensions 非空时把三份拆分与 unattributed 都收窄到符合这组条件的请求（本项目新增
+	// 的全局筛选，供「用量统计」页用，见 dimensions.go）。维度内 OR、维度间 AND。
 	//
-	// 都为空时行为与加这两个参数之前完全一致：WHERE 里一个字节都不多。
-	ProviderIDs  []string
-	AccessKeyIDs []string
+	// 全部为空时行为与加这些维度之前完全一致：WHERE 里一个字节都不多。
+	Dimensions
 }
 
 // keyUsageFinestColumns 是最细分组里的列，顺序即 SQL 的 SELECT / GROUP BY 列序。
@@ -92,9 +90,9 @@ var keyUsageFinestColumns = [...]string{
 // access_keys 里**只有 access_key_id**：显示名在配置里，而本包不读配置。服务端
 // 在写响应前补上 access_key_name（见 internal/server/key_usage.go）。
 //
-// 带筛选时，三份拆分与 unattributed 收窄到这些供应商 / 这些访问密钥发起的请求
-// （维度内 OR、维度间 AND）：upstream_keys / model_keys 因此回答「这组条件都打到哪些
-// 上游 Key 上」，unattributed 则是「这组条件里没有上游归属的那些行」。
+// 带筛选时，三份拆分与 unattributed 收窄到符合这组维度的请求（维度内 OR、维度间
+// AND）：upstream_keys / model_keys 因此回答「这组条件都打到哪些上游 Key 上」，
+// unattributed 则是「这组条件里没有上游归属的那些行」。
 func (s *Store) KeyUsage(params KeyUsageParams) (*canonical.Value, error) {
 	now := nowBeijing()
 	var since *string
@@ -124,21 +122,15 @@ func (s *Store) KeyUsage(params KeyUsageParams) (*canonical.Value, error) {
 	// 上界恒有值（就是 now）：与 Snapshot / WorkspaceUsage 一致，窗口总是封口的。
 	filters = append(filters, "m.created_at <= ?")
 	parameters = append(parameters, untilStr)
-	// 两个多值维度（本项目新增）：条件同样落在 **WHERE** 而不是 ON 上（理由就是上面
-	// 那条）。放 WHERE 等价于把没有归属的行排除掉，也就把三份拆分收窄到了这些条件
-	// （unattributed 那一桶随之变成「这组条件里没有上游归属的行」）。
+	// 多值维度（本项目新增）：条件同样落在 **WHERE** 而不是 ON 上（理由就是上面那条）。
+	// 放 WHERE 等价于把没有归属的行排除掉，也就把三份拆分收窄到了这些条件（unattributed
+	// 那一桶随之变成「这组条件里没有上游归属的行」）。
 	//
-	// 写法与其它三处不同（不共用 appendDimensionFilters）：这张查询的主表带别名 m，
-	// 访问密钥走 LEFT JOIN 可以直接过滤 a.access_key_id，不需要子查询。顺序仍是
-	// 先供应商、后访问密钥；两者都为空时 WHERE 里一个字节都不多。
-	if len(params.ProviderIDs) > 0 {
-		filters = append(filters, "m.provider_id IN ("+placeholders(len(params.ProviderIDs))+")")
-		parameters = append(parameters, stringParams(params.ProviderIDs)...)
-	}
-	if len(params.AccessKeyIDs) > 0 {
-		filters = append(filters, "a.access_key_id IN ("+placeholders(len(params.AccessKeyIDs))+")")
-		parameters = append(parameters, stringParams(params.AccessKeyIDs)...)
-	}
+	// 列写法与其它三处不同（appendKeyUsageDimensionFilters 而不是
+	// appendDimensionFilters）：这张查询的主表带别名 m，访问密钥走 LEFT JOIN 可以直接
+	// 过滤 a.access_key_id，不需要子查询；工作空间没有被 JOIN，仍走子查询（外层写 m.id）。
+	// 条件种类与顺序与其它取数路径一致；全部为空时 WHERE 里一个字节都不多。
+	filters, parameters = appendKeyUsageDimensionFilters(filters, parameters, params.Dimensions)
 	whereSQL := " WHERE " + strings.Join(filters, " AND ")
 
 	// 一次最细粒度扫描 + Go 侧上卷：三份拆分各自 GROUP BY 一遍要扫三次窗口，而

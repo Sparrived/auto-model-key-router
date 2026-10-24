@@ -8,7 +8,8 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 )
 
-// filteredMetricsPath 是「按供应商 / 访问密钥筛选的整页读数」在 WebUI 挂载下的文件名。
+// filteredMetricsPath 是「按一组维度（供应商、访问密钥、模型、上游 Key、工作空间、调用方
+// 档位、成败）筛选的整页读数」在 WebUI 挂载下的文件名。
 //
 // **为什么挂在 /ui/ 而不是给 /metrics 加参数**：/metrics、/metrics/series、
 // /metrics/requests 是**对照参照实现**的读数，形状与查询参数都已发布（连 filters 回显的
@@ -48,9 +49,8 @@ func (a *App) handleFilteredMetrics(w http.ResponseWriter, r *http.Request) {
 			Hours:         result.hoursOrNil("hours", "all_history"),
 			BucketSeconds: result.intValue("bucket_seconds"),
 			Limit:         result.intValue("limit"),
-			// 两个维度都可省：都不给就是全实例读数（见 metrics/filteredmetrics.go）。
-			ProviderIDs:  result.stringList("provider_id"),
-			AccessKeyIDs: result.stringList("access_key_id"),
+			// 七个维度都可省：都不给就是全实例读数（见 metrics/filteredmetrics.go）。
+			Dimensions: result.dimensions(),
 		})
 		if err != nil {
 			// 点数超限之类是**参数**问题（与 /metrics/series 同一套文本），翻译成 422；

@@ -48,10 +48,9 @@ func (a *App) handleKeyUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		body, err := store.KeyUsage(metrics.KeyUsageParams{
 			Hours: result.hoursOrNil("hours", "all_history"),
-			// 两个维度都可选：同名参数可以重复出现（维度内 OR、维度间 AND），三份拆分与
-			// unattributed 一并收窄；都不给则与加这两个参数之前完全一致。
-			ProviderIDs:  result.stringList("provider_id"),
-			AccessKeyIDs: result.stringList("access_key_id"),
+			// 七个维度都可选：同名参数可以重复出现（维度内 OR、维度间 AND），三份拆分与
+			// unattributed 一并收窄；都不给则与加这些参数之前完全一致。
+			Dimensions: result.dimensions(),
 		})
 		if err != nil {
 			// 参数已由 validateQuery 挡住，这里只可能是数据库错误；与 /metrics 一致

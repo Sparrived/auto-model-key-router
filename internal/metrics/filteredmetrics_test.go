@@ -87,9 +87,9 @@ func TestMetricFilterDimensionConditionsAppendedLast(t *testing.T) {
 	}
 
 	// filters 回显是已发布形状：两个维度都不进它。
-	if pairs := (queryFilter{
+	if pairs := (queryFilter{Dimensions: Dimensions{
 		ProviderIDs: []string{"openai"}, AccessKeyIDs: []string{"ak1"},
-	}).filterPairs(); len(pairs) != 0 {
+	}}).filterPairs(); len(pairs) != 0 {
 		t.Errorf("filterPairs 不应回显这两个维度，实得 %v", pairs)
 	}
 }
@@ -257,8 +257,10 @@ func TestFilteredMetricsMultiValueOrAnd(t *testing.T) {
 			Hours:         &hours,
 			BucketSeconds: 3600,
 			Limit:         200,
-			ProviderIDs:   testCase.providerIDs,
-			AccessKeyIDs:  testCase.accessKeyIDs,
+			Dimensions: Dimensions{
+				ProviderIDs:  testCase.providerIDs,
+				AccessKeyIDs: testCase.accessKeyIDs,
+			},
 		})
 		if err != nil {
 			t.Fatalf("%s: FilteredMetrics: %v", testCase.name, err)
@@ -307,7 +309,7 @@ func TestFilteredMetricsSingleValueMatchesSingleElement(t *testing.T) {
 	for _, testCase := range cases {
 		single, err := store.FilteredMetrics(FilteredMetricsParams{
 			Hours: &hours, BucketSeconds: 3600, Limit: 200,
-			ProviderIDs: testCase.providerIDs, AccessKeyIDs: testCase.accessKeyIDs,
+			Dimensions: Dimensions{ProviderIDs: testCase.providerIDs, AccessKeyIDs: testCase.accessKeyIDs},
 		})
 		if err != nil {
 			t.Fatalf("%s: 单元素筛选失败: %v", testCase.name, err)
@@ -368,7 +370,7 @@ func TestFilteredMetricsEmptyDimensionsMatchMetrics(t *testing.T) {
 	}
 	// 不存在的值回空，与「不筛」是两件事。
 	missing, err := store.FilteredMetrics(FilteredMetricsParams{
-		Hours: &hours, BucketSeconds: 3600, AccessKeyIDs: []string{"no-such-key"},
+		Hours: &hours, BucketSeconds: 3600, Dimensions: Dimensions{AccessKeyIDs: []string{"no-such-key"}},
 	})
 	if err != nil {
 		t.Fatalf("FilteredMetrics（不存在的 key）: %v", err)
@@ -388,7 +390,7 @@ func TestFilteredMetricsAllHistoryUsesTheFiltersOwnSpan(t *testing.T) {
 	store := tempStore(t)
 	seedFilteredMetrics(t, store, moment)
 
-	value, err := store.FilteredMetrics(FilteredMetricsParams{AccessKeyIDs: []string{"ak1"}})
+	value, err := store.FilteredMetrics(FilteredMetricsParams{Dimensions: Dimensions{AccessKeyIDs: []string{"ak1"}}})
 	if err != nil {
 		t.Fatalf("FilteredMetrics: %v", err)
 	}
@@ -431,7 +433,7 @@ func TestFilteredMetricsAllHistoryEmptyFilter(t *testing.T) {
 	store := tempStore(t)
 	seedFilteredMetrics(t, store, "2026-07-14T12:00:00+08:00")
 
-	value, err := store.FilteredMetrics(FilteredMetricsParams{AccessKeyIDs: []string{"no-such-key"}})
+	value, err := store.FilteredMetrics(FilteredMetricsParams{Dimensions: Dimensions{AccessKeyIDs: []string{"no-such-key"}}})
 	if err != nil {
 		t.Fatalf("FilteredMetrics: %v", err)
 	}
@@ -455,7 +457,7 @@ func TestFilteredMetricsRejectsTooFineBucket(t *testing.T) {
 
 	hours := 24.0
 	_, err := store.FilteredMetrics(FilteredMetricsParams{
-		Hours: &hours, BucketSeconds: 60, AccessKeyIDs: []string{"ak1"},
+		Hours: &hours, BucketSeconds: 60, Dimensions: Dimensions{AccessKeyIDs: []string{"ak1"}},
 	})
 	if err == nil {
 		t.Fatal("hours=24 配 60 秒桶应当报错")
@@ -470,7 +472,7 @@ func TestFilteredMetricsRejectsTooFineBucket(t *testing.T) {
 
 	// 同一组参数换成自动桶（0）必须能出结果：否则这个端点的默认调用是不可用的。
 	if _, err := store.FilteredMetrics(FilteredMetricsParams{
-		Hours: &hours, AccessKeyIDs: []string{"ak1"},
+		Hours: &hours, Dimensions: Dimensions{AccessKeyIDs: []string{"ak1"}},
 	}); err != nil {
 		t.Fatalf("自动桶应当可用，实得 %v", err)
 	}
@@ -490,7 +492,7 @@ func TestKeyUsageAccessKeyFilterNarrowsSplits(t *testing.T) {
 	seedFilteredMetrics(t, store, moment)
 
 	hours := 1.0
-	value, err := store.KeyUsage(KeyUsageParams{Hours: &hours, AccessKeyIDs: []string{"ak1"}})
+	value, err := store.KeyUsage(KeyUsageParams{Hours: &hours, Dimensions: Dimensions{AccessKeyIDs: []string{"ak1"}}})
 	if err != nil {
 		t.Fatalf("KeyUsage: %v", err)
 	}
@@ -598,9 +600,11 @@ func TestKeyUsageMultiValueDimensions(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		value, err := store.KeyUsage(KeyUsageParams{
-			Hours:        &hours,
-			ProviderIDs:  testCase.providerIDs,
-			AccessKeyIDs: testCase.accessKeyIDs,
+			Hours: &hours,
+			Dimensions: Dimensions{
+				ProviderIDs:  testCase.providerIDs,
+				AccessKeyIDs: testCase.accessKeyIDs,
+			},
 		})
 		if err != nil {
 			t.Fatalf("%s: KeyUsage: %v", testCase.name, err)

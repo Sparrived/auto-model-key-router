@@ -263,6 +263,10 @@ func (s *Store) initSchema() error {
 	if _, err := s.writeDB.Exec(createWorkspaceTableSQL); err != nil {
 		return err
 	}
+	// 它的查找索引（理由见 schema.go）：/ui 读数按工作空间多值筛选时先按 workspace 选行。
+	if _, err := s.writeDB.Exec(createWorkspaceIndexSQL); err != nil {
+		return err
+	}
 	// 访问密钥旁挂表（理由见 schema.go）。与工作空间旁挂表同一位置：只在
 	// sqlite_master 里多一条新表条目，request_metrics 自身逐字节不变。
 	if _, err := s.writeDB.Exec(createAccessKeyTableSQL); err != nil {
@@ -275,7 +279,8 @@ func (s *Store) initSchema() error {
 	// 请求来源旁挂表（理由见 schema.go）。与另外两张旁挂表同一位置：只在
 	// sqlite_master 里多一条新表条目，request_metrics 自身逐字节不变。
 	//
-	// 它按 request_id 一对一 JOIN，不需要自己的索引（与 request_workspace 同理）。
+	// 它只按 request_id 一对一 JOIN、从不按自己的列选行，因此不需要自己的索引
+	// （request_workspace 那条索引是为「按空间筛选」补的，这张表没有那种访问模式）。
 	if _, err := s.writeDB.Exec(createRequestSourceTableSQL); err != nil {
 		return err
 	}
@@ -485,18 +490,18 @@ func (s *Store) Snapshot(hours *float64, since *time.Time) (*canonical.Value, er
 	now := nowBeijing()
 	// /metrics 永远是全实例读数：这里**不过滤**（过滤能力只对本项目自有的 /ui 读数
 	// 开放，见 filteredmetrics.go）。
-	return s.snapshotSync(hours, since, now, nil, nil)
+	return s.snapshotSync(hours, since, now, Dimensions{})
 }
 
 // snapshotSync 对应 _snapshot_sync（metrics.py:680）。
 //
-// 两个维度都非空时全部分组、总量与 rate 窗口都收窄到这些供应商 / 访问密钥（维度内
-// OR、维度间 AND）；都为空时与参照实现逐字节同形（/metrics 走的就是两个 nil）。
+// dims 有任一维度非空时，全部分组、总量与 rate 窗口都收窄到这组条件（维度内 OR、维度间
+// AND，见 dimensions.go）；全部为空时与参照实现逐字节同形（/metrics 走的就是零值）。
 func (s *Store) snapshotSync(
 	hours *float64,
 	since *time.Time,
 	now time.Time,
-	providerIDs, accessKeyIDs []string,
+	dims Dimensions,
 ) (*canonical.Value, error) {
 	var sinceStr *string
 	if since != nil {
@@ -511,7 +516,7 @@ func (s *Store) snapshotSync(
 	// 窗口内的 9 个分组由一次最细粒度扫描上卷得到（见 rollup.go 的成本说明）：
 	// 归属维度只统计三个归属列全非空、未归属统计其余的行，这两种互补口径都在
 	// 那一层表达，这里不再逐个拼 WHERE。
-	groups, err := s.snapshotRollup(sinceStr, &untilStr, providerIDs, accessKeyIDs)
+	groups, err := s.snapshotRollup(sinceStr, &untilStr, dims)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +526,7 @@ func (s *Store) snapshotSync(
 	// rate 窗口只有几分钟，行数极少；这里继续用参照实现的 queryStats，一分钱不省，
 	// 但让那份实现留在链路上（它也是上卷结果的对照物）。过滤条件必须一并带上，
 	// 否则 current_rpm / current_tpm 会是全实例的数——那不是「这组条件下的读数」。
-	recent, err := s.queryStats(nil, &rateStart, &untilStr, true, providerIDs, accessKeyIDs)
+	recent, err := s.queryStats(nil, &rateStart, &untilStr, true, dims)
 	if err != nil {
 		return nil, err
 	}
@@ -728,14 +733,15 @@ type RequestHistoryParams struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	// ProviderIDs / AccessKeyIDs 非空时只返回这些供应商 / 这些访问密钥发起的请求
-	// （本项目新增，参照实现没有；维度内 OR、维度间 AND）。
+	// Dimensions 非空时只返回符合这组多值维度的请求（本项目新增，参照实现没有；维度内
+	// OR、维度间 AND，见 dimensions.go）。/metrics/requests 从不填它，只有
+	// FilteredMetrics 的明细会走这里。
 	//
-	// 它们不进响应里的 filters：那是已发布形状，多一个键就变了。
-	ProviderIDs  []string
-	AccessKeyIDs []string
-	Limit        int64
-	BeforeID     *int64
+	// 它不进响应里的 filters：那是已发布形状，多一个键就变了。嵌入后同名的 Success 被
+	// 外层遮蔽：`params.Success` 恒指上面那个已发布的单值参数。
+	Dimensions
+	Limit    int64
+	BeforeID *int64
 }
 
 // RequestHistory 对应 request_history()（metrics.py:263）。
@@ -776,8 +782,7 @@ func (s *Store) requestHistorySync(params RequestHistoryParams, now time.Time) (
 		StatusCode:       params.StatusCode,
 		Success:          params.Success,
 		Attributed:       params.Attributed,
-		ProviderIDs:      params.ProviderIDs,
-		AccessKeyIDs:     params.AccessKeyIDs,
+		Dimensions:       params.Dimensions,
 	}
 	untilStr := formatISO(now)
 	filter := query.metricFilter(since, &untilStr)
@@ -909,12 +914,11 @@ type TimeSeriesParams struct {
 	StatusCode       *int64
 	Success          *bool
 	Attributed       *bool
-	// ProviderIDs / AccessKeyIDs 非空时只统计这些供应商 / 这些访问密钥发起的请求
-	// （本项目新增，参照实现没有；维度内 OR、维度间 AND）。
+	// Dimensions 非空时只统计符合这组多值维度的请求（本项目新增，参照实现没有；维度内
+	// OR、维度间 AND，见 dimensions.go）。/metrics/series 的处理器从不填它。
 	//
-	// 它们不进响应里的 filters：那是已发布形状，多一个键就变了。
-	ProviderIDs  []string
-	AccessKeyIDs []string
+	// 它不进响应里的 filters：那是已发布形状，多一个键就变了。
+	Dimensions
 }
 
 // TimeSeries 对应 time_series()（metrics.py:300）。
@@ -943,8 +947,7 @@ func (s *Store) TimeSeries(params TimeSeriesParams) (*canonical.Value, error) {
 		StatusCode:       params.StatusCode,
 		Success:          params.Success,
 		Attributed:       params.Attributed,
-		ProviderIDs:      params.ProviderIDs,
-		AccessKeyIDs:     params.AccessKeyIDs,
+		Dimensions:       params.Dimensions,
 	}
 	points, err := s.seriesPoints(query, params.BucketSeconds, firstEpoch, now)
 	if err != nil {
@@ -1052,20 +1055,17 @@ func (s *Store) seriesPoints(
 	statusRows.Close()
 
 	// 补齐空桶：从 firstEpoch 到 lastEpoch 每步一点，让前端拿到连续的序列。
-	lastEpoch := bucketEpoch(now, bucketSeconds)
 	points := canonical.NewArray()
-	for epoch := firstEpoch; epoch <= lastEpoch; epoch += bucketSeconds {
-		startedAt := fromUnix(epoch)
-		endedAt := startedAt.Add(time.Duration(bucketSeconds) * time.Second)
-		stats, ok := buckets[epoch]
+	for _, bucket := range seriesBuckets(firstEpoch, bucketSeconds, now) {
+		stats, ok := buckets[bucket.Epoch]
 		if !ok {
 			stats = &UsageStats{StatusCodes: map[string]int64{}}
 		}
 		statsDict := stats.dict()
 		point := canonical.NewObjectOf(
-			canonical.ObjectPair{Key: "started_at", Value: canonical.NewString(formatISO(startedAt))},
-			canonical.ObjectPair{Key: "ended_at", Value: canonical.NewString(formatISO(endedAt))},
-			canonical.ObjectPair{Key: "complete", Value: canonical.NewBool(!endedAt.After(now))},
+			canonical.ObjectPair{Key: "started_at", Value: canonical.NewString(formatISO(bucket.StartedAt))},
+			canonical.ObjectPair{Key: "ended_at", Value: canonical.NewString(formatISO(bucket.EndedAt))},
+			canonical.ObjectPair{Key: "complete", Value: canonical.NewBool(bucket.Complete)},
 		)
 		for _, key := range statsDict.Obj.Keys() {
 			value, _ := statsDict.Obj.Get(key)
@@ -1074,6 +1074,43 @@ func (s *Store) seriesPoints(
 		points.Arr = append(points.Arr, point)
 	}
 	return points, nil
+}
+
+// seriesBucket 是零填充网格上的一个桶。
+type seriesBucket struct {
+	// Epoch 是桶起点的 unix 秒，与 bucketSQL 算出的 bucket_epoch 同一个值（取数结果按它
+	// 定位到桶上）。
+	Epoch     int64
+	StartedAt time.Time
+	EndedAt   time.Time
+	// Complete 为 false 表示桶的结束时刻还在 now 之后：最后那个桶还在填充中，界面据此
+	// 区分「这一格确实是 0」与「这一格还没走完」。
+	Complete bool
+}
+
+// seriesBuckets 列出 [firstEpoch, bucketEpoch(now)] 上按 bucketSeconds 铺开的全部桶。
+//
+// 这是 seriesPoints 零填充的那张网格。单独拆出来是为了让按维度拆分的趋势
+// （UsageBreakdown）**复用同一张网格**而不是另算一遍边界：两份读数的 started_at 与
+// complete 必须逐桶相同，同一个时间片在两张图上才是同一列。调用方负责 firstEpoch 的桶
+// 对齐（bucketEpoch）。
+func seriesBuckets(firstEpoch, bucketSeconds int64, now time.Time) []seriesBucket {
+	lastEpoch := bucketEpoch(now, bucketSeconds)
+	if lastEpoch < firstEpoch {
+		return nil
+	}
+	buckets := make([]seriesBucket, 0, (lastEpoch-firstEpoch)/bucketSeconds+1)
+	for epoch := firstEpoch; epoch <= lastEpoch; epoch += bucketSeconds {
+		startedAt := fromUnix(epoch)
+		endedAt := startedAt.Add(time.Duration(bucketSeconds) * time.Second)
+		buckets = append(buckets, seriesBucket{
+			Epoch:     epoch,
+			StartedAt: startedAt,
+			EndedAt:   endedAt,
+			Complete:  !endedAt.After(now),
+		})
+	}
+	return buckets
 }
 
 // db 返回读连接池；只读查询都走它。

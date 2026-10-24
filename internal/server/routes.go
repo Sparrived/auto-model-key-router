@@ -82,14 +82,19 @@ func (a *App) buildHandler() http.Handler {
 		// Key 用量读数（理由见 key_usage.go）：回答「这些流量是哪把 Key 出去的」。
 		// 与 workspace-usage 同样挂 /ui/，因为 /metrics 的形状已发布、不能加字段。
 		mux.HandleFunc(path+keyUsagePath, a.handleKeyUsage)
-		// 按供应商 / 访问密钥筛选的整页读数（理由见 filtered_metrics.go）：概览 +
-		// 趋势 + 明细三份同窗口的读数。过滤能力只在这里开放，/metrics 系列的查询
-		// 参数不动。
+		// 按一组维度筛选的整页读数（理由见 filtered_metrics.go）：概览 + 趋势 + 明细
+		// 三份同窗口的读数。过滤能力只在 /ui 读数上开放，/metrics 系列的查询参数不动。
 		mux.HandleFunc(path+filteredMetricsPath, a.handleFilteredMetrics)
 		// 状态监控的渠道健康矩阵（理由见 status_monitor.go）：概览 + 趋势 + 按渠道
 		// 分组的桶矩阵，三份共用同一个 now 与窗口。与 filtered-metrics 同属本项目
 		// 自有的读数，因此同样挂在 /ui/ 之下。
 		mux.HandleFunc(path+statusMonitorPath, a.handleStatusMonitor)
+		// 筛选器选项（理由见 metric_dimensions.go）：窗口内各维度实际出现过的取值，
+		// 刻意不随当前筛选收窄。
+		mux.HandleFunc(path+metricDimensionsPath, a.handleMetricDimensions)
+		// 按一个维度拆分的趋势（理由见 usage_breakdown.go）：与 filtered-metrics 同一套
+		// 筛选参数与同一张桶网格，前 N 组 + other。
+		mux.HandleFunc(path+usageBreakdownPath, a.handleUsageBreakdown)
 		a.webuiMounted = true
 	}
 

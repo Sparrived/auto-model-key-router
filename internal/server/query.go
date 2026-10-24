@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"net/url"
@@ -25,8 +26,8 @@ import (
 //
 //  1. **重复参数取最后一个**。Starlette 的 QueryParams.__getitem__ 取列表末位
 //     （`?hours=1&hours=2` 得到 2.0），而 Go 的 url.Values.Get 取第一位——必须显式取
-//     末位，否则多值请求会静默选错值。唯一的例外是 qStrList：那两个筛选维度**故意**
-//     收齐全部出现值（维度内多选是它们的语义），见 qStrList 的说明。
+//     末位，否则多值请求会静默选错值。唯一的例外是 qStrList / qPairList：/ui 读数的多值
+//     筛选维度**故意**收齐全部出现值（维度内多选是它们的语义），见 qStrList 的说明。
 //  2. **校验先于鉴权**。FastAPI 在调用路由函数之前解析依赖与参数，所以
 //     `GET /metrics?hours=0`（不带任何凭据）是 422 而不是 401。装配层必须保持这个
 //     顺序。
@@ -51,11 +52,19 @@ const (
 	qStr
 	qLiteral
 	// qStrList 是**可重复出现**的字符串参数：同名参数的每一次出现都是一个独立取值
-	// （维度内多选，见 validateQuery）。
+	// （维度内多选，见 validateQuery）。声明了 literals 时每一项按 Literal 校验
+	// （caller_type），否则按 minLen/maxLen 校验。
 	//
-	// 只有本项目自有的两个筛选维度用它：/metrics 系列的参数一律保持「取末位」，那是
+	// 只有本项目自有的 /ui 筛选维度用它：/metrics 系列的参数一律保持「取末位」，那是
 	// 已发布行为（对齐 FastAPI 的单值语义）。
 	qStrList
+	// qPairList 是可重复出现的**成对**字符串参数（upstream_key）：每一项是恰好两个非空
+	// 字符串的 JSON 数组 `["<provider_id>","<key_name>"]`。
+	//
+	// 为什么用 JSON 而不是分隔符：供应商 ID 与 Key 名都是配置里的任意字符串，任何分隔符
+	// （`/`、`:`、`|`）都可能出现在其中，拆分就有二义性；JSON 字符串的转义规则是现成且
+	// 无歧义的。每一部分仍按 minLen/maxLen（按字符数）校验，与 listTextParam 同一口径。
+	qPairList
 )
 
 // qParam 描述一个查询参数，字段顺序即响应里错误的顺序（Pydantic 按声明顺序报错）。
@@ -96,7 +105,13 @@ var (
 	// 访问密钥取代了 visitor 档：两者都是「分发给外部使用者的受限凭据」，但访问密钥
 	// 一人一把、各带清单，因此指标里分开统计才有意义。老库里残留的 visitor 行不再
 	// 出现在过滤器里（值域即契约，见 qLiteral）。
-	callerTypes = []string{"local", "workspace", "access_key"}
+	//
+	// 取值直接引用 metrics.CallerTypes：/ui/metric-dimensions.json 的筛选器选项按它补齐，
+	// 两边抄两份迟早漂移成「选项里有、参数校验却拒绝」。取值与顺序和原先的字面量完全
+	// 相同，/metrics/requests 与 /metrics/series 的 literal_error 文案因此逐字节不变。
+	callerTypes = metrics.CallerTypes
+	// qInt8 是 usage-breakdown 的 limit 缺省值（保留的分组数）。
+	qInt8 = canonical.NewInt("8")
 )
 
 // metricsSnapshotParams 对应 app.py:212-216 的 GET /metrics 签名。
@@ -121,23 +136,47 @@ var workspaceUsageParams = []qParam{
 // workspace-usage 的时间选择器语义一致。**有意增补**的读数：参照实现没有按 Key 拆分
 // 的口径，因此没有对应签名可比对，这里的取值方式只是复用既有解析器，不构成兼容性声明。
 //
-// provider_id 与 access_key_id 都是**可重复出现**的多值过滤：同名参数重复出现是维度内
-// OR、两个维度之间是 AND，都不给时与加这两个参数之前完全一致（三份拆分与 unattributed
-// 都是全量口径）。
-var keyUsageParams = []qParam{
+// 七个筛选维度（dimensionFilterParams）都是可省的多值过滤：同名参数重复出现是维度内
+// OR、维度之间是 AND，都不给时与加这些参数之前完全一致（三份拆分与 unattributed 都是
+// 全量口径）。
+var keyUsageParams = append([]qParam{
 	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
 	{name: "all_history", kind: qBool, def: qBoolFalse},
-	listTextParam("provider_id"),
-	listTextParam("access_key_id"),
+}, dimensionFilterParams()...)
+
+// dimensionFilterParams 是 /ui 读数共用的七个筛选维度参数（存储层的 metrics.Dimensions）。
+//
+// 声明顺序即 422 的报错顺序，也与 Dimensions 的字段顺序一致：最早的 provider_id /
+// access_key_id 在前（只有两个维度时它们就排在这两个位置），然后是 model_id、
+// upstream_key、workspace、caller_type、success。
+//
+//   - provider_id / access_key_id / model_id / workspace：可重复出现的字符串，每项
+//     1..512 个字符；
+//   - upstream_key：可重复出现的 `["<provider_id>","<key_name>"]` JSON 数组（见 qPairList）；
+//   - caller_type：可重复出现的 Literal，取值域与 /metrics/requests 的 caller_type 相同；
+//   - success：可省的单值布尔（三态：不给 = 不筛）。
+//
+// 每次调用返回一份新切片：几条路由会在它前后拼上自己的参数，共用底层数组会互相覆盖。
+func dimensionFilterParams() []qParam {
+	return []qParam{
+		listTextParam("provider_id"),
+		listTextParam("access_key_id"),
+		listTextParam("model_id"),
+		{name: "upstream_key", kind: qPairList, minLen: 1, maxLen: 512},
+		listTextParam("workspace"),
+		{name: "caller_type", kind: qStrList, literals: callerTypes},
+		{name: "success", kind: qBool},
+	}
 }
 
 // filteredMetricsParams 是 GET /ui/filtered-metrics.json 的签名。
 //
 // 与 /metrics 系列有两处刻意的差别：
 //
-//   - provider_id 与 access_key_id 都是**可重复出现**的多值参数（维度内 OR、维度间
-//     AND），且**都可省**：两个都不给就是全实例读数。这条路径保留着，因为「不筛」与
-//     「筛一个不存在的值」必须是两件不同的事——前者回全量、后者回空。
+//   - 七个筛选维度（dimensionFilterParams）都是**可重复出现**的多值参数（维度内 OR、
+//     维度间 AND；success 是单值三态），且**都可省**：全都不给就是全实例读数。这条路径
+//     保留着，因为「不筛」与「筛一个不存在的值」必须是两件不同的事——前者回全量、后者
+//     回空。
 //   - bucket_seconds 默认 **0 = 自动**：/metrics/series 要求调用方自己按跨度挑桶，
 //     24 小时配 60 秒桶是 1441 点、直接超上限被拒；整页读数把概览、趋势与明细拼在
 //     一起，默认交给服务端选最小的合适桶（响应里回真实桶宽）。显式给值时仍走
@@ -146,14 +185,12 @@ var keyUsageParams = []qParam{
 // 注意 0 只能来自缺省：validateQuery 与 Pydantic 一样**不校验缺省值**，所以下界写
 // 15 不会把默认值判成非法，而 `?bucket_seconds=0` 这种显式传法照旧报 422——「自动」
 // 是没说，不是说了个 0。
-var filteredMetricsParams = []qParam{
-	listTextParam("provider_id"),
-	listTextParam("access_key_id"),
-	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
-	{name: "all_history", kind: qBool, def: qBoolFalse},
-	{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
-	{name: "limit", kind: qInt, def: qInt0, ge: qInt0, le: qInt200},
-}
+var filteredMetricsParams = append(dimensionFilterParams(),
+	qParam{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	qParam{name: "all_history", kind: qBool, def: qBoolFalse},
+	qParam{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
+	qParam{name: "limit", kind: qInt, def: qInt0, ge: qInt0, le: qInt200},
+)
 
 // statusGroupByLiterals 是状态监控矩阵 group_by 的取值域。
 //
@@ -168,8 +205,9 @@ var statusGroupByLiterals = []string{
 
 // statusMonitorParams 是 GET /ui/status-monitor.json 的签名。
 //
-// 两个筛选维度与 /ui/filtered-metrics.json 逐字同义（可重复出现、维度内 OR、维度间
-// AND、都可省），hours 的上界也一致（8760）。与 filtered-metrics 的差别有两处：
+// 七个筛选维度与 /ui/filtered-metrics.json 逐字同义（dimensionFilterParams：可重复出现、
+// 维度内 OR、维度间 AND、都可省），hours 的上界也一致（8760）。与 filtered-metrics 的
+// 差别有两处：
 //
 //   - **没有 all_history**：矩阵把窗口切成桶，没有起点就没有列，因此窗口恒封口；
 //   - **多了 group_by**：矩阵的行身份由它决定（供应商 / 供应商+上游模型 /
@@ -177,14 +215,42 @@ var statusGroupByLiterals = []string{
 //
 // bucket_seconds 同样默认 0 = 自动：`?bucket_seconds=0` 这种显式传法照旧 422——
 // 「自动」是没说，不是说了个 0（validateQuery 与 Pydantic 都不校验缺省值）。
-var statusMonitorParams = []qParam{
-	listTextParam("provider_id"),
-	listTextParam("access_key_id"),
-	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
-	{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
-	{name: "group_by", kind: qLiteral, def: canonical.NewString(metrics.StatusGroupByProvider),
+var statusMonitorParams = append(dimensionFilterParams(),
+	qParam{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	qParam{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
+	qParam{name: "group_by", kind: qLiteral, def: canonical.NewString(metrics.StatusGroupByProvider),
 		literals: statusGroupByLiterals},
+)
+
+// metricDimensionsParams 是 GET /ui/metric-dimensions.json（筛选器选项）的签名。
+//
+// 只有时间窗口，与 key-usage 同一对 hours + all_history：选项是**不筛**的读数（筛了以后
+// 选项会随当前条件消失，筛选器把自己锁死，见 metrics/metricdimensions.go），因此刻意
+// 不接受任何维度参数——传了也按未知参数忽略（见文件顶部第 3 条）。
+var metricDimensionsParams = []qParam{
+	{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	{name: "all_history", kind: qBool, def: qBoolFalse},
 }
+
+// usageBreakdownParams 是 GET /ui/usage-breakdown.json（按维度拆分的趋势）的签名。
+//
+// 筛选维度与时间参数和 /ui/filtered-metrics.json 逐字同义（同一份 dimensionFilterParams、
+// 同一组 hours / all_history / bucket_seconds 的边界与缺省，bucket_seconds 缺省 0 = 自动），
+// 两条读数对同一组参数因此落在同一张桶网格上。多出三个：
+//
+//   - group_by：按哪个维度拆，取值域引用 metrics.UsageBreakdownGroupByValues，缺省 model；
+//   - rank_by：按 requests 还是 tokens（total_tokens）排名，缺省 requests；
+//   - limit：保留前几组（1..50，缺省 8），其余并进 other。
+var usageBreakdownParams = append(dimensionFilterParams(),
+	qParam{name: "hours", kind: qFloat, def: qFloat24, gt: qFloat0, le: qFloat8760},
+	qParam{name: "all_history", kind: qBool, def: qBoolFalse},
+	qParam{name: "bucket_seconds", kind: qInt, def: qInt0, ge: qInt15, le: qInt86400},
+	qParam{name: "group_by", kind: qLiteral, def: canonical.NewString(metrics.UsageBreakdownGroupByModel),
+		literals: metrics.UsageBreakdownGroupByValues},
+	qParam{name: "rank_by", kind: qLiteral, def: canonical.NewString(metrics.UsageBreakdownRankByRequests),
+		literals: metrics.UsageBreakdownRankByValues},
+	qParam{name: "limit", kind: qInt, def: qInt8, ge: qInt1, le: qInt50},
+)
 
 // accessKeyUsageParams 是 GET /ui/access-key-usage.json（访客看板）的签名。
 //
@@ -273,6 +339,8 @@ type queryValue struct {
 	text    string // qStr / qLiteral
 	// texts 用于 qStrList：同名参数的全部出现值，缺省为空。
 	texts []string
+	// pairs 用于 qPairList：每一项解析出的 [供应商, Key 名]，缺省为空。
+	pairs [][2]string
 	flag  bool // qBool
 }
 
@@ -324,15 +392,18 @@ func validateQuery(raw url.Values, specs []qParam) (*queryResult, []queryError) 
 		// 取末位：见文件顶部第 1 条。
 		if spec.kind == qStrList {
 			// 列表参数是这条规则的**例外**：同名参数重复出现就是维度内多选，因此收齐
-			// 全部出现值。逐项走同一套长度校验（空串仍是 string_too_short），任一项
-			// 非法就以**那一项**的原文作为 input 报错并停止——一次请求里同一个参数报
-			// 一堆同型错误没有额外信息，而「哪一项错了」正是最难自查的那个。
+			// 全部出现值。逐项走同一套单值校验（空串仍是 string_too_short，Literal 列表
+			// 的非法项仍是 literal_error），任一项非法就以**那一项**的原文作为 input 报错
+			// 并停止——一次请求里同一个参数报一堆同型错误没有额外信息，而「哪一项错了」
+			// 正是最难自查的那个。
+			itemSpec := qParam{name: spec.name, kind: qStr, minLen: spec.minLen, maxLen: spec.maxLen}
+			if len(spec.literals) > 0 {
+				itemSpec = qParam{name: spec.name, kind: qLiteral, literals: spec.literals}
+			}
 			items := make([]string, 0, len(texts))
 			var firstErr *queryError
 			for _, text := range texts {
-				value, queryErr := parseQueryValue(qParam{
-					name: spec.name, kind: qStr, minLen: spec.minLen, maxLen: spec.maxLen,
-				}, text)
+				value, queryErr := parseQueryValue(itemSpec, text)
 				if queryErr != nil {
 					firstErr = queryErr
 					break
@@ -344,6 +415,25 @@ func validateQuery(raw url.Values, specs []qParam) (*queryResult, []queryError) 
 				continue
 			}
 			result.values[spec.name] = queryValue{kind: qStrList, texts: items}
+			continue
+		}
+		if spec.kind == qPairList {
+			// 与 qStrList 同一条例外与同一套报错取舍：收齐全部出现值，第一项非法即停。
+			pairs := make([][2]string, 0, len(texts))
+			var firstErr *queryError
+			for _, text := range texts {
+				pair, queryErr := parsePairQuery(spec, text)
+				if queryErr != nil {
+					firstErr = queryErr
+					break
+				}
+				pairs = append(pairs, pair)
+			}
+			if firstErr != nil {
+				errs = append(errs, *firstErr)
+				continue
+			}
+			result.values[spec.name] = queryValue{kind: qPairList, pairs: pairs}
 			continue
 		}
 		text := texts[len(texts)-1]
@@ -453,6 +543,40 @@ func parseQueryValue(spec qParam, text string) (queryValue, *queryError) {
 		return queryValue{kind: qStr, text: text}, nil
 	}
 	return queryValue{kind: spec.kind, null: true}, nil
+}
+
+// parsePairQuery 解析一项 qPairList：恰好两个字符串的 JSON 数组，每一部分按字符数落在
+// [minLen, maxLen] 内。
+//
+// 报错是 Pydantic 自定义校验器的那一档（type=value_error，msg 以 "Value error, " 开头），
+// loc 仍是 ["query", <name>]、input 是**这一项的原文**——与 qStrList 的逐项报错同形。
+// 不细分「不是 JSON」「不是数组」「元素不是字符串」「长度不对」几种情形：调用方要改成
+// 的形状只有一种，一句完整的期望形状比四种错误码更好自查。不带 ctx：FastAPI 把
+// value_error 的 ctx 渲染成一个空对象，没有信息量。
+func parsePairQuery(spec qParam, text string) ([2]string, *queryError) {
+	invalid := &queryError{
+		name: spec.name, typ: "value_error", input: text,
+		msg: "Value error, " + spec.name + " must be a JSON array of exactly two non-empty strings " +
+			`["<provider_id>","<key_name>"], each at most ` + strconv.Itoa(spec.maxLen) + " characters",
+	}
+	var items []any
+	if err := json.Unmarshal([]byte(text), &items); err != nil || len(items) != 2 {
+		// null 也走这里：Unmarshal 把它解成 nil 切片，长度 0。
+		return [2]string{}, invalid
+	}
+	var pair [2]string
+	for i, item := range items {
+		part, ok := item.(string)
+		if !ok {
+			return [2]string{}, invalid
+		}
+		length := len([]rune(part))
+		if (spec.minLen > 0 && length < spec.minLen) || (spec.maxLen > 0 && length > spec.maxLen) {
+			return [2]string{}, invalid
+		}
+		pair[i] = part
+	}
+	return pair, nil
 }
 
 // plural 复刻 Pydantic 消息里的单复数（1 用单数，其余用复数）。
@@ -660,9 +784,36 @@ func (r *queryResult) stringList(name string) []string {
 	return r.values[name].texts
 }
 
+// upstreamKeys 返回 qPairList 参数的全部取值；缺省时长度 0。
+func (r *queryResult) upstreamKeys(name string) []metrics.UpstreamKey {
+	pairs := r.values[name].pairs
+	keys := make([]metrics.UpstreamKey, 0, len(pairs))
+	for _, pair := range pairs {
+		keys = append(keys, metrics.UpstreamKey{ProviderID: pair[0], KeyName: pair[1]})
+	}
+	return keys
+}
+
+// dimensions 把 dimensionFilterParams 声明的七个参数收成存储层的一组筛选维度。
+//
+// 只有用 dimensionFilterParams 声明过参数的路由才能调用它：别的路由的 values 里没有这些
+// 键，取出来全是零值（等于不筛），不会报错，但那就不是调用方的意图了。
+func (r *queryResult) dimensions() metrics.Dimensions {
+	return metrics.Dimensions{
+		ProviderIDs:  r.stringList("provider_id"),
+		AccessKeyIDs: r.stringList("access_key_id"),
+		ModelIDs:     r.stringList("model_id"),
+		UpstreamKeys: r.upstreamKeys("upstream_key"),
+		Workspaces:   r.stringList("workspace"),
+		CallerTypes:  r.stringList("caller_type"),
+		Success:      r.optionalBool("success"),
+	}
+}
+
 // stringValue 返回一个字符串 / Literal 参数的值。
 //
-// 只用于**声明了缺省值**的那一个 Literal（目前只有 status-monitor 的 group_by）：
+// 只用于**声明了缺省值**的 Literal（status-monitor 的 group_by、usage-breakdown 的
+// group_by / rank_by）：
 // 缺省时 defaultValue 已经把 def 里的字符串放进 queryValue.text，因此这里不需要
 // 判空分支。可空字符串参数请用 optionalString——那条路径的 nil 表示「请求里没给」。
 func (r *queryResult) stringValue(name string) string {
