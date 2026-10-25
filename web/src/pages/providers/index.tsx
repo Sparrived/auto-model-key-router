@@ -1,14 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, MoreHorizontal, Pencil, Plus, Radar, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
-import { errorText, shortRevision } from "@/lib/format";
+import { api, ApiError } from "@/lib/api";
+import { errorText, formatDateTime, shortRevision } from "@/lib/format";
 import { writeWithImpactConfirm, type Impact } from "@/lib/model-impact";
+import { freezeLookupKey, indexQuotaFreezes, invalidateFreezeViews } from "@/lib/quota-freeze";
 import { queryKeys } from "@/lib/query-keys";
 import { ProviderIcon } from "@/lib/brand-icons";
-import type { Provider, ProviderKey, ProvidersResponse } from "@/lib/types";
-import { setParams, useRoute } from "@/app/router";
+import type { Provider, ProviderKey, ProvidersResponse, QuotaFreeze } from "@/lib/types";
+import { navigate, setParams, useRoute } from "@/app/router";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
 import { Button, IconButton } from "@/components/ui/Button";
@@ -50,6 +51,18 @@ export default function ProvidersPage() {
   const impactConfirm = useImpactConfirm();
   const providersQuery = useQuery({ queryKey: queryKeys.providers(), queryFn: () => api.providers() });
   const routesQuery = useQuery({ queryKey: queryKeys.routes(), queryFn: () => api.routes() });
+  // 额度冻结：本地状态快照，与账号资源页共用同一个查询键。老后端没有这个接口（404）
+  // 时只是不显示冻结信息，页面其余部分照常工作，所以关掉重试。
+  const freezesQuery = useQuery({
+    queryKey: queryKeys.quotaFreezes(),
+    queryFn: api.quotaFreezes,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const freezes = useMemo(() => freezesQuery.data?.freezes ?? [], [freezesQuery.data]);
+  const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
+  // 同一时刻只放行一次解冻，避免连点发出多个 DELETE（第二次会 404）。
+  const releasingRef = useRef<string | null>(null);
 
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -81,6 +94,31 @@ export default function ProvidersPage() {
     });
     await client.invalidateQueries({ queryKey: queryKeys.routes() });
     return data;
+  }
+
+  // 手工解冻：只解除本次冻结（服务端附抑制窗口），不写配置；成功后刷新供应商与冻结列表。
+  async function releaseFreeze(freeze: QuotaFreeze) {
+    const id = freezeLookupKey(freeze.provider_id, freeze.key_name);
+    if (releasingRef.current) return;
+    releasingRef.current = id;
+    try {
+      const result = await api.releaseQuotaFreeze(freeze.provider_id, freeze.key_name);
+      const suppressed = result.suppressed_until ? `，抑制至 ${formatDateTime(result.suppressed_until)}` : "";
+      toast.success(`已解除 ${freeze.provider_id} · ${freeze.key_name} 的额度冻结${suppressed}。`);
+      await invalidateFreezeViews(client);
+      await refreshProviders();
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 404) {
+        // 冻结已被别的路径解除（到期自动解冻/账号资源页手工解冻）：刷新追上真实状态。
+        toast("该 Key 当前没有冻结，已刷新列表。");
+        await invalidateFreezeViews(client);
+        await refreshProviders().catch(() => undefined);
+      } else {
+        toast.error(`解除额度冻结失败：${errorText(failure)}`);
+      }
+    } finally {
+      releasingRef.current = null;
+    }
   }
 
   function selectProvider(id: string) {
@@ -138,6 +176,20 @@ export default function ProvidersPage() {
 
       {providersQuery.isError ? (
         <Banner tone="critical">无法读取供应商配置: {errorText(providersQuery.error)}</Banner>
+      ) : null}
+
+      {freezes.length ? (
+        <Banner
+          tone="warn"
+          title={`${freezes.length} 把上游 Key 因额度耗尽被自动冻结（不影响启用开关）`}
+          action={(
+            <Button size="sm" variant="secondary" onClick={() => navigate("accounts")}>
+              前往账号资源
+            </Button>
+          )}
+        >
+          冻结只影响 AMKR 的选路，不会改动配置里的启用状态；额度窗口重置或观测到有余额后会自动解除。
+        </Banner>
       ) : null}
 
       <div className="min-h-0 flex-1">
@@ -251,6 +303,8 @@ export default function ProvidersPage() {
                   provider={selected}
                   revision={revision}
                   boundModels={boundModels}
+                  freezes={freezeIndex}
+                  onReleaseFreeze={(freeze) => void releaseFreeze(freeze)}
                   onRefresh={refreshProviders}
                   onOpenModels={(key: ProviderKey) => setBindingTarget({ provider: selected.id, key: key.name })}
                 />

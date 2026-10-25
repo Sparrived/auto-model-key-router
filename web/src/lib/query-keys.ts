@@ -42,5 +42,7 @@ export const queryKeys = {
   accessKeys: () => ["config", "access-keys"] as const,
   cpaInstances: () => ["config", "cpa-instances"] as const,
   cpaAccounts: () => ["config", "cpa-accounts"] as const,
+  // 额度冻结列表：账号资源页（随 /api/cpa-accounts 一起）与供应商页（逐 Key 打徽标）共用。
+  quotaFreezes: () => ["config", "quota-freezes"] as const,
   v1Models: (workspace?: string) => ["v1-models", workspace ?? ""] as const,
 };

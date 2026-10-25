@@ -43,6 +43,8 @@ import type {
   ProviderKey,
   ProviderUpdateKeyPatch,
   ProvidersResponse,
+  QuotaFreezeReleaseResponse,
+  QuotaFreezesResponse,
   RequestListResponse,
   RouteEntry,
   RouteTarget,
@@ -650,6 +652,17 @@ export const api = {
       body: { config_revision: revision, instances },
     }),
   cpaAccounts: (): Promise<CPAAccountsResponse> => request("/api/cpa-accounts"),
+
+  // 额度冻结：窗口硬性耗尽后自动摘出选路的 Key 列表，以及手工解冻。
+  //
+  // GET 回的是**本地状态快照**（冻结表 + 巡检状态），不会扇出到 CPA/上游，可以放心随页面读；
+  // DELETE 只解除本次冻结并给该 Key 一个抑制窗口（否则下一轮巡检会立刻冻回去），不写配置、
+  // 不写上游，所以没有 config_revision。
+  quotaFreezes: (): Promise<QuotaFreezesResponse> => request("/api/quota-freezes"),
+  releaseQuotaFreeze: (providerId: string, keyName: string): Promise<QuotaFreezeReleaseResponse> =>
+    request(`/api/quota-freezes/${encodeURIComponent(providerId)}/${encodeURIComponent(keyName)}`, {
+      method: "DELETE",
+    }),
 
   // CPA 重置卡：GET 会真实访问上游且有限流，只在用户点「查看重置卡」时调用；POST 会消费
   // 一张卡并改变账号状态，必须由页面先做危险确认。404 表示当前构建没有该能力。

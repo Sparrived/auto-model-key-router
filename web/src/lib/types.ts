@@ -584,7 +584,73 @@ export interface CPARecentBucket {
   [key: string]: unknown;
 }
 
+// 额度冻结：某个额度窗口硬性耗尽后，对应上游 Key 被临时摘出选路。
+//
+// 与配置里的 enabled 是两回事：冻结是自动的临时状态（到期或观测到有余额即解除），
+// enabled 是人工长期开关。形状见 docs/design/quota-freeze.md 第 6 节。
+export interface QuotaFreeze {
+  provider_id: string;
+  key_name: string;
+  /** 厂商/订阅名，供界面显示（Claude、OpenCode Go…）。 */
+  vendor?: string;
+  /** subscription | cpa_instance | upstream。 */
+  scope?: string;
+  /** account_resource | upstream_header。 */
+  source?: string;
+  /** 触发冻结的账号标识（邮箱/文件名等）。 */
+  account?: string;
+  /** scope=cpa_instance 时非空。 */
+  instance_id?: string;
+  /** 窗口稳定标识，如 claude/5h。 */
+  window_key?: string;
+  /** 人话窗口标签，如「5 小时」。 */
+  window_label?: string;
+  /** 触发时的剩余比例（0..1）。 */
+  remaining?: number;
+  /** 触发时上游给的窗口状态词（rejected / exceeded…）。 */
+  status?: string;
+  /** 窗口重置时间；缺省表示未知。 */
+  reset_at?: string;
+  frozen_at?: string;
+  /** 到期自动解冻时刻。 */
+  expires_at?: string;
+  /** 一句人话，界面直接显示。 */
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface QuotaFreezesResponse {
+  fetched_at?: string;
+  /** false = 配置里 quota_freeze_interval_seconds=0，整套机制关闭。 */
+  enabled?: boolean;
+  interval_seconds?: number;
+  last_evaluated_at?: string;
+  /** 最近一次评估失败的原因（空串/缺省表示没有失败）。 */
+  last_error?: string;
+  freezes?: QuotaFreeze[];
+  [key: string]: unknown;
+}
+
+export interface QuotaGuardStatus {
+  enabled?: boolean;
+  interval_seconds?: number;
+  last_evaluated_at?: string;
+  last_error?: string;
+  [key: string]: unknown;
+}
+
+export interface QuotaFreezeReleaseResponse {
+  released?: boolean;
+  provider_id?: string;
+  key_name?: string;
+  /** 抑制窗口结束时间：在此之前即使读数仍耗尽也不会自动冻回去。 */
+  suppressed_until?: string;
+  [key: string]: unknown;
+}
+
 export interface CPAAccount {
+  /** 该账号是否有硬性耗尽的额度窗口。 */
+  quota_exhausted?: boolean;
   auth_index?: string | number;
   name?: string;
   label?: string;
@@ -619,6 +685,12 @@ export interface CPAAccountInstance {
   observed_at?: string;
   error?: string;
   accounts?: CPAAccount[];
+  /** base_url 指向该实例的供应商 ID 列表。 */
+  linked_providers?: string[];
+  /** 实例内启用账号是否全部硬性耗尽。 */
+  all_accounts_exhausted?: boolean;
+  /** 该实例关联供应商下当前被冻结的 Key。 */
+  frozen_keys?: Array<{ provider_id: string; key_name: string }>;
   [key: string]: unknown;
 }
 
@@ -639,11 +711,17 @@ export interface CPASubscription {
   summary?: CPASummaryMetric[];
   signals?: Record<string, unknown>;
   error?: string;
+  /** 该订阅出处的那把 Key 当前是否被冻结。 */
+  freeze?: QuotaFreeze;
   [key: string]: unknown;
 }
 
 export interface CPAAccountsResponse {
   fetched_at?: string;
+  /** 全部当前冻结（与 GET /api/quota-freezes 的 freezes 同形）。 */
+  freezes?: QuotaFreeze[];
+  /** 后台巡检状态。 */
+  guard?: QuotaGuardStatus;
   instances?: CPAAccountInstance[];
   subscriptions?: CPASubscription[];
   accounts?: CPAAccount[];

@@ -7,6 +7,7 @@ import { ImpactProvider } from "@/components/ui/ImpactDialog";
 import type {
   ModelSummaryResponse,
   Provider,
+  QuotaFreeze,
   RouteEntry,
   UnifiedModel,
 } from "@/lib/types";
@@ -25,6 +26,8 @@ export interface FakeState {
   unified: UnifiedModel | null;
   revision: string;
   counter: number;
+  /** 额度冻结表（GET /api/quota-freezes 的内容；默认空表）。 */
+  freezes: QuotaFreeze[];
 }
 
 const clone = <T,>(value: T): T => structuredClone(value);
@@ -34,6 +37,7 @@ export function seedState(): FakeState {
     revision: "rev-1",
     counter: 1,
     efforts: { "gpt-4o-mini": "medium" },
+    freezes: [],
     providers: [
       {
         id: "openai",
@@ -212,6 +216,31 @@ export function createFakeBackend(seed: Partial<FakeState> = {}) {
         models[name] = { kinds: [info.kind], primary: info.kind, endpoints: [info.endpoint] };
       }
       return response({ catalog_available: true, models });
+    }
+
+    if (path === "/api/quota-freezes" && method === "GET") {
+      return response({
+        fetched_at: "2026-10-24T17:00:00+08:00",
+        enabled: true,
+        interval_seconds: 60,
+        last_evaluated_at: "2026-10-24T17:00:00+08:00",
+        last_error: "",
+        freezes: clone(state.freezes),
+      });
+    }
+    const unfreeze = path.match(/^\/api\/quota-freezes\/([^/]+)\/([^/]+)$/);
+    if (unfreeze && method === "DELETE") {
+      const before = state.freezes.length;
+      state.freezes = state.freezes.filter(
+        (freeze) => !(freeze.provider_id === unfreeze[1] && freeze.key_name === unfreeze[2]),
+      );
+      if (state.freezes.length === before) return response({ detail: "当前没有冻结" }, 404);
+      return response({
+        released: true,
+        provider_id: unfreeze[1],
+        key_name: unfreeze[2],
+        suppressed_until: "2026-10-24T17:10:00+08:00",
+      });
     }
 
     if (path === "/api/providers" && method === "GET") {

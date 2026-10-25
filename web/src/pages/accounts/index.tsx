@@ -5,14 +5,22 @@
 // - 进页只取账号读数，管理密钥只在打开「管理实例」时读取；
 // - 只读、不轮询，刷新由用户明确触发，一次刷新只发一次账号请求；
 // - 额度显示**剩余**比例，≤5% 用 critical，≤20% 用 warn；
-// - 单个实例读取失败只影响自己的面板，搜索/筛选对所有实例统一生效。
+// - 单个实例读取失败只影响自己的面板，搜索/筛选对所有实例统一生效；
+// - 额度冻结是后台的临时状态，不写回配置的 enabled 开关（见 docs/design/quota-freeze.md）。
 
 import { useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { errorText, formatCount, formatDateTime, formatPercent } from "@/lib/format";
 import { queryKeys } from "@/lib/query-keys";
+import {
+  freezeLookupKey,
+  freezeReasonText,
+  freezeResetCountdown,
+  indexQuotaFreezes,
+  invalidateFreezeViews,
+} from "@/lib/quota-freeze";
 import { cn } from "@/lib/cn";
 import type {
   CPAAccount,
@@ -23,6 +31,8 @@ import type {
   CPAResetCreditsResponse,
   CPASubscription,
   CPAQuotaWindow,
+  QuotaFreeze,
+  QuotaGuardStatus,
 } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
@@ -38,6 +48,7 @@ import { ProgressBar } from "@/components/ui/ProgressBar";
 import { Segmented } from "@/components/ui/Segmented";
 import { Sheet } from "@/components/ui/Sheet";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { Tooltip } from "@/components/ui/Tooltip";
 import { useConfirm } from "@/components/ui/ConfirmProvider";
 import { Meter } from "@/components/charts";
 
@@ -115,6 +126,22 @@ function quotaHint(account: CPAAccount): string {
   }
   if (account.quota_error.includes("501")) return "对端没有额度提供者（未装额度插件，也没配 quota_probe）";
   return account.quota_error;
+}
+
+// 页头说明里的检测节奏：配置关掉整套机制（interval_seconds=0）时要说「已关闭」，
+// 不能写成「每 0 秒」；字段缺省（旧后端）时退回「定时」而不是报错。
+//
+// 关闭档的文案必须与后端一致：interval=0 时后台巡检、上游响应头信号、页面即时评估
+// **都不产生新冻结**（internal/api/quota_guard.go），已有冻结仍在选路里生效到到期或
+// 手工解冻（docs/USAGE.md 4.2）。所以关闭档不能复用「进页会立即评估一次」这句。
+function guardDescription(guard?: QuotaGuardStatus): string {
+  if (guard?.enabled === false) {
+    return "后台自动检测已在配置里关闭；进页也不会产生新冻结，已有冻结仍展示、仍参与选路，直到到期或手工解冻。";
+  }
+  const tail = "进页会立即评估一次；命中硬性额度后对应 Key 会被自动冻结（不写回配置的启用开关）。";
+  const seconds = Number(guard?.interval_seconds);
+  const every = Number.isFinite(seconds) && seconds > 0 ? `每 ${seconds} 秒` : "定时";
+  return `后台${every}自动检测；${tail}`;
 }
 
 function normalizeInstances(value: unknown): InstanceRow[] {
@@ -289,20 +316,55 @@ function RecentBars({ buckets }: { buckets: CPAAccount["recent_requests"] }) {
   );
 }
 
-function SubscriptionCard({ entry }: { entry: CPASubscription }) {
+interface SubscriptionCardProps {
+  entry: CPASubscription;
+  /** 解冻处理器；null 表示当前不可解冻（只显示冻结信息）。 */
+  releasingFreeze: ((freeze: QuotaFreeze) => void) | null;
+  /** 正在解冻的 Key（freezeLookupKey 结果），用于只给被点的那把按钮上 loading。 */
+  releasingKey: string | null;
+}
+
+function SubscriptionCard({ entry, releasingFreeze, releasingKey }: SubscriptionCardProps) {
   const windows = entry.windows ?? [];
+  const freeze = entry.freeze;
+  const freezeId = freeze ? freezeLookupKey(freeze.provider_id, freeze.key_name) : "";
+  const canRelease = Boolean(freeze?.provider_id && freeze?.key_name && releasingFreeze);
+  const resetCountdown = freeze ? freezeResetCountdown(freeze) : "";
   return (
     <Panel
       title={entry.vendor || entry.kind || entry.id || "订阅"}
       description={[entry.base_url, entry.account ? `账号 ${entry.account}` : null, entry.plan || entry.tier_id ? `档位 ${[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}` : null].filter(Boolean).join(" · ")}
       actions={(
         <div className="flex flex-wrap items-center gap-2">
+          {freeze ? <Badge tone="critical" dot>额度冻结</Badge> : null}
           <Badge tone="neutral">{entry.key_name ? `${entry.provider_id} · ${entry.key_name}` : entry.provider_id || "订阅"}</Badge>
           {entry.plan || entry.tier_id ? <Badge tone="neutral">{[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}</Badge> : null}
           {entry.ok && entry.observed_at ? <span className="text-[11px] text-ink-3">查询于 {formatDateTime(entry.observed_at)}</span> : null}
         </div>
       )}
     >
+      {freeze ? (
+        <Banner
+          tone="critical"
+          className="mb-2"
+          title="此 Key 已被自动冻结"
+          action={canRelease && freeze ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={releasingKey === freezeId}
+              onClick={() => releasingFreeze?.(freeze)}
+            >
+              解除冻结
+            </Button>
+          ) : null}
+        >
+          <div className="space-y-0.5">
+            <p>{freezeReasonText(freeze)}</p>
+            {resetCountdown ? <p>{resetCountdown}</p> : null}
+          </div>
+        </Banner>
+      ) : null}
       {entry.ok === false || entry.error ? <Banner tone="critical">{entry.error || "读取失败"}</Banner> : windows.length ? (
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {windows.map((window, index) => {
@@ -349,9 +411,12 @@ export default function AccountsPage() {
     retry: false,
     refetchOnWindowFocus: false,
   });
+  const client = useQueryClient();
   const [keyword, setKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const searchRef = useRef<HTMLInputElement>(null);
+  // 正在解冻的 Key（freezeLookupKey 结果）；同一时刻只放行一次解冻请求。
+  const [releasing, setReleasing] = useState<string | null>(null);
   const [resetData, setResetData] = useState<CPAResetCreditsResponse | null>(null);
   const [resetHidden, setResetHidden] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
@@ -366,6 +431,27 @@ export default function AccountsPage() {
   const report = accountsQuery.data as CPAAccountsResponse | undefined;
   const instances = report?.instances ?? [];
   const subscriptions = report?.subscriptions ?? [];
+  // 冻结列表随账号资源响应一起回来（顶层 freezes），不再单独请求一次；逐 Key 的徽标/明细
+  // 按 provider_id + key_name 索引出来。顶层数组缺省（后端过渡版本）时退回逐条字段汇总，
+  // 不让「有冻结徽标但计数为 0」这种自相矛盾的画面出现。
+  const freezes = useMemo(() => {
+    if (report?.freezes) return report.freezes;
+    const fallback = new Map<string, QuotaFreeze>();
+    for (const entry of report?.subscriptions ?? []) {
+      if (entry.freeze) fallback.set(freezeLookupKey(entry.freeze.provider_id, entry.freeze.key_name), entry.freeze);
+    }
+    for (const instance of report?.instances ?? []) {
+      for (const item of instance.frozen_keys ?? []) {
+        fallback.set(freezeLookupKey(item.provider_id, item.key_name), {
+          provider_id: item.provider_id,
+          key_name: item.key_name,
+        });
+      }
+    }
+    return [...fallback.values()];
+  }, [report]);
+  const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
+  const guard = report?.guard;
   const accounts = useMemo(() => instances.flatMap((instance) => instance.accounts ?? []), [instances]);
   const readableInstances = instances.filter((instance) => instance.ok !== false);
   const usableAccounts = accounts.filter((account) => !account.disabled && !account.unavailable);
@@ -515,10 +601,34 @@ export default function AccountsPage() {
     }
   }
 
+  // 手工解冻：DELETE 只解除本次冻结并附抑制窗口，不写配置；成功后账号资源与
+  // 冻结列表两个查询一起失效（供应商页共用同一份冻结列表缓存）。
+  async function releaseFreeze(freeze: Pick<QuotaFreeze, "provider_id" | "key_name">) {
+    const id = freezeLookupKey(freeze.provider_id, freeze.key_name);
+    if (releasing) return;
+    setReleasing(id);
+    try {
+      const result = await api.releaseQuotaFreeze(freeze.provider_id, freeze.key_name);
+      const suppressed = result.suppressed_until ? `，抑制至 ${formatDateTime(result.suppressed_until)}` : "";
+      toast.success(`已解除 ${freeze.provider_id} · ${freeze.key_name} 的额度冻结${suppressed}。`);
+      await invalidateFreezeViews(client);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        // 冻结已被别的路径解除（到期自动解冻/别处手工解冻）：刷新一下追上真实状态。
+        toast("该 Key 当前没有冻结，已刷新列表。");
+        await invalidateFreezeViews(client);
+      } else {
+        toast.error(`解除额度冻结失败：${errorText(error)}`);
+      }
+    } finally {
+      setReleasing(null);
+    }
+  }
+
   const pageHead = (
     <PageHeader
       title="账号资源"
-      description="账号资源：CPA 实例的账号，以及 OpenCode Go、Command Code 这类订阅的剩余额度。读数由服务端代问，不轮询。"
+      description={`账号资源：CPA 实例的账号，以及 OpenCode Go、Command Code 这类订阅的剩余额度。读数由服务端代问，页面本身不轮询。${guardDescription(guard)}`}
       actions={(
         <>
           {report?.fetched_at ? <span className="hidden text-meta text-ink-3 sm:inline">读取于 {formatDateTime(report.fetched_at)}</span> : null}
@@ -550,7 +660,7 @@ export default function AccountsPage() {
       ) : null}
       {resetError ? <Banner tone="critical" title="读取重置卡失败">{resetError}</Banner> : null}
 
-      <MetricStrip className="cols-4">
+      <MetricStrip className="cols-5">
         <MetricCell
           className="stat"
           label="实例"
@@ -566,6 +676,15 @@ export default function AccountsPage() {
           value={formatCount(alertCount)}
           hint={alertCount ? `其中 ${drainedCount} 个已用尽` : "都还有 20% 以上"}
           tone={drainedCount ? "critical" : alertCount ? "warn" : "neutral"}
+        />
+        <MetricCell
+          className="stat"
+          label="额度冻结"
+          value={formatCount(freezes.length)}
+          hint={freezes.length
+            ? "对应 Key 已从选路里摘出"
+            : guard?.enabled === false ? "后台自动检测已关闭" : "当前没有 Key 被冻结"}
+          tone={freezes.length ? "critical" : "neutral"}
         />
       </MetricStrip>
 
@@ -603,7 +722,12 @@ export default function AccountsPage() {
       ) : (
         <>
           {subscriptions.map((entry) => (
-            <SubscriptionCard key={entry.id || `${entry.provider_id}-${entry.key_name}`} entry={entry} />
+            <SubscriptionCard
+              key={entry.id || `${entry.provider_id}-${entry.key_name}`}
+              entry={entry}
+              releasingFreeze={releaseFreeze}
+              releasingKey={releasing}
+            />
           ))}
 
           {filteredInstances.map((instance) => {
@@ -615,16 +739,31 @@ export default function AccountsPage() {
               return lowest !== null && lowest <= 0.2;
             }).length;
             const offset = (instance.accounts ?? []).find((account) => account.server_time_offset_ms !== undefined)?.server_time_offset_ms;
+            // 实例级联动：全部启用账号都硬性耗尽时，指向该实例的每一把 Key 都会被冻结。
+            const frozenKeys = instance.frozen_keys ?? [];
+            const linkedProviders = instance.linked_providers ?? [];
             return (
               <Panel
                 key={instance.id}
                 title={instance.label || instance.id}
                 description={instance.base_url || "未填写地址"}
                 actions={(
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Badge tone={instance.ok === false ? "critical" : "neutral"}>
                       {instance.ok === false ? "读取失败" : `${instance.originalAccountCount ?? instance.accounts?.length ?? 0} 个账号`}
                     </Badge>
+                    {linkedProviders.length ? (
+                      <Tooltip
+                        content={(
+                          <div className="space-y-0.5">
+                            <div>地址指向这个实例的供应商：</div>
+                            {linkedProviders.map((id) => <div key={id} className="font-mono">{id}</div>)}
+                          </div>
+                        )}
+                      >
+                        <span tabIndex={0}><Badge tone="neutral">关联 {linkedProviders.length} 个供应商</Badge></span>
+                      </Tooltip>
+                    ) : null}
                     {instance.observed_at ? <span className="text-[11px] text-ink-3">CPA 观测于 {formatDateTime(instance.observed_at)}</span> : null}
                   </div>
                 )}
@@ -634,6 +773,40 @@ export default function AccountsPage() {
                   <div className="p-4"><Banner tone="critical">{instance.error}</Banner></div>
                 ) : (
                   <>
+                    {instance.all_accounts_exhausted ? (
+                      <div className="border-b border-rule px-4 py-3">
+                        <Banner
+                          tone="critical"
+                          title={`实例内全部账号额度均已用尽，已冻结指向该实例的 ${frozenKeys.length} 把 Key`}
+                        >
+                          {frozenKeys.length ? (
+                            <ul className="space-y-1.5">
+                              {frozenKeys.map((item) => {
+                                const id = freezeLookupKey(item.provider_id, item.key_name);
+                                const detail = freezeIndex.get(id);
+                                const resetCountdown = detail ? freezeResetCountdown(detail) : "";
+                                return (
+                                  <li key={id} className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="min-w-0 truncate font-mono text-[11px]" title={detail ? freezeReasonText(detail) : undefined}>
+                                      {item.provider_id} · {item.key_name}
+                                      {resetCountdown ? <span className="ml-1.5 font-sans text-ink-3">（{resetCountdown}）</span> : null}
+                                    </span>
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
+                                      loading={releasing === id}
+                                      onClick={() => void releaseFreeze({ provider_id: item.provider_id, key_name: item.key_name })}
+                                    >
+                                      解冻
+                                    </Button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          ) : <p>冻结明细还没回传，刷新一次即可看到逐把 Key。</p>}
+                        </Banner>
+                      </div>
+                    ) : null}
                     <div className="grid gap-3 border-b border-rule bg-sunken/40 px-4 py-3 text-meta sm:grid-cols-2 xl:grid-cols-5">
                       <div className="min-w-0">
                         <div className="text-ink-3">实例端点</div>
@@ -666,6 +839,11 @@ export default function AccountsPage() {
                                     {authIndex ? <span className="rounded-chip bg-sunken px-1.5 py-0.5 font-mono text-[11px] text-ink-3">#{authIndex}</span> : null}
                                     <Badge tone="neutral">{account.provider || "未知"}</Badge>
                                     <span title={account.status_message || undefined}><Badge tone={status.tone}>{status.text}</Badge></span>
+                                    {account.quota_exhausted ? (
+                                      <span title="该账号至少有一个硬性耗尽的额度窗口；不是配置里的停用">
+                                        <Badge tone="critical">额度用尽</Badge>
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </div>
                               </div>

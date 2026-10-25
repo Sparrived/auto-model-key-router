@@ -1,12 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Radar, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Radar, Trash2, Unlock } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { errorText, formatRelative } from "@/lib/format";
 import { writeWithImpactConfirm, type Impact } from "@/lib/model-impact";
-import type { Provider, ProviderKey, ProvidersResponse } from "@/lib/types";
+import {
+  freezeExpiresAtText,
+  freezeLookupKey,
+  freezeReasonText,
+  freezeResetAtText,
+  freezeResetCountdown,
+} from "@/lib/quota-freeze";
+import type { Provider, ProviderKey, ProvidersResponse, QuotaFreeze } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
 import { Button, IconButton } from "@/components/ui/Button";
@@ -25,6 +32,10 @@ interface KeysTableProps {
   boundModels: Map<string, string[]>;
   onRefresh: () => Promise<ProvidersResponse>;
   onOpenModels: (key: ProviderKey) => void;
+  /** 「供应商 + Key → 冻结记录」索引；缺省表示没有冻结数据（测试与旧调用方兼容）。 */
+  freezes?: Map<string, QuotaFreeze>;
+  /** 解除一把 Key 的冻结；由页面负责调接口、刷新与提示。 */
+  onReleaseFreeze?: (freeze: QuotaFreeze) => void;
 }
 
 function capabilityBadge(key: ProviderKey) {
@@ -45,7 +56,23 @@ function concurrencyBadge(value: number | null | undefined) {
   return <Badge tone={limited ? "good" : "neutral"}>{limited ? `并发 ${limit}` : "并发不限"}</Badge>;
 }
 
-export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenModels }: KeysTableProps) {
+// 冻结 tooltip：原因 + 重置/自动解冻时间。绝对时刻与倒计时都给，扫一眼不用自己换算。
+function FreezeTooltip({ freeze }: { freeze: QuotaFreeze }) {
+  const countdown = freezeResetCountdown(freeze);
+  const resetAt = freezeResetAtText(freeze);
+  const expiresAt = freezeExpiresAtText(freeze);
+  return (
+    <div className="space-y-0.5">
+      <div>{freezeReasonText(freeze)}</div>
+      {countdown ? <div>重置倒计时：{countdown}</div> : null}
+      {resetAt ? <div>窗口重置：{resetAt}</div> : null}
+      {expiresAt ? <div>最迟 {expiresAt} 自动解冻</div> : null}
+      <div>冻结不会改动启用开关</div>
+    </div>
+  );
+}
+
+export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenModels, freezes, onReleaseFreeze }: KeysTableProps) {
   const client = useQueryClient();
   const impactConfirm = useImpactConfirm();
   const [editing, setEditing] = useState<string | null>(null);
@@ -148,6 +175,8 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
         <tbody>
           {keys.map((key) => {
             const bound = boundModels.get(`${provider.id}|${key.name}`) || [];
+            // 冻结是选路侧的临时状态，与配置里的 enabled 无关：开关照旧绑定 enabled。
+            const freeze = freezes?.get(freezeLookupKey(provider.id, key.name));
             return editing === key.name ? (
               <KeyEditorRow
                 key={`${key.name}-edit`}
@@ -177,7 +206,22 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
               >
                 <td className="min-w-0 px-3 py-2.5 align-top">
                   <div className="flex min-w-0 flex-col gap-1">
-                    <span className="truncate font-mono text-dense font-medium text-ink">{key.name}</span>
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="truncate font-mono text-dense font-medium text-ink">{key.name}</span>
+                      {freeze ? (
+                        <Tooltip content={<FreezeTooltip freeze={freeze} />}>
+                          <span
+                            tabIndex={0}
+                            className="inline-flex"
+                            aria-label={`Key ${key.name} 的额度冻结详情`}
+                            onClick={(event) => event.stopPropagation()}
+                            onKeyDown={(event) => event.stopPropagation()}
+                          >
+                            <Badge tone="critical" dot>额度冻结</Badge>
+                          </span>
+                        </Tooltip>
+                      ) : null}
+                    </div>
                     <span
                       className="min-w-0 max-w-full"
                       onClick={(event) => event.stopPropagation()}
@@ -305,6 +349,9 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
                     )}
                   >
                     <DropdownMenuItem icon={<Pencil />} onSelect={() => setEditing(key.name)}>编辑</DropdownMenuItem>
+                    {freeze ? (
+                      <DropdownMenuItem icon={<Unlock />} onSelect={() => onReleaseFreeze?.(freeze)}>解除冻结</DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem danger icon={<Trash2 />} onSelect={() => void removeKey(key)}>删除 Key</DropdownMenuItem>
                   </DropdownMenu>

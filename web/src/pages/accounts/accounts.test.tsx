@@ -1,11 +1,14 @@
-// 账号资源页验收：额度口径、故障隔离、刷新请求数、重置卡按需读取与危险确认。
+// 账号资源页验收：额度口径、故障隔离、刷新请求数、重置卡按需读取与危险确认，
+// 以及额度冻结的展示与手工解冻（徽标/原因/倒计时、实例级联动横幅、刷新范围）。
 
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfirmProvider } from "@/components/ui/ConfirmProvider";
 import { SecretProvider } from "@/components/ui/SecretDialog";
+import { queryKeys } from "@/lib/query-keys";
 import AccountsPage from "./index";
 
 interface Call {
@@ -78,24 +81,49 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function renderPage() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+function renderPage(client: QueryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })) {
   return render(
     <QueryClientProvider client={client}>
-      <ConfirmProvider><SecretProvider><AccountsPage /></SecretProvider></ConfirmProvider>
+      <ConfirmProvider>
+        <SecretProvider>
+          <AccountsPage />
+          <Toaster />
+        </SecretProvider>
+      </ConfirmProvider>
     </QueryClientProvider>,
   );
 }
 
-function installFetch(options: { resetStatus?: number; useStatus?: number; report?: typeof report } = {}): Call[] {
+function installFetch(options: {
+  resetStatus?: number;
+  useStatus?: number;
+  report?: unknown;
+  /** 按顺序回放账号资源响应；用完之后重复最后一份（模拟解冻后的重新读取）。 */
+  reports?: unknown[];
+} = {}): Call[] {
   const calls: Call[] = [];
+  let accountReads = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "http://localhost");
     const method = init?.method ?? "GET";
     let body: unknown = null;
     try { body = init?.body ? JSON.parse(String(init.body)) : null; } catch { body = init?.body; }
     calls.push({ path: url.pathname, method, body });
-    if (url.pathname === "/api/cpa-accounts") return json(options.report ?? report);
+    if (url.pathname === "/api/cpa-accounts") {
+      const queue = options.reports;
+      const current = queue ? queue[Math.min(accountReads, queue.length - 1)] : options.report ?? report;
+      accountReads += 1;
+      return json(current);
+    }
+    if (url.pathname.startsWith("/api/quota-freezes/") && method === "DELETE") {
+      const [, , , providerId, keyName] = url.pathname.split("/");
+      return json({
+        released: true,
+        provider_id: decodeURIComponent(providerId),
+        key_name: decodeURIComponent(keyName),
+        suppressed_until: "2026-10-24T18:10:00+08:00",
+      });
+    }
     if (url.pathname === "/api/cpa-reset-credits") {
       if (options.resetStatus && options.resetStatus !== 200) return json({ detail: "没有这个能力" }, options.resetStatus);
       return json({
@@ -206,5 +234,159 @@ describe("账号资源页", () => {
     const useCall = calls.find((call) => call.path === "/api/cpa-reset-credits/use");
     expect(useCall?.body).toMatchObject({ instance: "cpa-main", auth_index: "0" });
     expect(useCall?.body).not.toHaveProperty("credit_id");
+  });
+
+  describe("额度冻结", () => {
+    const resetAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
+    const subscriptionReason = "本月窗口已用尽（剩余 0%），额度重置后自动解除";
+
+    function frozenSubscription() {
+      return {
+        ...report.subscriptions[0],
+        freeze: {
+          provider_id: "opencode",
+          key_name: "team",
+          vendor: "OpenCode Go",
+          scope: "subscription",
+          window_label: "本月",
+          remaining: 0,
+          status: "rejected",
+          reset_at: resetAt,
+          expires_at: resetAt,
+          reason: subscriptionReason,
+        },
+      };
+    }
+
+    function frozenSubscriptionReport() {
+      const subscription = frozenSubscription();
+      return {
+        ...report,
+        guard: { enabled: true, interval_seconds: 60, last_evaluated_at: "2026-10-24T17:00:00+08:00", last_error: "" },
+        freezes: [subscription.freeze],
+        subscriptions: [subscription],
+      };
+    }
+
+    function clearedSubscriptionReport() {
+      return { ...report, freezes: [], subscriptions: [report.subscriptions[0]] };
+    }
+
+    function allExhaustedReport() {
+      const base = report.instances[0];
+      return {
+        ...report,
+        guard: { enabled: true, interval_seconds: 60 },
+        freezes: [
+          {
+            provider_id: "cpa-main", key_name: "key-a", scope: "cpa_instance", instance_id: "cpa-main",
+            window_label: "5 小时", remaining: 0, status: "rejected", expires_at: resetAt, reason: "5 小时窗口已用尽",
+          },
+          {
+            provider_id: "cpa-main", key_name: "key-b", scope: "cpa_instance", instance_id: "cpa-main",
+            window_label: "每周", remaining: 0, status: "rejected", expires_at: resetAt, reason: "每周窗口已用尽",
+          },
+        ],
+        instances: [
+          {
+            ...base,
+            linked_providers: ["openai", "deepseek"],
+            all_accounts_exhausted: true,
+            frozen_keys: [
+              { provider_id: "cpa-main", key_name: "key-a" },
+              { provider_id: "cpa-main", key_name: "key-b" },
+            ],
+            accounts: base.accounts.map((account) => ({ ...account, quota_exhausted: true })),
+          },
+          report.instances[1],
+        ],
+      };
+    }
+
+    it("订阅冻结显示徽标、原因与重置倒计时，解冻后同时失效账号资源与冻结列表", async () => {
+      const user = userEvent.setup();
+      const calls = installFetch({ reports: [frozenSubscriptionReport(), clearedSubscriptionReport()] });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+      const invalidate = vi.spyOn(client, "invalidateQueries");
+      renderPage(client);
+
+      // 页头说明按后端给的巡检间隔写出来（不从配置猜）。
+      expect(await screen.findByText(/后台每 60 秒自动检测/)).toBeInTheDocument();
+
+      const panel = (await screen.findByRole("heading", { name: "OpenCode Go" })).closest("section") as HTMLElement;
+      expect(within(panel).getByText("额度冻结")).toBeInTheDocument();
+      expect(within(panel).getByText("此 Key 已被自动冻结")).toBeInTheDocument();
+      expect(within(panel).getByText(subscriptionReason)).toBeInTheDocument();
+      expect(within(panel).getByText(/后重置|即将重置|自动解冻/)).toBeInTheDocument();
+
+      await user.click(within(panel).getByRole("button", { name: "解除冻结" }));
+      await waitFor(() => expect(
+        calls.filter((call) => call.method === "DELETE" && call.path === "/api/quota-freezes/opencode/team"),
+      ).toHaveLength(1));
+      // 解冻成功后账号资源重新读取一次，冻结横幅随之消失。
+      await waitFor(() => expect(calls.filter((call) => call.path === "/api/cpa-accounts")).toHaveLength(2));
+      await waitFor(() => expect(screen.queryByText("此 Key 已被自动冻结")).not.toBeInTheDocument());
+
+      // 两个查询都要失效：账号资源（当前活跃）与冻结列表（供应商页共用同一份缓存）。
+      const invalidatedKeys = invalidate.mock.calls.map(
+        ([arg]) => JSON.stringify((arg as { queryKey?: unknown } | undefined)?.queryKey),
+      );
+      expect(invalidatedKeys).toEqual(expect.arrayContaining([
+        JSON.stringify(queryKeys.cpaAccounts()),
+        JSON.stringify(queryKeys.quotaFreezes()),
+      ]));
+      expect(await screen.findByText(/已解除 opencode · team 的额度冻结/)).toBeInTheDocument();
+    });
+
+    it("实例内账号全部耗尽时显示联动横幅，逐把解冻并刷新", async () => {
+      const user = userEvent.setup();
+      const calls = installFetch({ reports: [allExhaustedReport(), clearedSubscriptionReport()] });
+      renderPage();
+
+      expect(await screen.findByText(
+        "实例内全部账号额度均已用尽，已冻结指向该实例的 2 把 Key",
+      )).toBeInTheDocument();
+      expect(screen.getByText("关联 2 个供应商")).toBeInTheDocument();
+      // 账号卡片标出「额度用尽」——这是额度状态，不改配置里的停用/冷却。
+      expect(screen.getAllByText("额度用尽")).toHaveLength(2);
+      // 冻结计数进指标条（label 唯一：本场景没有订阅冻结徽标）。
+      const metric = screen.getByText("额度冻结").parentElement as HTMLElement;
+      expect(within(metric).getByText("2")).toBeInTheDocument();
+
+      const banner = screen.getByText(
+        "实例内全部账号额度均已用尽，已冻结指向该实例的 2 把 Key",
+      ).closest('[role="alert"]') as HTMLElement;
+      const rows = within(banner).getAllByRole("listitem");
+      expect(rows).toHaveLength(2);
+      expect(within(rows[0]).getByText(/cpa-main · key-a/)).toBeInTheDocument();
+      expect(within(rows[1]).getByText(/cpa-main · key-b/)).toBeInTheDocument();
+      expect(within(banner).getAllByRole("button", { name: "解冻" })).toHaveLength(2);
+
+      await user.click(within(banner).getAllByRole("button", { name: "解冻" })[0]);
+      await waitFor(() => expect(
+        calls.filter((call) => call.method === "DELETE" && call.path === "/api/quota-freezes/cpa-main/key-a"),
+      ).toHaveLength(1));
+      await waitFor(() => expect(screen.queryByText(/实例内全部账号额度均已用尽/)).not.toBeInTheDocument());
+    });
+
+    it("顶层 freezes 缺省时用逐条 freeze 字段兜底，计数与徽标一致", async () => {
+      installFetch({
+        report: {
+          ...report,
+          guard: { enabled: true, interval_seconds: 60 },
+          subscriptions: [frozenSubscription()],
+        },
+      });
+      renderPage();
+
+      const panel = (await screen.findByRole("heading", { name: "OpenCode Go" })).closest("section") as HTMLElement;
+      expect(within(panel).getByText("额度冻结")).toBeInTheDocument();
+      // 指标条里是同一份计数：不能出现「卡片说冻结、指标说 0」。
+      // 「额度告警」既是筛选项标签又是指标标题，取不是按钮的那个。
+      const alertLabel = screen.getAllByText("额度告警").find((element) => element.tagName === "DIV") as HTMLElement;
+      const strip = alertLabel.parentElement?.parentElement as HTMLElement;
+      const freezeLabel = within(strip).getByText("额度冻结");
+      expect(within(freezeLabel.parentElement as HTMLElement).getByText("1")).toBeInTheDocument();
+    });
   });
 });
