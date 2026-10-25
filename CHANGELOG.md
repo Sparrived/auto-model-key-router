@@ -75,6 +75,13 @@
 - **`PUT /api/routes/{id}` 请求体 `id: null`（未改名）时不再返回 500。** 原先请求里的 `id`
   为空时，配置其实已经写入磁盘，却在后续响应处理中触发 500，调用方会误以为保存失败并重试；
   现在 `id: null` 等同于不改名，写入成功后正常返回，不产生重复写入。
+- **用量统计页在拆分维度分组超过 8 项时不再整页崩溃。** 服务端把第 8 组之后的用量并进 `other`
+  （只有 `group_count` / `stats` / `series`，**没有 `key`**），前端把它渲染成「其他」行时仍按分组
+  对象取 `key`，`model` 维度下读 `undefined.model_id` 抛
+  `Cannot read properties of undefined (reading 'model_id')`，整页被错误边界替换成「用量统计渲染失败」。
+  真实实例有 41 个模型，进页即触发。现在「其他」行不再参与筛选目标计算，`groupFilterTarget` 与
+  `keyString` / `keyNumber` 对缺失 key 一律按「不可筛选 / 未归属」处理；正常分组的「仅看此项」、
+  维度切换与图表行为不变。
 
 ### 变更
 
