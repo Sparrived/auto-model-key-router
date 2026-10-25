@@ -166,7 +166,7 @@ func TestEmptyConfigDictKeyOrder(t *testing.T) {
 		"config_version", "host", "port", "default_base_url", "upstream_routes",
 		"request_timeout", "stream_first_byte_timeout", "stream_idle_timeout",
 		"max_retries", "key_failure_threshold", "key_cooldown_seconds",
-		"key_balance_cooldown_seconds",
+		"key_balance_cooldown_seconds", "quota_freeze_interval_seconds",
 		"endpoint_capabilities_path", "metrics_db_path", "log_file_path",
 		"local_api_key", "webui_enabled", "ops_enabled", "providers", "models",
 	}
@@ -181,19 +181,20 @@ func TestEmptyConfigDictKeyOrder(t *testing.T) {
 	}
 	// 各标量字段的默认值属对外契约。
 	checks := map[string]string{
-		"host":                         `"127.0.0.1"`,
-		"port":                         "8000",
-		"default_base_url":             `"https://api.openai.com"`,
-		"request_timeout":              "60",
-		"stream_first_byte_timeout":    "60",
-		"stream_idle_timeout":          "60",
-		"max_retries":                  "2",
-		"key_failure_threshold":        "2",
-		"key_cooldown_seconds":         "60",
-		"key_balance_cooldown_seconds": "300",
-		"webui_enabled":                "true",
-		"ops_enabled":                  "true",
-		"config_version":               "4",
+		"host":                          `"127.0.0.1"`,
+		"port":                          "8000",
+		"default_base_url":              `"https://api.openai.com"`,
+		"request_timeout":               "60",
+		"stream_first_byte_timeout":     "60",
+		"stream_idle_timeout":           "60",
+		"max_retries":                   "2",
+		"key_failure_threshold":         "2",
+		"key_cooldown_seconds":          "60",
+		"key_balance_cooldown_seconds":  "300",
+		"quota_freeze_interval_seconds": "60",
+		"webui_enabled":                 "true",
+		"ops_enabled":                   "true",
+		"config_version":                "4",
 	}
 	for key, want := range checks {
 		got := canonical.Dumps(data.Lookup(key))

@@ -329,14 +329,21 @@ type RouterConfig struct {
 	// 一定不行」，后者的窗口要长得多、而且按命中次数翻倍（上限 keypool 的
 	// MaxBalanceCooldownSeconds）。取 0 表示关闭这项机制。
 	KeyBalanceCooldownSeconds float64
-	EndpointCapabilitiesPath  string
-	MetricsDBPath             string
-	LogFilePath               string
-	LocalAPIKey               string
-	Models                    []ModelConfig
-	StreamFirstByteTimeout    float64
-	StreamIdleTimeout         float64
-	Providers                 []ProviderConfig
+	// QuotaFreezeIntervalSeconds 是「账号额度冻结」后台巡检的间隔（秒）。
+	//
+	// 账号资源页的额度读数（CPA 账号窗口、订阅类供应商用量）撞到硬性上限后，AMKR 会
+	// 把对应的上游 Key 从选路里摘掉，避免额度用完后还继续打上游。取 0 表示关闭整套
+	// 机制（后台巡检、上游响应头信号、页面即时评估都不再产生新冻结）；已有冻结记录
+	// 不会被抹掉，仍展示、仍参与选路，直到到期或手工解冻。
+	QuotaFreezeIntervalSeconds float64
+	EndpointCapabilitiesPath   string
+	MetricsDBPath              string
+	LogFilePath                string
+	LocalAPIKey                string
+	Models                     []ModelConfig
+	StreamFirstByteTimeout     float64
+	StreamIdleTimeout          float64
+	Providers                  []ProviderConfig
 	// UpstreamRoutes 是「上游 URL -> {模式: 路径}」。
 	//
 	// 重要：它**只**由 providers[].routes 汇总而来。配置文件顶层的
@@ -442,6 +449,17 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 		balanceCooldown = 0
 	}
 	config.KeyBalanceCooldownSeconds = balanceCooldown
+
+	// 默认 60 秒：5h 窗口是小时级粒度，一分钟一次的巡检足够「及时」，又不至于把上游
+	// 额度端点（CPA 管理面、订阅用量接口）打疼。0 是显式关闭档。
+	freezeInterval, err := floatOr(raw.Lookup("quota_freeze_interval_seconds"), 60)
+	if err != nil {
+		return nil, err
+	}
+	if freezeInterval < 0 {
+		freezeInterval = 0
+	}
+	config.QuotaFreezeIntervalSeconds = freezeInterval
 
 	config.EndpointCapabilitiesPath = pathOr(raw, "endpoint_capabilities_path", "key_state_path", "")
 	if config.EndpointCapabilitiesPath == "" {
