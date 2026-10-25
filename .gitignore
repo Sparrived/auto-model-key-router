@@ -28,6 +28,9 @@ data/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+# 额度冻结状态（运行时数据，与配置文件同目录生成，含账号邮箱/实例 ID 等）。
+quota-freezes.json
+.quota-freezes-*.tmp
 
 # 例外：测试语料里的 .sqlite3 是**随包发布的对拍夹具**，必须入库。
 #
