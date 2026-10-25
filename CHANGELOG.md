@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **账号额度与供应商 Key 双向联动：硬性额度耗尽自动冻结对应上游 Key。** 账号资源页的额度
+  读数不再「只看不拦」：订阅类供应商（OpenCode Go / Command Code）任一窗口剩余 0% 或上游
+  明确拒绝，或其关联 CPA 实例内**全部**启用账号都撞到硬性上限时，对应的上游 Key 会被自动摘
+  出选路——`/v1/*` 不再选中它，`/v1/models` 里只绑了它的模型随之消失，点名该 Key 的请求回
+  `503` 并说明窗口与重置时间；窗口重置或重新观测到有余额后自动解冻。冻结是运行时状态，
+  **不写回配置的 `enabled`**，持久化在配置文件同目录的 `quota-freezes.json`，重启与热重载
+  都不会让耗尽的 Key 复活；配置里删掉或人工停用的 Key 在下一轮巡检时清理。触发有三条通道：
+  后台巡检（新配置 `quota_freeze_interval_seconds`，默认 60 秒，取 0 关闭整套机制——不再
+  产生新冻结，已有冻结仍生效至到期或手工解冻）、打开
+  账号资源页时的即时评估，以及转发响应里的上游限额头（Anthropic
+  `anthropic-ratelimit-unified-*`、Codex `x-codex-*`；多账号 CPA 实例不按单次响应直接冻，
+  改为触发重评估）。供应商页与账号资源页都会显示冻结徽标、原因与重置时间，并提供手工解冻
+  （10 分钟抑制窗口，避免下一轮巡检立刻冻回去）。新增 `GET /api/quota-freezes` 与
+  `DELETE /api/quota-freezes/{provider_id}/{key_name}`；`GET /api/cpa-accounts` 只增字段：
+  顶层 `freezes` / `guard`，订阅条目 `freeze`，实例 `linked_providers` /
+  `all_accounts_exhausted` / `frozen_keys`，账号 `quota_exhausted`。判定细节见
+  `docs/USAGE.md` 4.2 与 `docs/API.md`「额度冻结接口」，实现契约见
+  `docs/design/quota-freeze.md`。
+
 ### 修复
 
 - **表单端点（图像编辑/变体、语音转写/翻译）现在会把表单里的 `model` 改写成上游模型名。**

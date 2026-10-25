@@ -84,6 +84,8 @@ x-api-key: your-local-api-key
 | `GET` | `/api/cpa-accounts` | 仅本地 | 服务端扇出各 CPA 实例的账号与额度读数（只读、不缓存） |
 | `GET` | `/api/cpa-reset-credits` | 仅本地 | 服务端扇出各 CPA 实例的 Claude / Codex 重置卡读数（只读、不缓存） |
 | `POST` | `/api/cpa-reset-credits/use` | 仅本地 | 消费一张重置卡；默认选**最快过期**的可用卡（会真实改变上游账号状态） |
+| `GET` | `/api/quota-freezes` | 仅本地 | 列出当前额度冻结（哪把上游 Key 因哪个额度窗口被摘出选路）与后台巡检状态 |
+| `DELETE` | `/api/quota-freezes/{provider_id}/{key_name}` | 仅本地 | 手工解除一把 Key 的额度冻结（附最短 10 分钟的抑制窗口） |
 | `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
 | `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
 | `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 GitHub Releases 版本检查 |
@@ -117,7 +119,7 @@ x-api-key: your-local-api-key
 **已发布接口**的清单，不能随意增减：这些响应的形状已经对外承诺，改动会破坏既有调用方。
 新增能力因此分两类：
 
-- **管理面的正式资源**（工作空间自身的读/改/删与整包迁移、访问密钥、CPA 实例与账号资源）
+- **管理面的正式资源**（工作空间自身的读/改/删与整包迁移、访问密钥、CPA 实例、账号资源与额度冻结）
   注册在 `/api` 之下，但列在**另一份**清单（`workspacePatterns()`）里。它们没有历史版本可
   对照，塞进那 47 条会让「这 47 条就是已发布行为」这句话失去意义。两批注册在同一棵 mux 上，
   因此错方法的 `405` / `Allow` 判定要同时看两份清单。
@@ -1517,8 +1519,9 @@ ID 兜底；实例里未知的字段原样保留（与配置整体一致：旧�
 
 > **运维提醒**：CPA 的管理面对鉴权失败有 **5 次 / 30 分钟的 IP 封禁**（按 client IP 计，
 > **loopback 也照封**）。因此不要拿错误的密钥去反复试探 `/v0/management/*` —— 试满 5 次会让
-> AMKR 连着它自己的看板一起被锁在外面半小时。AMKR 只在用户显式配了实例、点开看板时才去读，
-> 不做后台轮询，也不做「猜密钥」式的探测。
+> AMKR 连着它自己的看板一起被锁在外面半小时。AMKR 不做「猜密钥」式的探测，读认证只用你配好的
+> 那一份；但配了实例时，额度冻结的后台巡检（`quota_freeze_interval_seconds`，默认 60 秒）会
+> 周期性读管理面，鉴权失败同样计入那 5 次配额，所以密钥不对时别把间隔调小。
 
 ```bash
 # 读实例清单：响应含 config_revision 与各实例的 management_key（要求完整权限）
@@ -1628,7 +1631,8 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
 - **`signals[]` 是原始信号兜底**：订阅侧把上游那些还没被归一化的状态字段原样列出（如
   `status`、`cancelAtPeriodEnd`），与 CPA 侧的 `signals` 同一个用途。
 - **请求只带一种凭据头**：`Authorization: Bearer <该供应商的 api_key>`。AMKR 只读，不改对端状态。
-- **只看不拦**：这些读数同样**不参与** AMKR 的 Key 冷却与失败切换，与 CPA 那半边一致。
+- **会触发额度冻结**：这些读数不再「只看不拦」——某个窗口硬性耗尽时，该条目对应的上游
+  Key 会被自动摘出选路（见[「额度冻结接口」](#额度冻结接口)），与 CPA 那半边同一套规则。
 
 CPA 侧的口径与边界：
 
@@ -1637,7 +1641,9 @@ CPA 侧的口径与边界：
   `Authorization: Bearer <management_key>` 一种凭据头。
 - **只读、不缓存**：只调 CPA 的 `GET /v0/management/auth-files` 与
   `POST /v0/management/quota/fetch`，不改 CPA 的任何状态，AMKR 侧也不留副本——看板上的数字
-  与 CPA 里的一致，没有中间层会过期。因此**没有**轮询：每次调用都是一次真实的扇出。
+  与 CPA 里的一致，没有中间层会过期。「账号资源」页本身不轮询：每次打开或点刷新都是一次真实
+  扇出；但配了实例 / 订阅时，额度冻结的后台巡检会按 `quota_freeze_interval_seconds`（默认
+  60 秒）周期扇出一次做冻结判定，见[「额度冻结接口」](#额度冻结接口)。
 - **额度的两个来源**（`windows[].source`）：`passive` 是 CPA 从上游响应头采到并缓存的快照
   （Anthropic 的 `anthropic-ratelimit-unified-*`、Codex 的 `x-codex-*`，白名单见 CPA 的
   `sdk/cliproxy/auth/quota_signals.go`）；`quota` 是现场 `quota/fetch` 的归一化结果。同一账号
@@ -1668,8 +1674,9 @@ CPA 侧的口径与边界：
   为空（不构成故障，报出来只是噪音）；一个窗口都没有时才会带上 `quota_error`。
 - **失败是逐实例的**：某个实例连不上、管理密钥不对或条目残缺，只让它的 `error` 有值，其余实例
   照常返回。整个扇出有 60 秒总预算，到点未回的账号按无额度处理。
-- **只看不拦**：这些读数**不参与** AMKR 的 Key 冷却与失败切换。AMKR 路由的是它自己的上游 Key，
-  与 CPA 侧的账号额度没有耦合关系；额度耗尽该由 CPA 自己的冷却机制处理。
+- **会触发额度冻结**：这些读数不再「只看不拦」。CPA 实例内**全部**启用账号的某个窗口硬性
+  耗尽时，`base_url` 指向该实例的供应商下所有启用 Key 会被自动摘出选路；只有部分账号耗尽
+  时不冻结。规则、状态文件与手工解冻见[「额度冻结接口」](#额度冻结接口)。
 
 `subscriptions` 与 `instances` 一样**恒为数组**（没有条目时是 `[]`，不是 `null`），客户端少写一次
 判空也不会炸。
@@ -1775,6 +1782,90 @@ curl -X POST http://127.0.0.1:8000/api/cpa-reset-credits/use \
 > Juniper 会话重置仍可用，会继续返回 `juniper_tide` 的卡，否则不会伪造一张可兑换的卡。
 > Codex 不受此限制，但要求账号的 `id_token` 里有 ChatGPT account id。
 
+### 额度冻结接口
+
+账号资源那半边的额度读数**不再只看**：某个 Key 的订阅窗口、或它所属 CPA 实例的账号窗口撞到
+硬性上限（剩余 0%，或上游明确回 `rejected`）后，AMKR 会把**那把上游 Key**从选路里摘掉——
+`/v1/*` 不再选中它，只绑了它的模型在 `/v1/models` 里随之消失；请求若点名它（`模型[Key]`）
+直接 `503` 并说明原因。窗口重置或重新观测到有余额后自动解冻。
+
+冻结作用于 **Provider Key**，不写回配置的 `enabled`：供应商页的启用开关仍表示配置里的值，
+冻结是另一层运行时状态。它持久化在配置文件同目录的 `quota-freezes.json`（配置文件路径为空
+时只驻内存），因此重启与配置热重载都不会让耗尽的 Key 复活；配置里已不存在的 Key、已被人工
+停用的 Key 会在下一轮巡检时被清掉。
+
+```bash
+# 列出当前冻结与后台巡检状态
+curl http://127.0.0.1:8000/api/quota-freezes -H "Authorization: Bearer your-local-api-key"
+
+# 手工解除一把 Key 的冻结（10 分钟内不会被同一读数重新冻回去）
+curl -X DELETE "http://127.0.0.1:8000/api/quota-freezes/cpa-claude/claude-pro" \
+  -H "Authorization: Bearer your-local-api-key"
+```
+
+`GET /api/quota-freezes`：
+
+```json
+{
+  "fetched_at": "2026-10-25T12:00:00Z",
+  "enabled": true,
+  "interval_seconds": 60,
+  "last_evaluated_at": "2026-10-25T11:59:30Z",
+  "last_error": "",
+  "freezes": [
+    {
+      "provider_id": "cpa-claude", "key_name": "claude-pro", "vendor": "Claude",
+      "scope": "cpa_instance", "source": "account_resource",
+      "account": "ops@example.com", "instance_id": "jp-cpa-claude",
+      "window_key": "claude/5h", "window_label": "5 小时",
+      "remaining": 0, "status": "rejected",
+      "reset_at": "2026-10-25T15:00:00Z",
+      "frozen_at": "2026-10-25T11:00:00Z",
+      "expires_at": "2026-10-25T15:01:00Z",
+      "reason": "5 小时窗口已用尽（剩余 0%），15:00 后重置"
+    }
+  ]
+}
+```
+
+`enabled=false` 表示配置里 `quota_freeze_interval_seconds=0`：后台不再巡检、上游响应头信号不
+落地、页面也不再触发新评估，因此不会产生**新的**冻结；但已有冻结记录仍会展示、仍参与选路，
+直到窗口到期自动解除或手工解冻（不禁用机制也不抹掉已经发生的额度事实）。`freezes` 恒为数组。
+
+`DELETE /api/quota-freezes/{provider_id}/{key_name}` 成功回：
+
+```json
+{"released": true, "provider_id": "cpa-claude", "key_name": "claude-pro",
+ "suppressed_until": "2026-10-25T15:01:00Z"}
+```
+
+该 Key 不在配置里、或当前没有冻结时回 `404`。解冻会给该 Key 一个**抑制窗口**：取冻结原到期
+时间与「现在 + 10 分钟」的较大者；窗口内即使读数仍显示耗尽也不会自动冻回去（否则下一轮巡检
+立刻复位，按钮等于没用），窗口过后若仍观测到耗尽会重新冻结。
+
+**判定口径**（与账号资源页的读数同源，后台按 `quota_freeze_interval_seconds` 周期执行）：
+
+| 来源 | 冻结条件 | 解冻条件 |
+| --- | --- | --- |
+| 订阅条目 | 该条目任一窗口硬性耗尽 | 下一次成功观测里没有硬性耗尽窗口 |
+| CPA 实例 | 实例内**全部**启用账号都有硬性耗尽窗口 | 至少一个账号不再硬性耗尽 |
+| 上游响应头 | 响应头里出现硬性耗尽窗口，且该供应商未关联 CPA 实例、或关联实例只有 1 个启用账号 | 到期 / 账号资源观测到健康 / 手工解冻 |
+
+- **无意见不改变现状**：额度读取失败、实例不可达、账号额度未知时既不冻也不解冻——不能把
+  「读不到」当成「有余额」。
+- **多账号实例不按单次响应直接冻**：一个实例后面挂多个账号时，单次限流响应只说明刚才那个账号
+  用完，不代表整把 Key 不可用；此时改为触发一次即时重新评估，由实例级规则决定。
+- **到期兜底**：拿不到窗口重置时间时按 10 分钟自动解冻，避免额度端点长期不可达导致永久冻结；
+  再次观测到耗尽会重新冻结。
+- **不写上游**：只影响 AMKR 自己的选路，不给 CPA / 订阅厂商发任何写请求。
+
+`GET /api/cpa-accounts` 的响应为此新增（只增不改）：顶层 `freezes`（同上）与 `guard`
+（`{enabled, interval_seconds, last_evaluated_at, last_error}`）；`subscriptions[]` 增
+`freeze`；`instances[]` 增 `linked_providers`（`base_url` 指向该实例的供应商）、
+`all_accounts_exhausted` 与 `frozen_keys`；`instances[].accounts[]` 增 `quota_exhausted`。
+打开账号资源页会**立即触发一次评估**，所以「进页 = 立刻检测」；页面本身仍不轮询，周期巡检由
+后台按 `quota_freeze_interval_seconds` 跑。
+
 ## 状态码与错误格式
 
 常见状态码：
@@ -1793,7 +1884,7 @@ curl -X POST http://127.0.0.1:8000/api/cpa-reset-credits/use \
 | `429` | **仅 `/v1/*` 代理接口**：选路并发耗尽——该模型的候选 Key 或供应商已达 `max_concurrency` 上限，AMKR 直接拒绝，不请求上游（响应体形状见下） |
 | `500` | 配置保存失败 |
 | `502` | 上游连接或响应转换失败 |
-| `503` | 没有可用 Key |
+| `503` | 没有可用 Key；**候选 Key 全部因额度冻结停用**时同样回 503，但文案是额度冻结原因（哪把 Key、哪个窗口、何时重置），不是「模型未配置 / 没有可用 Key」 |
 
 代理接口错误通常使用：
 

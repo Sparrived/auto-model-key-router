@@ -404,29 +404,33 @@ description}`），因此**不需要写 `mapping`**。配好后 auth-files 里�
 - **条目从已配置的供应商派生，不另存清单、也不解析成 AMKR 的 Key**。`base_url` 落在已知订阅
   端点上时，该供应商的每个启用 key 就产生一条订阅，复用它的 `api_key`。删掉供应商条目自动消失，
   不需要清理钩子。代价是只有**经由 AMKR 路由**的订阅才看得见。
-- **没有接冷却**。这一页是「只看不拦」，读数不参与 Key 冷却与失败切换（与 CPA 侧一致）。
+- **已接额度冻结（不再「只看不拦」）**：硬性耗尽（剩余 0%，或上游明确 `rejected`）会冻结对应的
+  上游 Key，让它立即退出选路；判定、解冻与配置见
+  [`docs/USAGE.md`](USAGE.md#42-额度用尽后自动冻结-key) 与
+  [`docs/API.md`](API.md#额度冻结接口)。冻结是运行时状态，不写回配置的启用开关。
 - **没有落 `quota` 字段、没有缓存**。每次 `/api/cpa-accounts` 都是一次真实扇出，60 秒总预算。
   所以同一把 key 的用量读数不会与推理 Key 的能力缓存混在一起，也就不存在两套刷新节奏。
 - **按端点识别、认不出就不猜**：宁可少一条，也不拿别家端点的 key 去问，那只会得到误导性的
   401/403。
 
-**还没做的部分（AMKR 自己上游 Key 的额度）**：现状是 AMKR 的按 Key 探测缓存为
-`providers.<id>.keys.<key>.capabilities = {models, route_status, errors, checked_at}`，
-只解析上游 `Retry-After`，不采集任何限额信号；文档里也明确写着「统计不是配额」。
-要做「每个 Key 还剩多少」，建议按 L3 → L2 的顺序推进：
+**已经部分落地的部分（L3 被动信号）**：AMKR 现在会在转发响应时读取 `anthropic-ratelimit-unified-*`
+与 `x-codex-*` 限额头（`internal/quota` 统一解析，与 CPA 被动采集共用同一份代码），但**不是**为了
+在配置里落一份 `providers.<id>.keys.<key>.quota` 读数，而是直接作为额度冻结的一个触发源：出现
+硬性耗尽窗口时按判定规则冻结对应 Key（见
+[`docs/USAGE.md`](USAGE.md#42-额度用尽后自动冻结-key)）。
 
-1. **先做 L3 被动采集（零额外请求）**。转发响应时顺手抓
-   `anthropic-ratelimit-unified-*`、`x-codex-*` 等限额头，按 Key 落到
-   `providers.<id>.keys.<key>.quota`（形如 `{windows: {5h: {used_percent, resets_at}, 7d: {...}}, source: "header", observed_at}`）。
-   与现有 capabilities 一样**按 Key 独立**，绝不跨 Key 合并。
-   落点现成：`internal/proxy/lifecycle.go` 的 `streamLifecycle` 已经在收尾时解析上游
-   `Retry-After`（字段 `retryAfter`，随 `onFinish(MetricRecord, failed)` 出去），
-   限额头可以挂在同一条链路上，不必新开一条响应读取路径。
-2. **再做 L2 主动探测**。按供应商类型调用 3.1–3.6 的接口，复用
+**还没做的部分（每把 Key 的额度看板）**：按 Key 探测缓存仍为
+`providers.<id>.keys.<key>.capabilities = {models, route_status, errors, checked_at}`，不保存
+「每个 Key 还剩多少」的持久读数；要做按 Key 的额度展示，建议按 L2 的顺序推进：
+
+1. **先做 L2 主动探测**。按供应商类型调用 3.1–3.6 的接口，复用
    `ProbeKeyCapability` 那套接缝（`Prober` + 15s 超时 + `POST /api/providers/{id}/keys/{name}/probe`），
    但**单独缓存**（`quota` 与 `fetched_at` / `error`），不要污染 `capabilities`——前者是
    「能不能用」，后者是「还剩多少」，刷新节奏也不同。
-3. **最后接冷却**。额度耗尽的 Key 直接进入冷却，而不是等一次 `429`。
+2. **再把读数落成持久状态**。把 L3/L2 的窗口按 Key 落到 `quota` 字段（形如
+   `{windows: {5h: {used_percent, resets_at}, 7d: {...}}, source: "header", observed_at}`），
+   与 capabilities 一样**按 Key 独立**，绝不跨 Key 合并；且与冻结状态分开——冻结是布尔判定，
+   读数是展示数据。L3 的落点仍可复用 `internal/proxy` 现有的响应链路，不必新开一条读取路径。
 
 > **这一步的「就地判定」已经落地**：上游**当场**回欠费时（`402`，或响应体里写明
 > `Insufficient Balance` / `insufficient_quota` / `credit balance is too low` / `欠费` 等），AMKR 会
