@@ -82,10 +82,17 @@ export function BreakdownPanel({
   const format = breakdownValueFormat(metric);
   const unit = breakdownUnit(metric);
   const selectFilter = useSelectFilter();
-  const selectable = rows.some((row) => groupFilterTarget(dimension, row.group.key));
+  // 「其他」是服务端聚合出来的桶（只有 group_count/stats/series，没有 key），它代表
+  // limit 之外的一整批分组，不对应任何可加入全局筛选的单一值。因此筛选目标一律只从
+  // 非 other 行计算：selectable、mobileAction、rowActions、applyRowFilter 都走这里，
+  // 而不是把空 key 丢给 groupFilterTarget 再依赖它兜底。
+  function filterTargetOf(row: BreakdownRow) {
+    return row.isOther ? null : groupFilterTarget(dimension, row.group.key);
+  }
+  const selectable = rows.some((row) => filterTargetOf(row) !== null);
 
   function applyRowFilter(row: BreakdownRow) {
-    const target = groupFilterTarget(dimension, row.group.key);
+    const target = filterTargetOf(row);
     if (!target) return;
     if (target.dimension === "uk") {
       setDimension("uk", [target.value as UpstreamKeyFilter]);
@@ -105,7 +112,7 @@ export function BreakdownPanel({
           mobileDetail={totalRequests > 0
             ? `${formatCount(numberField(row.group.stats, "requests"))} 次 · ${formatPercentValue(numberField(row.group.stats, "requests") / totalRequests)}`
             : undefined}
-          mobileAction={groupFilterTarget(dimension, row.group.key) ? () => applyRowFilter(row) : undefined}
+          mobileAction={filterTargetOf(row) ? () => applyRowFilter(row) : undefined}
         />
       ),
       sortValue: (row) => row.display.primary,
@@ -294,7 +301,7 @@ export function BreakdownPanel({
             />
           )}
           rowActions={(row) => {
-            const target = groupFilterTarget(dimension, row.group.key);
+            const target = filterTargetOf(row);
             if (!target) return null;
             return (
               <Button

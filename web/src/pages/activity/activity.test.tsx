@@ -75,6 +75,19 @@ interface Call {
   search: string;
 }
 
+// 服务端在分组数超过 limit(8) 时额外返回的聚合桶：只有 group_count/stats/series，没有 key。
+interface OtherBreakdown {
+  group_count: number;
+  stats: typeof STATS;
+  series: ReturnType<typeof series>;
+}
+
+const OTHER_GROUP: OtherBreakdown = {
+  group_count: 12,
+  stats: { ...STATS, requests: 12, successes: 11, failures: 1, total_tokens: 120_000 },
+  series: series([4, 4, 4]),
+};
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -82,7 +95,7 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-function installFetch(calls: Call[]): void {
+function installFetch(calls: Call[], other: OtherBreakdown | null = null): void {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     calls.push({ path: url.pathname, search: url.search });
@@ -120,8 +133,8 @@ function installFetch(calls: Call[]): void {
         bucket_seconds: 3600,
         buckets: BUCKETS,
         groups: GROUPS,
-        other: null,
-        total_groups: GROUPS.length,
+        other,
+        total_groups: GROUPS.length + (other?.group_count ?? 0),
       });
     }
     return json({ detail: `unexpected ${url.pathname}` }, 500);
@@ -205,6 +218,37 @@ describe("用量统计", () => {
       const decoded = decodeURIComponent(window.location.hash);
       expect(decoded).toContain('uk=[["openai","main"]]');
     });
+  });
+
+  it("「其他」聚合行不提供「仅看此项」，切到状态码维度也不崩", async () => {
+    const calls: Call[] = [];
+    installFetch(calls, OTHER_GROUP);
+    const { user } = renderPage();
+
+    // 回归：other 非 null 时，旧实现会在 mobileAction 里对没有 key 的聚合行取
+    // model_id，抛 "Cannot read properties of undefined (reading 'model_id')" 整页白屏。
+    const table = await screen.findByRole("table", { name: "拆分明细" });
+    const otherLabel = await within(table).findByText("其他（12 项）");
+    expect(otherLabel).toBeInTheDocument();
+    expect(within(table).getByText("gpt-4o-mini")).toBeInTheDocument();
+
+    // 正常分组行仍有「仅看此项」：行内动作带 aria-label，移动端动作是纯文本按钮。
+    expect(within(table).getByRole("button", { name: "仅看此项：gpt-4o-mini" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "仅看此项：gpt-4o" })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: "仅看此项：其他（12 项）" })).toBeNull();
+
+    // 聚合行一个「仅看此项」都不能有：它代表 limit 之外的一整批分组，不是单一值。
+    const otherRow = otherLabel.closest("tr");
+    expect(otherRow).not.toBeNull();
+    expect(within(otherRow as HTMLElement).queryAllByRole("button", { name: /仅看此项/ })).toHaveLength(0);
+
+    // 切到 status（走 keyNumber 分支）：聚合行同样不该有动作，页面必须照常渲染。
+    await user.selectOptions(screen.getByLabelText("拆分维度"), "status");
+    await waitFor(() => expect(window.location.hash).toContain("by=status"));
+    const statusTable = screen.getByRole("table", { name: "拆分明细" });
+    expect(await within(statusTable).findByText("HTTP 200")).toBeInTheDocument();
+    expect(within(statusTable).getByText("其他（12 项）")).toBeInTheDocument();
+    expect(within(statusTable).queryAllByRole("button", { name: /仅看此项/ })).toHaveLength(0);
   });
 
   it("全部历史用 all_history=true，并在跨度超过 8760 小时时提示只覆盖最近 1 年", async () => {

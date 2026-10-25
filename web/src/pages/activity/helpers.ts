@@ -109,14 +109,18 @@ export function breakdownUnit(metric: BreakdownMetric): string {
     : "次";
 }
 
-function keyString(key: BreakdownKey, field: string): string | null {
+// 「其他」行是服务端聚合出来的桶，只有 group_count/stats/series，没有 key；
+// 取值函数必须容忍空 key，否则读 key[field] 会抛 TypeError 并让整页崩掉。
+function keyString(key: BreakdownKey | null | undefined, field: string): string | null {
+  if (key === null || key === undefined) return null;
   if (typeof key === "string") return key || null;
   const value = key[field];
   if (value === null || value === undefined || value === "") return null;
   return String(value);
 }
 
-function keyNumber(key: BreakdownKey, field: string): number | null {
+function keyNumber(key: BreakdownKey | null | undefined, field: string): number | null {
+  if (key === null || key === undefined) return null;
   if (typeof key === "string") {
     const parsed = Number(key);
     return Number.isFinite(parsed) ? parsed : null;
@@ -322,11 +326,13 @@ export function numberField(stats: MetricStats | undefined, field: keyof MetricS
   return Number.isFinite(number) ? number : 0;
 }
 
+// 「其他」不是可筛选目标：它代表 limit 之外的一整批分组，没有可加入全局筛选的
+// 单一值（key 为空）。空 key 与字符串 key 一样直接返回 null，交给调用方不展示动作。
 export function groupFilterTarget(
   dimension: BreakdownDimension,
-  key: BreakdownKey,
+  key: BreakdownKey | null | undefined,
 ): { dimension: FilterDimension; value: string | UpstreamKeyFilter } | null {
-  if (typeof key === "string") return null;
+  if (key === null || key === undefined || typeof key === "string") return null;
   switch (dimension) {
     case "model": {
       const value = keyString(key, "model_id");
