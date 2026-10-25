@@ -9,6 +9,7 @@ import { ChartTable } from "./chart-utils";
 export interface MeterProps {
   value: number;
   label?: string;
+  /** 与数值同行的补充说明。只渲染这一处：不再作为 ChartFrame 副标题重复一遍。 */
   hint?: string;
   tone?: "accent" | "good" | "warn" | "critical" | "neutral";
   format?: (value: number) => string;
@@ -51,7 +52,6 @@ export function Meter({
       title={label}
       busy={busy}
       error={error}
-      subtitle={hint}
       table={
         <ChartTable
           caption={label ?? "比例读数"}

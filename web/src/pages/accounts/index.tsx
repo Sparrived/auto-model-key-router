@@ -670,13 +670,23 @@ export default function AccountsPage() {
                                 </div>
                               </div>
 
+                              {/* 邮箱/名称/档位一行；授权与项目另起一行——project_id 可能是长串，
+                                  和文件标识挤在同一行会把卡片撑破。长串在自己的徽标里截断，完整值在 title 里。 */}
                               <div className="flex flex-wrap items-center gap-1.5">
                                 {account.email && account.email !== title ? <span className="text-meta text-ink-3">{account.email}</span> : null}
                                 {account.name && account.name !== title ? <span className="text-meta text-ink-3">{account.name}</span> : null}
                                 {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
                                 {account.tier_id ? <Badge tone="neutral">{account.tier_id}</Badge> : null}
-                                {account.account_type ? <Badge tone="neutral">授权 {account.account_type}</Badge> : null}
-                                {account.project_id ? <Badge tone="neutral">项目 {account.project_id}</Badge> : null}
+                                {account.account_type || account.project_id ? (
+                                  <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5">
+                                    {account.account_type ? <Badge tone="neutral">授权 {account.account_type}</Badge> : null}
+                                    {account.project_id ? (
+                                      <Badge tone="neutral" className="min-w-0 max-w-full">
+                                        <span className="truncate" title={`项目 ${account.project_id}`}>项目 {account.project_id}</span>
+                                      </Badge>
+                                    ) : null}
+                                  </div>
+                                ) : null}
                               </div>
 
                               <QuotaSection account={account} />

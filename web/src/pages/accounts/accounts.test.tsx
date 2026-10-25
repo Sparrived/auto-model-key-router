@@ -30,6 +30,8 @@ const report = {
           email: "main@example.com",
           provider: "codex",
           status: "active",
+          account_type: "oauth",
+          project_id: "aicode-consumers",
           supports_quota: true,
           success: 90,
           failed: 10,
@@ -139,6 +141,18 @@ describe("账号资源页", () => {
     const warning = screen.getByText("每周 剩余额度").closest("[data-tone]");
     expect(critical?.getAttribute("data-tone")).toBe("critical");
     expect(warning?.getAttribute("data-tone")).toBe("warn");
+  });
+
+  it("额度卡的倒计时只出现一次，授权与项目各自成徽标", async () => {
+    installFetch();
+    renderPage();
+    const codexCard = (await screen.findByText("codex-main.json")).closest("article") as HTMLElement;
+    // 有 reset_at 的窗口显示倒计时（“N 天后重置”或“即将重置”），没有的窗口回落到来源说明。
+    expect(within(codexCard).getAllByText(/后重置|即将重置/)).toHaveLength(1);
+    const claudeCard = screen.getByText("claude-team.json").closest("article") as HTMLElement;
+    expect(within(claudeCard).getAllByText("现场查询")).toHaveLength(1);
+    expect(within(codexCard).getByText("授权 oauth")).toBeInTheDocument();
+    expect(within(codexCard).getByText("项目 aicode-consumers")).toBeInTheDocument();
   });
 
   it("搜索跨实例生效，且单个实例失败不影响另一个实例", async () => {
