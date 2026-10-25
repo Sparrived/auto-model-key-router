@@ -129,6 +129,13 @@ type KeyPool interface {
 	// BalanceLimitedKeys 返回模型的候选 key 总数与其中因欠费被限流的数量，只用于
 	// 选路失败时的诊断（不参与决策）。
 	BalanceLimitedKeys(modelID string, accessKey *config.AccessKeyConfig) (limited, total int)
+	// QuotaFrozenError 返回「该模型在本作用域内的候选全部因额度冻结不可用」的错误；
+	// 还有可用候选（或压根没有启用候选）时返回 nil。
+	//
+	// 模型校验阶段用它把「额度用完了」与「模型未配置」分开：KeyCount 同样把冻结的
+	// Key 剔除在外，全部冻结时它是 0，只看计数就会错误地回 404。返回的文案与 NextKey
+	// 在同样局面下的一致（503 + 额度冻结原因）。
+	QuotaFrozenError(modelID string, accessKey *config.AccessKeyConfig) error
 	SupportsNativeEndpoint(baseURL, routePath string) *bool
 	UpdateNativeEndpoint(baseURL string, supported bool, routePath, reason string) error
 }
@@ -141,6 +148,23 @@ type KeyPool interface {
 type UpstreamClient interface {
 	Do(req *http.Request) (*http.Response, error)
 	DoStream(req *http.Request) (*http.Response, error)
+}
+
+// QuotaObserver 是「上游响应头里的额度信号」的投递点（**参照实现没有的能力**）。
+//
+// 存在的理由是额度冻结的 L3 触发源：上游在限流响应（以及部分成功响应）里带回窗口
+// 用量，这是 AMKR 唯一能在**没有**额度端点的情况下知道「这个账号刚用完」的途径。
+//
+// 契约（实现方必须遵守，否则会拖慢代理路径）：
+//   - 只允许「有没有额度头 → 解析 → 非阻塞投递一个信号」；
+//   - **不做文件 IO、不发网络请求、不等待任何处理**（落盘与整轮评估由后台循环做）；
+//   - 实现方自行保证并发安全（本包会从任意请求 goroutine 调用它）。
+//
+// 装配方是 *api.QuotaGuard（签名一致即可隐式满足）；本包**不** import internal/api，
+// 否则就成了反向依赖。observer 为 nil 表示不启用（测试默认），此时行为与改动前
+// 逐字一致。
+type QuotaObserver interface {
+	ObserveUpstreamQuota(providerID, keyName string, headers http.Header)
 }
 
 // 编译期断言：internal/upstream 的客户端满足本接缝。
@@ -250,6 +274,9 @@ type Options struct {
 	Clock func() time.Time
 	// Authorizer 覆盖鉴权判定；nil 时用 auth.DefaultAuthorizer。
 	Authorizer func(r *http.Request, localAPIKey string) *AuthorizerResult
+	// QuotaObserver 接收每一次上游响应的响应头（额度冻结的 L3 被动信号）；
+	// nil 表示不启用，此时本包行为与改动前完全一致。见 QuotaObserver。
+	QuotaObserver QuotaObserver
 }
 
 // AuthorizerResult 是鉴权结果。
@@ -291,6 +318,8 @@ type Handler struct {
 	maxMultipart int64
 	maxJSONBytes int64
 	now          func() time.Time
+	// quotaObserver 见 QuotaObserver；nil 时额度观察点整体短路。
+	quotaObserver QuotaObserver
 }
 
 // New 构造 Handler。metrics 可以为 nil（此时不写指标行，key 健康回写仍然发生）。
@@ -327,17 +356,18 @@ func New(manager *runtime.RuntimeManager, metrics MetricsSink, options Options) 
 		now = time.Now
 	}
 	return &Handler{
-		manager:      manager,
-		metrics:      metrics,
-		extract:      extract,
-		logger:       logger,
-		authorizer:   options.Authorizer,
-		maxCalls:     maxCalls,
-		bodyPolicy:   bodyPolicy,
-		multipart:    multipart,
-		maxMultipart: maxMultipart,
-		maxJSONBytes: maxJSON,
-		now:          now,
+		manager:       manager,
+		metrics:       metrics,
+		extract:       extract,
+		logger:        logger,
+		authorizer:    options.Authorizer,
+		maxCalls:      maxCalls,
+		bodyPolicy:    bodyPolicy,
+		multipart:     multipart,
+		maxMultipart:  maxMultipart,
+		maxJSONBytes:  maxJSON,
+		now:           now,
+		quotaObserver: options.QuotaObserver,
 	}
 }
 

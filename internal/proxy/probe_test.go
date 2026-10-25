@@ -142,6 +142,49 @@ func TestUnsupportedNativeResponseRewritesCache(t *testing.T) {
 	}
 }
 
+// TestQuotaObserverReceivesProbeResponseHeaders 固化「能力探测也是上游响应」。
+//
+// 探测发生在新 base_url 的首次原生请求上（用 401 表示端点存在），它拿到的响应头是
+// 这条路径上唯一可能带额度信号的位置；漏掉它，一次「首次请求即额度耗尽」的情形就
+// 完全看不到 L3 信号。这里断言探测与真实请求各投递一次。
+func TestQuotaObserverReceivesProbeResponseHeaders(t *testing.T) {
+	observer := &recordingQuotaObserver{}
+	cfg := nativeFirstConfig()
+	cfg.Models[0].Keys[0].Provider = "cpa-claude"
+	env := newTestEnv(t, cfg, Options{
+		BodyPolicy: BodyPolicyPython, Multipart: MultipartPython, QuotaObserver: observer})
+	env.route("/v1/messages",
+		upstreamStep{
+			Status: 401,
+			Headers: map[string]string{
+				"content-type":    "application/json",
+				quotaSignalHeader: "1",
+			},
+			Body: `{"error":"unauthorized"}`,
+		},
+		jsonStep(200, `{"type":"message","content":[]}`),
+	)
+
+	recorder := env.request(http.MethodPost, "messages",
+		`{"model":"vendor-model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("状态码: got %d（%s）", recorder.Code, recorder.Body.String())
+	}
+	calls := observer.take()
+	if len(calls) != 2 {
+		t.Fatalf("探测与真实请求应各投递一次，实得 %d 次", len(calls))
+	}
+	for index, call := range calls {
+		if call.providerID != "cpa-claude" || call.keyName != "k1" {
+			t.Fatalf("第 %d 次投递身份: got %s/%s want cpa-claude/k1",
+				index+1, call.providerID, call.keyName)
+		}
+	}
+	if got := calls[0].headers.Get(quotaSignalHeader); got != "1" {
+		t.Fatalf("探测响应头应被投递，实得 %q", got)
+	}
+}
+
 // canonicalText 把能力状态渲染成可读文本（诊断用）。
 func canonicalText(value interface{ StringValue() string }) string {
 	return value.StringValue()

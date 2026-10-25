@@ -178,6 +178,12 @@ type KeyPool struct {
 
 	// capabilityStore 为 nil 时不持久化（测试用）。
 	capabilityStore *CapabilityStore
+
+	// quotaFreezes 是额度冻结判定（nil = 未启用）：候选集合级硬过滤，见 freeze.go。
+	//
+	// 与配置无关，因此 applyConfig 不碰它；热重载若新建了 KeyPool，由装配层重新注入
+	// （SetQuotaFreezes）。读写都在 p.mu 下进行。
+	quotaFreezes QuotaFreezes
 }
 
 // stickyKey 是粘滞映射的键：(模型, 作用域标识, 粘滞哈希)。
@@ -622,7 +628,32 @@ func (p *KeyPool) KeysForModel(modelID string, accessKey *config.AccessKeyConfig
 // accessKey 非 nil 且配了供应商清单时，只保留属于这些供应商的 key。过滤放在
 // **候选集合**这一层而不是挑选之后：作用域之外的 key 根本不该进入候选，否则
 // only_first 会先选中一把无权使用的 key 再失败。
+//
+// 额度冻结同样在**候选集合**级剔除（见 freeze.go）：KeyCount / AvailableModelIDs
+// 与选路都走这里，因此「列出来的」「数出来的」「调得动的」恒等。这一层过滤对冷却的
+// 软回退同样生效——软回退是在剩下的候选里放宽冷却，不是把冻结恢复成可用。
 func (p *KeyPool) keysForModelLocked(modelID string, accessKey *config.AccessKeyConfig) []config.KeyConfig {
+	keys := p.enabledKeysForModelLocked(modelID, accessKey)
+	if p.quotaFreezes == nil {
+		return keys
+	}
+	result := make([]config.KeyConfig, 0, len(keys))
+	for _, key := range keys {
+		if p.frozenLocked(key) {
+			continue
+		}
+		result = append(result, key)
+	}
+	return result
+}
+
+// enabledKeysForModelLocked 返回「配置启用且落在访问密钥作用域内」的候选，**不做**
+// 额度冻结过滤。
+//
+// 与 keysForModelLocked 分开的理由不只是复用：冻结是临时状态，而这两类排除的原因
+// 完全不同（配置错误 vs 额度耗尽），失败时要说清是哪一种。冻结过滤后的集合为空时，
+// 正是靠这里的集合才能回答「是没配 key 还是 key 都被冻结了」。
+func (p *KeyPool) enabledKeysForModelLocked(modelID string, accessKey *config.AccessKeyConfig) []config.KeyConfig {
 	allowed := accessKeyProviders(accessKey)
 	all := p.keys[modelID]
 	result := make([]config.KeyConfig, 0, len(all))
@@ -638,7 +669,7 @@ func (p *KeyPool) keysForModelLocked(modelID string, accessKey *config.AccessKey
 	return result
 }
 
-// KeyByName 按名字取启用中的 key。
+// KeyByName 按名字取启用中的 key；点名一把被额度冻结的 Key 会失败（见 freeze.go）。
 func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKeyConfig) (config.KeyConfig, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -655,6 +686,11 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 		if allowed != nil && !allowed[key.Provider] {
 			continue
 		}
+		// 点名路径不能绕过冻结：绕过等于冻结对 `model[key]` 语法不存在，而调用方
+		// 明确点名一把已经耗尽额度的 Key 时，最该看到的正是「为什么不能用它」。
+		if p.frozenLocked(key) {
+			return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{key})
+		}
 		return key, nil
 	}
 	return config.KeyConfig{}, &missingKeyError{modelID: modelID, keyName: keyName}
@@ -663,20 +699,26 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 // NextKey 按路由模式挑选下一个可用 key。
 //
 // 四种模式的行为差异（对齐 key_pool.py:214）：
-//   - only_first：只用第一个；被排除即失败，**不进入冷却判断**；
+//   - only_first：只用第一个；被排除即失败，**不进入冷却判断**；配置顺序里的第一把
+//     被额度冻结时同样直接失败（不悄悄改道第二把，见下方分支注释）；
 //   - priority：按配置顺序取第一个可用项，受冷却排除影响；
 //   - round_robin：在并发数最低的候选里按游标轮转，支持粘滞；
 //
 // 冷却过滤是**软**的：可用集合为空时会回退到「仅排除 excluded」的集合，因此
 // 冷却中的 key 仍可能被选中。这是刻意的降级策略，避免全部冷却时彻底不可用。
 //
-// **欠费是这条降级的唯一例外**：余额不足的账号在软回退里也不放行（剩下的候选仍会
-// 借用冷却中的 key）。两条理由：冷却（429/5xx）是「暂时」，欠费是「现在一定不行」，
+// **欠费不参与这条降级**：余额不足的账号在软回退里也不放行（剩下的候选仍会借用
+// 冷却中的 key）。两条理由：冷却（429/5xx）是「暂时」，欠费是「现在一定不行」，
 // 放它进来只会把同一个 402 原样转给调用方；而且放行一次就等于每来一个请求都试一次，
 // 「自动限流」也就无从谈起。全部账号都欠费时返回「没有可用 key」（503），由调用方
 // 决定怎么处理——这正是它比一个上游欠费错误更好处理的情形。
 //
-// **并发上限是第二个例外，而且是硬约束**：已满的 key 与已满的供应商一律不放行，
+// **额度冻结更彻底：它进不了候选集**（keysForModelLocked 里就剔除了，见 freeze.go），
+// 因此软回退天然放行不了它。全部候选都被冻结时返回 quotaFrozenError（503，文案指出
+// 是额度冻结、哪把 Key、什么原因），不退化成「没有可用 key」——后者是配置问题的
+// 说法，而这里配置完全正确，只是额度用完了。
+//
+// **并发上限是另一个例外，而且是硬约束**：已满的 key 与已满的供应商一律不放行，
 // 软回退也不放行——放行一次就是直接越过用户配的上限，而这个上限的意义正是「宁可
 // 让调用方等」而不是「宁可把上游打满」。候选全被并发挡下时返回 concurrencyLimitedError
 // （429），与「没有可用 key」区分开。
@@ -691,6 +733,11 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 	}
 	keys := p.keysForModelLocked(modelID, accessKey)
 	if len(keys) == 0 {
+		// 冻结集合已经被 keysForModelLocked 过滤掉了，这里单独再扫一遍才能分辨
+		// 「候选全被冻结」与「候选因配置/作用域为空」——两者的错误必须不同。
+		if frozen := p.frozenCandidatesLocked(modelID, accessKey); len(frozen) > 0 {
+			return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, frozen)
+		}
 		if len(p.keys[modelID]) > 0 {
 			return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
 		}
@@ -699,6 +746,15 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 
 	if p.routingModeLocked(modelID) == "only_first" {
 		first := keys[0]
+		if p.quotaFreezes != nil {
+			// only_first 钉死的是**配置顺序里的第一把**（含被冻结的那把）：它一旦被
+			// 冻结就直接失败，不能悄悄把流量挪给第二把——那等于把「只用第一把」的
+			// 配置意图偷偷改成「用第一把能用的」，冻结也就从硬约束变成一次静默改道。
+			first = p.enabledKeysForModelLocked(modelID, accessKey)[0]
+			if p.frozenLocked(first) {
+				return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{first})
+			}
+		}
 		if !excludedSet[first.Name] {
 			if !p.hasCapacityLocked(modelID, first) {
 				return config.KeyConfig{}, p.concurrencyLimitedErrorLocked(modelID, []config.KeyConfig{first})
@@ -878,11 +934,11 @@ func (p *KeyPool) routingModeLocked(modelID string) string {
 	return mode
 }
 
-// AcquireKey 记一个在途请求，并在并发已满时拒绝。
+// AcquireKey 记一个在途请求，并在并发已满或该 Key 被额度冻结时拒绝。
 //
 // 与 NextKey 的分工：NextKey **负责挑**（顺带计数），本方法只回答「点名的这把 key
 // 还能不能再塞一个」。返回值从「无」变成 error，是因为点名路径（`model[key]` 语法）
-// 同样受并发上限约束——绕过它等于上限在显式指定 key 时形同不存在。
+// 同样受并发上限与额度冻结约束——绕过它等于这两条约束在显式指定 key 时形同不存在。
 func (p *KeyPool) AcquireKey(modelID, keyName string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -890,6 +946,11 @@ func (p *KeyPool) AcquireKey(modelID, keyName string) error {
 	for _, key := range p.keys[modelID] {
 		if key.Name != keyName {
 			continue
+		}
+		// 点名路径不能绕过冻结：与并发上限同级，是硬约束。放行一次就是把一个必然
+		// 失败的请求打给一个额度已耗尽的账号。
+		if p.frozenLocked(key) {
+			return p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{key})
 		}
 		if !p.hasCapacityLocked(modelID, key) {
 			return p.concurrencyLimitedErrorLocked(modelID, []config.KeyConfig{key})

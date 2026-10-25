@@ -106,6 +106,10 @@ func (h *Handler) runProbe(
 			"upstream_url", target, "error", err.Error())
 		return false, "error"
 	}
+	// 探测也是一次真实的上游调用：响应头里的额度信号同样要交给观察点。探测请求量
+	// 极小，但它往往是新 base_url 上第一次拿到真实响应的位置，漏掉就等于「首次
+	// 请求即额度耗尽」这种情形完全没有 L3 信号。
+	h.observeUpstreamQuota(key, response)
 	statusCode := response.StatusCode
 	drainAndClose(response)
 

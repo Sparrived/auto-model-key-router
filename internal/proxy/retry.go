@@ -298,6 +298,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			retrySameKey: retrySameKey,
 		}
 	}
+	// 额度信号：非流式 buffered、流式响应头、>=400 与可重试分支都从这里之后分流，
+	// 因此在这一处投递即可覆盖本轮的全部下游分支。
+	h.observeUpstreamQuota(key, response)
 	durationMS := elapsedMS(started, finished)
 
 	if useNative && isUnsupportedEndpointStatus(response.StatusCode) {
@@ -349,6 +352,8 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				retrySameKey: retrySameKey,
 			}
 		}
+		// 原生端点回退请求也是一次真实的上游调用：它的响应头同样可能带额度信号。
+		h.observeUpstreamQuota(key, fallbackResponse)
 		response = fallbackResponse
 		durationMS = elapsedMS(fallbackStarted, fallbackFinished)
 		started = fallbackStarted
@@ -433,6 +438,8 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
+			// 过滤工具后的重试请求同样是上游调用，无论成败它的响应头都要投递。
+			h.observeUpstreamQuota(key, retryResponse)
 			if retryResponse.StatusCode < 400 {
 				response = retryResponse
 				durationMS = retryDuration
@@ -533,10 +540,12 @@ func (h *Handler) selectKey(context *RequestContext, excluded map[string]bool) (
 
 // keySelectionFailure 把选 key 的错误折算成下游响应。
 //
-// 判定的依据是 keypool 的两个哨兵错误：`ErrUnknownModel` 对应 Python 的
+// 判定的依据是 keypool 的哨兵错误：`ErrUnknownModel` 对应 Python 的
 // `KeyError(model_id)`（⇒ 404「模型未配置」），`ErrNoUsableKey` 对应
 // `RuntimeError("模型 X 没有可用 key")`（⇒ 503，文本原样回给调用方）。用哨兵错误
-// 而不是 Python 的异常类做分支，因为后者是实现细节。
+// 而不是 Python 的异常类做分支，因为后者是实现细节。参照实现没有的两个哨兵各有
+// 自己的落点：`ErrConcurrencyLimited` ⇒ 429（配置正确，只是排满了），
+// `ErrQuotaFrozen` ⇒ 503（配置正确，额度用完了，见下方分支）。
 //
 // 503 的分支多记一条日志（**有意增补**）：余额不足的账号被全部限流之后，这里就是
 // 调用方看到 503 的唯一原因，「模型 X 没有可用 key」这句话本身指不出该去充值——而
@@ -560,6 +569,18 @@ func (h *Handler) keySelectionFailure(context *RequestContext, err error) attemp
 			"workspace", context.Workspace,
 			"reason", err.Error())
 		return jsonResult(http.StatusTooManyRequests, jsonErrorResponse(err.Error()))
+	}
+	// 额度冻结是**临时**状态而不是配置问题（窗口耗尽 → 自动冻结 → 重置或观测到余额
+	// 后自动解除），所以状态码与「没有可用 key」相同（503：调用方确实拿不到这次响应，
+	// 也没有自己能改的配置），但文案**必须**用错误原文——它已经指出是额度冻结、哪把
+	// Key、什么原因（含窗口与重置时间），而「模型 X 没有可用 key」会把人引向配置。
+	//
+	// 判定放在访问密钥的 403 分支之前：点名一把被冻结的 Key 时，真实原因是额度而不是
+	// 权限，说成「无权访问」会让人去查凭据清单。
+	if errors.Is(err, keypool.ErrQuotaFrozen) {
+		h.logQuotaFrozen(context.Path, context.RequestedModelID, context.ModelID,
+			context.Workspace, err)
+		return jsonResult(http.StatusServiceUnavailable, jsonErrorResponse(err.Error()))
 	}
 	if context.AccessKey != nil && context.RequestedKeyName != nil && *context.RequestedKeyName != "" {
 		return jsonResult(http.StatusForbidden, jsonErrorResponse(
@@ -661,6 +682,23 @@ func (h *Handler) sendUpstream(context *RequestContext, upstreamURL string, head
 		return client.DoStream(request)
 	}
 	return client.Do(request)
+}
+
+// observeUpstreamQuota 把一次上游响应的响应头投递给额度观察点（失败安全）。
+//
+// 这是额度冻结的 L3 被动信号入口：**只投递**响应头，不做解析、不做 IO、不阻塞——
+// 解析与落盘在 observer 侧（后台循环）完成，代理请求路径不能为额度统计付出延迟。
+// observer 为 nil（未装配，或配置里关掉了该机制）时整体短路，行为与改动前一致。
+//
+// 调用点必须覆盖**每一次**拿到上游响应的地方：主请求、原生端点回退请求、工具过滤
+// 重试请求、能力探测请求。漏掉任何一个，那条分支上的额度信号就永远看不到，而现象
+// 只是「冻结偶尔不生效」——极难排查，所以这个函数放在 sendUpstream 旁边，与调用点
+// 一一对应（见 retry.go 与 probe.go）。
+func (h *Handler) observeUpstreamQuota(key config.KeyConfig, response *http.Response) {
+	if h.quotaObserver == nil || response == nil {
+		return
+	}
+	h.quotaObserver.ObserveUpstreamQuota(key.Provider, key.Name, response.Header)
 }
 
 // newUpstreamRequest 构造上游请求。

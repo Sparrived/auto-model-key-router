@@ -350,6 +350,15 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		keyCount = pool.KeyCountFor(modelID, accessKey)
 	}
 	if configuredKeyCount == 0 {
+		// 全部候选被额度冻结时 KeyCount 也是 0（它与选路走同一份候选过滤），但这不是
+		// 配置问题，而是临时状态：说成 404「模型未配置」会把运维引去改配置，而配置
+		// 完全正确。这里与 NextKey 返回同一个错误、同一套文案，回 503 + 额度冻结原因
+		// （docs/design/quota-freeze.md §1）。
+		if frozenErr := pool.QuotaFrozenError(modelID, accessKey); frozenErr != nil {
+			h.logQuotaFrozen(path, requestedModelID, modelID, workspace, frozenErr)
+			writeJSON(w, http.StatusServiceUnavailable, jsonErrorResponse(frozenErr.Error()))
+			return nil
+		}
 		h.logModelNotConfigured(path, requestedModelID, modelID, workspace, "no_configured_keys")
 		if taskParams != nil {
 			writeJSON(w, http.StatusNotFound, jsonErrorResponse(
@@ -362,6 +371,13 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		return nil
 	}
 	if keyCount == 0 {
+		// 与上面同理：访问密钥的供应商作用域内可能恰好只剩被冻结的 Key，此时真实原因
+		// 是额度而不是权限，403「无权访问」会让人去查凭据清单。
+		if frozenErr := pool.QuotaFrozenError(modelID, accessKey); frozenErr != nil {
+			h.logQuotaFrozen(path, requestedModelID, modelID, workspace, frozenErr)
+			writeJSON(w, http.StatusServiceUnavailable, jsonErrorResponse(frozenErr.Error()))
+			return nil
+		}
 		// 走到这里只可能是访问密钥：它的供应商清单与这个模型的上游全都不相交。
 		// 说清是**供应商**维度被拒（而不是笼统的「无权」），运维才知道该改哪一份清单。
 		//
@@ -478,6 +494,20 @@ func (h *Handler) logModelNotConfigured(path, requestedModelID, modelID, workspa
 		"resolved_model", modelID,
 		"workspace", workspace,
 		"reason", reason)
+}
+
+// logQuotaFrozen 记录「候选 Key 全部因额度冻结停用」。
+//
+// 与 logModelNotConfigured 分开：那不是「路由没配好」，而是额度临时耗尽的状态。
+// reason 用错误的原文（含 provider/key 与窗口原因），因此日志与 503 响应体对得上，
+// 排查时能把「上游何时观测到耗尽」与「哪个模型开始 503」串起来。
+func (h *Handler) logQuotaFrozen(path, requestedModelID, modelID, workspace string, err error) {
+	h.logger.Warn("候选 Key 全部因额度冻结停用",
+		"path", "/v1/"+path,
+		"requested_model", requestedModelID,
+		"model_id", modelID,
+		"workspace", workspace,
+		"reason", err.Error())
 }
 
 // joinChineseEnumeration 用「、」连接参数名，对齐参照实现的 `'、'.join(...)`。
