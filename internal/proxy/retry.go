@@ -242,13 +242,14 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	// 方言专有的补丁，见 proxy_support.py:84）。
 	//
 	// FlatPayload（multipart 表单）走**字节透传**：AMKR 只从表单里取了 model 用于
-	// 路由，其余字段对它不透明，任何「重写成 JSON」的动作都会破坏请求。参照实现
-	// 在这一档上不可比——它把 multipart 当 JSON，payload 恒为 `{}`，因此永远到不了
-	// 这里（那条路径在模型校验阶段就 400 了）。
+	// 路由，其余字段对它不透明，任何「重写成 JSON」的动作都会破坏请求。唯一必须改的
+	// 是 model 本身——它要和 JSON 路径一样换成上游模型名，否则任务名/别名会被原样
+	// 发给上游（见 flatUpstreamBody）。参照实现在这一档上不可比——它把 multipart 当
+	// JSON，payload 恒为 `{}`，因此永远到不了这里（那条路径在模型校验阶段就 400 了）。
 	var upstreamBody []byte
 	var bodyErr error
 	if context.FlatPayload {
-		upstreamBody = context.OriginalRaw
+		upstreamBody, bodyErr = flatUpstreamBody(context, upstreamModelID)
 	} else if useNative {
 		upstreamBody, bodyErr = proxysupport.UpstreamBody(
 			context.OriginalRaw, context.Payload, upstreamModelID, context.Config,
@@ -318,7 +319,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		var fallbackBody []byte
 		var fallbackBodyErr error
 		if context.FlatPayload {
-			fallbackBody = context.OriginalRaw
+			fallbackBody, fallbackBodyErr = flatUpstreamBody(context, upstreamModelID)
 		} else {
 			fallbackBody, fallbackBodyErr = proxysupport.UpstreamBody(
 				context.OriginalRaw, context.Payload, upstreamModelID, context.Config,
@@ -404,11 +405,12 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 				content, durationMS, true, false)
 			_ = response.Body.Close()
-			// FlatPayload（multipart）没有 tools 可过滤，仍按字节透传。
+			// FlatPayload（multipart）没有 tools 可过滤，仍按字节透传（model 那一个
+			// 字段按路由改写，见 flatUpstreamBody）。
 			var filteredBody []byte
 			var filteredErr error
 			if context.FlatPayload {
-				filteredBody = context.OriginalRaw
+				filteredBody, filteredErr = flatUpstreamBody(context, upstreamModelID)
 			} else {
 				filteredBody, filteredErr = proxysupport.UpstreamBodyWithFilteredTools(
 					context.OriginalRaw, context.Payload, upstreamModelID, context.Config,

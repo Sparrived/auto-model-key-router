@@ -348,7 +348,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `responses` | `responses` | Responses，见该节 |
 | `embeddings` | `embeddings` | 文本嵌入。`input` 不会被改写成 chat 的 `messages`。别名 `embedding` / `embed` |
 | `images/generations` | `images` | 图像生成 |
-| `images/edits` | `images` | 图像编辑。**表单请求**默认原样转发；显式配置了 `images` 路由时用它，否则用字面 `v1/images/edits`（**不会**套用 `images` 的默认路径 `v1/images/generations`——那会把「编辑」发到「生成」端点） |
+| `images/edits` | `images` | 图像编辑。**表单请求**默认放行并转发（只有表单字段 `model` 的值按路由改写，见「表单请求」）；显式配置了 `images` 路由时用它，否则用字面 `v1/images/edits`（**不会**套用 `images` 的默认路径 `v1/images/generations`——那会把「编辑」发到「生成」端点） |
 | `images/variations` | `images` | 图像变体，与 `images/edits` 同规则 |
 | `audio/speech` | `speech` | 语音合成（TTS）。`input` 是待朗读文本，不会被改写 |
 | `audio/transcriptions` | `transcriptions` | 语音转写（STT），**表单请求**（见下） |
@@ -363,7 +363,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 #### 表单请求（multipart/form-data）
 
-图像编辑、图像变体、语音转写、语音翻译的上游规范形态就是表单（文件 + 字段）。这几条路径上默认**原样转发**：AMKR 只从表单字段 `model` 取值用于路由，其余字节与 `Content-Type` 一并送出（文件内容对 AMKR 不透明，不做任何改写）。请求体上限 64 MiB，超过返回 `413`。
+图像编辑、图像变体、语音转写、语音翻译的上游规范形态就是表单（文件 + 字段）。这几条路径上请求体**逐字节转发**，只做一处改写：表单字段 `model` 的值会换成选中 target 的上游模型名（与 JSON 路径一致，所以任务名、别名、`模型[Key]` 同样可用，`upstream_model` 与本地名不同时也按上游名发出）。除此之外 boundary、`Content-Type`、文件内容与其他字段一个字节都不动（文件内容对 AMKR 不透明）。表单里的 `model` 已经是目标上游模型名时不重建请求体，仍是纯透传。请求体上限 64 MiB，超过返回 `413`。
 
 其它路径上的表单请求返回 `415`，而不是被悄悄改写成空 JSON——未知端点的表单没法保证改对，明确拒绝比「看起来转发成功、上游却收到空体」好得多。语音转写/翻译这类没有等价 JSON 形态的端点上，`415` 的文案会说明这是策略问题。
 
