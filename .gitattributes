@@ -46,5 +46,11 @@ internal/wsproxy/testdata/** -text
 # 导致构建产物一致性检查出现假失败。linguist 标记为生成文件，代码审查时折叠。
 webui/** -text linguist-generated=true
 
+# 入口 HTML 与 public/ 静态文件会被 Vite 原样带进 webui/，源码换行会改变构建结果：
+# CRLF 源码经 Vite 处理时会在移除入口 <script> 后多留一个空行，产物因此与 Linux CI
+# 重建的不同（不只是 \r 有无）。强制 LF 检出，两端构建才逐字节一致。
+web/*.html text eol=lf
+web/public/** text eol=lf
+
 # package-lock.json 是生成文件，不参与 diff 阅读；依赖变化看 npm ci / 锁文件摘要即可。
 web/package-lock.json -diff
