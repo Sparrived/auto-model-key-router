@@ -21,6 +21,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/metrics"
 	"github.com/Sparrived/auto-model-key-router/internal/pricing"
 	"github.com/Sparrived/auto-model-key-router/internal/proxy"
+	"github.com/Sparrived/auto-model-key-router/internal/quota"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 	"github.com/Sparrived/auto-model-key-router/internal/selfupdate"
 	"github.com/Sparrived/auto-model-key-router/internal/upstream"
@@ -159,6 +160,22 @@ type App struct {
 	// pricingStop 停掉价格目录的定期刷新循环（见 Close）。
 	pricingStop func()
 
+	// freezeStore 是额度冻结状态表；与配置同目录、独立文件，进程重启与热重载都不会
+	// 让耗尽的 Key 复活（见 quota.NewStore 与设计稿第 3 节）。
+	//
+	// 它**不随配置重建**：热重载只换 KeyPool/指标库/客户端，冻结表是持久化状态，
+	// 新 pool 重新注入同一个 store（见 reload）。
+	freezeStore *quota.Store
+	// guard 是额度冻结评估器（后台巡检 + 页面即时评估 + L3 信号落地）。
+	//
+	// 它同时被三处引用：api.Server.QuotaGuard（页面）、proxy.Options.QuotaObserver
+	// （上游响应头）、以及本 App 的 Run/Close 生命周期。
+	guard *api.QuotaGuard
+	// guardCancel/guardDone 管理巡检 goroutine 的生命周期：Close 取消 ctx 并等它退出，
+	// 避免关停之后仍有评估在往冻结表里写（设计与 App.Close 的注释）。
+	guardCancel context.CancelFunc
+	guardDone   chan struct{}
+
 	// reloadMu 对应 app.state.config_reload_lock（app.py:89）。
 	reloadMu sync.Mutex
 	// configMtime 对应 app.state.config_mtime；零值等价 Python 的 0.0（「拿不到
@@ -182,6 +199,16 @@ func New(options Options) (*App, error) {
 	app := &App{options: options}
 	app.configPath = absoluteConfigPath(options.ConfigPath)
 	app.configMtime = configMtime(app.configPath)
+	// 额度冻结状态文件固定在配置同目录：它是**运行时状态**而不是配置（不进配置、
+	// 不新增配置键），但跟着配置走——换一份配置就换一套冻结，不会串味。
+	//
+	// 配置路径为空（嵌入/测试里没有配置文件）时用内存态：没有地方落盘，也不能因此
+	// 让整套机制失败。
+	freezePath := ""
+	if app.configPath != "" {
+		freezePath = filepath.Join(filepath.Dir(app.configPath), "quota-freezes.json")
+	}
+	app.freezeStore = quota.NewStore(freezePath)
 	app.opsEnabled = options.Config.OpsEnabled
 	if options.OpsEnabled != nil {
 		app.opsEnabled = *options.OpsEnabled
@@ -194,6 +221,9 @@ func New(options Options) (*App, error) {
 
 	keyPool := keypool.New(options.Config,
 		keypool.NewCapabilityStore(options.Config.EndpointCapabilitiesPath), nil)
+	// 选路层只拿到一个「这把 Key 冻没冻」的最小读接口；热重载新建的 pool 要重新注入
+	// （见 reload），冻结表本身不重建。
+	keyPool.SetQuotaFreezes(app.freezeStore)
 	store, err := metrics.Open(options.Config.MetricsDBPath)
 	if err != nil {
 		return nil, err
@@ -219,32 +249,14 @@ func New(options Options) (*App, error) {
 		runtime.NewRuntimeResources(options.Config, keyPool, adapter, client),
 	)
 
-	proxyOptions := proxy.Options{Logger: options.Logger}
-	if options.Authorizer != nil {
-		// 参照实现只有一个 authenticator（app.state.authenticator），proxy 也走它
-		// （proxy_handler.py 的 authorize 读 app.state）。宿主的钩子只回答「是不是
-		// 完整权限」，受限凭据（访问密钥、工作空间推理 key）是 AMKR 自己的配置能力，
-		// 宿主体系里没有对应概念，因此这里不透传。
-		//
-		// 宿主自带的身份体系里也没有「工作空间凭据」这个概念，因此 Workspace 留空：
-		// 空间仍由 X-AMKR-Workspace 头选择。
-		//
-		// **已知取舍**：注入自定义 Authorizer 时，访问密钥与工作空间推理凭据都不再被
-		// 识别（宿主接管了整条判定链）。这是有意的——宿主既然自带身份体系，AMKR 就不该
-		// 在旁边再开两条它管不到的通道。
-		authorizer := options.Authorizer
-		proxyOptions.Authorizer = func(r *http.Request, localAPIKey string) *proxy.AuthorizerResult {
-			if authorizer(r, localAPIKey) == nil {
-				return nil
-			}
-			return &proxy.AuthorizerResult{}
-		}
-	}
-	app.proxy = proxy.New(app.manager, &switchableSink{app: app}, proxyOptions)
-	// WS /v1/{path}：注入点直接绑定 proxy.Handle，签名逐字相同，不需要适配层
-	// （app.py:374 的 register_websocket_proxy(app, proxy)）。
-	app.wsProxy = &wsproxy.Handler{Proxy: app.proxy.Handle, Logger: options.Logger}
-
+	// —— 管理 API 与额度冻结评估器 ——
+	//
+	// 这里的构造顺序是本文件唯一一处被有意调整过的：评估器必须在 proxy.New 之前
+	// 建好。proxy 的 L3 观察点（上游响应头 → 额度信号）接在 proxy.Options 上，而
+	// 它的实现就是 *api.QuotaGuard（方法签名一致，不需要适配层）；QuotaGuard 又需要
+	// 一个能采集账号资源的 api.Server。因此 api.Server 的构造被前移到 proxy 之前，
+	// 其余接缝（Reload/CurrentConfig/运维面等）逐字不变——它只依赖 manager 与配置
+	// 路径，这两者在上面都已就位。
 	app.api = &api.Server{
 		ConfigPath:        app.configPath,
 		Reload:            app.reload,
@@ -271,6 +283,53 @@ func New(options Options) (*App, error) {
 	if app.api.CheckUpdate == nil {
 		app.api.CheckUpdate = defaultCheckUpdate(options.Version)
 	}
+	// 额度冻结：管理面读同一张冻结表，页面刷新时由评估器即时判定（见 handlers_cpa.go）。
+	app.api.Logger = options.Logger
+	app.api.QuotaFreezes = app.freezeStore
+	app.guard = api.NewQuotaGuard(api.QuotaGuardOptions{
+		Server: app.api,
+		Store:  app.freezeStore,
+		// 用当前代运行时配置：热重载改了巡检间隔后，下一轮循环直接生效。
+		Config: func() *config.RouterConfig {
+			if resources := app.manager.Current(); resources != nil {
+				return resources.Config
+			}
+			return nil
+		},
+		Logger: options.Logger,
+	})
+	app.api.QuotaGuard = app.guard
+
+	proxyOptions := proxy.Options{
+		Logger: options.Logger,
+		// L3 被动信号：每次上游响应都把响应头投给评估器。观察点只做前缀判断 + 非阻塞
+		// 投递，落盘与整轮评估都在后台循环里（见 api.QuotaGuard.ObserveUpstreamQuota）。
+		QuotaObserver: app.guard,
+	}
+	if options.Authorizer != nil {
+		// 参照实现只有一个 authenticator（app.state.authenticator），proxy 也走它
+		// （proxy_handler.py 的 authorize 读 app.state）。宿主的钩子只回答「是不是
+		// 完整权限」，受限凭据（访问密钥、工作空间推理 key）是 AMKR 自己的配置能力，
+		// 宿主体系里没有对应概念，因此这里不透传。
+		//
+		// 宿主自带的身份体系里也没有「工作空间凭据」这个概念，因此 Workspace 留空：
+		// 空间仍由 X-AMKR-Workspace 头选择。
+		//
+		// **已知取舍**：注入自定义 Authorizer 时，访问密钥与工作空间推理凭据都不再被
+		// 识别（宿主接管了整条判定链）。这是有意的——宿主既然自带身份体系，AMKR 就不该
+		// 在旁边再开两条它管不到的通道。
+		authorizer := options.Authorizer
+		proxyOptions.Authorizer = func(r *http.Request, localAPIKey string) *proxy.AuthorizerResult {
+			if authorizer(r, localAPIKey) == nil {
+				return nil
+			}
+			return &proxy.AuthorizerResult{}
+		}
+	}
+	app.proxy = proxy.New(app.manager, &switchableSink{app: app}, proxyOptions)
+	// WS /v1/{path}：注入点直接绑定 proxy.Handle，签名逐字相同，不需要适配层
+	// （app.py:374 的 register_websocket_proxy(app, proxy)）。
+	app.wsProxy = &wsproxy.Handler{Proxy: app.proxy.Handle, Logger: options.Logger}
 
 	// 价格目录（models.dev）：只驻内存，独立于指标库，因此不受热重载影响。
 	// PricingFetch 为 nil 时 Catalog 仍然可用，但没有任何目录 → /ui/pricing.json
@@ -284,6 +343,16 @@ func New(options Options) (*App, error) {
 	// 访问日志包在**整棵树**外面，对应 uvicorn 在协议层为每个请求记一行——它不关心
 	// 请求最终落到哪条路由，404/405 也照样记（历史日志里 404、503 都有 access 行）。
 	app.handler = app.accessLog(app.buildHandler())
+	// 额度冻结后台巡检：启动时立即评估一次，此后按当前配置的间隔周期巡检、响应
+	// 热重载触发与 L3 信号。它在自己的 goroutine 里跑（不阻塞启动），ctx 由 Close
+	// 取消、Close 会等它退出——否则关停后仍可能有评估在往冻结表落盘。
+	guardCtx, guardCancel := context.WithCancel(context.Background())
+	app.guardCancel = guardCancel
+	app.guardDone = make(chan struct{})
+	go func() {
+		defer close(app.guardDone)
+		app.guard.Run(guardCtx)
+	}()
 	// 广播循环最后启动：它要读 app.eventBus 与 app.broadcaster，而且必须在 Handler
 	// 可用之前就绪（第一个 /ws/events 连接会立刻触发一次 metrics_snapshot 广播）。
 	// 对应 lifespan 启动时创建 _metrics_broadcast_task（app.py:64-66）。
@@ -307,6 +376,12 @@ func (a *App) Close() error {
 	var err error
 	a.closeOnce.Do(func() {
 		a.stopMetricsBroadcast()
+		// 停额度冻结巡检并等它退出：它可能正在采集（最长 60 秒预算）或落盘冻结表。
+		// 取消 ctx 会让采集立刻返回，而 Run 退出前会等在途评估结束。
+		if a.guardCancel != nil {
+			a.guardCancel()
+			<-a.guardDone
+		}
 		// 停掉价格目录的定期刷新并等它退出：它可能正在读一个 4.7 MB 的响应体，
 		// 不等它结束就返回会让测试进程在 goroutine 仍持有连接时退出。
 		if a.pricingStop != nil {

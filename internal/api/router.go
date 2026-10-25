@@ -66,6 +66,13 @@ func (s *Server) register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/cpa-reset-credits", s.handleListCPAResetCredits)
 	mux.HandleFunc("POST /api/cpa-reset-credits/use", s.handleUseCPAResetCredit)
 
+	// —— 额度冻结（Go 侧新增，见 quota_freeze.go 与 workspacePatterns）——
+	//
+	// 冻结是运行时状态而不是配置：GET 读冻结表 + 评估器状态，DELETE 只解除一条并给
+	// 该 Key 一个抑制窗口（不写回配置里的 enabled）。两条都要求完整管理权限。
+	mux.HandleFunc("GET /api/quota-freezes", s.handleListQuotaFreezes)
+	mux.HandleFunc("DELETE /api/quota-freezes/{provider_id}/{key_name}", s.handleReleaseQuotaFreeze)
+
 	// —— 设置 ——
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
@@ -208,5 +215,7 @@ func workspacePatterns() []string {
 		"GET /api/cpa-accounts",
 		"GET /api/cpa-reset-credits",
 		"POST /api/cpa-reset-credits/use",
+		"GET /api/quota-freezes",
+		"DELETE /api/quota-freezes/{provider_id}/{key_name}",
 	}
 }

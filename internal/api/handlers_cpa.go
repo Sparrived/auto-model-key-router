@@ -14,6 +14,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 	"github.com/Sparrived/auto-model-key-router/internal/configops"
+	"github.com/Sparrived/auto-model-key-router/internal/quota"
 )
 
 // CPA 账号资源：把若干个 CLIProxyAPI（下称 CPA）实例的账号额度汇总到一块看板。
@@ -125,6 +126,38 @@ type cpaInstanceAccountReport struct {
 	Accounts   []cpaAccount `json:"accounts"`
 }
 
+// cpaInstanceAccountView 在实例读数之后追加额度冻结的联动字段（设计稿 6.2）。
+//
+// 用内嵌而不是往 cpaInstanceAccountReport 里加字段：那份结构是**采集结果**，会被
+// QuotaGuard 当成判定输入；联动字段是展示层算出来的（依赖冻结表与配置），混进采集
+// 结果会让「同一个结构在不同调用点含义不同」。
+//
+// 内嵌结构体的字段会被 encoding/json 平铺到同一层，因此既有字段的名字与顺序不变，
+// 新字段排在 accounts 之后——对既有调用方是纯增量。
+type cpaInstanceAccountView struct {
+	cpaInstanceAccountReport
+	// LinkedProviders 是 base_url 指向该实例的供应商 ID 列表。
+	LinkedProviders []string `json:"linked_providers"`
+	// AllAccountsExhausted 表示实例内启用账号是否全部有硬性耗尽窗口。
+	AllAccountsExhausted bool `json:"all_accounts_exhausted"`
+	// FrozenKeys 是该实例关联供应商下当前被冻结的 Key 坐标。
+	FrozenKeys []quotaFrozenKeyView `json:"frozen_keys"`
+}
+
+// cpaAccountsResponse 是 GET /api/cpa-accounts 的响应形状。
+//
+// 前三块（fetched_at / instances / subscriptions）与既有契约逐字一致，冻结读数以
+// freezes / guard 追加在最后：老前端只取前面几块，新前端多读两块，互不干扰。
+type cpaAccountsResponse struct {
+	FetchedAt     string                   `json:"fetched_at"`
+	Instances     []cpaInstanceAccountView `json:"instances"`
+	Subscriptions []subscriptionEntry      `json:"subscriptions"`
+	// Freezes 是当前全部生效的冻结（与 GET /api/quota-freezes 的数组同形）。
+	Freezes []QuotaFreezeView `json:"freezes"`
+	// Guard 是评估器状态；未装配时 enabled=false、其余为零值。
+	Guard QuotaGuardStatus `json:"guard"`
+}
+
 // cpaAccount 是一个账号在账号资源页上的全部读数。
 //
 // 只搬运看板要用的字段，**不向浏览器暴露** CPA 条目里的 id_token（JWT claims）、path、
@@ -163,6 +196,11 @@ type cpaAccount struct {
 	ServerTimeOffsetMs int64           `json:"server_time_offset_ms,omitempty"`
 	Cooldowns          json.RawMessage `json:"cooldowns,omitempty"`
 	QuotaError         string          `json:"quota_error,omitempty"`
+	// QuotaExhausted 报告该账号是否有窗口硬性耗尽（设计稿 6.2）。
+	//
+	// 由 api.QuotaGuard 的同一套判据算出（quota.HardExhausted），页面据此显示「额度
+	// 用尽」徽标；它是**读数**，不影响 CPA 自己的任何状态。
+	QuotaExhausted bool `json:"quota_exhausted"`
 	// chatGPTAccountID 只用于服务端代查/消费 Codex 重置卡，不进 JSON：它不是看板读数，
 	// 泄漏给浏览器也没有用途。
 	chatGPTAccountID string
@@ -220,8 +258,97 @@ func (s *Server) handleListCPAAccounts(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		return canonicalFromAny(s.collectAccountsReport(r.Context(), cfg, instances))
+		report := s.collectAccountsReport(r.Context(), cfg, instances)
+		// 页面刷新 = 立即评估：把刚采到的读数直接交给评估器，不重新扇出（设计稿 4/6.2）。
+		// 评估器未装配（嵌入/测试）时这一步跳过，响应里的冻结字段退化成空。
+		if s.QuotaGuard != nil {
+			s.QuotaGuard.ApplyReport(report)
+		}
+		return canonicalFromAny(s.cpaAccountsView(cfg, report))
 	})
+}
+
+// cpaAccountsView 把采集结果组装成响应：补齐冻结联动字段。
+//
+// 调用方必须**已经**跑过 ApplyReport（见 handleListCPAAccounts）：freezes /
+// frozen_keys / subscriptions[].freeze 读的都是评估之后的冻结表，顺序反了页面上就会
+// 显示上一轮巡检的旧结论，而「命中额度后打开页面立刻能看到已冻结」正是这一页的意义。
+func (s *Server) cpaAccountsView(cfg *config.RouterConfig, report cpaAccountsReport) cpaAccountsResponse {
+	links, providersByInstance := instanceLinkIndex(cfg, report.Instances)
+
+	var freezes []quota.Freeze
+	if s.QuotaFreezes != nil {
+		freezes = s.QuotaFreezes.Snapshot()
+	}
+	guardStatus := QuotaGuardStatus{}
+	if s.QuotaGuard != nil {
+		guardStatus = s.QuotaGuard.Status()
+	}
+
+	// 冻结按「它关联的实例」分组：一把 Key 的 base_url 指向哪个实例，就显示在哪个
+	// 实例的 frozen_keys 里。未关联实例的冻结（订阅、无实例供应商的上游信号）不在
+	// 任何实例区块里出现，它们只在顶层 freezes 与对应的订阅卡片上。
+	frozenByInstance := make(map[string][]quotaFrozenKeyView, len(report.Instances))
+	for _, freeze := range freezes {
+		link, linked := links[freeze.ProviderID]
+		if !linked {
+			continue
+		}
+		frozenByInstance[link.InstanceID] = append(frozenByInstance[link.InstanceID],
+			quotaFrozenKeyView{ProviderID: freeze.ProviderID, KeyName: freeze.KeyName})
+	}
+
+	instances := make([]cpaInstanceAccountView, 0, len(report.Instances))
+	for _, instance := range report.Instances {
+		// 账号与实例都复制一份再填展示字段：采集结果还被评估器用过，别让展示层的
+		// 派生值（quota_exhausted）回灌到判定输入里。
+		accounts := make([]cpaAccount, len(instance.Accounts))
+		copy(accounts, instance.Accounts)
+		for index := range accounts {
+			accounts[index].QuotaExhausted = len(hardQuotaWindows(accounts[index].Windows)) > 0
+		}
+		allExhausted, _, _ := instanceExhaustion(enabledAccounts(accounts))
+		frozenKeys := frozenByInstance[instance.ID]
+		if frozenKeys == nil {
+			// 空数组而不是 null：前端把 frozen_keys 当列表渲染，null 会让 .map 炸掉。
+			frozenKeys = []quotaFrozenKeyView{}
+		}
+		instances = append(instances, cpaInstanceAccountView{
+			cpaInstanceAccountReport: cpaInstanceAccountReport{
+				ID:         instance.ID,
+				Label:      instance.Label,
+				BaseURL:    instance.BaseURL,
+				OK:         instance.OK,
+				Error:      instance.Error,
+				ObservedAt: instance.ObservedAt,
+				Accounts:   accounts,
+			},
+			LinkedProviders:      append([]string{}, providersByInstance[instance.ID]...),
+			AllAccountsExhausted: allExhausted,
+			FrozenKeys:           frozenKeys,
+		})
+	}
+
+	subscriptions := make([]subscriptionEntry, len(report.Subscriptions))
+	copy(subscriptions, report.Subscriptions)
+	if s.QuotaFreezes != nil {
+		for index := range subscriptions {
+			freeze, found := s.QuotaFreezes.Get(subscriptions[index].ProviderID, subscriptions[index].KeyName)
+			if !found {
+				continue
+			}
+			view := quotaFreezeView(freeze)
+			subscriptions[index].Freeze = &view
+		}
+	}
+
+	return cpaAccountsResponse{
+		FetchedAt:     report.FetchedAt,
+		Instances:     instances,
+		Subscriptions: subscriptions,
+		Freezes:       quotaFreezeViews(freezes),
+		Guard:         guardStatus,
+	}
 }
 
 // collectAccountsReport 扇出整块看板：CPA 实例与派生出来的订阅**同时**开问。
@@ -394,6 +521,13 @@ func quotaProbeWindows(response cpaQuotaProbeResponse) []cpaQuotaWindow {
 	for groupIndex, group := range response.Groups {
 		groupName := strings.TrimSpace(group.DisplayName)
 		for bucketIndex, bucket := range group.Buckets {
+			// 上游没给比例的 bucket 整个跳过：不能把「没说」当成「剩 0%」。以前
+			// 非指针的 float64 会把缺失字段解成 0，看板画出一条假的空进度条，
+			// 现在还会被额度冻结判成硬性耗尽、把这把 Key 误摘出选路。
+			// 与 docs/USAGE.md 的既有口径一致：不替上游保证一个它没说的额度。
+			if bucket.RemainingFraction == nil {
+				continue
+			}
 			window := strings.TrimSpace(bucket.Window)
 			label := quotaWindowLabel(window)
 			if label == "" {
@@ -408,7 +542,7 @@ func quotaProbeWindows(response cpaQuotaProbeResponse) []cpaQuotaWindow {
 				Window:      window,
 				Group:       groupName,
 				Description: strings.TrimSpace(bucket.Description),
-				Remaining:   clampFraction(bucket.RemainingFraction),
+				Remaining:   clampFraction(*bucket.RemainingFraction),
 				ResetAt:     quotaTimeText(bucket.ResetTime),
 				Source:      "quota",
 			})
@@ -636,10 +770,10 @@ type cpaQuotaProbeResponse struct {
 	Groups             []struct {
 		DisplayName string `json:"displayName"`
 		Buckets     []struct {
-			Window            string  `json:"window"`
-			RemainingFraction float64 `json:"remainingFraction"`
-			ResetTime         string  `json:"resetTime"`
-			Description       string  `json:"description"`
+			Window            string   `json:"window"`
+			RemainingFraction *float64 `json:"remainingFraction"`
+			ResetTime         string   `json:"resetTime"`
+			Description       string   `json:"description"`
 		} `json:"buckets"`
 	} `json:"groups"`
 }

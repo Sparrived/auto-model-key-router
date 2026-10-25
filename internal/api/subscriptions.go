@@ -99,6 +99,12 @@ type subscriptionEntry struct {
 	Windows    []cpaQuotaWindow  `json:"windows"`
 	Summary    []cpaQuotaMetric  `json:"summary,omitempty"`
 	Signals    map[string]string `json:"signals,omitempty"`
+	// Freeze 是该条目的 Key 当前生效的额度冻结（设计稿 6.2）。
+	//
+	// 由账号资源 handler 在评估之后填入，采集器（collectSubscription）不碰它：
+	// 「这个条目读到什么」与「它现在冻没冻」来自两份数据，混在采集里会让失败路径
+	// （读取失败）也显式带上一个过期的冻结。
+	Freeze *QuotaFreezeView `json:"freeze,omitempty"`
 }
 
 // subscriptionReading 是某个厂商的采集器返回的归一化结果。

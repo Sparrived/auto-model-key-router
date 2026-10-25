@@ -87,6 +87,9 @@ func (a *App) reload() {
 	// 没有对应的错误分支。
 	pool := keypool.New(runtimeConfig,
 		keypool.NewCapabilityStore(runtimeConfig.EndpointCapabilitiesPath), nil)
+	// 冻结表不随配置重建（那是持久化状态），但新 pool 必须重新注入同一个：
+	// SetQuotaFreezes **不会**从旧 pool 继承，漏了这一步热重载会让所有冻结失效。
+	pool.SetQuotaFreezes(a.freezeStore)
 
 	if err := a.manager.Replace(
 		runtime.NewRuntimeResources(runtimeConfig, pool, store, client)); err != nil {
@@ -103,4 +106,9 @@ func (a *App) reload() {
 	// 参照实现在调用点自己判了 `if event_bus.client_count > 0`，Go 侧把这个门禁收进
 	// eventbus.Bus.BroadcastConfigChange 里——没人订阅时不广播，也**不构建帧**。
 	a.eventBus.BroadcastConfigChange(a.broadcastContext())
+	// 配置变了就尽快重评一次端到端（间隔、供应商、CPA 实例、冻结阈值都可能变了）。
+	// 只是请求尽快评估：Trigger 非阻塞，后台循环会把同一时刻的多次触发合并成一次。
+	if a.guard != nil {
+		a.guard.Trigger()
+	}
 }

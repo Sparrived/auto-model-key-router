@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/configops"
 	"github.com/Sparrived/auto-model-key-router/internal/configservice"
 	"github.com/Sparrived/auto-model-key-router/internal/health"
+	"github.com/Sparrived/auto-model-key-router/internal/quota"
 	"github.com/Sparrived/auto-model-key-router/internal/updatecheck"
 )
 
@@ -83,6 +85,20 @@ type Server struct {
 	CurrentConfig func() *config.RouterConfig
 	// Authorizer 对应 app.state.authenticator；nil 表示默认实现。
 	Authorizer auth.Authorizer
+	// Logger 是管理面自己写结构化日志的出口（手工解除冻结、巡检失败等）。
+	//
+	// nil 时退回 slog.Default()：这些日志不是可选项——「谁在什么时候解除了哪把 Key
+	// 的冻结」必须留痕，静默失败比多打一行糟得多。
+	Logger *slog.Logger
+	// QuotaFreezes 是额度冻结表；nil 表示这套机制未装配（嵌入/测试场景）。
+	//
+	// 冻结的写操作全部由 QuotaGuard 负责，管理面只读它、并允许手工解除一条。
+	QuotaFreezes *quota.Store
+	// QuotaGuard 是额度冻结评估器；nil 时账号资源页不做即时评估、L3 信号不落地。
+	//
+	// 它与 QuotaFreezes 分开注入：嵌入方可能只想要冻结表（读状态）却不要后台巡检，
+	// 两者的 nil 语义因此不同，不能用一个字段兼表。
+	QuotaGuard *QuotaGuard
 
 	// ProbeKeyCapability 对应 config_editor.probe_key_capability。
 	//
@@ -378,6 +394,14 @@ func (s *Server) reload() {
 	if s.Reload != nil {
 		s.Reload()
 	}
+}
+
+// logger 返回管理面的日志出口；未注入时退回 slog.Default()。
+func (s *Server) logger() *slog.Logger {
+	if s != nil && s.Logger != nil {
+		return s.Logger
+	}
+	return slog.Default()
 }
 
 // currentConfig 返回当前生效的配置。
