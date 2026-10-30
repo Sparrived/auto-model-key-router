@@ -80,8 +80,10 @@ func modelImpactValue(impact configops.ModelEditImpact) *canonical.Value {
 		canonical.ObjectPair{Key: "removed_tasks", Value: stringArray(impact.RemovedTasks)},
 		canonical.ObjectPair{Key: "unified_model", Value: canonical.NewBool(impact.UnifiedModel)},
 		canonical.ObjectPair{Key: "endpoint_plans", Value: canonical.NewBool(impact.EndpointPlans)},
-		// removed_keys 追加在末尾：既有字段的位置一个不动，客户端按名字读。
+		// removed_keys 追加在既有字段之后：既有字段的位置一个不动，客户端按名字读。
 		canonical.ObjectPair{Key: "removed_keys", Value: removedKeys},
+		// quota_freeze_whitelist 同样追加在末尾，兼容只认识旧字段的调用方。
+		canonical.ObjectPair{Key: "quota_freeze_whitelist", Value: stringArray(impact.QuotaFreezeWhitelist)},
 	)
 }
 

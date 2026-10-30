@@ -60,6 +60,10 @@ type ModelEditImpact struct {
 	// EndpointPlans 报告是否有模型的端点计划被一并改写：被删的模型被别的模型的端点
 	// 计划引用时，那些端点会被移除（该模型不再按那个端点分派）。
 	EndpointPlans bool
+	// QuotaFreezeWhitelist 是提前冻结白名单里被本次操作移除或改名的旧名字（升序）。
+	// 白名单只影响 threshold 冻结的豁免，但它同样是配置层的硬引用：删模型或改 ID 时
+	// 不同步更新，整份配置会被「引用了未配置的模型」挡住。
+	QuotaFreezeWhitelist []string
 }
 
 // ModelEditImpactOf 对比一次写操作前后的配置，算出它连带改掉了哪些引用。
@@ -78,6 +82,13 @@ func ModelEditImpactOf(before, after *canonical.Value) ModelEditImpact {
 		Workspaces:    workspaceListChanges(before, after),
 		UnifiedModel:  !pyEqualValues(lookup(before, "unified_model"), lookup(after, "unified_model")),
 		EndpointPlans: endpointPlansChanged(before, after),
+		QuotaFreezeWhitelist: func() []string {
+			removed, _ := listRemovals(
+				lookup(before, "quota_freeze_threshold_whitelist"),
+				lookup(after, "quota_freeze_threshold_whitelist"),
+			)
+			return removed
+		}(),
 	}
 }
 

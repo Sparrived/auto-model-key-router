@@ -32,6 +32,7 @@ const listFixture = `{
 	},
 	"tasks": {"shared": {"model": "model-a"}},
 	"workspaces": {"teamA": {"models": ["model-a", "model-b"], "tasks": {}}},
+	"quota_freeze_threshold_whitelist": ["model-a", "alias-a", "model-b"],
 	"access_keys": {
 		"public": {"name": "公开", "key": "amkr_ak_public", "models": ["model-a", "alias-a", "model-b"], "providers": ["prov-a", "prov-b"]},
 		"open": {"name": "不限制", "key": "amkr_ak_open"}
@@ -78,6 +79,10 @@ func TestRepairReferenceListsPrunesDanglingNames(t *testing.T) {
 	if names, _ := listNames(t, teamA, "models"); len(names) != 1 || names[0] != "model-b" {
 		t.Errorf("工作空间直呼清单 = %v，期望只剩 model-b", names)
 	}
+	whitelist, present := listNames(t, data, "quota_freeze_threshold_whitelist")
+	if !present || !slices.Equal(whitelist, []string{"model-b"}) {
+		t.Errorf("提前冻结白名单 = %v（present=%v），期望只剩 model-b", whitelist, present)
+	}
 }
 
 // TestRepairReferenceListsKeepsEmptyArray 固化：摘空后保留空数组，不删字段。
@@ -112,6 +117,10 @@ func TestRepairReferenceListsKeepsEmptyArray(t *testing.T) {
 	open := mustLookup(t, mustLookup(t, data, "access_keys"), "open")
 	if open.Obj.Has("models") || open.Obj.Has("providers") {
 		t.Errorf("未配置清单的访问密钥不应被补上空清单: %v", open)
+	}
+	whitelist, present := listNames(t, data, "quota_freeze_threshold_whitelist")
+	if !present || len(whitelist) != 0 {
+		t.Errorf("提前冻结白名单 = %v（present=%v），期望保留空数组", whitelist, present)
 	}
 }
 
@@ -178,6 +187,7 @@ const renameFixture = `{
 	"workspaces": {
 		"teamA": {"models": ["model-a", "alias-a", "model-b"], "tasks": {"team-shared": {"model": "model-a"}}}
 	},
+	"quota_freeze_threshold_whitelist": ["model-a", "alias-a", "model-b"],
 	"access_keys": {
 		"public": {"name": "公开", "key": "amkr_ak_public", "models": ["model-a", "alias-a", "model-b"], "providers": ["prov-a"]}
 	},
@@ -213,6 +223,9 @@ func TestUpdateModelRenameFollowsReferences(t *testing.T) {
 	teamA := mustLookup(t, mustLookup(t, data, "workspaces"), "teamA")
 	if names, _ := listNames(t, teamA, "models"); !slices.Equal(names, want) {
 		t.Errorf("工作空间直呼清单 = %v，期望 %v", names, want)
+	}
+	if whitelist, _ := listNames(t, data, "quota_freeze_threshold_whitelist"); !slices.Equal(whitelist, want) {
+		t.Errorf("提前冻结白名单 = %v，期望 %v（别名 alias-a 不该跟着改）", whitelist, want)
 	}
 	// 任务里的首选模型跟到新名字；备选指的是另一个模型，必须原样不动。
 	if got := taskField(t, mustLookup(t, data, "tasks"), "shared", "model"); got != "model-c" {

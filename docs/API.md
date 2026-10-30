@@ -746,14 +746,17 @@ Anthropic 的 `thinking`（`{type, budget_tokens}`）**不参与** `reasoning_ef
   "unified_model": true,
   "endpoint_plans": true,
   "removed_keys": [{"provider": "openai", "key": "backup"}],
+  "quota_freeze_whitelist": ["gemini-3-flash"],
   "config_revision": "..."
 }
 ```
 
 `removed_models` 是失去全部目标而被删除的模型；`models_cleared` / `providers_cleared` 报告
 那份清单是否被摘空。命名工作空间的任务用 `空间/任务名` 限定，默认空间按原名。
+`quota_freeze_whitelist` 是提前冻结白名单里被本次操作移除或改名的旧模型名；白名单只影响
+提前冻结豁免，但同样是配置层的硬引用，删模型或改名时必须同步更新。
 
-`removed_keys` 是**追加在响应末尾**的字段（为兼容既有调用方而排在最后）：本次写入里**消失、
+`removed_keys` 是**追加**的字段（为兼容既有调用方而排在旧字段之后）：本次写入里**消失、
 且其供应商仍然存在**的供应商 Key，形如 `[{"provider": "openai", "key": "backup"}]`，按
 `provider`、`key` 升序。删路由时它列出的就是「失去最后一个模型绑定」而被清理的那些 Key——
 仍被其他模型路由绑定的 Key 不在其中；整个供应商被删除时不逐把罗列（那种情况已经体现在

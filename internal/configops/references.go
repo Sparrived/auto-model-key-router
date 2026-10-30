@@ -7,12 +7,14 @@ import (
 )
 
 // 本文件管「模型/供应商清单」这类**引用**：`access_keys.<id>.models`、
-// `access_keys.<id>.providers` 与 `workspaces.<空间>.models`。
+// `access_keys.<id>.providers`、`workspaces.<空间>.models`，以及顶层的
+// `quota_freeze_threshold_whitelist`。
 //
 // 它们与 tasks、unified_model 是同一类东西——写的是别处的名字。被引用的目标没了，
 // 留着这个名字整份配置就再也解析不过去（config.parseAccessKeyModels /
-// parseWorkspaceModels 直接报「引用了未配置的模型」），于是「删掉一个没人用的模型」
-// 会被一句引用错误顶回来：用户想删的恰恰是那个模型，却因为一份清单里还写着它而删不动。
+// parseWorkspaceModels / parseQuotaFreezeThresholdWhitelist 直接报「引用了未配置的模型」），
+// 于是「删掉一个没人用的模型」会被一句引用错误顶回来：用户想删的恰恰是那个模型，却因为
+// 一份清单里还写着它而删不动。
 //
 // 这里负责把失效的名字摘掉（RepairReferenceLists）与陪着改名一起走（FollowModelRename /
 // FollowProviderRename）；「动手之前先算出会摘掉谁」在 impact.go。
@@ -45,6 +47,9 @@ func RepairReferenceLists(data *canonical.Value) error {
 		}
 		pruneNameList(lookup(pair.Value, "models"), knownModels)
 	}
+	// 白名单与访问密钥/工作空间清单同源：写的是模型 ID 或别名。它摘空后也是空数组
+	// （没有任何模型豁免），保留字段可以让编辑界面明确显示「当前没有白名单」。
+	pruneNameList(lookup(data, "quota_freeze_threshold_whitelist"), knownModels)
 	return nil
 }
 
@@ -98,11 +103,13 @@ func pruneNameList(list *canonical.Value, known map[string]bool) {
 // 变成一次静默减权。两种都不对，正确的动作是把引用一起改名。
 //
 // unified_model 的跟随由 ReplaceUnifiedModelName 负责（它要处理 primary/fallback 的结构
-// 与迁移副本），这里管 access_keys / workspaces 的模型清单与任务的 model / fallback_model。
+// 与迁移副本），这里管 access_keys / workspaces 的模型清单、任务的 model / fallback_model，
+// 以及提前冻结白名单。
 //
 // 只改**与旧 ID 完全相同**的那些名字：清单与任务里允许写别名，而别名不随 ID 改名失效，
 // 跟着改反而会把一个仍然有效的别名改没。
 func FollowModelRename(data *canonical.Value, oldName, newName string) {
+	renameListItems(lookup(data, "quota_freeze_threshold_whitelist"), oldName, newName)
 	for _, pair := range objectItems(lookup(data, "access_keys")) {
 		if pair.Value.IsObject() {
 			renameListItems(lookup(pair.Value, "models"), oldName, newName)

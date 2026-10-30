@@ -1,6 +1,9 @@
 package configops
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // 本文件固化预演的结果：一次会连带改动的写操作，要能逐项报出它会摘掉谁。
 //
@@ -42,6 +45,9 @@ func TestModelEditImpactOfReportsCascade(t *testing.T) {
 	if len(impact.RemovedTasks) != 1 || impact.RemovedTasks[0] != "shared" {
 		t.Errorf("被删任务 = %v，期望 [shared]", impact.RemovedTasks)
 	}
+	if !slices.Equal(impact.QuotaFreezeWhitelist, []string{"alias-a", "model-a"}) {
+		t.Errorf("提前冻结白名单变更 = %v，期望 [alias-a model-a]", impact.QuotaFreezeWhitelist)
+	}
 	if impact.UnifiedModel {
 		t.Error("这份配置没有 unified_model，不该报告它被改写")
 	}
@@ -67,6 +73,9 @@ func TestModelEditImpactOfReportsCleared(t *testing.T) {
 	}
 	if len(impact.Workspaces) != 1 || !impact.Workspaces[0].ModelsCleared {
 		t.Errorf("工作空间清单应报成被摘空: %+v", impact.Workspaces)
+	}
+	if !slices.Equal(impact.QuotaFreezeWhitelist, []string{"alias-a", "model-a", "model-b"}) {
+		t.Errorf("提前冻结白名单变更 = %v，期望全部旧名字", impact.QuotaFreezeWhitelist)
 	}
 }
 

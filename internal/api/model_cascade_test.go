@@ -40,6 +40,7 @@ const cascadeFixture = `{
   },
   "tasks": {"shared": {"model": "model-a"}},
   "workspaces": {"teamA": {"models": ["model-a", "model-b"], "tasks": {"only-a": {"model": "model-a"}}}},
+  "quota_freeze_threshold_whitelist": ["model-a", "model-b"],
   "access_keys": {"public": {"name": "公开", "key": "amkr_ak_public", "models": ["model-a", "model-b"], "providers": ["prov-a"]}},
   "unified_model": {"default": {"primary": {"model": "model-a", "key": null}}}
 }`
@@ -81,6 +82,8 @@ type dryRunImpact struct {
 	} `json:"workspaces"`
 	RemovedTasks []string `json:"removed_tasks"`
 	UnifiedModel bool     `json:"unified_model"`
+	// QuotaFreezeWhitelist 是被删/改名模型在提前冻结白名单里的旧名字。
+	QuotaFreezeWhitelist []string `json:"quota_freeze_whitelist"`
 	// RemovedKeys 是与模型一起消失的供应商 Key（供应商仍在，Key 没了）。
 	RemovedKeys []struct {
 		Provider string `json:"provider"`
@@ -186,6 +189,9 @@ func TestDryRunKeyModelsReportsCascade(t *testing.T) {
 	if !slices.Equal(impact.RemovedModels, []string{"model-a"}) {
 		t.Errorf("被删模型 = %v，期望 [model-a]", impact.RemovedModels)
 	}
+	if !slices.Equal(impact.QuotaFreezeWhitelist, []string{"model-a"}) {
+		t.Errorf("提前冻结白名单变更 = %v，期望 [model-a]", impact.QuotaFreezeWhitelist)
+	}
 	if len(impact.AccessKeys) != 1 || impact.AccessKeys[0].ID != "public" ||
 		!slices.Equal(impact.AccessKeys[0].Models, []string{"model-a"}) {
 		t.Errorf("访问密钥清单变动不符: %+v", impact.AccessKeys)
@@ -252,6 +258,9 @@ func TestModelRemovalCascadesInsteadOfBlocking(t *testing.T) {
 	}
 	if providers, present := stringList(t, public, "providers"); !present || !slices.Equal(providers, []string{"prov-a"}) {
 		t.Errorf("供应商没被删，providers 清单不该动: %v（present=%v）", providers, present)
+	}
+	if whitelist, present := stringList(t, data, "quota_freeze_threshold_whitelist"); !present || !slices.Equal(whitelist, []string{"model-b"}) {
+		t.Errorf("提前冻结白名单 = %v（present=%v），期望只剩 model-b", whitelist, present)
 	}
 }
 
