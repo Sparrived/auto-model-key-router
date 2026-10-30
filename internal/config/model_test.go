@@ -669,3 +669,63 @@ func TestTaskPlanWithEmptyModelIsEmpty(t *testing.T) {
 		t.Errorf("未指定模型的任务不应产生任何目标，实际 %+v", plan)
 	}
 }
+
+// TestQuotaFreezeThresholds 钉住 5h/7d 提前冻结底限的解析口径。
+//
+// 缺省与显式 0 都表示关闭；负值与超过 1 的误配按边界夹住而不是让启动失败——
+// 一个阈值写错不该让整份配置不可用。
+func TestQuotaFreezeThresholds(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want float64
+		key  string
+	}{
+		{name: "缺省关闭", body: `{}`, want: 0, key: "quota_freeze_threshold_5h"},
+		{name: "解析 5h", body: `"quota_freeze_threshold_5h":0.05`, want: 0.05, key: "quota_freeze_threshold_5h"},
+		{name: "解析 7d", body: `"quota_freeze_threshold_7d":0.1`, want: 0.1, key: "quota_freeze_threshold_7d"},
+		{name: "负值夹到 0", body: `"quota_freeze_threshold_5h":-0.2`, want: 0, key: "quota_freeze_threshold_5h"},
+		{name: "超过 1 夹到 1", body: `"quota_freeze_threshold_7d":1.5`, want: 1, key: "quota_freeze_threshold_7d"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := ""
+			if tc.body != "{}" {
+				extra = "," + tc.body
+			}
+			cfg, err := FromDict(mustParse(t, `{"config_version":4,"local_api_key":"k"`+extra+`}`))
+			if err != nil {
+				t.Fatalf("解析失败: %v", err)
+			}
+			got := cfg.QuotaFreezeThreshold5h
+			if tc.key == "quota_freeze_threshold_7d" {
+				got = cfg.QuotaFreezeThreshold7d
+			}
+			if got != tc.want {
+				t.Errorf("%s = %v，期望 %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestQuotaFreezeThresholdWhitelist 钉住提前冻结白名单：允许模型 ID 或别名，未知名字
+// 在配置层直接报错，而不是等额度触底时静默漏掉一个模型。
+func TestQuotaFreezeThresholdWhitelist(t *testing.T) {
+	base := `{"config_version":4,"local_api_key":"k",` +
+		`"providers":{"p":{"base_url":"https://p.example","keys":{"k":{"api_key":"x"}}}},` +
+		`"models":{"m":{"targets":[{"provider":"p","key":"k","upstream_model":"u"}],` +
+		`"aliases":["alias-m"]}}`
+	cfg, err := FromDict(mustParse(t, base+`,"quota_freeze_threshold_whitelist":["m","alias-m"]}`))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if got := cfg.QuotaFreezeThresholdWhitelist; len(got) != 2 || got[0] != "m" || got[1] != "alias-m" {
+		t.Fatalf("白名单解析结果不符: %v", got)
+	}
+
+	if _, err := FromDict(mustParse(t, base+`,"quota_freeze_threshold_whitelist":["missing"]}`)); err == nil {
+		t.Fatal("引用未配置模型的白名单应报错")
+	} else if !strings.Contains(err.Error(), "quota_freeze_threshold_whitelist[0]") {
+		t.Fatalf("错误文案应带字段与下标: %v", err)
+	}
+}

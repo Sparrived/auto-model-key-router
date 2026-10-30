@@ -40,7 +40,7 @@ func TestListQuotaFreezesShape(t *testing.T) {
 		Status:      "rejected",
 		ResetAt:     resetAt,
 		FrozenAt:    fixture.Clock.Now(),
-		ExpiresAt:   resetAt.Add(quotaFreezeResetGrace),
+		ExpiresAt:   resetAt,
 		Reason:      "5 小时窗口已用尽（剩余 0%）",
 	}); err != nil {
 		t.Fatalf("写入冻结失败: %v", err)
@@ -420,6 +420,58 @@ func TestAccountsReportQuotaFreezeDisabled(t *testing.T) {
 	}
 	if fixture.Store.IsFrozen("go-a", "key-1") {
 		t.Fatal("机制关闭时冻结表不该被写入")
+	}
+}
+
+// TestListQuotaFreezesThresholdFields 钉住 6.1 的底限与触发字段：guard 对象带
+// threshold_5h/threshold_7d，冻结视图带 trigger/threshold。
+func TestListQuotaFreezesThresholdFields(t *testing.T) {
+	fixture := newQuotaGuardFixture(t,
+		`{"go-a":{"base_url":"https://opencode.ai/zen/go/v1","keys":{"key-1":{"api_key":"sk-1"}}}}`,
+		`{}`, `"quota_freeze_threshold_5h":0.05,"quota_freeze_threshold_7d":0.1,`)
+
+	resetAt := fixture.Clock.Now().Add(2 * time.Hour)
+	fixture.Guard.ApplyReport(subscriptionReport(true,
+		quotaWindow("claude/5h", "5 小时", 0.03, "allowed", formatFreezeTime(resetAt))))
+
+	recorder := callCPA(t, fixture.Server, http.MethodGet, "/api/quota-freezes", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d（%s）", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Threshold5h float64           `json:"threshold_5h"`
+		Threshold7d float64           `json:"threshold_7d"`
+		Freezes     []QuotaFreezeView `json:"freezes"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是期望形状: %v（%s）", err, recorder.Body.String())
+	}
+	if body.Threshold5h != 0.05 || body.Threshold7d != 0.1 {
+		t.Errorf("guard 底限字段不对: %+v", body)
+	}
+	if len(body.Freezes) != 1 {
+		t.Fatalf("期望 1 条冻结，实际 %d", len(body.Freezes))
+	}
+	freeze := body.Freezes[0]
+	if freeze.Trigger != "threshold" || freeze.Threshold != 0.05 {
+		t.Errorf("冻结视图应带 trigger=threshold、threshold=0.05: %+v", freeze)
+	}
+	if !strings.Contains(recorder.Body.String(), `"trigger":"threshold"`) {
+		t.Errorf("JSON 里应出现 trigger 字段: %s", recorder.Body.String())
+	}
+
+	// 硬性耗尽没有用户配置的底限：threshold 按 omitempty 省略，trigger 仍要出现。
+	if _, err := fixture.Store.Upsert(quota.Freeze{
+		ProviderID: "go-a", KeyName: "key-1", Scope: "subscription", Source: "account_resource",
+		WindowKey: "claude/5h", WindowLabel: "5 小时", Remaining: 0, Status: "rejected",
+		Trigger: "hard", FrozenAt: fixture.Clock.Now(), ExpiresAt: fixture.Clock.Now().Add(time.Hour),
+		Reason: "测试",
+	}); err != nil {
+		t.Fatalf("写入硬性冻结失败: %v", err)
+	}
+	recorder = callCPA(t, fixture.Server, http.MethodGet, "/api/quota-freezes", "")
+	if body := recorder.Body.String(); strings.Contains(body, `"threshold":`) {
+		t.Errorf("硬性冻结不该输出 threshold 字段: %s", body)
 	}
 }
 

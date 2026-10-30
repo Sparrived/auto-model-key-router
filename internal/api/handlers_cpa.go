@@ -142,6 +142,11 @@ type cpaInstanceAccountView struct {
 	AllAccountsExhausted bool `json:"all_accounts_exhausted"`
 	// FrozenKeys 是该实例关联供应商下当前被冻结的 Key 坐标。
 	FrozenKeys []quotaFrozenKeyView `json:"frozen_keys"`
+	// AllAccountsBelowFloor 表示实例内启用账号是否全部有低于底限的窗口。
+	//
+	// 与 AllAccountsExhausted 独立（设计稿 6.2）：前者是提前冻结线，后者是硬性
+	// 耗尽线，两者可以同时为 true。
+	AllAccountsBelowFloor bool `json:"all_accounts_below_floor"`
 }
 
 // cpaAccountsResponse 是 GET /api/cpa-accounts 的响应形状。
@@ -201,6 +206,11 @@ type cpaAccount struct {
 	// 由 api.QuotaGuard 的同一套判据算出（quota.HardExhausted），页面据此显示「额度
 	// 用尽」徽标；它是**读数**，不影响 CPA 自己的任何状态。
 	QuotaExhausted bool `json:"quota_exhausted"`
+	// QuotaBelowFloor 报告该账号是否有窗口低于**已配置**的 5h/7d 底限。
+	//
+	// 与 QuotaExhausted 独立：硬性耗尽的窗口只要仍落在底限内也会同时计入（设计稿
+	// 6.2：「可同时为 true」）；底限为 0 时该档关闭，不产生这个标记。
+	QuotaBelowFloor bool `json:"quota_below_floor"`
 	// chatGPTAccountID 只用于服务端代查/消费 Codex 重置卡，不进 JSON：它不是看板读数，
 	// 泄漏给浏览器也没有用途。
 	chatGPTAccountID string
@@ -275,6 +285,7 @@ func (s *Server) handleListCPAAccounts(w http.ResponseWriter, r *http.Request) {
 // 显示上一轮巡检的旧结论，而「命中额度后打开页面立刻能看到已冻结」正是这一页的意义。
 func (s *Server) cpaAccountsView(cfg *config.RouterConfig, report cpaAccountsReport) cpaAccountsResponse {
 	links, providersByInstance := instanceLinkIndex(cfg, report.Instances)
+	thresholds := thresholdsFromConfig(cfg)
 
 	var freezes []quota.Freeze
 	if s.QuotaFreezes != nil {
@@ -301,13 +312,16 @@ func (s *Server) cpaAccountsView(cfg *config.RouterConfig, report cpaAccountsRep
 	instances := make([]cpaInstanceAccountView, 0, len(report.Instances))
 	for _, instance := range report.Instances {
 		// 账号与实例都复制一份再填展示字段：采集结果还被评估器用过，别让展示层的
-		// 派生值（quota_exhausted）回灌到判定输入里。
+		// 派生值（quota_exhausted / quota_below_floor）回灌到判定输入里。
 		accounts := make([]cpaAccount, len(instance.Accounts))
 		copy(accounts, instance.Accounts)
 		for index := range accounts {
 			accounts[index].QuotaExhausted = len(hardQuotaWindows(accounts[index].Windows)) > 0
+			accounts[index].QuotaBelowFloor = accountBelowFloor(accounts[index], thresholds)
 		}
-		allExhausted, _, _ := instanceExhaustion(enabledAccounts(accounts))
+		enabled := enabledAccounts(accounts)
+		allExhausted := instanceAllHardExhausted(enabled)
+		allBelowFloor := instanceAllBelowFloor(enabled, thresholds)
 		frozenKeys := frozenByInstance[instance.ID]
 		if frozenKeys == nil {
 			// 空数组而不是 null：前端把 frozen_keys 当列表渲染，null 会让 .map 炸掉。
@@ -323,9 +337,10 @@ func (s *Server) cpaAccountsView(cfg *config.RouterConfig, report cpaAccountsRep
 				ObservedAt: instance.ObservedAt,
 				Accounts:   accounts,
 			},
-			LinkedProviders:      append([]string{}, providersByInstance[instance.ID]...),
-			AllAccountsExhausted: allExhausted,
-			FrozenKeys:           frozenKeys,
+			LinkedProviders:       append([]string{}, providersByInstance[instance.ID]...),
+			AllAccountsExhausted:  allExhausted,
+			FrozenKeys:            frozenKeys,
+			AllAccountsBelowFloor: allBelowFloor,
 		})
 	}
 

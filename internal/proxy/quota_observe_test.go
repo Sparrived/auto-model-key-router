@@ -71,6 +71,14 @@ func (f frozenQuotaKeys) FrozenReason(providerID, keyName string) string {
 	return f[[2]string{providerID, keyName}]
 }
 
+// FrozenTrigger 返回冻结类型；这组用例只关心「全部冻结」的失败，按硬性耗尽处理。
+func (f frozenQuotaKeys) FrozenTrigger(providerID, keyName string) string {
+	if _, found := f[[2]string{providerID, keyName}]; found {
+		return "hard"
+	}
+	return ""
+}
+
 // quotaObserveConfig 构造「单模型单 key、带 provider 标识」的配置。
 //
 // provider 必须非空：观察点收到的 providerID 来自 Key.Provider，它决定了 L3 信号

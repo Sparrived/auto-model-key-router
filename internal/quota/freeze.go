@@ -36,6 +36,10 @@ type Freeze struct {
 	// Remaining 是触发时的剩余比例（0..1）；Status 是上游原话（可空）。
 	Remaining float64 `json:"remaining"`
 	Status    string  `json:"status,omitempty"`
+	// Trigger 是触发类型：hard（硬性耗尽） / threshold（低于底限）。
+	Trigger string `json:"trigger,omitempty"`
+	// Threshold 是触发时的底限（0..1；Trigger=threshold 时有值）。
+	Threshold float64 `json:"threshold,omitempty"`
 	// ResetAt 是窗口重置时间；零值表示上游没给。
 	ResetAt time.Time `json:"reset_at,omitempty"`
 	// FrozenAt 是首次冻结时刻（后续刷新保留），ExpiresAt 是到期自动解冻时刻。
@@ -119,6 +123,16 @@ func freezeKey(providerID, keyName string) string {
 	return providerID + "\x00" + keyName
 }
 
+// sortFreezes 按 (provider_id, key_name) 排序，快照、清理与落盘共用同一口径。
+func sortFreezes(freezes []Freeze) {
+	sort.Slice(freezes, func(i, j int) bool {
+		if freezes[i].ProviderID != freezes[j].ProviderID {
+			return freezes[i].ProviderID < freezes[j].ProviderID
+		}
+		return freezes[i].KeyName < freezes[j].KeyName
+	})
+}
+
 // Snapshot 返回当前未过期的冻结，按 (provider_id, key_name) 排序。
 func (s *Store) Snapshot() []Freeze {
 	s.mu.Lock()
@@ -131,12 +145,7 @@ func (s *Store) Snapshot() []Freeze {
 			result = append(result, freeze)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].ProviderID != result[j].ProviderID {
-			return result[i].ProviderID < result[j].ProviderID
-		}
-		return result[i].KeyName < result[j].KeyName
-	})
+	sortFreezes(result)
 	return result
 }
 
@@ -170,40 +179,70 @@ func (s *Store) FrozenReason(providerID, keyName string) string {
 	return freeze.Reason
 }
 
+// FrozenTrigger 返回冻结类型（hard / threshold）；未冻结返回空串。
+//
+// keypool 用它决定模型白名单能否豁免：只有提前冻结可豁免，硬性耗尽永远不能。
+// 旧版本写入的记录没有 Trigger 字段，按硬性冻结处理（空串 != threshold），宁可少
+// 放行也不能把已经耗尽的额度继续打出去。
+func (s *Store) FrozenTrigger(providerID, keyName string) string {
+	freeze, found := s.Get(providerID, keyName)
+	if !found {
+		return ""
+	}
+	return freeze.Trigger
+}
+
 // Upsert 新增或刷新一条冻结记录；返回是否真的发生了变化（调用方据此决定是否打日志）。
 //
-// 同一把 Key 只保留一条：刷新窗口、原因与到期时间，但**沿用仍生效记录的首次
-// FrozenAt**（界面上的「自 X 起冻结」不该被每轮巡检推后）。旧记录已过期时按全新
-// 一次冻结处理：评估链路每轮末尾才 Prune，过期记录可能还留在表里，若无条件沿用，
-// 界面会显示出很久以前的起始时间。若该 Key 处于手工解冻抑制窗口内，则忽略本次
-// 冻结（返回 false）——抑制优先，直到窗口过期。
+// 同一把 Key 只保留一条：刷新窗口、原因等字段，但**沿用仍生效记录的首次
+// FrozenAt**（界面上的「自 X 起冻结」不该被每轮巡检推后）。ExpiresAt 是内置计时器目标，
+// 已生效时只允许换成本次候选里**更早**的时刻：更晚或零值（没意见）都保留原值，避免
+// 上游长期回旧读数时把解冻时刻无限延后。旧记录已过期时按全新一次冻结处理：评估链路
+// 每轮末尾才 Prune，过期记录可能还留在表里，若无条件沿用，界面会显示出很久以前的
+// 起始时间。若该 Key 处于手工解冻抑制窗口内，则忽略本次冻结（返回 false）——抑制优先。
 func (s *Store) Upsert(freeze Freeze) (bool, error) {
 	freeze.ProviderID = strings.TrimSpace(freeze.ProviderID)
 	freeze.KeyName = strings.TrimSpace(freeze.KeyName)
 	if freeze.ProviderID == "" || freeze.KeyName == "" {
 		return false, errors.New("额度冻结记录缺少 provider_id / key_name")
 	}
-	if freeze.ExpiresAt.IsZero() {
-		freeze.ExpiresAt = s.clock().Add(fallbackFreezeTTL)
-	}
+	now := s.clock()
 	if freeze.FrozenAt.IsZero() {
-		freeze.FrozenAt = s.clock()
+		freeze.FrozenAt = now
 	}
+	// 状态文件与接口都按 UTC 口径；调用方给本地时间时在持久化边界统一。
+	freeze.ResetAt = freeze.ResetAt.UTC()
+	freeze.FrozenAt = freeze.FrozenAt.UTC()
+	freeze.ExpiresAt = freeze.ExpiresAt.UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureLoadedLocked()
 	key := freezeKey(freeze.ProviderID, freeze.KeyName)
-	if until, found := s.suppressions[key]; found && s.clock().Before(until) {
+	if until, found := s.suppressions[key]; found && now.Before(until) {
 		return false, nil
 	}
-	if existing, found := s.freezes[key]; found && s.clock().Before(existing.ExpiresAt) {
+	if existing, found := s.freezes[key]; found && now.Before(existing.ExpiresAt) {
 		freeze.FrozenAt = existing.FrozenAt
-		if existing == freeze {
+		if freeze.ExpiresAt.IsZero() || !freeze.ExpiresAt.Before(existing.ExpiresAt) {
+			freeze.ExpiresAt = existing.ExpiresAt
+		}
+		if sameFreeze(existing, freeze) {
 			return false, nil
 		}
 	}
+	if freeze.ExpiresAt.IsZero() {
+		freeze.ExpiresAt = now.Add(fallbackFreezeTTL).UTC()
+	}
 	s.freezes[key] = freeze
 	return true, s.saveLocked()
+}
+
+// sameFreeze 比较两条记录的内容；时间按瞬时比较，避免调用方带单调时钟读数时误判为变化。
+func sameFreeze(a, b Freeze) bool {
+	a.ResetAt, b.ResetAt = a.ResetAt.Round(0).UTC(), b.ResetAt.Round(0).UTC()
+	a.FrozenAt, b.FrozenAt = a.FrozenAt.Round(0).UTC(), b.FrozenAt.Round(0).UTC()
+	a.ExpiresAt, b.ExpiresAt = a.ExpiresAt.Round(0).UTC(), b.ExpiresAt.Round(0).UTC()
+	return a == b
 }
 
 // Release 手工解除一条冻结；返回被解除的记录。
@@ -280,13 +319,46 @@ func (s *Store) Prune(valid func(providerID, keyName string) bool) ([]Freeze, er
 	if !changed {
 		return nil, nil
 	}
-	sort.Slice(removed, func(i, j int) bool {
-		if removed[i].ProviderID != removed[j].ProviderID {
-			return removed[i].ProviderID < removed[j].ProviderID
-		}
-		return removed[i].KeyName < removed[j].KeyName
-	})
+	sortFreezes(removed)
 	return removed, s.saveLocked()
+}
+
+// ExpireDue 删除所有已到解冻时刻的冻结并落盘（内置计时器到点由后台调用）。
+// 返回按 (provider_id, key_name) 排序的已删记录；没有到期记录时不落盘。
+func (s *Store) ExpireDue() ([]Freeze, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureLoadedLocked()
+	now := s.clock()
+	removed := make([]Freeze, 0)
+	for key, freeze := range s.freezes {
+		if now.Before(freeze.ExpiresAt) {
+			continue
+		}
+		delete(s.freezes, key)
+		removed = append(removed, freeze)
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	sortFreezes(removed)
+	return removed, s.saveLocked()
+}
+
+// NextExpiry 返回所有记录里最早的解冻时刻；没有记录时 ok=false。
+func (s *Store) NextExpiry() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureLoadedLocked()
+	var deadline time.Time
+	found := false
+	for _, freeze := range s.freezes {
+		if !found || freeze.ExpiresAt.Before(deadline) {
+			deadline = freeze.ExpiresAt
+			found = true
+		}
+	}
+	return deadline, found
 }
 
 // ensureLoadedLocked 首次访问时读盘；文件缺失或损坏按空表处理（不返回错误）。
@@ -343,12 +415,7 @@ func (s *Store) saveLocked() error {
 	for _, freeze := range s.freezes {
 		file.Freezes = append(file.Freezes, freeze)
 	}
-	sort.Slice(file.Freezes, func(i, j int) bool {
-		if file.Freezes[i].ProviderID != file.Freezes[j].ProviderID {
-			return file.Freezes[i].ProviderID < file.Freezes[j].ProviderID
-		}
-		return file.Freezes[i].KeyName < file.Freezes[j].KeyName
-	})
+	sortFreezes(file.Freezes)
 	for key, until := range s.suppressions {
 		providerID, keyName, _ := strings.Cut(key, "\x00")
 		file.Suppressions = append(file.Suppressions, suppressionEntry{

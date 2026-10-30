@@ -55,7 +55,10 @@ func passiveQuotaWindows(provider string, signals map[string]any) []cpaQuotaWind
 	out := make([]cpaQuotaWindow, 0, len(windows))
 	for _, window := range windows {
 		out = append(out, cpaQuotaWindow{
-			Key:       window.Key,
+			Key: window.Key,
+			// Window 是上游原始窗口名，底限判定靠它识别 5h/7d；不能只靠 Key，
+			// codex 的 Key 带 limit id（可能叫 weekly），按词面猜会认错档位。
+			Window:    window.Raw,
 			Label:     window.Label,
 			Remaining: window.Remaining,
 			ResetAt:   quota.ResetText(window.ResetAt),

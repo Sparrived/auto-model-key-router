@@ -14,12 +14,18 @@ import (
 // *quota.Store 天然满足它（IsFrozen / FrozenReason 签名一致），不需要适配器；
 // 测试里用一个查表的假实现即可。
 //
-// 两个方法的语义：
-//   - IsFrozen 回答「这把 Key 现在能不能用」，只在选路热路径上被调用；
-//   - FrozenReason 返回一句人话，只在下游错误文案里出现（未冻结返回空串）。
+// 基本接口只保留两个方法：这是选路层真正依赖的最小面，旧实现/测试假实现不必为了
+// 白名单增加方法而重写。白名单需要知道冻结类型时，再可选探测下面的
+// quotaFreezeTrigger；探测不到就按 hard 处理（宁可少放行，不把耗尽额度打出去）。
 type QuotaFreezes interface {
 	IsFrozen(providerID, keyName string) bool
 	FrozenReason(providerID, keyName string) string
+}
+
+// quotaFreezeTrigger 是 QuotaFreezes 的可选扩展：返回 hard / threshold。
+// 只有提前冻结能被模型白名单豁免，硬性耗尽永远不豁免。
+type quotaFreezeTrigger interface {
+	FrozenTrigger(providerID, keyName string) string
 }
 
 // ErrQuotaFrozen 表示模型的候选 Key 全部因额度冻结被停用。
@@ -91,7 +97,7 @@ func (p *KeyPool) QuotaFrozenError(modelID string, accessKey *config.AccessKeyCo
 	}
 	frozen := make([]config.KeyConfig, 0, len(enabled))
 	for _, key := range enabled {
-		if !p.frozenLocked(key) {
+		if !p.frozenForModelLocked(resolved, key) {
 			return nil
 		}
 		frozen = append(frozen, key)
@@ -99,9 +105,29 @@ func (p *KeyPool) QuotaFrozenError(modelID string, accessKey *config.AccessKeyCo
 	return p.quotaFrozenErrorLocked(resolved, frozen)
 }
 
-// frozenLocked 报告该 Key 是否因额度冻结被停用。调用方须持 p.mu。
+// frozenLocked 报告该 Key 是否有一条额度冻结记录。调用方须持 p.mu。
 func (p *KeyPool) frozenLocked(key config.KeyConfig) bool {
 	return p.quotaFreezes != nil && p.quotaFreezes.IsFrozen(key.Provider, key.Name)
+}
+
+// frozenForModelLocked 报告该 Key 对指定模型是否不可用。
+//
+// 提前冻结（trigger=threshold）只停用未进入 quota_freeze_threshold_whitelist 的模型；
+// 硬性耗尽（含旧记录/未知 trigger）对所有模型都不可豁免。白名单按真实模型 ID 存放，
+// 解析与别名归一在 applyConfig 完成，因此这里只做一次 map 查找。
+func (p *KeyPool) frozenForModelLocked(modelID string, key config.KeyConfig) bool {
+	if !p.frozenLocked(key) {
+		return false
+	}
+	if !p.thresholdWhitelist[modelID] {
+		return true
+	}
+	trigger, ok := p.quotaFreezes.(quotaFreezeTrigger)
+	if !ok {
+		// 旧实现没有提供冻结类型：按 hard 处理，宁可不豁免。
+		return true
+	}
+	return trigger.FrozenTrigger(key.Provider, key.Name) != "threshold"
 }
 
 // frozenReasonLocked 返回冻结的人话原因；未冻结返回空串。调用方须持 p.mu。
@@ -112,8 +138,9 @@ func (p *KeyPool) frozenReasonLocked(key config.KeyConfig) string {
 	return p.quotaFreezes.FrozenReason(key.Provider, key.Name)
 }
 
-// frozenCandidatesLocked 返回「配置启用且落在作用域内、但被额度冻结」的候选，保持配置
-// 顺序。调用方须持 p.mu。
+// frozenCandidatesLocked 返回「配置启用且落在作用域内、但对当前模型不可用」的冻结
+// 候选，保持配置顺序。提前冻结对白名单模型不算不可用，因此不会进入这个集合。
+// 调用方须持 p.mu。
 //
 // 必须在 keysForModelLocked（已剔除冻结）之外单独扫一遍：候选集合被冻结清空时，
 // 错误文案要说清是额度冻结而不是「没有可用 key」，而那时冻结集合已经被过滤掉了。
@@ -123,7 +150,7 @@ func (p *KeyPool) frozenCandidatesLocked(modelID string, accessKey *config.Acces
 	}
 	var frozen []config.KeyConfig
 	for _, key := range p.enabledKeysForModelLocked(modelID, accessKey) {
-		if p.frozenLocked(key) {
+		if p.frozenForModelLocked(modelID, key) {
 			frozen = append(frozen, key)
 		}
 	}

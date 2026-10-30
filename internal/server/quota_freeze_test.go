@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,13 +136,12 @@ func TestQuotaFreezePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestFrozenKeyLeavesModelList 端到端断言装配链真的通了：冻结一把 Key 之后，
-// 只绑这把 Key 的模型从 /v1/models 里消失，点名请求直接 503 并说明是额度冻结。
+// TestFrozenKeyKeptInModelList 端到端断言：冻结一把 Key 之后，只绑这把 Key 的模型
+// 仍留在 /v1/models 里，但点名请求直接 503 并说明是额度冻结。
 //
-// 这一条跨了三层（App 装配 → KeyPool 硬过滤 → proxy 错误映射），是本任务里唯一能
-// 证明「冻结表真的接进了选路」的用例；只测 GET /api/quota-freezes 是不够的——接口
-// 能读表不代表选路在读它。
-func TestFrozenKeyLeavesModelList(t *testing.T) {
+// 模型清单不能因临时冻结而抖动：部分客户端会把 /v1/models 当权威清单同步，模型消失
+// 就可能被本地删除，解冻后也不会自动回来。冻结的硬约束落在选路层。
+func TestFrozenKeyKeptInModelList(t *testing.T) {
 	app := newTestApp(t, t.TempDir(), nil)
 
 	ids := modelIDs(t, serve(app, http.MethodGet, "/v1/models", fullAuthorization))
@@ -153,10 +154,10 @@ func TestFrozenKeyLeavesModelList(t *testing.T) {
 	}
 
 	ids = modelIDs(t, serve(app, http.MethodGet, "/v1/models", fullAuthorization))
-	if contains(ids, "model-a") {
-		t.Fatalf("只能由冻结 Key 提供的模型应从清单里消失，实际 %v", ids)
+	if !contains(ids, "model-a") {
+		t.Fatalf("冻结不应把模型从 /v1/models 摘掉，实际 %v", ids)
 	}
-	// 别的模型不受牵连。
+	// 别的模型也照常列出。
 	if !contains(ids, "model-nv") {
 		t.Errorf("未被冻结的模型不该消失，实际 %v", ids)
 	}
@@ -268,6 +269,115 @@ func TestUpstreamQuotaHeaderFreezesKey(t *testing.T) {
 	}
 	if third := call(); third.Code != http.StatusOK {
 		t.Fatalf("解冻后请求应恢复，实际 %d（%s）", third.Code, third.Body.String())
+	}
+}
+
+// TestUpstreamQuotaThresholdWhitelist 端到端覆盖白名单：提前冻结期间白名单模型仍能
+// 调用；上游随后报告硬性耗尽时，冻结必须升级为 hard，白名单模型立即变成 503。
+func TestUpstreamQuotaThresholdWhitelist(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.97")
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+		} else {
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Utilization", "1")
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(time.Now().Add(2*time.Hour).Unix(), 10))
+			w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,` +
+			`"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},` +
+			`"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	app := newTestAppWith(t, t.TempDir(), appFixture{opsEnabled: true, configText: `{
+  "config_version": 4,
+  "host": "127.0.0.1",
+  "port": 8000,
+  "request_timeout": 10,
+  "stream_first_byte_timeout": 30,
+  "stream_idle_timeout": 60,
+  "max_retries": 1,
+  "key_failure_threshold": 1,
+  "key_cooldown_seconds": 60,
+  "quota_freeze_interval_seconds": 60,
+  "quota_freeze_threshold_5h": 0.05,
+  "quota_freeze_threshold_whitelist": ["model-a"],
+  "endpoint_capabilities_path": "<CAP>",
+  "metrics_db_path": "<DB>",
+  "log_file_path": "<LOG>",
+  "local_api_key": "local-key",
+  "ops_enabled": true,
+  "webui_enabled": false,
+  "providers": {
+    "prov-a": {
+      "base_url": "` + upstream.URL + `",
+      "keys": {"key-a": {"api_key": "sk-secret-a", "enabled": true}},
+      "routes": {"openai": "v1/chat/completions"}
+    }
+  },
+  "models": {
+    "model-a": {
+      "targets": [{"provider": "prov-a", "key": "key-a", "upstream_model": "model-a"}],
+      "routing_mode": "round_robin"
+    }
+  }
+}`})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for app.guard.Status().LastEvaluatedAt == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("启动评估没有完成")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	call := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`))
+		request.Header.Set("Authorization", fullAuthorization)
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		app.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	waitTrigger := func(want string) {
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			freeze, found := app.freezeStore.Get("prov-a", "key-a")
+			if found && freeze.Trigger == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("等待 trigger=%s 超时，当前冻结: %+v", want, freeze)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if first := call(); first.Code != http.StatusOK {
+		t.Fatalf("第一次请求应成功到达上游，实际 %d（%s）", first.Code, first.Body.String())
+	}
+	waitTrigger("threshold")
+	if ids := modelIDs(t, serve(app, http.MethodGet, "/v1/models", fullAuthorization)); !contains(ids, "model-a") {
+		t.Fatalf("提前冻结不应把模型从 /v1/models 摘掉，实际 %v", ids)
+	}
+
+	// 白名单模型继续调用；上游这次报告硬性耗尽。
+	if second := call(); second.Code != http.StatusOK {
+		t.Fatalf("白名单模型在提前冻结期间应能继续调用，实际 %d（%s）", second.Code, second.Body.String())
+	}
+	waitTrigger("hard")
+
+	if third := call(); third.Code != http.StatusServiceUnavailable {
+		t.Fatalf("硬性耗尽后白名单模型也应回 503，实际 %d（%s）", third.Code, third.Body.String())
+	}
+	if ids := modelIDs(t, serve(app, http.MethodGet, "/v1/models", fullAuthorization)); !contains(ids, "model-a") {
+		t.Fatalf("硬性冻结仍不应把模型从 /v1/models 摘掉，实际 %v", ids)
 	}
 }
 

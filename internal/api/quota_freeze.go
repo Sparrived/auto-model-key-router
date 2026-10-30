@@ -23,7 +23,8 @@ import (
 // 乘 100——百分比写法属于展示层。
 //
 // 可选字段用 omitempty：vendor/account/instance_id 只对某些 scope 有意义，
-// status/reset_at 上游可能没给，给空串比给一个编出来的时间更诚实。
+// status/reset_at 上游可能没给，trigger/threshold 则是老记录没有的新字段：给空串/零值
+// 比给一个编出来的值更诚实。
 type QuotaFreezeView struct {
 	ProviderID  string  `json:"provider_id"`
 	KeyName     string  `json:"key_name"`
@@ -36,6 +37,8 @@ type QuotaFreezeView struct {
 	WindowLabel string  `json:"window_label"`
 	Remaining   float64 `json:"remaining"`
 	Status      string  `json:"status,omitempty"`
+	Trigger     string  `json:"trigger,omitempty"`
+	Threshold   float64 `json:"threshold,omitempty"`
 	ResetAt     string  `json:"reset_at,omitempty"`
 	FrozenAt    string  `json:"frozen_at"`
 	ExpiresAt   string  `json:"expires_at"`
@@ -56,6 +59,8 @@ func quotaFreezeView(freeze quota.Freeze) QuotaFreezeView {
 		WindowLabel: freeze.WindowLabel,
 		Remaining:   freeze.Remaining,
 		Status:      freeze.Status,
+		Trigger:     freeze.Trigger,
+		Threshold:   freeze.Threshold,
 		ResetAt:     formatFreezeTime(freeze.ResetAt),
 		FrozenAt:    formatFreezeTime(freeze.FrozenAt),
 		ExpiresAt:   formatFreezeTime(freeze.ExpiresAt),
@@ -182,6 +187,10 @@ func (s *Server) handleReleaseQuotaFreeze(w http.ResponseWriter, r *http.Request
 		s.logger().Info("额度冻结已手工解除",
 			"provider_id", providerID, "key_name", keyName,
 			"suppressed_until", formatFreezeTime(suppressUntil))
+		// 手工解除可能拆掉最近到期的那条冻结：让后台循环重排内置计时器。
+		if s.QuotaGuard != nil {
+			s.QuotaGuard.wakeExpiry()
+		}
 		return canonicalFromAny(quotaFreezeReleaseResponse{
 			Released:        true,
 			ProviderID:      providerID,

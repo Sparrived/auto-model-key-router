@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,16 +33,11 @@ import (
 // 等价的窗口信号，规则只在那一处实现，避免「巡检冻了、页面又解了」这种自相矛盾。
 
 const (
-	// quotaFreezeResetGrace 是冻结到期的宽限：窗口 reset_at 之后 60 秒（设计稿 2）。
-	//
-	// 留这 60 秒是因为上游的重置时刻与本地时钟总有几十秒抖动：刚好在 reset 点把 Key
-	// 放回来，第一个请求很可能仍然撞上「还没重置」。宁可晚一分钟恢复，也不要用一个
-	// 必然失败的请求去试探。
-	quotaFreezeResetGrace = 60 * time.Second
-	// quotaFreezeFallbackTTL 是拿不到（或拿到已经过去的）reset_at 时的冻结时长。
+	// quotaFreezeFallbackTTL 是拿不到 reset_at 时的冻结时长。
 	//
 	// 与 quota.fallbackFreezeTTL 同口径：额度端点长期不可达时，一个错判不能让 Key
-	// 永久消失。10 分钟后自动解除，下一轮观测若仍耗尽会重新冻结。
+	// 永久消失。10 分钟后自动解除，下一轮观测若仍耗尽会重新冻结。拿到 reset_at 时
+	// 内置计时器**精确**停在那一刻，不再额外加宽限（设计稿 2/4）。
 	quotaFreezeFallbackTTL = 10 * time.Minute
 	// quotaSignalBuffer 是 L3 信号通道容量。
 	//
@@ -71,9 +68,14 @@ type QuotaGuardOptions struct {
 }
 
 // QuotaGuardStatus 是评估器的对外状态（设计稿 6.1 的 guard 对象）。
+//
+// 两个 threshold 字段是**当前运行时配置**的底限（0..1，0 表示只按硬性耗尽冻结），
+// 让前端能说清楚「现在按什么标准提前冻结」，而不是只看到一个 enabled。
 type QuotaGuardStatus struct {
 	Enabled         bool    `json:"enabled"`
 	IntervalSeconds float64 `json:"interval_seconds"`
+	Threshold5h     float64 `json:"threshold_5h"`
+	Threshold7d     float64 `json:"threshold_7d"`
 	LastEvaluatedAt string  `json:"last_evaluated_at"`
 	LastError       string  `json:"last_error"`
 }
@@ -103,7 +105,7 @@ type QuotaInstanceLink struct {
 	EnabledAccounts int
 }
 
-// quotaSignal 是 L3 投递的一条信号：只带「哪把 Key + 哪些硬性耗尽窗口」。
+// quotaSignal 是 L3 投递的一条信号：只带「哪把 Key + 哪些触发冻结的窗口」。
 type quotaSignal struct {
 	ProviderID string
 	KeyName    string
@@ -139,6 +141,11 @@ type QuotaGuard struct {
 	trigger chan struct{}
 	// signals 是 L3 的投递队列（容量见 quotaSignalBuffer，满了丢弃）。
 	signals chan quotaSignal
+	// expiryWake 是「冻结表变了，重算下一条截止时间」的电平信号（容量 1，非阻塞发送）。
+	//
+	// 只在后台循环读：新增/提前/解除冻结后唤醒它，让定时器立刻按新的最近到期时间重排，
+	// 而不是等到下一次巡检（默认 60 秒）才发现。
+	expiryWake chan struct{}
 
 	collectMu sync.Mutex
 	evalMu    sync.Mutex
@@ -171,6 +178,7 @@ func NewQuotaGuard(opts QuotaGuardOptions) *QuotaGuard {
 		now:        now,
 		trigger:    make(chan struct{}, 1),
 		signals:    make(chan quotaSignal, quotaSignalBuffer),
+		expiryWake: make(chan struct{}, 1),
 		links:      map[string]QuotaInstanceLink{},
 		signalSeen: map[string]time.Time{},
 	}
@@ -208,11 +216,13 @@ func (g *QuotaGuard) interval() time.Duration {
 // enabled 报告整套机制是否开启（配置里的 interval > 0）。
 func (g *QuotaGuard) enabled() bool { return g.intervalSeconds() > 0 }
 
-// Run 跑后台循环：启动立即评估一次，此后按当前间隔巡检、响应 Trigger 与 L3 信号。
+// Run 跑后台循环：启动立即评估一次，此后按当前间隔巡检、响应 Trigger 与 L3 信号，
+// 并在最近一条冻结的 expires_at 到点时主动清理（设计稿 4）。
 //
 // 间隔每轮重新读配置，因此热重载改了 quota_freeze_interval_seconds 无需重启，下一轮
 // 即生效；改成 0 后仍然处理 Trigger（重载本身会发一个）与信号（信号会被直接忽略），
-// 但不装定时器、不评估——「0 = 关闭」不能因为循环还在转就漏出去。
+// 也不装巡检定时器、不评估——「0 = 关闭」不能因为循环还在转就漏出去。
+// **但内置计时器不受 interval=0 影响**：已有冻结仍按 expires_at 到期解冻。
 //
 // ctx 取消立即返回，并等待在途的判定应用结束（页面评估可能正持有 evalMu）：不这样做
 // 的话，Close 返回之后仍可能有一次判定往冻结表里写记录，测试进程退出时会看到未完成的
@@ -221,47 +231,129 @@ func (g *QuotaGuard) Run(ctx context.Context) {
 	if g == nil {
 		return
 	}
-	// 启动立即评估一次：不阻塞调用方（装配层本来就是 go Run）。
+	// 启动先把已经到期的记录清理掉（状态文件可能跨越了一次停机）；再立即评估一次：
+	// 不阻塞调用方（装配层本来就是 go Run）。
+	g.releaseExpired()
 	if g.enabled() {
 		g.Evaluate(ctx)
 	}
 	for {
-		wait := g.interval()
-		var timer *time.Timer
-		var deadline <-chan time.Time
-		if wait > 0 {
-			timer = time.NewTimer(wait)
-			deadline = timer.C
-		}
+		inspectTimer, inspect := g.newInspectTimer()
+		expiryTimer, expiry := g.newExpiryTimer()
 		select {
 		case <-ctx.Done():
-			if timer != nil {
-				timer.Stop()
-			}
+			stopTimer(inspectTimer)
+			stopTimer(expiryTimer)
 			// 等在途判定应用结束：Lock/Unlock 是「排队到锁空出来」的最短写法，
 			// 也顺带保证不会与之后的 Close 抢冻结表。
 			g.evalMu.Lock()
 			g.evalMu.Unlock()
 			return
 		case <-g.trigger:
-			if timer != nil {
-				timer.Stop()
-			}
+			stopTimer(inspectTimer)
+			stopTimer(expiryTimer)
 			if g.enabled() {
 				g.Evaluate(ctx)
 			}
 		case signal := <-g.signals:
-			if timer != nil {
-				timer.Stop()
-			}
+			stopTimer(inspectTimer)
+			stopTimer(expiryTimer)
 			g.handleSignal(signal)
-		case <-deadline:
-			// timer 已触发，无需 Stop。
+		case <-g.expiryWake:
+			// 冻结表变了：丢掉旧定时器，下一轮按最新的 NextExpiry 重排。
+			stopTimer(inspectTimer)
+			stopTimer(expiryTimer)
+		case <-inspect:
+			stopTimer(expiryTimer)
 			if g.enabled() {
 				g.Evaluate(ctx)
 			}
+		case <-expiry:
+			stopTimer(inspectTimer)
+			g.releaseExpired()
 		}
 	}
+}
+
+// newInspectTimer 按当前巡检间隔装一个定时器；interval=0 时返回 nil（关闭巡检）。
+func (g *QuotaGuard) newInspectTimer() (*time.Timer, <-chan time.Time) {
+	wait := g.interval()
+	if wait <= 0 {
+		return nil, nil
+	}
+	timer := time.NewTimer(wait)
+	return timer, timer.C
+}
+
+// newExpiryTimer 按最近一条冻结的 expires_at 装一个定时器；没有冻结时返回 nil。
+//
+// 它与巡检定时器**并行**：最近冻结先到期就先解冻，不依赖下一轮巡检，也不依赖页面刷新。
+func (g *QuotaGuard) newExpiryTimer() (*time.Timer, <-chan time.Time) {
+	wait, ok := g.expiryWait()
+	if !ok {
+		return nil, nil
+	}
+	timer := time.NewTimer(wait)
+	return timer, timer.C
+}
+
+// expiryWait 返回距最近一条冻结到期的等待时长；没有冻结时 ok=false。
+//
+// 单独拆出来是为了让用例不启动 Run 也能钉住「计时器目标是否跟随冻结表变化」。
+func (g *QuotaGuard) expiryWait() (time.Duration, bool) {
+	if g == nil || g.store == nil {
+		return 0, false
+	}
+	deadline, ok := g.store.NextExpiry()
+	if !ok {
+		return 0, false
+	}
+	wait := deadline.Sub(g.now())
+	if wait < 0 {
+		wait = 0
+	}
+	return wait, true
+}
+
+// stopTimer 停掉一个可能为 nil 的定时器（select 里提前退出时要显式释放）。
+func stopTimer(timer *time.Timer) {
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+// wakeExpiry 让后台循环重算最近冻结的截止时间（非阻塞、可重复调用）。
+func (g *QuotaGuard) wakeExpiry() {
+	if g == nil {
+		return
+	}
+	select {
+	case g.expiryWake <- struct{}{}:
+	default:
+		// 已经有一次待处理的重排：合并掉。
+	}
+}
+
+// releaseExpired 清理所有已到期的冻结并逐条记日志（内置计时器的落地点）。
+//
+// 它只在 Run 循环里调用，或由用例直接调用以做确定性验证；不取 evalMu——ExpireDue
+// 在冻结表自己的锁内完成原子清理与落盘，与判定应用交错也不会丢状态。不要在持有
+// evalMu 时调用它（那会把一次磁盘写塞进代理热路径的等待链里）。
+func (g *QuotaGuard) releaseExpired() int {
+	if g == nil || g.store == nil {
+		return 0
+	}
+	removed, err := g.store.ExpireDue()
+	if err != nil {
+		g.logger.Warn("额度冻结到期清理后落盘失败", "error", err)
+	}
+	for _, freeze := range removed {
+		g.logger.Info("额度冻结到期自动解冻",
+			"provider_id", freeze.ProviderID, "key_name", freeze.KeyName,
+			"scope", freeze.Scope, "window", freeze.WindowKey,
+			"expires_at", formatFreezeTime(freeze.ExpiresAt))
+	}
+	return len(removed)
 }
 
 // Trigger 请求尽快评估一次（热重载、L3 多账号实例等）。不阻塞、可重复调用。
@@ -378,6 +470,7 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 		providers[provider.ID] = provider
 	}
 	links, providersByInstance := instanceLinkIndex(cfg, report.Instances)
+	thresholds := thresholdsFromConfig(cfg)
 
 	// —— 1. 订阅类账号资源：条目级判定 ——
 
@@ -386,9 +479,16 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 			// 无意见：读不到不等于有余额，不动现状。
 			continue
 		}
-		hard := hardQuotaWindows(entry.Windows)
-		if len(hard) > 0 {
-			window := latestResetWindow(hard)
+		triggered := quota.TriggerWindows(quotaWindowsFromCPA(entry.Windows), thresholds)
+		if len(triggered) > 0 {
+			expiresAt, ok := freezeExpiresAt(now, triggered)
+			if !ok {
+				// 最晚的 reset_at 已经过去：读数过期，不新建冻结（设计稿 2）。
+				continue
+			}
+			trigger := triggerKindForWindows(triggered, thresholds)
+			window := reasonWindowForTrigger(triggered, thresholds, trigger)
+			threshold := windowTriggerThreshold(window, thresholds, trigger)
 			evaluation.Changed += g.upsertFreeze(quota.Freeze{
 				ProviderID:  entry.ProviderID,
 				KeyName:     entry.KeyName,
@@ -400,10 +500,12 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 				WindowLabel: window.Label,
 				Remaining:   window.Remaining,
 				Status:      window.Status,
+				Trigger:     trigger,
+				Threshold:   threshold,
 				ResetAt:     window.ResetAt,
 				FrozenAt:    now,
-				ExpiresAt:   freezeExpiresAt(now, hard),
-				Reason:      windowExhaustedReason(window),
+				ExpiresAt:   expiresAt,
+				Reason:      windowTriggerReason(window, trigger, threshold),
 			})
 			continue
 		}
@@ -411,7 +513,7 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 		evaluation.Changed += g.releaseFreeze(entry.ProviderID, entry.KeyName, "subscription", "upstream")
 	}
 
-	// —— 2. CPA 实例级联动：全部启用账号耗尽才冻 ——
+	// —— 2. CPA 实例级联动：全部启用账号都至少有一个触发窗口才冻 ——
 
 	configuredInstances := make(map[string]bool, len(report.Instances))
 	for _, instance := range report.Instances {
@@ -425,9 +527,20 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 			// 实例没有启用账号：没有判定对象，同样无意见。
 			continue
 		}
+		if instanceQuotaUncertain(enabled) {
+			// 有账号额度读取失败（quota_error）：既不能证明「全部触发」，也不能
+			// 证明「有余额」，保持现状（设计稿 2 的「无意见」）。
+			continue
+		}
 		linked := providersByInstance[instance.ID]
-		allExhausted, account, window := instanceExhaustion(enabled)
-		if allExhausted {
+		allTriggered, account, window, trigger := instanceTrigger(enabled, thresholds)
+		if allTriggered {
+			expiresAt, ok := freezeExpiresAt(now, []quota.Window{window})
+			if !ok {
+				// 触发窗口的 reset_at 已经过去：不拿过期读数冻整台实例。
+				continue
+			}
+			threshold := windowTriggerThreshold(window, thresholds, trigger)
 			for _, providerID := range linked {
 				for _, key := range providers[providerID].Keys {
 					if !key.Enabled {
@@ -445,10 +558,12 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 						WindowLabel: window.Label,
 						Remaining:   window.Remaining,
 						Status:      window.Status,
+						Trigger:     trigger,
+						Threshold:   threshold,
 						ResetAt:     window.ResetAt,
 						FrozenAt:    now,
-						ExpiresAt:   freezeExpiresAt(now, []quota.Window{window}),
-						Reason:      instanceExhaustedReason(instance, len(enabled), window),
+						ExpiresAt:   expiresAt,
+						Reason:      instanceTriggeredReason(instance, len(enabled), window, trigger, threshold),
 					})
 				}
 			}
@@ -505,6 +620,11 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 	}
 	evaluation.Changed += len(removed)
 	evaluation.Frozen = len(g.store.Snapshot())
+	if evaluation.Changed > 0 {
+		// 冻结表的最早截止时间可能变了（新增、提前或清理）：唤醒后台循环重排计时器。
+		// upsertFreeze/releaseFreeze 已经各自唤醒过，这里是兜底（例如 Prune 清掉了记录）。
+		g.wakeExpiry()
+	}
 	g.recordEvaluation(evaluation)
 	return evaluation
 }
@@ -527,6 +647,8 @@ func (g *QuotaGuard) upsertFreeze(freeze quota.Freeze) int {
 		"provider_id", freeze.ProviderID, "key_name", freeze.KeyName,
 		"scope", freeze.Scope, "window", freeze.WindowKey,
 		"reason", freeze.Reason, "expires_at", formatFreezeTime(freeze.ExpiresAt))
+	// 新增/提前都可能把最近截止时间提前：让后台循环重排计时器（非阻塞）。
+	g.wakeExpiry()
 	return 1
 }
 
@@ -555,14 +677,17 @@ func (g *QuotaGuard) releaseFreeze(providerID, keyName string, scopes ...string)
 	g.logger.Info("额度冻结已解除",
 		"provider_id", providerID, "key_name", keyName,
 		"scope", freeze.Scope, "reason", "账号资源观测到额度恢复")
+	// 解除的可能正好是最近到期的那条：重排计时器，别让旧定时器空等。
+	g.wakeExpiry()
 	return 1
 }
 
 // ObserveUpstreamQuota 是 L3 观察点：代理请求路径上每次拿到上游响应头都调一次。
 //
-// 这里只做三件廉价的事：有没有额度头（前缀判断）→ 解析出窗口 → 若有硬性耗尽则
-// 非阻塞投递一个信号。**不做文件 IO、不发网络请求、不取评估锁**：它跑在请求的关键
-// 路径上，任何阻塞都会直接变成用户可见的延迟。真正的判定与落盘在 Run 循环里做。
+// 这里只做三件廉价的事：有没有额度头（前缀判断）→ 解析出窗口 → 按当前底限筛出
+// 触发窗口后非阻塞投递一个信号。**不做文件 IO、不发网络请求、不取评估锁**：它跑在
+// 请求的关键路径上，任何阻塞都会直接变成用户可见的延迟。真正的判定与落盘在 Run
+// 循环里做。
 func (g *QuotaGuard) ObserveUpstreamQuota(providerID, keyName string, headers http.Header) {
 	if g == nil || g.store == nil {
 		return
@@ -570,20 +695,14 @@ func (g *QuotaGuard) ObserveUpstreamQuota(providerID, keyName string, headers ht
 	if !quota.HasQuotaHeaders(headers) {
 		return
 	}
-	windows := quota.HeaderWindows(headers)
-	hard := make([]quota.Window, 0, len(windows))
-	for _, window := range windows {
-		if quota.HardExhausted(window) {
-			hard = append(hard, window)
-		}
-	}
-	if len(hard) == 0 {
-		// 预警状态（allowed_warning）不参与冻结：硬约束宁可晚一次请求，也不能误伤
-		// 还有额度的 Key。
+	triggered := quota.TriggerWindows(quota.HeaderWindows(headers), thresholdsFromConfig(g.currentConfig()))
+	if len(triggered) == 0 {
+		// 没有触发窗口（预警状态且高于底限）：不投递。硬约束宁可晚一次请求，也
+		// 不能误伤还有额度的 Key。
 		return
 	}
 	select {
-	case g.signals <- quotaSignal{ProviderID: providerID, KeyName: keyName, Windows: hard}:
+	case g.signals <- quotaSignal{ProviderID: providerID, KeyName: keyName, Windows: triggered}:
 	default:
 		// 缓冲满：丢弃。信号不是事实来源，下一轮巡检会把状态重新算对。
 	}
@@ -598,13 +717,21 @@ func (g *QuotaGuard) handleSignal(signal quotaSignal) {
 	if signal.ProviderID == "" || signal.KeyName == "" || len(signal.Windows) == 0 {
 		return
 	}
-	// 已经冻住 / 处于手工抑制窗口内：无需重复动作。放在去抖之前，这样解冻后紧跟着的
-	// 一条新信号仍然能被立刻处理，不会被「刚才冻过」的去抖表格挡掉。
-	if g.store.IsFrozen(signal.ProviderID, signal.KeyName) ||
-		g.store.Suppressed(signal.ProviderID, signal.KeyName) {
+	// 处于手工抑制窗口内：不再处理。放在去抖之前，这样解冻后紧跟着的一条新信号
+	// 仍然能被立刻处理，不会被「刚才冻过」的去抖表格挡掉。
+	if g.store.Suppressed(signal.ProviderID, signal.KeyName) {
 		return
 	}
-	if !g.markSignalSeen(signal) {
+	// 已有冻结时不能简单 return：提前冻结可能只是 threshold，随后上游报告硬性
+	// 耗尽时必须把记录升级成 hard，否则白名单模型会一直绕过已经见底的 Key。反过来，
+	// 已有 hard 记录不会被一条 threshold 信号降级。
+	existing, alreadyFrozen := g.store.Get(signal.ProviderID, signal.KeyName)
+	if alreadyFrozen && existing.Trigger != "threshold" {
+		return
+	}
+	if !alreadyFrozen && !g.markSignalSeen(signal) {
+		// 新冻结才需要去抖；已有提前冻结要允许后续 hard 信号升级，不能被
+		// 同一把 Key 刚才的 threshold 信号挡掉。
 		return
 	}
 	link, linked, linksReady := g.instanceLink(signal.ProviderID)
@@ -614,8 +741,32 @@ func (g *QuotaGuard) handleSignal(signal quotaSignal) {
 		g.Trigger()
 		return
 	}
-	window := latestResetWindow(signal.Windows)
+	thresholds := thresholdsFromConfig(g.currentConfig())
+	// 信号是在观察点按当时的底限筛出来的；落地前再按**当前**配置筛一次：
+	// 两次之间热重载可能把底限调低或关掉，旧信号不该继续产生冻结。
+	triggered := quota.TriggerWindows(signal.Windows, thresholds)
+	if len(triggered) == 0 {
+		return
+	}
+	trigger := triggerKindForWindows(triggered, thresholds)
+	if alreadyFrozen && trigger != "hard" {
+		// 已有提前冻结 + 新的提前冻结信号：计时器、窗口与原因都已存在，无需重写。
+		return
+	}
 	now := g.now()
+	expiresAt, ok := freezeExpiresAt(now, triggered)
+	if !ok {
+		if !alreadyFrozen {
+			// 上游一直回同一个已经过去的 reset_at：说明读数过期，不冻结。这正是
+			// 「到点自动解冻后不会再被旧读数冻回去」的保证（设计稿 2）。
+			return
+		}
+		// 已有冻结时，硬性信号即使带着过去的 reset_at，也必须把记录升级成 hard；
+		// 到期时间沿用原记录（Upsert 会保留更早的值），不凭过期读数延长冻结。
+		expiresAt = existing.ExpiresAt
+	}
+	window := reasonWindowForTrigger(triggered, thresholds, trigger)
+	threshold := windowTriggerThreshold(window, thresholds, trigger)
 	g.upsertFreeze(quota.Freeze{
 		ProviderID:  signal.ProviderID,
 		KeyName:     signal.KeyName,
@@ -625,10 +776,12 @@ func (g *QuotaGuard) handleSignal(signal quotaSignal) {
 		WindowLabel: window.Label,
 		Remaining:   window.Remaining,
 		Status:      window.Status,
+		Trigger:     trigger,
+		Threshold:   threshold,
 		ResetAt:     window.ResetAt,
 		FrozenAt:    now,
-		ExpiresAt:   freezeExpiresAt(now, signal.Windows),
-		Reason:      "上游响应头报告：" + windowExhaustedReason(window),
+		ExpiresAt:   expiresAt,
+		Reason:      "上游响应头报告：" + windowTriggerReason(window, trigger, threshold),
 	})
 }
 
@@ -690,9 +843,12 @@ func (g *QuotaGuard) Status() QuotaGuardStatus {
 	if g == nil {
 		return QuotaGuardStatus{}
 	}
+	thresholds := thresholdsFromConfig(g.currentConfig())
 	status := QuotaGuardStatus{
 		Enabled:         g.enabled(),
 		IntervalSeconds: g.intervalSeconds(),
+		Threshold5h:     thresholds.FiveHour,
+		Threshold7d:     thresholds.SevenDay,
 	}
 	g.mu.Lock()
 	if !g.lastEvaluatedAt.IsZero() {
@@ -737,11 +893,14 @@ func (g *QuotaGuard) recordFailure(err error) {
 //
 // 两个包的字段名刻意一致（Key/Label/Remaining/ResetAt/Status），差别只在时间类型：
 // api 的窗口给前端看的是字符串（可能是上游原话），quota 的判定要 time.Time。
+// Raw 填上游原始窗口名（`5h` / `weekly` / `primary`）：现场额度窗口的 Key 是
+// `quota/0/1` 这种拍平坐标，底限判定只能靠 Raw 认出窗口语义。
 func quotaWindowsFromCPA(windows []cpaQuotaWindow) []quota.Window {
 	out := make([]quota.Window, 0, len(windows))
 	for _, window := range windows {
 		out = append(out, quota.Window{
 			Key:       window.Key,
+			Raw:       firstNonEmpty(window.Window, window.Key),
 			Label:     firstNonEmpty(window.Label, window.Window, window.Key),
 			Remaining: window.Remaining,
 			ResetAt:   quota.ParseResetText(window.ResetAt),
@@ -749,6 +908,57 @@ func quotaWindowsFromCPA(windows []cpaQuotaWindow) []quota.Window {
 		})
 	}
 	return out
+}
+
+// thresholdsFromConfig 取当前运行时配置的底限并归一（夹进 0..1）。
+func thresholdsFromConfig(cfg *config.RouterConfig) quota.Thresholds {
+	if cfg == nil {
+		return quota.Thresholds{}
+	}
+	return quota.Thresholds{
+		FiveHour: cfg.QuotaFreezeThreshold5h,
+		SevenDay: cfg.QuotaFreezeThreshold7d,
+	}.Normalize()
+}
+
+// triggerKindForWindows 汇总一组触发窗口的冻结类型：任一窗口硬性耗尽即 hard，
+// 否则只要有一个低于底限就是 threshold。
+//
+// 不能只看 latestResetWindow 选中的那个：同一把 Key 可能同时有「5h 硬性耗尽」和
+// 「7d 低于底限」两个窗口，按最晚 reset 选中后者时若把 trigger 记成 threshold，
+// 白名单就会错误地豁免一把已经硬性耗尽的 Key。
+func triggerKindForWindows(windows []quota.Window, thresholds quota.Thresholds) string {
+	trigger := ""
+	for _, window := range windows {
+		switch quota.TriggerKind(window, thresholds) {
+		case "hard":
+			return "hard"
+		case "threshold":
+			if trigger == "" {
+				trigger = "threshold"
+			}
+		}
+	}
+	return trigger
+}
+
+// reasonWindowForTrigger 选写进「原因」的窗口：hard 优先挑真正硬性耗尽的窗口，
+// 避免混合窗口时把最晚 reset 的 threshold 窗口写成「已用尽」。计时器仍单独用全部
+// 触发窗口的最晚 reset_at，两者不能互相顶替。
+func reasonWindowForTrigger(windows []quota.Window, thresholds quota.Thresholds, trigger string) quota.Window {
+	if trigger != "hard" {
+		return latestResetWindow(windows)
+	}
+	hard := make([]quota.Window, 0, len(windows))
+	for _, window := range windows {
+		if quota.TriggerKind(window, thresholds) == "hard" {
+			hard = append(hard, window)
+		}
+	}
+	if len(hard) == 0 {
+		return latestResetWindow(windows)
+	}
+	return latestResetWindow(hard)
 }
 
 // hardQuotaWindows 筛出硬性耗尽的窗口（判定本身只有 quota.HardExhausted 一份实现）。
@@ -762,10 +972,10 @@ func hardQuotaWindows(windows []cpaQuotaWindow) []quota.Window {
 	return hard
 }
 
-// latestResetWindow 从一组硬性耗尽窗口里挑出「最晚重置」的那个。
+// latestResetWindow 从一组触发窗口里挑出「最晚重置」的那个。
 //
-// 冻结到期取最晚的 reset + 宽限：同一把 Key 上可能同时有两个窗口耗尽（5h 用完、
-// 7d 也用完），按最早的那个解冻会让 Key 带着另一个仍耗尽的窗口回到选路里。
+// 内置计时器取最晚的 reset_at：同一把 Key 上可能同时有两个窗口触发（5h 低于底限、
+// 7d 也用尽），按最早的那个解冻会让 Key 带着另一个仍触发的窗口回到选路里。
 // 重置时间相同时取剩余更低的那个，让记录里的读数更贴近真实原因。
 func latestResetWindow(windows []quota.Window) quota.Window {
 	if len(windows) == 0 {
@@ -784,57 +994,94 @@ func latestResetWindow(windows []quota.Window) quota.Window {
 	return best
 }
 
-// freezeExpiresAt 计算冻结到期：最晚 reset + 60 秒；拿不到（或已过去）时 now + 10 分钟。
-func freezeExpiresAt(now time.Time, windows []quota.Window) time.Time {
+// freezeExpiresAt 计算冻结的内置计时器目标：取触发窗口里最晚的 reset_at（精确到那一
+// 刻，不再加宽限）；拿不到 reset_at 时 now + 10 分钟；最晚的 reset_at 已经过去时返回
+// ok=false，调用方必须跳过这次冻结（设计稿 2/4）。
+func freezeExpiresAt(now time.Time, windows []quota.Window) (time.Time, bool) {
 	latest := latestResetWindow(windows)
 	if latest.ResetAt.IsZero() {
-		return now.Add(quotaFreezeFallbackTTL)
+		return now.Add(quotaFreezeFallbackTTL), true
 	}
-	expires := latest.ResetAt.Add(quotaFreezeResetGrace)
-	if !expires.After(now) {
-		// 上游给的 reset 已经过去：读数可能是旧的。按兜底时长短冻一次，下一轮巡检
-		// 若仍观测到耗尽会重新冻结——不能拿一个过去的时间点让冻结立刻失效。
-		return now.Add(quotaFreezeFallbackTTL)
+	if !latest.ResetAt.After(now) {
+		return time.Time{}, false
 	}
-	return expires
+	return latest.ResetAt, true
 }
 
-// windowExhaustedReason 把「为什么冻」写成一句人话（界面直接显示）。
-func windowExhaustedReason(window quota.Window) string {
+// windowTriggerThreshold 返回写进冻结记录的底限：只有提前冻结才有值，硬性耗尽为 0。
+func windowTriggerThreshold(window quota.Window, thresholds quota.Thresholds, trigger string) float64 {
+	if trigger != "threshold" {
+		return 0
+	}
+	return thresholds.Floor(window)
+}
+
+// percentText 把 0..1 的比例写成百分比数字（3、5、0.5），用于人话原因。
+//
+// 先按万分之一取整再格式化：0.05*100 在浮点里是 5.000000000000001，直接格式化会把
+// 一句本可以说清的话写成噪声。
+func percentText(value float64) string {
+	percent := math.Round(value*10000) / 100
+	return strconv.FormatFloat(percent, 'f', -1, 64)
+}
+
+// windowTriggerReason 把「为什么冻」写成一句人话（界面直接显示）。
+//
+// 两条触发线的文案必须能分开：硬性耗尽说「已用尽」，提前冻结说「剩余 X%，低于
+// Y% 底限」——用户看到「提前冻结」时要知道是自己配的底限在起作用。
+func windowTriggerReason(window quota.Window, trigger string, threshold float64) string {
 	label := firstNonEmpty(window.Label, window.Key)
 	if label == "" {
 		label = "额度"
 	}
-	text := fmt.Sprintf("%s窗口已用尽（剩余 %.0f%%）", label, window.Remaining*100)
+	var text string
+	if trigger == "threshold" {
+		text = fmt.Sprintf("%s窗口剩余 %s%%，低于 %s%% 底限",
+			label, percentText(window.Remaining), percentText(threshold))
+	} else {
+		text = fmt.Sprintf("%s窗口已用尽（剩余 %s%%）", label, percentText(window.Remaining))
+	}
 	if !window.ResetAt.IsZero() {
 		text += "，" + formatFreezeTime(window.ResetAt) + " 后重置"
 	}
 	return text
 }
 
-// instanceExhaustedReason 是实例级冻结的原因文本。
-func instanceExhaustedReason(instance cpaInstanceAccountReport, accountCount int, window quota.Window) string {
-	return fmt.Sprintf("CPA 实例 %s 内 %d 个启用账号额度均已用尽；%s",
-		instanceLabel(instance), accountCount, windowExhaustedReason(window))
+// instanceTriggeredReason 是实例级冻结的原因文本。
+func instanceTriggeredReason(instance cpaInstanceAccountReport, accountCount int, window quota.Window, trigger string, threshold float64) string {
+	state := "额度均已用尽"
+	if trigger == "threshold" {
+		state = "额度均已低于冻结底限"
+	}
+	return fmt.Sprintf("CPA 实例 %s 内 %d 个启用账号%s；%s",
+		instanceLabel(instance), accountCount, state, windowTriggerReason(window, trigger, threshold))
 }
 
-// instanceExhaustion 判定实例内**全部**启用账号是否都至少有一个硬性耗尽窗口。
+// instanceTrigger 判定实例内**全部**启用账号是否都至少有一个触发窗口（硬性耗尽或
+// 低于底限）。
 //
 // 返回值里的 account/window 是写进冻结记录的「触发者」：取最晚重置的那个账号窗口，
-// 让界面上的原因与到期时间对得上。
-func instanceExhaustion(accounts []cpaAccount) (bool, string, quota.Window) {
+// 让界面上的原因与到期时间对得上；trigger 汇总所有账号的所有触发窗口——只要其中
+// 有一个是硬性耗尽，整次冻结就按 hard 处理，模型白名单不能豁免。
+func instanceTrigger(accounts []cpaAccount, thresholds quota.Thresholds) (bool, string, quota.Window, string) {
 	if len(accounts) == 0 {
-		return false, "", quota.Window{}
+		return false, "", quota.Window{}, ""
 	}
 	var chosen quota.Window
 	chosenAccount := ""
+	trigger := ""
 	for _, account := range accounts {
-		hard := hardQuotaWindows(account.Windows)
-		if len(hard) == 0 {
-			// 有一个账号还有额度：实例整体不算耗尽。
-			return false, "", quota.Window{}
+		triggered := quota.TriggerWindows(quotaWindowsFromCPA(account.Windows), thresholds)
+		if len(triggered) == 0 {
+			// 有一个账号还有额度：实例整体不算触发。
+			return false, "", quota.Window{}, ""
 		}
-		window := latestResetWindow(hard)
+		if accountTrigger := triggerKindForWindows(triggered, thresholds); accountTrigger == "hard" {
+			trigger = "hard"
+		} else if trigger == "" {
+			trigger = accountTrigger
+		}
+		window := latestResetWindow(triggered)
 		if chosenAccount == "" ||
 			window.ResetAt.After(chosen.ResetAt) ||
 			(window.ResetAt.Equal(chosen.ResetAt) && window.Remaining < chosen.Remaining) {
@@ -842,7 +1089,50 @@ func instanceExhaustion(accounts []cpaAccount) (bool, string, quota.Window) {
 			chosenAccount = accountLabel(account)
 		}
 	}
-	return true, chosenAccount, chosen
+	return true, chosenAccount, chosen, trigger
+}
+
+// instanceAllHardExhausted 判定实例内**全部**启用账号是否都至少有一个硬性耗尽窗口。
+//
+// 账号资源响应的 all_accounts_exhausted 仍按这条硬口径单独算，不与「低于底限」混同
+// （设计稿 6.2：两个字段可以同时为 true，但含义各自独立）。
+func instanceAllHardExhausted(accounts []cpaAccount) bool {
+	if len(accounts) == 0 {
+		return false
+	}
+	for _, account := range accounts {
+		if len(hardQuotaWindows(account.Windows)) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// accountBelowFloor 报告账号是否有低于**已配置**底限的窗口。
+//
+// 底限为 0 表示该档关闭（不产生「低于底限」标记）；底限配置后 remaining<=floor
+// 即命中，因此一个已经耗尽的窗口可能与 quota_exhausted 同时为 true（设计稿 6.2）。
+func accountBelowFloor(account cpaAccount, thresholds quota.Thresholds) bool {
+	for _, window := range quotaWindowsFromCPA(account.Windows) {
+		floor := thresholds.Floor(window)
+		if floor > 0 && window.Remaining <= floor {
+			return true
+		}
+	}
+	return false
+}
+
+// instanceAllBelowFloor 判定实例内**全部**启用账号是否都至少有一个低于底限的窗口。
+func instanceAllBelowFloor(accounts []cpaAccount, thresholds quota.Thresholds) bool {
+	if len(accounts) == 0 {
+		return false
+	}
+	for _, account := range accounts {
+		if !accountBelowFloor(account, thresholds) {
+			return false
+		}
+	}
+	return true
 }
 
 // enabledAccounts 筛出实例里的启用账号（CPA 的 disabled 才是人工停用）。
@@ -855,6 +1145,19 @@ func enabledAccounts(accounts []cpaAccount) []cpaAccount {
 		enabled = append(enabled, account)
 	}
 	return enabled
+}
+
+// instanceQuotaUncertain 报告实例内是否有启用账号的额度读数不可用（quota_error）。
+//
+// 这类账号既不能证明「全部账号都触发」，也不能证明「有余额」：实例级规则必须保持
+// 现状，不能把「读不到」当成「有余额」而解掉已经成立的冻结（设计稿 2）。
+func instanceQuotaUncertain(accounts []cpaAccount) bool {
+	for _, account := range accounts {
+		if strings.TrimSpace(account.QuotaError) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // instanceLinkIndex 算出「供应商 → CPA 实例」的关联读数与「实例 → 供应商列表」。

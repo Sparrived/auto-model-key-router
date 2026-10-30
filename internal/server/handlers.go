@@ -41,12 +41,13 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleModels 对应 app.py:183-210 的 GET /v1/models。
 //
 // 需要鉴权，且**按凭据的授权范围收窄**：
-//   - 本地主凭据：全部可用模型 + unified-model；
+//   - 本地主凭据：全部已配置且至少有一个启用 Key 的模型 + unified-model；
 //   - 访问密钥：只列它 providers 清单能覆盖、且模型名在它 models 清单内的模型；
 //   - 工作空间推理凭据：按该空间的 models 白名单，或退化为任务名。
 //
-// 这份清单必须与 proxy 的判定一致——列了却调不动、或调得动却不在清单里，都会让
-// 接入方以为自己配错了。
+// 清单按配置与凭据范围收窄，但**不按额度冻结收窄**：冻结是临时状态，若模型从
+// /v1/models 消失，某些会自动同步模型清单的客户端可能把它从本地删除，解冻后也不会
+// 自动恢复。冻结期间模型照常列出，调用由 proxy 返回 503 + 额度冻结原因。
 func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	a.withLease(w, func(resources *runtime.RuntimeResources) {
 		apiKey := auth.RequestAPIKey(r.Header)
@@ -97,12 +98,13 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// accessKeyModelNames 列出某把访问密钥可用且**在它清单内**的模型名（升序）。
+// accessKeyModelNames 列出某把访问密钥**在它授权清单内**的模型名（升序）。
 //
-// 两步过滤缺一不可，否则清单会与实际能力脱节：
-//   - pool.AvailableModelIDs 按 providers 清单收窄，排除「有配置但一个上游都用不了」
-//     的模型；
+// 两步过滤缺一不可，否则清单会与配置脱节：
+//   - pool.AvailableModelIDs 按 providers 清单与「至少有一把启用 Key」收窄；
 //   - AllowsModel 再按 models 清单收窄到这把 key 被明确授权的名字。
+//
+// 额度冻结不参与这里的过滤：模型仍列出，调用时由 proxy 返回 503。
 //
 // unified-model 由 AvailableModelIDs 追加在末尾，这里必须**剔掉**：访问密钥用不了
 // 它（见 proxy 的同名判断），列出来就是给了个必然 403 的名字。

@@ -253,7 +253,7 @@ func TestQuotaGuardSubscriptionResetAndWarning(t *testing.T) {
 		t.Fatal("预警状态不应触发冻结")
 	}
 
-	// reset_at 是 Unix 秒：到期时间 = reset + 60 秒宽限。
+	// reset_at 是 Unix 秒：内置计时器的目标**精确**停在 reset_at，不再加宽限。
 	resetAt := fixture.Clock.Now().Add(2 * time.Hour)
 	window := exhaustedWindow()
 	window.ResetAt = formatFreezeTime(resetAt)
@@ -265,8 +265,11 @@ func TestQuotaGuardSubscriptionResetAndWarning(t *testing.T) {
 	if !freeze.ResetAt.Equal(resetAt) {
 		t.Errorf("reset_at 应解析为 %v，实际 %v", resetAt, freeze.ResetAt)
 	}
-	if want := resetAt.Add(quotaFreezeResetGrace); !freeze.ExpiresAt.Equal(want) {
-		t.Errorf("到期时间应为 reset+60s（%v），实际 %v", want, freeze.ExpiresAt)
+	if !freeze.ExpiresAt.Equal(resetAt) {
+		t.Errorf("到期时间应精确等于 reset_at（%v），实际 %v", resetAt, freeze.ExpiresAt)
+	}
+	if freeze.Trigger != "hard" || freeze.Threshold != 0 {
+		t.Errorf("硬性耗尽应记 trigger=hard、threshold=0: %+v", freeze)
 	}
 
 	// 跨过到期时间：冻结自动失效，清理把它从表里删掉。
@@ -354,9 +357,9 @@ func TestQuotaGuardInstanceRules(t *testing.T) {
 	if freeze.Account == "" {
 		t.Error("实例级冻结应记下触发账号")
 	}
-	// 触发窗口取最晚重置的那个（a1 的 1 小时后），到期时间带 60 秒宽限。
-	if want := resetAt.Add(quotaFreezeResetGrace); !freeze.ExpiresAt.Equal(want) {
-		t.Errorf("到期时间应为最晚 reset+60s（%v），实际 %v", want, freeze.ExpiresAt)
+	// 触发窗口取最晚重置的那个（a1 的 1 小时后），内置计时器精确停在 reset_at。
+	if !freeze.ExpiresAt.Equal(resetAt) {
+		t.Errorf("到期时间应精确等于最晚 reset_at（%v），实际 %v", resetAt, freeze.ExpiresAt)
 	}
 	if evaluation.Frozen != 1 {
 		t.Errorf("期望 1 条生效冻结，实际 %+v", evaluation)
@@ -405,6 +408,14 @@ func TestQuotaGuardInstanceNoOpinion(t *testing.T) {
 	))
 	if !fixture.Store.IsFrozen("cpa-claude", "claude-a") {
 		t.Fatal("实例没有启用账号时不该解冻")
+	}
+
+	// 有账号额度读取失败（quota_error）：无意见，保留冻结。
+	fixture.Guard.ApplyReport(instanceReport(true,
+		cpaAccount{Name: "a1.json", QuotaError: "quota/fetch 501"},
+	))
+	if !fixture.Store.IsFrozen("cpa-claude", "claude-a") {
+		t.Fatal("账号额度未知时不该解冻")
 	}
 
 	// base_url 不指向该实例：不联动（既不冻也不解冻）。
@@ -526,8 +537,11 @@ func TestQuotaGuardL3DirectFreeze(t *testing.T) {
 	if !freeze.ResetAt.Equal(resetAt) {
 		t.Errorf("reset_at 应解析为 %v，实际 %v", resetAt, freeze.ResetAt)
 	}
-	if want := resetAt.Add(quotaFreezeResetGrace); !freeze.ExpiresAt.Equal(want) {
-		t.Errorf("到期时间应为 reset+60s（%v），实际 %v", want, freeze.ExpiresAt)
+	if !freeze.ExpiresAt.Equal(resetAt) {
+		t.Errorf("到期时间应精确等于 reset_at（%v），实际 %v", resetAt, freeze.ExpiresAt)
+	}
+	if freeze.Trigger != "hard" {
+		t.Errorf("L3 硬性耗尽应记 trigger=hard: %+v", freeze)
 	}
 }
 

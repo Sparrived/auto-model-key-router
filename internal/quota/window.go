@@ -17,6 +17,8 @@ import (
 type Window struct {
 	// Key 是窗口的稳定标识，如 claude/5h、codex/primary、codex/bengalfox-primary。
 	Key string
+	// Raw 是上游原始窗口名（如 5h / weekly / primary），供底限判定按窗口语义分档。
+	Raw string
 	// Label 是给人看的窗口名，如「5 小时」「7 天」；认不出的窗口保留上游原文。
 	Label string
 	// Remaining 是剩余比例，已夹进 0..1。
@@ -47,6 +49,149 @@ func HardExhausted(window Window) bool {
 		return true
 	}
 	return window.Remaining <= 0
+}
+
+// Thresholds 是 5h / 7d 窗口的剩余比例底限；0 表示关闭该档的提前冻结。
+type Thresholds struct {
+	FiveHour float64
+	SevenDay float64
+}
+
+// Normalize 把底限夹进 0..1：配置写错（负数 / 超过 1 / NaN）时收敛到确定口径，
+// +Inf / -Inf 分别落到 1 / 0。
+func (t Thresholds) Normalize() Thresholds {
+	return Thresholds{FiveHour: clampThreshold(t.FiveHour), SevenDay: clampThreshold(t.SevenDay)}
+}
+
+// clampThreshold 把单个底限夹进 0..1；NaN 视为未配置。
+func clampThreshold(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	return math.Min(1, math.Max(0, value))
+}
+
+// WindowKind 把窗口归到 5h / 7d 两档；认不出返回空串。
+//
+// 依次看 Raw（上游原话）、Key（稳定标识）、Label（人话标签）。codex 的 Key 形如
+// codex/<limit>-primary，其中的 limit id 可能是任意词（甚至叫 weekly），不能当窗口
+// 长度，因此 codex 的 Key 不参与识别，只看它的 Raw / Label。
+func WindowKind(window Window) string {
+	raw := strings.TrimSpace(window.Raw)
+	if !isCodexWindowKey(raw) {
+		if kind := matchWindowKind(raw, true); kind != "" {
+			return kind
+		}
+	}
+	key := strings.TrimSpace(window.Key)
+	if !isCodexWindowKey(key) {
+		if kind := matchWindowKind(key, true); kind != "" {
+			return kind
+		}
+	}
+	return matchWindowKind(window.Label, false)
+}
+
+// isCodexWindowKey 判断文本是不是 codex 的窗口 Key；调用方可能把 Key 兜底填进 Raw，
+// 这种带 limit id 的文本同样不能按词面猜窗口长度。
+func isCodexWindowKey(text string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(text)), "codex/")
+}
+
+// matchWindowKind 从窗口名里识别档位；aliases 控制是否把 weekly/week 也算作 7d。
+//
+// 标签里只认显式时长（「5 小时」「7 天」），因为 codex 的标签可能是
+// 「weekly · 2 小时」——那个 weekly 是 limit id，不是窗口长度。
+func matchWindowKind(raw string, aliases bool) string {
+	text := compactWindowText(raw)
+	if text == "" {
+		return ""
+	}
+	if hasWindowToken(text, "5h") || hasWindowToken(text, "5hour") ||
+		hasWindowToken(text, "fivehour") || hasWindowToken(text, "5小时") {
+		return "5h"
+	}
+	if hasWindowToken(text, "7d") || hasWindowToken(text, "7day") ||
+		hasWindowToken(text, "sevenday") || hasWindowToken(text, "7天") {
+		return "7d"
+	}
+	if aliases && (hasWindowToken(text, "weekly") || hasWindowToken(text, "week")) {
+		return "7d"
+	}
+	return ""
+}
+
+// compactWindowText 归一大小写与常见分隔符：5 小时 / five_hour / 7-day 落到同一种写法。
+func compactWindowText(raw string) string {
+	text := strings.ToLower(strings.TrimSpace(raw))
+	if text == "" {
+		return ""
+	}
+	return strings.NewReplacer(" ", "", "\t", "", "\n", "", "_", "", "-", "", "·", "").Replace(text)
+}
+
+// hasWindowToken 判断归一文本里是否出现 token，且 token 前不是数字。
+//
+// 这条边界是为了不把「15 小时」认成「5 小时」：多认一档会提前冻结还有额度的 Key。
+func hasWindowToken(text, token string) bool {
+	for offset := 0; offset < len(text); {
+		index := strings.Index(text[offset:], token)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		if start == 0 || text[start-1] < '0' || text[start-1] > '9' {
+			return true
+		}
+		offset = start + len(token)
+	}
+	return false
+}
+
+// Floor 返回窗口对应的底限；不是 5h / 7d 窗口或底限为 0 时返回 0。
+func (t Thresholds) Floor(window Window) float64 {
+	normalized := t.Normalize()
+	switch WindowKind(window) {
+	case "5h":
+		return normalized.FiveHour
+	case "7d":
+		return normalized.SevenDay
+	default:
+		return 0
+	}
+}
+
+// BelowFloor 报告窗口是否已低于底限。
+//
+// 剩余归零也返回 true（此时 TriggerKind 会先判为 hard）；底限为 0 时该档关闭。
+func BelowFloor(window Window, thresholds Thresholds) bool {
+	if window.Remaining <= 0 {
+		return true
+	}
+	floor := thresholds.Floor(window)
+	return floor > 0 && window.Remaining <= floor
+}
+
+// TriggerKind 返回窗口应触发的冻结类型：hard（硬性耗尽）/ threshold（低于底限）/ 空。
+func TriggerKind(window Window, thresholds Thresholds) string {
+	if HardExhausted(window) {
+		return "hard"
+	}
+	if BelowFloor(window, thresholds) {
+		return "threshold"
+	}
+	return ""
+}
+
+// TriggerWindows 按原顺序筛出会触发冻结的窗口。
+func TriggerWindows(windows []Window, thresholds Thresholds) []Window {
+	result := make([]Window, 0, len(windows))
+	for _, window := range windows {
+		if TriggerKind(window, thresholds) != "" {
+			result = append(result, window)
+		}
+	}
+	return result
 }
 
 // Label 把上游窗口名归一成人话（5 小时 / 7 天 / 30 天），认不出的原样返回。
@@ -114,6 +259,7 @@ func claudePassiveWindows(signals map[string]string) []Window {
 		}
 		windows = append(windows, Window{
 			Key:       "claude/" + spec.key,
+			Raw:       spec.key,
 			Label:     spec.label,
 			Remaining: clampFraction(1 - used),
 			ResetAt:   ParseResetText(signalValue(signals, spec.prefix+"Reset")),
@@ -160,6 +306,7 @@ func codexPassiveWindows(signals map[string]string) []Window {
 		}
 		window := Window{
 			Key:       "codex/" + scope,
+			Raw:       windowName,
 			Label:     codexWindowLabel(limitID, windowName, codexCompanion(signals, additional, scope, "Window-Minutes")),
 			Remaining: clampFraction(1 - used),
 			ResetAt:   ParseResetText(codexCompanion(signals, additional, scope, "Reset-At")),

@@ -77,7 +77,8 @@ func (a *App) handleWorkspacePanel(w http.ResponseWriter, r *http.Request) {
 // workspacePanelModels 列出面板可用于建任务的名字（模型 id 与别名，按配置顺序）。
 //
 // 恰好就是可调用名的全集（模型 ID + aliases，见 config.ModelConfig）：面板是给人挑
-// 模型的界面，清单与 /v1/models 同口径才不会让人挑到一个调不通的名字。
+// 模型的界面，清单与 /v1/models 同口径；额度冻结不会让模型从清单里消失，调用失败时
+// 再由选路层说明原因。
 func workspacePanelModels(cfg *config.RouterConfig) *canonical.Value {
 	items := canonical.NewArray()
 	if cfg == nil {

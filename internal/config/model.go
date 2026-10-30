@@ -334,16 +334,25 @@ type RouterConfig struct {
 	// 账号资源页的额度读数（CPA 账号窗口、订阅类供应商用量）撞到硬性上限后，AMKR 会
 	// 把对应的上游 Key 从选路里摘掉，避免额度用完后还继续打上游。取 0 表示关闭整套
 	// 机制（后台巡检、上游响应头信号、页面即时评估都不再产生新冻结）；已有冻结记录
-	// 不会被抹掉，仍展示、仍参与选路，直到到期或手工解冻。
+	// 不会被抹掉，仍展示、仍参与选路，直到内置计时器到期或手工解冻。
 	QuotaFreezeIntervalSeconds float64
-	EndpointCapabilitiesPath   string
-	MetricsDBPath              string
-	LogFilePath                string
-	LocalAPIKey                string
-	Models                     []ModelConfig
-	StreamFirstByteTimeout     float64
-	StreamIdleTimeout          float64
-	Providers                  []ProviderConfig
+	// QuotaFreezeThreshold5h / QuotaFreezeThreshold7d 是 5h / 7d 额度窗口的剩余比例
+	// 底限（0..1）。观测到 remaining <= 底限时提前冻结对应 Key，用窗口当时的 reset_at
+	// 作为内置计时器的解冻时刻。取 0 表示关闭提前冻结（只在硬性耗尽时冻结）。
+	QuotaFreezeThreshold5h float64
+	QuotaFreezeThreshold7d float64
+	// QuotaFreezeThresholdWhitelist 是达到 5h / 7d 底限后仍允许继续使用的模型名
+	// （真实 ID 或别名）。它只豁免「提前冻结」：额度硬性耗尽后所有模型仍立即停用，
+	// 因此白名单模型最多把额度用到完全耗尽。空表示不豁免任何模型。
+	QuotaFreezeThresholdWhitelist []string
+	EndpointCapabilitiesPath      string
+	MetricsDBPath                 string
+	LogFilePath                   string
+	LocalAPIKey                   string
+	Models                        []ModelConfig
+	StreamFirstByteTimeout        float64
+	StreamIdleTimeout             float64
+	Providers                     []ProviderConfig
 	// UpstreamRoutes 是「上游 URL -> {模式: 路径}」。
 	//
 	// 重要：它**只**由 providers[].routes 汇总而来。配置文件顶层的
@@ -461,6 +470,33 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 	}
 	config.QuotaFreezeIntervalSeconds = freezeInterval
 
+	// 底限两条默认 0（关闭提前冻结）：升级到本版本不改变既有冻结行为，想用的人
+	// 显式写 0.05 / 0.10 这类剩余比例。超过 1 的写法按 100% 夹住——把负值或
+	// 「5 表示 5%」这类误配直接当错误更糟，启动不该因为一个阈值写错而失败。
+	threshold5h, err := floatOr(raw.Lookup("quota_freeze_threshold_5h"), 0)
+	if err != nil {
+		return nil, err
+	}
+	if threshold5h < 0 {
+		threshold5h = 0
+	}
+	if threshold5h > 1 {
+		threshold5h = 1
+	}
+	config.QuotaFreezeThreshold5h = threshold5h
+
+	threshold7d, err := floatOr(raw.Lookup("quota_freeze_threshold_7d"), 0)
+	if err != nil {
+		return nil, err
+	}
+	if threshold7d < 0 {
+		threshold7d = 0
+	}
+	if threshold7d > 1 {
+		threshold7d = 1
+	}
+	config.QuotaFreezeThreshold7d = threshold7d
+
 	config.EndpointCapabilitiesPath = pathOr(raw, "endpoint_capabilities_path", "key_state_path", "")
 	if config.EndpointCapabilitiesPath == "" {
 		path, err := DefaultEndpointCapabilitiesPath()
@@ -500,6 +536,11 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 		return nil, err
 	}
 	config.Models = models
+	config.QuotaFreezeThresholdWhitelist, err = parseQuotaFreezeThresholdWhitelist(
+		raw.Lookup("quota_freeze_threshold_whitelist"), modelIDsByName(models))
+	if err != nil {
+		return nil, err
+	}
 
 	if config.UnifiedModel, err = parseUnifiedModel(raw, models); err != nil {
 		return nil, err
@@ -1155,6 +1196,32 @@ func parseAccessKeyProviders(raw *canonical.Value, keyID string, providerIDs map
 			return nil, errf("access_keys.%s.providers[%d] 引用了未配置的供应商: %s", keyID, index, providerID)
 		}
 		out = append(out, providerID)
+	}
+	return out, nil
+}
+
+// parseQuotaFreezeThresholdWhitelist 解析 `quota_freeze_threshold_whitelist`。
+//
+// 允许写真实 ID 或别名；与 workspaces.models 同一口径，写错名字会让配置直接失败，
+// 避免白名单里一条拼写错误静默失效、到额度触底时才发现某个模型没有按预期继续使用。
+// 运行时由 keypool 归一成真实模型 ID；配置保留原样以便编辑界面回显。
+func parseQuotaFreezeThresholdWhitelist(raw *canonical.Value, idsByName map[string]string) ([]string, error) {
+	if raw == nil || raw.IsNull() {
+		return nil, nil
+	}
+	if !raw.IsArray() {
+		return nil, errf("quota_freeze_threshold_whitelist 必须是数组")
+	}
+	out := make([]string, 0, len(raw.Arr))
+	for index, item := range raw.Arr {
+		name := strings.TrimSpace(item.StringValue())
+		if name == "" {
+			return nil, errf("quota_freeze_threshold_whitelist[%d] 不能为空", index)
+		}
+		if _, ok := idsByName[name]; !ok {
+			return nil, errf("quota_freeze_threshold_whitelist[%d] 引用了未配置的模型: %s", index, name)
+		}
+		out = append(out, name)
 	}
 	return out, nil
 }

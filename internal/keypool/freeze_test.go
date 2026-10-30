@@ -21,27 +21,44 @@ import (
 // 生产实现是 *quota.Store（带持久化），选路层只依赖这两个读方法。假实现同样加锁，
 // 因为 SetQuotaFreezes 与读会并发（见并发用例）。
 type fakeQuotaFreezes struct {
-	mu      sync.Mutex
-	reasons map[[2]string]string
+	mu       sync.Mutex
+	reasons  map[[2]string]string
+	triggers map[[2]string]string
 }
 
 // newFakeQuotaFreezes 构造空的冻结表。
 func newFakeQuotaFreezes() *fakeQuotaFreezes {
-	return &fakeQuotaFreezes{reasons: map[[2]string]string{}}
+	return &fakeQuotaFreezes{
+		reasons:  map[[2]string]string{},
+		triggers: map[[2]string]string{},
+	}
 }
 
-// Freeze 冻结一把 Key，并记下原因。
+// Freeze 冻结一把 Key，并记下原因（硬性耗尽，白名单不可豁免）。
 func (f *fakeQuotaFreezes) Freeze(providerID, keyName, reason string) {
+	f.freeze(providerID, keyName, reason, "hard")
+}
+
+// FreezeThreshold 冻结一把 Key，并标记为提前冻结（白名单模型可豁免）。
+func (f *fakeQuotaFreezes) FreezeThreshold(providerID, keyName, reason string) {
+	f.freeze(providerID, keyName, reason, "threshold")
+}
+
+func (f *fakeQuotaFreezes) freeze(providerID, keyName, reason, trigger string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.reasons[[2]string{providerID, keyName}] = reason
+	key := [2]string{providerID, keyName}
+	f.reasons[key] = reason
+	f.triggers[key] = trigger
 }
 
 // Release 解除一把 Key 的冻结。
 func (f *fakeQuotaFreezes) Release(providerID, keyName string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.reasons, [2]string{providerID, keyName})
+	key := [2]string{providerID, keyName}
+	delete(f.reasons, key)
+	delete(f.triggers, key)
 }
 
 // IsFrozen 报告是否在冻结表里。
@@ -57,6 +74,13 @@ func (f *fakeQuotaFreezes) FrozenReason(providerID, keyName string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.reasons[[2]string{providerID, keyName}]
+}
+
+// FrozenTrigger 返回冻结类型；未冻结时为硬性（空串按 hard 处理）。
+func (f *fakeQuotaFreezes) FrozenTrigger(providerID, keyName string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.triggers[[2]string{providerID, keyName}]
 }
 
 // frozenReasonText 是测试里统一使用的冻结原因，形态与生产 quota.Store 写入的一致。
@@ -100,8 +124,9 @@ func keyNames(keys []config.KeyConfig) []string {
 
 // TestFrozenKeyExcludedFromCandidates 固化「冻结在候选集合级剔除」。
 //
-// 这一层过滤保证 KeyCount / KeysForModel / AvailableModelIDs / 选路四处天然一致：
-// 冻结一把 Key 后，它从计数、清单与游标里同时消失，而不是等到挑选时才被跳过。
+// KeyCount / KeysForModel / 选路都走同一层过滤：冻结一把 Key 后，它从计数与游标里
+// 同时消失，而不是等到挑选时才被跳过。AvailableModelIDs 是例外：它只看启用 Key，
+// 避免 /v1/models 抖动导致客户端删模型；冻结期间调用会返回 ErrQuotaFrozen。
 func TestFrozenKeyExcludedFromCandidates(t *testing.T) {
 	pool, freezes := newFrozenPool(t, "round_robin")
 	freezes.Freeze("p", "k1", frozenReasonText)
@@ -115,9 +140,9 @@ func TestFrozenKeyExcludedFromCandidates(t *testing.T) {
 	if names := keyNames(pool.KeysForModel("m", nil)); len(names) != 1 || names[0] != "k2" {
 		t.Fatalf("候选应只剩 k2，实得 %v", names)
 	}
-	// 还有一把可用 Key，模型必须仍在可用清单里（否则 /v1/models 会误导调用方）。
+	// 模型清单只按配置上的启用 Key 过滤；冻结不能让它从 /v1/models 里消失。
 	if !containsString(pool.AvailableModelIDs(nil), "m") {
-		t.Fatal("还有可用 Key 时模型不应从可用清单消失")
+		t.Fatal("模型有启用 Key 时应始终出现在模型清单里，冻结不应摘掉它")
 	}
 
 	for i := 0; i < 5; i++ {
@@ -183,8 +208,9 @@ func TestAllCandidatesFrozenReturnsQuotaFrozen(t *testing.T) {
 	if got := pool.KeyCount("m"); got != 0 {
 		t.Fatalf("全部冻结后 KeyCount: got %d want 0", got)
 	}
-	if containsString(pool.AvailableModelIDs(nil), "m") {
-		t.Fatal("全部 Key 冻结后模型应不在可用清单里")
+	// 全部 Key 冻结只影响选路，不影响模型清单：清单抖动会让客户端误删模型。
+	if !containsString(pool.AvailableModelIDs(nil), "m") {
+		t.Fatal("全部 Key 冻结时模型仍应留在 /v1/models 清单里")
 	}
 
 	_, err := pool.NextKey("m", nil, nil, "")
@@ -204,6 +230,56 @@ func TestAllCandidatesFrozenReturnsQuotaFrozen(t *testing.T) {
 	}
 	if strings.Contains(message, "没有可用 key") {
 		t.Fatalf("冻结不应说成「没有可用 key」: %s", message)
+	}
+}
+
+// TestThresholdFreezeWhitelist 固化「提前冻结可对白名单模型豁免，硬性耗尽不豁免」。
+//
+// 配置里白名单写别名也要生效：keypool 在 applyConfig 归一成真实模型 ID；同一把
+// Key 上未进入白名单的模型照常被提前冻结挡住。
+func TestThresholdFreezeWhitelist(t *testing.T) {
+	raw := `{
+		"config_version": 4, "local_api_key": "local",
+		"quota_freeze_threshold_whitelist": ["alias-m"],
+		"providers": {"p": {"base_url": "https://a.example", "keys": {"k": {"api_key": "1"}}}},
+		"models": {
+			"m": {"aliases": ["alias-m"], "targets": [
+				{"provider": "p", "key": "k", "upstream_model": "u"}]},
+			"other": {"targets": [
+				{"provider": "p", "key": "k", "upstream_model": "u"}]}
+		}
+	}`
+	pool := New(mustConfig(t, raw), nil, func() float64 { return 1000 })
+	freezes := newFakeQuotaFreezes()
+	pool.SetQuotaFreezes(freezes)
+	freezes.FreezeThreshold("p", "k", frozenReasonText)
+
+	if got := pool.KeyCount("m"); got != 1 {
+		t.Fatalf("白名单模型的提前冻结 Key 应可继续使用: KeyCount=%d", got)
+	}
+	if key, err := pool.NextKey("m", nil, nil, ""); err != nil || key.Name != "k" {
+		t.Fatalf("白名单模型应能选中 k: key=%+v err=%v", key, err)
+	}
+	if key, err := pool.KeyByName("m", "k", nil); err != nil || key.Name != "k" {
+		t.Fatalf("白名单模型的点名路径应能取到 k: key=%+v err=%v", key, err)
+	}
+	if err := pool.AcquireKey("m", "k"); err != nil {
+		t.Fatalf("白名单模型的 AcquireKey 应放行 k: %v", err)
+	}
+	if got := pool.KeyCount("other"); got != 0 {
+		t.Fatalf("非白名单模型仍应被提前冻结挡住: KeyCount=%d", got)
+	}
+	if _, err := pool.NextKey("other", nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
+		t.Fatalf("非白名单模型应返回 ErrQuotaFrozen，实得 %v", err)
+	}
+
+	// 额度完全耗尽：白名单也必须失效，不能把已经见底的 Key 继续打出去。
+	freezes.Freeze("p", "k", "5 小时窗口已用尽（剩余 0%）")
+	if got := pool.KeyCount("m"); got != 0 {
+		t.Fatalf("硬性耗尽后白名单模型也必须停用: KeyCount=%d", got)
+	}
+	if _, err := pool.NextKey("m", nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
+		t.Fatalf("硬性耗尽后应返回 ErrQuotaFrozen，实得 %v", err)
 	}
 }
 

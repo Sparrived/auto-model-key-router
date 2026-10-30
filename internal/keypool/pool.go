@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
@@ -184,6 +185,10 @@ type KeyPool struct {
 	// 与配置无关，因此 applyConfig 不碰它；热重载若新建了 KeyPool，由装配层重新注入
 	// （SetQuotaFreezes）。读写都在 p.mu 下进行。
 	quotaFreezes QuotaFreezes
+	// thresholdWhitelist 是达到 5h/7d 底限后仍允许使用 Key 的真实模型 ID 集合。
+	// 配置里允许写别名，applyConfig 会归一到这里；只豁免 threshold 冻结，hard 冻结
+	// 不受白名单影响。读写都在 p.mu 下进行。
+	thresholdWhitelist map[string]bool
 }
 
 // stickyKey 是粘滞映射的键：(模型, 作用域标识, 粘滞哈希)。
@@ -195,7 +200,8 @@ type stickyKey = [3]string
 // applyConfig 装载配置。
 //
 // 可调用名只有模型的 ID 与 aliases（target 的 upstream_model 只是发给上游的名字，
-// 不参与本地解析），因此这里的别名表与 `/v1/models` 的清单恒等。
+// 不参与本地解析）；别名表是可调用名的全集，`/v1/models` 再按「至少有一把启用 Key」
+// 收窄（额度冻结不影响该清单）。
 func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 	p.keys = map[string][]config.KeyConfig{}
 	p.routingModes = map[string]string{}
@@ -241,6 +247,15 @@ func (p *KeyPool) applyConfig(cfg *config.RouterConfig) {
 		p.aliases[model.ID] = model.ID
 		for _, alias := range model.Aliases {
 			p.aliases[alias] = model.ID
+		}
+	}
+
+	// 白名单允许写模型 ID 或别名，统一归一成真实 ID。配置解析已经校验过名字存在，
+	// 这里再查一次只是防御调用方绕过解析直接构造 RouterConfig（测试/嵌入场景）。
+	p.thresholdWhitelist = map[string]bool{}
+	for _, name := range cfg.QuotaFreezeThresholdWhitelist {
+		if modelID, ok := p.aliases[strings.TrimSpace(name)]; ok {
+			p.thresholdWhitelist[modelID] = true
 		}
 	}
 
@@ -369,17 +384,21 @@ func (p *KeyPool) PublicModelIDs() []string {
 	return sortedSet(seen)
 }
 
-// AvailableModelIDs 返回当前确实有可用 key 的对外模型名（排序）。
+// AvailableModelIDs 返回配置上至少有一把启用 Key 的对外模型名（排序）。
+//
+// **额度冻结不参与这里的过滤**：冻结是临时状态，若把模型从 /v1/models 摘掉，某些会
+// 自动同步模型清单的客户端可能把模型从其本地配置里删除，解冻后也不会自动加回来。
+// 冻结期间模型照常列出，调用会在选路阶段被硬性拒绝并返回 ErrQuotaFrozen（503 + 原因）。
 //
 // accessKey 非 nil 且配了供应商清单时，只考虑属于这些供应商的 key：一把访问密钥不该
-// 在模型清单里看到自己一个上游都用不了的模型——那会让调用方以为能调，实际每次都 403。
-// 这份过滤与选 key 走同一个 keysForModelLocked，因此「列出来的」与「调得动的」恒等。
+// 在模型清单里看到自己一个上游都没有启用 Key 的模型。该过滤与选 key 的配置/作用域
+// 过滤一致，但不包含冻结过滤。
 func (p *KeyPool) AvailableModelIDs(accessKey *config.AccessKeyConfig) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	result := []string{}
 	for name, modelID := range p.aliases {
-		if len(p.keysForModelLocked(modelID, accessKey)) > 0 {
+		if len(p.enabledKeysForModelLocked(modelID, accessKey)) > 0 {
 			result = append(result, name)
 		}
 	}
@@ -629,9 +648,11 @@ func (p *KeyPool) KeysForModel(modelID string, accessKey *config.AccessKeyConfig
 // **候选集合**这一层而不是挑选之后：作用域之外的 key 根本不该进入候选，否则
 // only_first 会先选中一把无权使用的 key 再失败。
 //
-// 额度冻结同样在**候选集合**级剔除（见 freeze.go）：KeyCount / AvailableModelIDs
-// 与选路都走这里，因此「列出来的」「数出来的」「调得动的」恒等。这一层过滤对冷却的
-// 软回退同样生效——软回退是在剩下的候选里放宽冷却，不是把冻结恢复成可用。
+// 额度冻结同样在**候选集合**级剔除（见 freeze.go）：KeyCount / KeysForModel 与选路
+// 都走这里，因此「数出来的」与「调得动的」恒等（提前冻结对白名单模型的豁免也在这层
+// 完成）。AvailableModelIDs 是例外——它只用 enabledKeysForModelLocked，冻结不会把
+// 模型从 /v1/models 里摘掉。这一层过滤对冷却的软回退同样生效——软回退是在剩下的
+// 候选里放宽冷却，不是把冻结恢复成可用。
 func (p *KeyPool) keysForModelLocked(modelID string, accessKey *config.AccessKeyConfig) []config.KeyConfig {
 	keys := p.enabledKeysForModelLocked(modelID, accessKey)
 	if p.quotaFreezes == nil {
@@ -639,7 +660,7 @@ func (p *KeyPool) keysForModelLocked(modelID string, accessKey *config.AccessKey
 	}
 	result := make([]config.KeyConfig, 0, len(keys))
 	for _, key := range keys {
-		if p.frozenLocked(key) {
+		if p.frozenForModelLocked(modelID, key) {
 			continue
 		}
 		result = append(result, key)
@@ -686,9 +707,9 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 		if allowed != nil && !allowed[key.Provider] {
 			continue
 		}
-		// 点名路径不能绕过冻结：绕过等于冻结对 `model[key]` 语法不存在，而调用方
-		// 明确点名一把已经耗尽额度的 Key 时，最该看到的正是「为什么不能用它」。
-		if p.frozenLocked(key) {
+		// 点名路径同样受冻结约束；但提前冻结对白名单模型不生效，此时点名也应放行，
+		// 否则白名单在 `model[key]` 语法下等于不存在。硬性耗尽仍直接失败。
+		if p.frozenForModelLocked(modelID, key) {
 			return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{key})
 		}
 		return key, nil
@@ -714,9 +735,10 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 // 决定怎么处理——这正是它比一个上游欠费错误更好处理的情形。
 //
 // **额度冻结更彻底：它进不了候选集**（keysForModelLocked 里就剔除了，见 freeze.go），
-// 因此软回退天然放行不了它。全部候选都被冻结时返回 quotaFrozenError（503，文案指出
-// 是额度冻结、哪把 Key、什么原因），不退化成「没有可用 key」——后者是配置问题的
-// 说法，而这里配置完全正确，只是额度用完了。
+// 因此软回退天然放行不了它；提前冻结对白名单模型的豁免也在这层完成，硬性耗尽没有
+// 豁免。全部候选都被冻结时返回 quotaFrozenError（503，文案指出是额度冻结、哪把 Key、
+// 什么原因），不退化成「没有可用 key」——后者是配置问题的说法，而这里配置完全正确，
+// 只是额度用完了。
 //
 // **并发上限是另一个例外，而且是硬约束**：已满的 key 与已满的供应商一律不放行，
 // 软回退也不放行——放行一次就是直接越过用户配的上限，而这个上限的意义正是「宁可
@@ -751,7 +773,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 			// 冻结就直接失败，不能悄悄把流量挪给第二把——那等于把「只用第一把」的
 			// 配置意图偷偷改成「用第一把能用的」，冻结也就从硬约束变成一次静默改道。
 			first = p.enabledKeysForModelLocked(modelID, accessKey)[0]
-			if p.frozenLocked(first) {
+			if p.frozenForModelLocked(modelID, first) {
 				return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{first})
 			}
 		}
@@ -947,9 +969,9 @@ func (p *KeyPool) AcquireKey(modelID, keyName string) error {
 		if key.Name != keyName {
 			continue
 		}
-		// 点名路径不能绕过冻结：与并发上限同级，是硬约束。放行一次就是把一个必然
-		// 失败的请求打给一个额度已耗尽的账号。
-		if p.frozenLocked(key) {
+		// 点名路径不能绕过冻结：与并发上限同级，是硬约束。提前冻结对白名单模型
+		// 是例外，硬性耗尽没有例外。
+		if p.frozenForModelLocked(modelID, key) {
 			return p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{key})
 		}
 		if !p.hasCapacityLocked(modelID, key) {

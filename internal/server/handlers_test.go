@@ -50,7 +50,7 @@ func TestModelsExcludesUnconfiguredModelAndAppendsUnified(t *testing.T) {
 //   - 只管供应商的（providers=[prov-b]）；
 //   - 停用的。
 //
-// 它们合起来验证 /v1/models 的收窄与 proxy 的判定用的是同一份判据。
+// 它们合起来验证 /v1/models 的配置与授权收窄（额度冻结不参与收窄）。
 const accessKeyFixture = `{
   "config_version": 4,
   "local_api_key": "local-key",

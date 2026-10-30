@@ -95,15 +95,17 @@ func TestStoreUpsertGetExpiry(t *testing.T) {
 	}
 }
 
-// TestStoreUpsertRefreshesAndPreservesFrozenAt 钉住「只保留一条 + 保留首次 FrozenAt」。
+// TestStoreUpsertRefreshesAndPreservesFrozenAt 钉住「只保留一条 + 保留首次 FrozenAt +
+// ExpiresAt 计时器只可提前不可延后」。
 func TestStoreUpsertRefreshesAndPreservesFrozenAt(t *testing.T) {
 	now := testNow()
 	clock := newTestClock(now)
 	store := NewStoreWithClock("", clock.Now)
 
+	firstExpires := now.Add(10 * time.Minute)
 	if _, err := store.Upsert(Freeze{
 		ProviderID: "p", KeyName: "k",
-		ExpiresAt: now.Add(10 * time.Minute),
+		ExpiresAt: firstExpires,
 		Remaining: 0,
 		Reason:    "首次",
 	}); err != nil {
@@ -111,6 +113,7 @@ func TestStoreUpsertRefreshesAndPreservesFrozenAt(t *testing.T) {
 	}
 	clock.Advance(5 * time.Minute)
 
+	// 候选更晚：计时器不得延后，其余字段照常刷新。
 	changed, err := store.Upsert(Freeze{
 		ProviderID: "p", KeyName: "k",
 		ExpiresAt: clock.Now().Add(30 * time.Minute),
@@ -127,8 +130,33 @@ func TestStoreUpsertRefreshesAndPreservesFrozenAt(t *testing.T) {
 	if freeze.Reason != "刷新" || freeze.Remaining != 0.1 {
 		t.Errorf("窗口字段应随刷新更新: %+v", freeze)
 	}
-	if !freeze.ExpiresAt.Equal(clock.Now().Add(30 * time.Minute)) {
-		t.Errorf("ExpiresAt 应随刷新更新: %+v", freeze)
+	if !freeze.ExpiresAt.Equal(firstExpires) {
+		t.Errorf("更晚的 ExpiresAt 不得延后计时器，期望 %v，实际 %v", firstExpires, freeze.ExpiresAt)
+	}
+
+	// 候选更早：允许提前。
+	earlier := now.Add(7 * time.Minute)
+	changed, err = store.Upsert(Freeze{
+		ProviderID: "p", KeyName: "k",
+		ExpiresAt: earlier,
+		Reason:    "提前",
+	})
+	if err != nil || !changed {
+		t.Fatalf("提前计时器应算变化: changed=%v err=%v", changed, err)
+	}
+	freeze, _ = store.Get("p", "k")
+	if !freeze.ExpiresAt.Equal(earlier) {
+		t.Errorf("更早的 ExpiresAt 应替换计时器，期望 %v，实际 %v", earlier, freeze.ExpiresAt)
+	}
+
+	// 候选零值表示「没意见」：保留已有计时器。
+	changed, err = store.Upsert(Freeze{ProviderID: "p", KeyName: "k", Reason: "无计时器意见"})
+	if err != nil || !changed {
+		t.Fatalf("原因变化应算变化: changed=%v err=%v", changed, err)
+	}
+	freeze, _ = store.Get("p", "k")
+	if !freeze.ExpiresAt.Equal(earlier) {
+		t.Errorf("零值 ExpiresAt 应保留原计时器 %v，实际 %v", earlier, freeze.ExpiresAt)
 	}
 
 	// 完全相同的记录再写一次不产生变化（调用方据此决定是否打日志）。
@@ -461,6 +489,141 @@ func TestStorePrunePersistsSuppressionCleanup(t *testing.T) {
 	}
 }
 
+// TestStoreExpireDue 钉住内置计时器到点清理：只删到期的、按 provider/key 排序返回、
+// 变化落盘、未到期记录跨文件重载仍在。
+func TestStoreExpireDue(t *testing.T) {
+	now := testNow()
+	clock := newTestClock(now)
+	path := filepath.Join(t.TempDir(), "quota-freezes.json")
+	store := NewStoreWithClock(path, clock.Now)
+
+	// 空表不落盘：没有到期的记录就不该平白创建状态文件。
+	removed, err := store.ExpireDue()
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("空表 ExpireDue 应返回空: removed=%+v err=%v", removed, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("无到期记录时不应落盘，stat err=%v", err)
+	}
+
+	for _, freeze := range []Freeze{
+		{ProviderID: "b", KeyName: "k2", ExpiresAt: now.Add(time.Minute)},
+		{ProviderID: "a", KeyName: "k2", ExpiresAt: now.Add(time.Minute)},
+		{ProviderID: "a", KeyName: "k1", ExpiresAt: now.Add(time.Minute)},
+		{ProviderID: "c", KeyName: "future", ExpiresAt: now.Add(time.Hour)},
+	} {
+		if _, err := store.Upsert(freeze); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+
+	// 到点（now == ExpiresAt）即到期；返回顺序按 provider/key，而不是 map 遍历顺序。
+	clock.Advance(time.Minute)
+	removed, err = store.ExpireDue()
+	if err != nil {
+		t.Fatalf("ExpireDue: %v", err)
+	}
+	wantOrder := []string{"a/k1", "a/k2", "b/k2"}
+	if len(removed) != len(wantOrder) {
+		t.Fatalf("应删 3 条，实际 %d（%+v）", len(removed), removed)
+	}
+	for index, freeze := range removed {
+		if got := freeze.ProviderID + "/" + freeze.KeyName; got != wantOrder[index] {
+			t.Errorf("已删记录排序不对: 第 %d 条是 %s，期望 %s", index, got, wantOrder[index])
+		}
+	}
+	if snapshot := store.Snapshot(); len(snapshot) != 1 || snapshot[0].KeyName != "future" {
+		t.Errorf("未到期记录应保留: %+v", snapshot)
+	}
+
+	// 已删记录必须落盘：文件里只剩未到期那条，重载后也不会复活。
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var file freezeFile
+	if err := json.Unmarshal(content, &file); err != nil {
+		t.Fatalf("状态文件不是合法 JSON: %v", err)
+	}
+	if len(file.Freezes) != 1 || file.Freezes[0].KeyName != "future" {
+		t.Errorf("到期记录应已从文件移除: %+v", file.Freezes)
+	}
+	reloaded := NewStoreWithClock(path, clock.Now)
+	if reloaded.IsFrozen("a", "k1") {
+		t.Error("已到期冻结不应在重载后复活")
+	}
+	if _, found := reloaded.Get("c", "future"); !found {
+		t.Error("未到期冻结重载后应仍生效")
+	}
+
+	// 没有新的到期项时不报错、不返回记录。
+	if removed, err := store.ExpireDue(); err != nil || len(removed) != 0 {
+		t.Errorf("无到期项时应返回空: removed=%+v err=%v", removed, err)
+	}
+
+	// 只驻内存的表同样按 ExpiresAt 清理。
+	memoryClock := newTestClock(now)
+	memory := NewStoreWithClock("", memoryClock.Now)
+	if _, err := memory.Upsert(Freeze{ProviderID: "p", KeyName: "k", ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	memoryClock.Advance(time.Minute)
+	removed, err = memory.ExpireDue()
+	if err != nil || len(removed) != 1 || removed[0].KeyName != "k" {
+		t.Errorf("内存表也应清理到期记录: removed=%+v err=%v", removed, err)
+	}
+	if memory.IsFrozen("p", "k") {
+		t.Error("内存表到期后不应再冻结")
+	}
+}
+
+// TestStoreNextExpiry 钉住「最早解冻时刻」：用于后台循环安排下一次唤醒。
+func TestStoreNextExpiry(t *testing.T) {
+	now := testNow()
+	clock := newTestClock(now)
+	store := NewStoreWithClock("", clock.Now)
+
+	if _, ok := store.NextExpiry(); ok {
+		t.Error("空表 NextExpiry 应返回 ok=false")
+	}
+	records := []struct {
+		key     string
+		expires time.Time
+	}{
+		{key: "c", expires: now.Add(3 * time.Hour)},
+		{key: "a", expires: now.Add(time.Hour)},
+		{key: "b", expires: now.Add(2 * time.Hour)},
+	}
+	for _, record := range records {
+		if _, err := store.Upsert(Freeze{ProviderID: "p", KeyName: record.key, ExpiresAt: record.expires}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+
+	want := now.Add(time.Hour)
+	if deadline, ok := store.NextExpiry(); !ok || !deadline.Equal(want) {
+		t.Fatalf("最早解冻时刻应为 %v: deadline=%v ok=%v", want, deadline, ok)
+	}
+
+	// 到点清理后自动落到下一条；全部清完返回 ok=false。
+	for _, want := range []time.Time{now.Add(2 * time.Hour), now.Add(3 * time.Hour)} {
+		clock.Advance(time.Hour)
+		if _, err := store.ExpireDue(); err != nil {
+			t.Fatalf("ExpireDue: %v", err)
+		}
+		if deadline, ok := store.NextExpiry(); !ok || !deadline.Equal(want) {
+			t.Fatalf("下一条解冻时刻应为 %v: deadline=%v ok=%v", want, deadline, ok)
+		}
+	}
+	clock.Advance(time.Hour)
+	if _, err := store.ExpireDue(); err != nil {
+		t.Fatalf("ExpireDue: %v", err)
+	}
+	if deadline, ok := store.NextExpiry(); ok {
+		t.Errorf("全部到期后 NextExpiry 应为 ok=false，实际 %v", deadline)
+	}
+}
+
 // TestStorePersistenceRoundTrip 钉住落盘格式与跨实例重载。
 func TestStorePersistenceRoundTrip(t *testing.T) {
 	now := testNow()
@@ -474,6 +637,7 @@ func TestStorePersistenceRoundTrip(t *testing.T) {
 			ProviderID: "z-provider", KeyName: "a-key", Vendor: "Claude", Scope: "cpa_instance",
 			Source: "account_resource", Account: "ops@example.com", InstanceID: "jp-1",
 			WindowKey: "claude/5h", WindowLabel: "5 小时", Remaining: 0, Status: "rejected",
+			Trigger: "threshold", Threshold: 0.05,
 			ResetAt:   now.Add(3 * time.Hour),
 			ExpiresAt: now.Add(3*time.Hour + time.Minute),
 			Reason:    "5 小时窗口已用尽（剩余 0%）",
@@ -512,7 +676,8 @@ func TestStorePersistenceRoundTrip(t *testing.T) {
 	}
 	if got.Vendor != "Claude" || got.Scope != "cpa_instance" || got.Account != "ops@example.com" ||
 		got.InstanceID != "jp-1" || got.WindowKey != "claude/5h" || got.WindowLabel != "5 小时" ||
-		got.Status != "rejected" || got.Reason != "5 小时窗口已用尽（剩余 0%）" {
+		got.Status != "rejected" || got.Trigger != "threshold" || got.Threshold != 0.05 ||
+		got.Reason != "5 小时窗口已用尽（剩余 0%）" {
 		t.Errorf("重载后字段丢失: %+v", got)
 	}
 	if !got.ResetAt.Equal(now.Add(3*time.Hour)) || !got.FrozenAt.Equal(now) || !got.ExpiresAt.Equal(now.Add(3*time.Hour+time.Minute)) {

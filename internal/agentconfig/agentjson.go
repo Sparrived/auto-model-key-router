@@ -163,7 +163,8 @@ func configurePiAgent(current []byte, cfg *config.RouterConfig) ([]byte, error) 
 // availableModelNames 返回 AMKR 当前可用的全部对外模型名（去重、排序）。
 //
 // 判定与 internal/keypool.AvailableModelIDs 保持一致：**至少有一个启用 Key** 的
-// 模型才算可用——列进客户端却调不动是最坏的体验。模型 ID 与每个别名都是独立的
+// 模型就算可用。额度冻结是运行时临时状态，不参与清单过滤——模型仍列出，调用时由
+// 选路层返回 503，避免客户端同步清单后误删模型。模型 ID 与每个别名都是独立的
 // 可调用名；配置了统一模型时把 unified-model 一并列上（未配置时它调不动，不列）。
 //
 // 排序也与 /v1/models 一致：名字升序，unified-model 追加在末尾（它不是一个真实

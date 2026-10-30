@@ -471,3 +471,145 @@ func TestHardExhausted(t *testing.T) {
 		})
 	}
 }
+
+// TestWindowKind 钉住窗口语义分档：5h / 7d 只有这一份识别，底限判定全靠它。
+//
+// 覆盖四族来源：claude 的 Key、codex 的 primary/secondary + 人话标签、commandcode
+// 的 Key、quota 窗口的 Raw；同时钉住「不认识的窗口不猜」与「15 小时不是 5 小时」。
+func TestWindowKind(t *testing.T) {
+	cases := []struct {
+		name   string
+		window Window
+		want   string
+	}{
+		{name: "claude/5h", window: Window{Key: "claude/5h", Raw: "5h", Label: "5 小时"}, want: "5h"},
+		{name: "claude/7d", window: Window{Key: "claude/7d", Raw: "7d", Label: "7 天"}, want: "7d"},
+		{name: "claude/7d_oi", window: Window{Key: "claude/7d_oi", Raw: "7d_oi", Label: "7 天（含超额）"}, want: "7d"},
+		{name: "codex primary 5 小时", window: Window{Key: "codex/primary", Raw: "primary", Label: "5 小时"}, want: "5h"},
+		{name: "codex secondary 7 天", window: Window{Key: "codex/secondary", Raw: "secondary", Label: "7 天"}, want: "7d"},
+		{name: "codex 带 limit id 的 7 天", window: Window{Key: "codex/bengalfox-primary", Raw: "primary", Label: "bengalfox · 7 天"}, want: "7d"},
+		{name: "codex 只有位置说法不猜", window: Window{Key: "codex/primary", Raw: "primary", Label: "主要窗口"}, want: ""},
+		{name: "commandcode/fiveHour", window: Window{Key: "commandcode/fiveHour", Raw: "5h", Label: "5 小时"}, want: "5h"},
+		{name: "commandcode/weekly", window: Window{Key: "commandcode/weekly", Raw: "weekly", Label: "7 天"}, want: "7d"},
+		{name: "quota 窗口 Raw=weekly", window: Window{Key: "quota/w", Raw: " Weekly "}, want: "7d"},
+		{name: "quota 窗口 Raw=5h", window: Window{Key: "quota/h", Raw: "5H"}, want: "5h"},
+		{name: "大小写与下划线不敏感", window: Window{Key: "COMMANDCODE/Five_Hour"}, want: "5h"},
+		{name: "weekly 是 limit id 时看标签时长", window: Window{Key: "codex/weekly-secondary", Raw: "secondary", Label: "weekly · 2 小时"}, want: ""},
+		{name: "Key 兜底进 Raw 时同样不按 limit id 猜", window: Window{Key: "codex/weekly-secondary", Raw: "codex/weekly-secondary", Label: "weekly · 2 小时"}, want: ""},
+		{name: "30 天不是 7 天", window: Window{Key: "claude/30d", Raw: "30d", Label: "30 天"}, want: ""},
+		{name: "15 小时不是 5 小时", window: Window{Key: "x/15h", Raw: "15h", Label: "15 小时"}, want: ""},
+		{name: "空窗口", window: Window{}, want: ""},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := WindowKind(testCase.window); got != testCase.want {
+				t.Errorf("WindowKind(%+v) = %q，期望 %q", testCase.window, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestThresholdsNormalize 钉住底限配置的夹紧口径。
+func TestThresholdsNormalize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Thresholds
+		want Thresholds
+	}{
+		{name: "原样保留", in: Thresholds{FiveHour: 0.05, SevenDay: 0.1}, want: Thresholds{FiveHour: 0.05, SevenDay: 0.1}},
+		{name: "负数归零", in: Thresholds{FiveHour: -0.2, SevenDay: -1}, want: Thresholds{}},
+		{name: "超过一夹到一", in: Thresholds{FiveHour: 1.5, SevenDay: 2}, want: Thresholds{FiveHour: 1, SevenDay: 1}},
+		{name: "NaN 视为未配置", in: Thresholds{FiveHour: math.NaN(), SevenDay: math.NaN()}, want: Thresholds{}},
+		{name: "无穷夹到边界", in: Thresholds{FiveHour: math.Inf(1), SevenDay: math.Inf(-1)}, want: Thresholds{FiveHour: 1}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := testCase.in.Normalize(); got != testCase.want {
+				t.Errorf("Normalize() = %+v，期望 %+v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestThresholdsFloor 钉住窗口语义到配置底限的映射。
+func TestThresholdsFloor(t *testing.T) {
+	thresholds := Thresholds{FiveHour: 0.05, SevenDay: 0.1}
+	if got := thresholds.Floor(Window{Key: "claude/5h"}); got != 0.05 {
+		t.Errorf("5h 窗口应取 5h 底限，实际 %v", got)
+	}
+	if got := thresholds.Floor(Window{Key: "claude/7d"}); got != 0.1 {
+		t.Errorf("7d 窗口应取 7d 底限，实际 %v", got)
+	}
+	if got := thresholds.Floor(Window{Key: "claude/30d"}); got != 0 {
+		t.Errorf("认不出的窗口应返回 0，实际 %v", got)
+	}
+	if got := (Thresholds{FiveHour: -1, SevenDay: 2}).Floor(Window{Key: "claude/5h"}); got != 0 {
+		t.Errorf("越界底限应夹到 0，实际 %v", got)
+	}
+}
+
+// TestBelowFloor 钉住提前冻结的边界：等于底限算、0 关闭、未知窗口不参与。
+func TestBelowFloor(t *testing.T) {
+	thresholds := Thresholds{FiveHour: 0.05, SevenDay: 0.1}
+	cases := []struct {
+		name   string
+		window Window
+		limit  Thresholds
+		want   bool
+	}{
+		{name: "5h 恰好等于底限", window: Window{Key: "claude/5h", Remaining: 0.05}, limit: thresholds, want: true},
+		{name: "5h 高于底限", window: Window{Key: "claude/5h", Remaining: 0.06}, limit: thresholds, want: false},
+		{name: "7d 低于底限", window: Window{Key: "claude/7d", Remaining: 0.01}, limit: thresholds, want: true},
+		{name: "底限为 0 关闭该档", window: Window{Key: "claude/5h", Remaining: 0.01}, limit: Thresholds{}, want: false},
+		{name: "未知窗口不参与", window: Window{Key: "claude/30d", Remaining: 0.01}, limit: thresholds, want: false},
+		{name: "剩余归零也算", window: Window{Remaining: 0}, limit: Thresholds{}, want: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := BelowFloor(testCase.window, testCase.limit); got != testCase.want {
+				t.Errorf("BelowFloor(%+v) = %v，期望 %v", testCase.window, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestTriggerKind 钉住 hard 优先于 threshold。
+func TestTriggerKind(t *testing.T) {
+	thresholds := Thresholds{FiveHour: 0.05, SevenDay: 0.1}
+	cases := []struct {
+		name   string
+		window Window
+		want   string
+	}{
+		{name: "硬性耗尽", window: Window{Key: "claude/5h", Remaining: 0, Status: "rejected"}, want: "hard"},
+		{name: "状态拒绝但比例还高", window: Window{Key: "claude/5h", Remaining: 0.9, Status: "rejected"}, want: "hard"},
+		{name: "低于底限", window: Window{Key: "claude/5h", Remaining: 0.03}, want: "threshold"},
+		{name: "allowed_warning 且低于底限", window: Window{Key: "claude/7d", Remaining: 0.05, Status: "allowed_warning"}, want: "threshold"},
+		{name: "allowed_warning 但高于底限", window: Window{Key: "claude/7d", Remaining: 0.5, Status: "allowed_warning"}, want: ""},
+		{name: "健康", window: Window{Key: "claude/5h", Remaining: 0.8, Status: "allowed"}, want: ""},
+		{name: "未知窗口", window: Window{Key: "claude/30d", Remaining: 0.01}, want: ""},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := TriggerKind(testCase.window, thresholds); got != testCase.want {
+				t.Errorf("TriggerKind(%+v) = %q，期望 %q", testCase.window, got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestTriggerWindows 钉住筛选保持原顺序。
+func TestTriggerWindows(t *testing.T) {
+	windows := []Window{
+		{Key: "claude/5h", Remaining: 0.02},
+		{Key: "claude/7d", Remaining: 0.5},
+		{Key: "claude/7d_oi", Remaining: 0, Status: "rejected"},
+	}
+	got := TriggerWindows(windows, Thresholds{FiveHour: 0.05, SevenDay: 0.1})
+	if len(got) != 2 || got[0].Key != "claude/5h" || got[1].Key != "claude/7d_oi" {
+		t.Errorf("应按原顺序筛出 5h 与 7d_oi，实际 %+v", got)
+	}
+	if empty := TriggerWindows(nil, Thresholds{FiveHour: 0.05}); empty == nil || len(empty) != 0 {
+		t.Errorf("没有窗口时应返回空数组而不是 nil: %+v", empty)
+	}
+}
