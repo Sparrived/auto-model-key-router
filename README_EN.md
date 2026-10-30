@@ -49,7 +49,7 @@ When working with Large Language Models (LLMs) across various projects and devel
   - Automatic retry and key rotation on `401`, `403`, `429`, or `5xx` transient errors.
   - **Smart Balance Exhaustion Circuit Breaker**: Identifies `402 Payment Required`, `insufficient_quota`, `Insufficient Balance`, or `credit balance is too low`, putting the account into an exponential cooldown (starting at 300s up to 30m). Automatically performs half-open recovery when the window expires and fails fast with 503 when all keys are exhausted.
   - **Concurrency Limits (provider + key)**: Cap in-flight upstream requests with `providers.<id>.max_concurrency` (counted across every key and every model of that provider) and `providers.<id>.keys.<key>.max_concurrency` (per upstream key; all models referencing the same key share one counter). Omitted, `null`, or `0` means unlimited. Keys and providers at their limit are excluded hard (no cooldown-style soft fallback), and when every candidate for a model is blocked by concurrency the proxy answers `429` instead of sending a request that would only queue up or fail upstream.
-  - **Quota-Based Auto Freeze**: Account-resource quota readings feed routing decisions. Once a hard 5h / 7d window is exhausted for a subscription provider or a CPA instance, the matching upstream key is dropped from candidates (the config `enabled` flag is never rewritten) and automatically unfrozen after the window resets or a healthy reading arrives. Freezes are visible on both the providers and account-resource pages and can be released manually.
+  - **Quota-Based Auto Freeze**: Account-resource quota readings feed routing decisions. Once a 5h / 7d window is exhausted for a subscription provider or a CPA instance, the matching upstream key is dropped from candidates (the config `enabled` flag is never rewritten). Configurable 5h / 7d remaining-ratio floors allow freezing **before** the quota runs out, and `quota_freeze_threshold_whitelist` lets selected models keep using the key until the quota is fully exhausted (hard exhaustion still stops whitelisted models). Each freeze captures the window's reset time at creation as a server-side built-in timer, which releases and persists the unfreeze when due — independent of the next poll or a page refresh. Freezes are visible on both the providers and account-resource pages and can be released manually.
 - 🎯 **Unified Model (`unified-model`)**: Point client requests to a single model name. AMKR resolves requests based on endpoint family (chat, image, embedding, speech synthesis, transcription, video, rerank) to preconfigured upstream models.
 - 📋 **Task-Based Routing (`TASK_XXXXXX`)**: Pass semantic task IDs as model names. AMKR locks primary models, fallback models, and sampling hyperparameters (`temperature`, `top_p`, `reasoning_effort`, etc.), preventing client overrides.
 - 🏢 **Multi-Tenant Workspaces**:
@@ -337,6 +337,9 @@ AMKR uses a JSON configuration file (with automatic backward-compatible schema m
   "key_cooldown_seconds": 60,
   "key_balance_cooldown_seconds": 300,
   "quota_freeze_interval_seconds": 60,
+  "quota_freeze_threshold_5h": 0,
+  "quota_freeze_threshold_7d": 0,
+  "quota_freeze_threshold_whitelist": [],
   "local_api_key": "amkr_sec_prod_gateway_key",
   "webui_enabled": true,
   "ops_enabled": true,
@@ -406,7 +409,10 @@ AMKR uses a JSON configuration file (with automatic backward-compatible schema m
 | `stream_idle_timeout` | int | Maximum idle gap between subsequent chunks (seconds, default 60) |
 | `key_cooldown_seconds` | int | Cooldown duration for keys after transient failures (seconds, default 60) |
 | `key_balance_cooldown_seconds` | int | Initial cooldown duration for balance exhaustion (seconds, default 300, doubles up to 30m) |
-| `quota_freeze_interval_seconds` | int | Background poll interval for quota-based key freezing (seconds, default 60; `0` disables the whole mechanism without touching existing freezes' expiry) |
+| `quota_freeze_interval_seconds` | int | Background poll interval for quota-based key freezing (seconds, default 60; `0` disables the whole mechanism without touching existing freezes' built-in expiry timer or manual release) |
+| `quota_freeze_threshold_5h` | number | Remaining-ratio floor for 5h windows (0..1, default 0 = off); freeze the key early when `remaining <= floor`, auto-unfreeze at the captured `reset_at` |
+| `quota_freeze_threshold_7d` | number | Remaining-ratio floor for 7d windows (0..1, default 0 = off); same semantics |
+| `quota_freeze_threshold_whitelist` | string[] | Model names (IDs or aliases) allowed to keep using a key after a threshold freeze (default empty); only early freezes are exempt, hard exhaustion still stops every model |
 | `ops_enabled` | bool | Toggle for host management APIs (log viewing, system service control, client config writes; disable in Docker) |
 | `webui_enabled` | bool | Mount status of the embedded WebUI |
 | `providers.<id>.max_concurrency` | int / null | Maximum in-flight upstream requests for **every key and every model** of this provider; omitted, `null`, or `0` means unlimited |
@@ -448,7 +454,7 @@ AMKR uses a JSON configuration file (with automatic backward-compatible schema m
 | Category | Endpoint | Method | Description |
 | :--- | :--- | :--- | :--- |
 | **Health** | `/health` | `GET` | Health status, version, and feature flags (unauthenticated) |
-| **Models** | `/v1/models` | `GET` | List all available routed models with active keys |
+| **Models** | `/v1/models` | `GET` | List all configured routed models with at least one enabled key; quota freezes do not change the list, and calls on frozen keys return 503 |
 | **OpenAI Proxy** | `/v1/chat/completions` | `POST` | Chat completions with streaming, tool calling, and reasoning tokens |
 | | `/v1/embeddings` | `POST` | Text embeddings generation |
 | | `/v1/images/*` | `POST` | Image generation and editing pass-through |
