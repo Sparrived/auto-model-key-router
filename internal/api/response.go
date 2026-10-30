@@ -292,6 +292,9 @@ func settingsResponse(cfg *config.RouterConfig) *canonical.Value {
 		canonical.ObjectPair{Key: "stream_first_byte_timeout", Value: canonical.NewFloat(cfg.StreamFirstByteTimeout)},
 		canonical.ObjectPair{Key: "stream_idle_timeout", Value: canonical.NewFloat(cfg.StreamIdleTimeout)},
 		canonical.ObjectPair{Key: "max_retries", Value: canonical.NewInt(pyIntLiteral(cfg.MaxRetries))},
+		canonical.ObjectPair{Key: "quota_freeze_threshold_5h", Value: canonical.NewFloat(cfg.QuotaFreezeThreshold5h)},
+		canonical.ObjectPair{Key: "quota_freeze_threshold_7d", Value: canonical.NewFloat(cfg.QuotaFreezeThreshold7d)},
+		canonical.ObjectPair{Key: "quota_freeze_threshold_whitelist", Value: stringArray(cfg.QuotaFreezeThresholdWhitelist)},
 		canonical.ObjectPair{Key: "local_auth_enabled", Value: canonical.NewBool(cfg.LocalAPIKey != "")},
 		canonical.ObjectPair{Key: "local_api_key_fingerprint", Value: fingerprint},
 	)

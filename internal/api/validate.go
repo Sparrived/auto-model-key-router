@@ -99,6 +99,8 @@ var (
 	intLe65535 = canonical.NewInt("65535")
 	intGe0     = canonical.NewInt("0")
 	floatGt0   = canonical.NewFloat(0)
+	floatGe0   = canonical.NewFloat(0)
+	floatLe1   = canonical.NewFloat(1)
 	floatLe120 = canonical.NewFloat(120)
 )
 
@@ -430,6 +432,9 @@ var specSettingsUpdate = newModelSpec("SettingsUpdate",
 	nul("stream_first_byte_timeout", kindFloat).gtV(floatGt0),
 	nul("stream_idle_timeout", kindFloat).gtV(floatGt0),
 	nul("max_retries", kindInt).geV(intGe0),
+	nul("quota_freeze_threshold_5h", kindFloat).geV(floatGe0).leV(floatLe1),
+	nul("quota_freeze_threshold_7d", kindFloat).geV(floatGe0).leV(floatLe1),
+	nul("quota_freeze_threshold_whitelist", kindStrList),
 )
 
 // validationError 是一条 Pydantic 校验错误，渲染顺序固定为
