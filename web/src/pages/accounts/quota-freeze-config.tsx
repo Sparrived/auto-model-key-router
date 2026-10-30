@@ -173,7 +173,7 @@ export function QuotaFreezeConfigSheet({ open, onOpenChange, onSaved }: Props) {
       open={open}
       onOpenChange={onOpenChange}
       title="额度冻结规则"
-      subtitle="设置低于额度的哪个比例时提前冻结 Key；白名单模型可继续使用，直到额度完全耗尽。"
+      subtitle="设置剩余比例不高于多少时提前冻结 Key；白名单模型可继续使用，直到额度完全耗尽。"
       width="lg"
       dirty={dirty}
       onSave={ready ? save : undefined}
@@ -187,7 +187,7 @@ export function QuotaFreezeConfigSheet({ open, onOpenChange, onSaved }: Props) {
           <div className="grid gap-3 sm:grid-cols-2">
             <Field
               label="5h 提前冻结底限"
-              hint="剩余比例低于此值时提前冻结；0 表示关闭。"
+              hint="剩余比例不高于此值（含等于）时提前冻结；0 表示关闭。"
               error={fiveHourError}
             >
               <Input
@@ -206,7 +206,7 @@ export function QuotaFreezeConfigSheet({ open, onOpenChange, onSaved }: Props) {
             </Field>
             <Field
               label="7d 提前冻结底限"
-              hint="剩余比例低于此值时提前冻结；0 表示关闭。"
+              hint="剩余比例不高于此值（含等于）时提前冻结；0 表示关闭。"
               error={sevenDayError}
             >
               <Input

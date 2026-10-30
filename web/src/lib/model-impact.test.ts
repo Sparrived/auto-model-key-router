@@ -14,6 +14,7 @@ const impact: Impact = {
   removed_tasks: ["TASK_000001"],
   unified_model: { default: { primary: { model: "new-model" } } },
   endpoint_plans: { image: { primary: { model: "new-model" } } },
+  quota_freeze_whitelist: ["old-model"],
 };
 
 describe("影响清单", () => {
@@ -24,18 +25,20 @@ describe("影响清单", () => {
     expect(hasImpact({ removed_keys: [{ provider: "p", key: "k" }] })).toBe(true);
     expect(hasImpact({ endpoint_plans: {} })).toBe(true);
     expect(hasImpact({ endpoint_plans: { image: {} } })).toBe(true);
+    expect(hasImpact({ quota_freeze_whitelist: ["old-model"] })).toBe(true);
   });
 
   it("分节渲染文案，空清单为空数组", () => {
     expect(impactSections(null)).toEqual([]);
     const sections = impactSections(impact);
     expect(sections.map((section) => section.title)).toEqual(
-      ["模型", "供应商 Key", "访问密钥", "工作空间", "任务", "统一模型", "端点计划"]);
+      ["模型", "供应商 Key", "访问密钥", "工作空间", "任务", "统一模型", "端点计划", "提前冻结白名单"]);
     expect(sections[0].lines[0]).toContain("old-model 失去全部 Key 绑定");
     expect(sections[1].lines[0]).toContain("openai / old-key");
     expect(sections[2].lines[0]).toContain("模型清单移除 old-model");
     expect(sections[3].lines[0]).toContain("模型清单被摘空");
     expect(sections[4].lines[0]).toContain("TASK_000001");
+    expect(sections[7].lines[0]).toContain("提前冻结白名单将同步更新");
   });
 });
 

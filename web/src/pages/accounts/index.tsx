@@ -149,7 +149,7 @@ function guardDescription(guard?: QuotaGuardStatus): string {
   if (guard?.enabled === false) {
     return `后台自动检测已在配置里关闭；进页也不会产生新冻结，已有冻结仍展示、仍参与选路，直到到期或手工解冻。${thresholds}`;
   }
-  const tail = "进页会立即评估一次；命中硬性额度或低于 5h/7d 底限时对应 Key 会被自动冻结（不写回配置的启用开关），冻结按内置计时器自动解冻。";
+  const tail = "进页会立即评估一次；命中硬性额度或剩余比例不高于 5h/7d 底限时对应 Key 会被自动冻结（不写回配置的启用开关），冻结按内置计时器自动解冻。";
   const seconds = Number(guard?.interval_seconds);
   const every = Number.isFinite(seconds) && seconds > 0 ? `每 ${seconds} 秒` : "定时";
   return `后台${every}自动检测；${tail}${thresholds}`;

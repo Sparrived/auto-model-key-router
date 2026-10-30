@@ -36,6 +36,7 @@ export interface Impact {
   removed_tasks?: string[];
   unified_model?: unknown;
   endpoint_plans?: unknown;
+  quota_freeze_whitelist?: string[];
 }
 
 // hasImpact 报告预演结果里是否有需要用户点头的连带变动。
@@ -52,7 +53,9 @@ export function hasImpact(impact: Impact | null | undefined): boolean {
     impact.unified_model ||
     // 模型的端点计划（endpoints）也会指向别的模型：删掉一个模型名，别处把它当作某一族的
     // 分派目标时，那条计划会被改写。这件事必须说出来——它是"删一个名字"最不显眼的连带后果。
-    impact.endpoint_plans,
+    impact.endpoint_plans ||
+    // 提前冻结白名单也是模型名的硬引用：删模型/改名时必须同步清理或跟随。
+    impact.quota_freeze_whitelist?.length,
   );
 }
 
@@ -148,6 +151,11 @@ export function impactSections(impact: Impact | null | undefined): ImpactSection
   if (impact.endpoint_plans) {
     sections.push(section("端点计划", [
       "别的模型名把它当作某一端点族的分派目标，那几条端点计划会被清掉（未配置的族回落到该模型自己的目标）",
+    ]));
+  }
+  if (impact.quota_freeze_whitelist?.length) {
+    sections.push(section("提前冻结白名单", [
+      `提前冻结白名单将同步更新：${impact.quota_freeze_whitelist.join("、")}`,
     ]));
   }
   return sections;
