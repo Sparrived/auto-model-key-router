@@ -54,6 +54,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useConfirm } from "@/components/ui/ConfirmProvider";
 import { Meter } from "@/components/charts";
+import { QuotaFreezeConfigSheet } from "./quota-freeze-config";
 
 type StatusFilter = "all" | "usable" | "cooling" | "alert";
 
@@ -437,6 +438,7 @@ export default function AccountsPage() {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetError, setResetError] = useState("");
   const [managing, setManaging] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
   const [manageLoading, setManageLoading] = useState(false);
   const [manageSaving, setManageSaving] = useState(false);
   const [manageError, setManageError] = useState("");
@@ -664,6 +666,7 @@ export default function AccountsPage() {
           <Button size="sm" variant="secondary" loading={accountsQuery.isFetching} onClick={() => void refreshAccounts()}>
             刷新
           </Button>
+          <Button size="sm" variant="secondary" onClick={() => setConfigOpen(true)}>冻结规则</Button>
           <Button size="sm" onClick={() => void openManage()}>管理实例</Button>
         </>
       )}
@@ -1021,6 +1024,14 @@ export default function AccountsPage() {
           </div>
         )}
       </Sheet>
+
+      {configOpen ? (
+        <QuotaFreezeConfigSheet
+          open={configOpen}
+          onOpenChange={setConfigOpen}
+          onSaved={() => setConfigOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

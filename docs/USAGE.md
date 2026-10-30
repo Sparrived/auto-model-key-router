@@ -335,7 +335,9 @@ Claude 的重置卡可能被 Anthropic 按 surface 门禁限定在 Claude.ai 网
   内不会被同一读数重新冻回去。底层接口是 `DELETE /api/quota-freezes/{provider_id}/{key_name}`，
   `GET /api/quota-freezes` 可以看当前全部冻结，见 [`docs/API.md`](API.md) 的「额度冻结接口」。
 
-**配置**：`quota_freeze_interval_seconds`（默认 60）是后台巡检间隔。`quota_freeze_threshold_5h`
+**配置**：WebUI 的账号资源页右上角「冻结规则」可以直接编辑 5h / 7d 底限和白名单，保存后
+热重载生效；也可以继续在配置文件里手改。`quota_freeze_interval_seconds`（默认 60）是后台巡检间隔。
+`quota_freeze_threshold_5h`
 与 `quota_freeze_threshold_7d`（默认 0 = 关闭）是 5h / 7d 窗口的剩余比例底限，取值 0..1
 （例如 `0.05` 表示剩余 5%），命中后提前冻结。`quota_freeze_threshold_whitelist` 可列出
 需要继续使用到额度完全耗尽的模型名（真实 ID 或别名）：提前冻结只停用不在白名单里的模型，

@@ -86,7 +86,7 @@ x-api-key: your-local-api-key
 | `POST` | `/api/cpa-reset-credits/use` | 仅本地 | 消费一张重置卡；默认选**最快过期**的可用卡（会真实改变上游账号状态） |
 | `GET` | `/api/quota-freezes` | 仅本地 | 列出当前额度冻结（哪把上游 Key 因哪个额度窗口被摘出选路）与后台巡检状态 |
 | `DELETE` | `/api/quota-freezes/{provider_id}/{key_name}` | 仅本地 | 手工解除一把 Key 的额度冻结（附最短 10 分钟的抑制窗口） |
-| `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时和重试设置 |
+| `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时、重试，以及 5h/7d 提前冻结阈值和模型白名单 |
 | `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
 | `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 GitHub Releases 版本检查 |
 | `POST` | `/api/probes/keys` | 仅本地 | 异步探测指定 Provider 下 Key 的模型列表与各端点可用性（逐 Key 兼容接口） |

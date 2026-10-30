@@ -811,6 +811,9 @@ export interface SettingsData {
   request_timeout?: number;
   stream_first_byte_timeout?: number;
   stream_idle_timeout?: number;
+  quota_freeze_threshold_5h?: number;
+  quota_freeze_threshold_7d?: number;
+  quota_freeze_threshold_whitelist?: string[];
   local_auth_enabled?: boolean;
   local_api_key_fingerprint?: string;
   [key: string]: unknown;
