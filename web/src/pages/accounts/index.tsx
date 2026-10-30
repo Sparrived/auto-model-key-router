@@ -3,7 +3,7 @@
 // 口径（与 legacy accounts.js 一致）：
 // - 浏览器不直接访问 CPA，所有读数走 /api/cpa-accounts 的服务端扇出；
 // - 进页只取账号读数，管理密钥只在打开「管理实例」时读取；
-// - 只读、不轮询，刷新由用户明确触发，一次刷新只发一次账号请求；
+// - 只读、不轮询；刷新由用户或冻结到期触发，一次刷新只发一次账号请求；
 // - 额度显示**剩余**比例，≤5% 用 critical，≤20% 用 warn；
 // - 单个实例读取失败只影响自己的面板，搜索/筛选对所有实例统一生效；
 // - 额度冻结是后台的临时状态，不写回配置的 enabled 开关（见 docs/design/quota-freeze.md）。
@@ -18,8 +18,11 @@ import {
   freezeLookupKey,
   freezeReasonText,
   freezeResetCountdown,
+  freezeTriggerText,
   indexQuotaFreezes,
   invalidateFreezeViews,
+  useDeadlineRefresh,
+  useNow,
 } from "@/lib/quota-freeze";
 import { cn } from "@/lib/cn";
 import type {
@@ -91,11 +94,11 @@ function formatMetric(metric: { value?: number | string; unit?: string }): strin
   return [text, metric.unit].filter(Boolean).join(" ");
 }
 
-function countdown(window: CPAQuotaWindow, offsetMs: number): string {
+function countdown(window: CPAQuotaWindow, offsetMs: number, now: number): string {
   if (!window.reset_at) return "";
   const at = Date.parse(window.reset_at);
   if (!Number.isFinite(at)) return "";
-  const remaining = at - (Number(offsetMs) || 0) - Date.now();
+  const remaining = at - (Number(offsetMs) || 0) - now;
   if (remaining <= 0) return "即将重置";
   const minutes = Math.round(remaining / 60000);
   if (minutes < 60) return `${minutes} 分钟后重置`;
@@ -111,11 +114,11 @@ function statusBadge(account: CPAAccount): { text: string; tone: "good" | "warn"
   return { text: "可用", tone: "good" };
 }
 
-function quotaTitle(window: CPAQuotaWindow, offsetMs: number): string {
+function quotaTitle(window: CPAQuotaWindow, offsetMs: number, now: number): string {
   return [
     window.source === "passive" ? "CPA 采集" : "现场查询",
     window.status === "rejected" ? "已用尽" : null,
-    countdown(window, offsetMs),
+    countdown(window, offsetMs, now),
     window.description || null,
   ].filter(Boolean).join("\n");
 }
@@ -134,14 +137,21 @@ function quotaHint(account: CPAAccount): string {
 // 关闭档的文案必须与后端一致：interval=0 时后台巡检、上游响应头信号、页面即时评估
 // **都不产生新冻结**（internal/api/quota_guard.go），已有冻结仍在选路里生效到到期或
 // 手工解冻（docs/USAGE.md 4.2）。所以关闭档不能复用「进页会立即评估一次」这句。
+function thresholdDescription(value: number | undefined): string {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio) || ratio <= 0) return "未启用";
+  return `${Math.round(ratio * 1000) / 10}%`;
+}
+
 function guardDescription(guard?: QuotaGuardStatus): string {
+  const thresholds = `提前冻结底限：5h ${thresholdDescription(guard?.threshold_5h)}、7d ${thresholdDescription(guard?.threshold_7d)}。`;
   if (guard?.enabled === false) {
-    return "后台自动检测已在配置里关闭；进页也不会产生新冻结，已有冻结仍展示、仍参与选路，直到到期或手工解冻。";
+    return `后台自动检测已在配置里关闭；进页也不会产生新冻结，已有冻结仍展示、仍参与选路，直到到期或手工解冻。${thresholds}`;
   }
-  const tail = "进页会立即评估一次；命中硬性额度后对应 Key 会被自动冻结（不写回配置的启用开关）。";
+  const tail = "进页会立即评估一次；命中硬性额度或低于 5h/7d 底限时对应 Key 会被自动冻结（不写回配置的启用开关），冻结按内置计时器自动解冻。";
   const seconds = Number(guard?.interval_seconds);
   const every = Number.isFinite(seconds) && seconds > 0 ? `每 ${seconds} 秒` : "定时";
-  return `后台${every}自动检测；${tail}`;
+  return `后台${every}自动检测；${tail}${thresholds}`;
 }
 
 function normalizeInstances(value: unknown): InstanceRow[] {
@@ -194,7 +204,7 @@ function resetInfoFor(
   return accountEntry?.reset_credits ?? null;
 }
 
-function QuotaSection({ account }: { account: CPAAccount }) {
+function QuotaSection({ account, now }: { account: CPAAccount; now: number }) {
   const windows = account.windows ?? [];
   const offset = Number(account.server_time_offset_ms) || 0;
   const groups: Array<{ name: string; windows: CPAQuotaWindow[] }> = [];
@@ -227,11 +237,11 @@ function QuotaSection({ account }: { account: CPAAccount }) {
                 const tone = quotaTone(remaining);
                 const label = window.label || window.window || "额度";
                 return (
-                  <div key={`${window.key ?? label}-${index}`} data-tone={tone} title={quotaTitle(window, offset)}>
+                  <div key={`${window.key ?? label}-${index}`} data-tone={tone} title={quotaTitle(window, offset, now)}>
                     <Meter
                       value={remaining}
                       label={`${label} 剩余额度`}
-                      hint={countdown(window, offset) || (window.source === "passive" ? "CPA 采集" : "现场查询")}
+                      hint={countdown(window, offset, now) || (window.source === "passive" ? "CPA 采集" : "现场查询")}
                       tone={tone}
                       ariaLabel={`${label} 剩余额度`}
                       format={(value) => `${Math.floor(value * 100 + 1e-9)}%`}
@@ -266,7 +276,7 @@ function QuotaSection({ account }: { account: CPAAccount }) {
                   {(value.windows ?? []).map((window, index) => {
                     const remaining = clampPercent(window.remaining);
                     return (
-                      <div key={`${model}-${window.key ?? index}`} title={quotaTitle(window, 0)}>
+                      <div key={`${model}-${window.key ?? index}`} title={quotaTitle(window, 0, now)}>
                         <Meter
                           value={remaining}
                           label={`${model} ${window.label || window.window || "额度"}`}
@@ -318,25 +328,28 @@ function RecentBars({ buckets }: { buckets: CPAAccount["recent_requests"] }) {
 
 interface SubscriptionCardProps {
   entry: CPASubscription;
+  /** 页面级 useNow 的当前时刻，让倒计时随时间前进。 */
+  now: number;
   /** 解冻处理器；null 表示当前不可解冻（只显示冻结信息）。 */
   releasingFreeze: ((freeze: QuotaFreeze) => void) | null;
   /** 正在解冻的 Key（freezeLookupKey 结果），用于只给被点的那把按钮上 loading。 */
   releasingKey: string | null;
 }
 
-function SubscriptionCard({ entry, releasingFreeze, releasingKey }: SubscriptionCardProps) {
+function SubscriptionCard({ entry, now, releasingFreeze, releasingKey }: SubscriptionCardProps) {
   const windows = entry.windows ?? [];
   const freeze = entry.freeze;
   const freezeId = freeze ? freezeLookupKey(freeze.provider_id, freeze.key_name) : "";
   const canRelease = Boolean(freeze?.provider_id && freeze?.key_name && releasingFreeze);
-  const resetCountdown = freeze ? freezeResetCountdown(freeze) : "";
+  const freezeCountdown = freeze ? freezeResetCountdown(freeze, now) : "";
+  const threshold = freeze?.trigger === "threshold";
   return (
     <Panel
       title={entry.vendor || entry.kind || entry.id || "订阅"}
       description={[entry.base_url, entry.account ? `账号 ${entry.account}` : null, entry.plan || entry.tier_id ? `档位 ${[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}` : null].filter(Boolean).join(" · ")}
       actions={(
         <div className="flex flex-wrap items-center gap-2">
-          {freeze ? <Badge tone="critical" dot>额度冻结</Badge> : null}
+          {freeze ? <Badge tone={threshold ? "warn" : "critical"} dot>{freezeTriggerText(freeze)}</Badge> : null}
           <Badge tone="neutral">{entry.key_name ? `${entry.provider_id} · ${entry.key_name}` : entry.provider_id || "订阅"}</Badge>
           {entry.plan || entry.tier_id ? <Badge tone="neutral">{[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}</Badge> : null}
           {entry.ok && entry.observed_at ? <span className="text-[11px] text-ink-3">查询于 {formatDateTime(entry.observed_at)}</span> : null}
@@ -345,9 +358,9 @@ function SubscriptionCard({ entry, releasingFreeze, releasingKey }: Subscription
     >
       {freeze ? (
         <Banner
-          tone="critical"
+          tone={threshold ? "warn" : "critical"}
           className="mb-2"
-          title="此 Key 已被自动冻结"
+          title={threshold ? "此 Key 已被提前冻结" : "此 Key 已被自动冻结"}
           action={canRelease && freeze ? (
             <Button
               size="sm"
@@ -361,7 +374,7 @@ function SubscriptionCard({ entry, releasingFreeze, releasingKey }: Subscription
         >
           <div className="space-y-0.5">
             <p>{freezeReasonText(freeze)}</p>
-            {resetCountdown ? <p>{resetCountdown}</p> : null}
+            {freezeCountdown ? <p>{freezeCountdown}</p> : null}
           </div>
         </Banner>
       ) : null}
@@ -370,11 +383,11 @@ function SubscriptionCard({ entry, releasingFreeze, releasingKey }: Subscription
           {windows.map((window, index) => {
             const remaining = clampPercent(window.remaining);
             return (
-              <div key={`${window.key ?? index}`} title={quotaTitle(window, 0)}>
+              <div key={`${window.key ?? index}`} title={quotaTitle(window, 0, now)}>
                 <Meter
                   value={remaining}
                   label={`${window.label || window.window || "额度"} 剩余额度`}
-                  hint={countdown(window, 0) || "上游返回的剩余额度"}
+                  hint={countdown(window, 0, now) || "上游返回的剩余额度"}
                   tone={quotaTone(remaining)}
                   format={(value) => `${Math.floor(value * 100 + 1e-9)}%`}
                 />
@@ -412,6 +425,8 @@ export default function AccountsPage() {
     refetchOnWindowFocus: false,
   });
   const client = useQueryClient();
+  // 页面刻意不轮询：倒计时只重算本地时间；到最近一条 expires_at 才 refetch 一次。
+  const now = useNow();
   const [keyword, setKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -451,6 +466,19 @@ export default function AccountsPage() {
     return [...fallback.values()];
   }, [report]);
   const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
+  // 顶层 freezes 已包含全部冻结；订阅条目里的 freeze 再合并一次，兼容顶层数组暂缺的
+  // 过渡版本。expires_at 是唯一会触发自动刷新的时间，不能用 reset_at 代替。
+  const freezeDeadlines = useMemo(() => {
+    const list = [
+      ...(report?.freezes ?? []),
+      ...(report?.subscriptions ?? []).flatMap((entry) => entry.freeze ? [entry.freeze] : []),
+    ];
+    return list.map((freeze) => freeze.expires_at);
+  }, [report?.freezes, report?.subscriptions]);
+  useDeadlineRefresh(freezeDeadlines, () => {
+    // 到点徽标必须自己消失：不依赖用户点刷新，也不改成全局轮询。
+    void accountsQuery.refetch();
+  });
   const guard = report?.guard;
   const accounts = useMemo(() => instances.flatMap((instance) => instance.accounts ?? []), [instances]);
   const readableInstances = instances.filter((instance) => instance.ok !== false);
@@ -725,6 +753,7 @@ export default function AccountsPage() {
             <SubscriptionCard
               key={entry.id || `${entry.provider_id}-${entry.key_name}`}
               entry={entry}
+              now={now}
               releasingFreeze={releaseFreeze}
               releasingKey={releasing}
             />
@@ -739,9 +768,11 @@ export default function AccountsPage() {
               return lowest !== null && lowest <= 0.2;
             }).length;
             const offset = (instance.accounts ?? []).find((account) => account.server_time_offset_ms !== undefined)?.server_time_offset_ms;
-            // 实例级联动：全部启用账号都硬性耗尽时，指向该实例的每一把 Key 都会被冻结。
+            // 实例级联动：全部启用账号都硬性耗尽或都低于底限时，指向该实例的每一把 Key 都会被冻结。
             const frozenKeys = instance.frozen_keys ?? [];
             const linkedProviders = instance.linked_providers ?? [];
+            const allExhausted = Boolean(instance.all_accounts_exhausted);
+            const allBelowFloor = Boolean(instance.all_accounts_below_floor);
             return (
               <Panel
                 key={instance.id}
@@ -773,23 +804,25 @@ export default function AccountsPage() {
                   <div className="p-4"><Banner tone="critical">{instance.error}</Banner></div>
                 ) : (
                   <>
-                    {instance.all_accounts_exhausted ? (
+                    {allExhausted || allBelowFloor ? (
                       <div className="border-b border-rule px-4 py-3">
                         <Banner
-                          tone="critical"
-                          title={`实例内全部账号额度均已用尽，已冻结指向该实例的 ${frozenKeys.length} 把 Key`}
+                          tone={allExhausted ? "critical" : "warn"}
+                          title={allExhausted
+                            ? `实例内全部账号额度均已用尽，已冻结指向该实例的 ${frozenKeys.length} 把 Key`
+                            : `实例内全部账号额度均已低于冻结底限，已冻结指向该实例的 ${frozenKeys.length} 把 Key`}
                         >
                           {frozenKeys.length ? (
                             <ul className="space-y-1.5">
                               {frozenKeys.map((item) => {
                                 const id = freezeLookupKey(item.provider_id, item.key_name);
                                 const detail = freezeIndex.get(id);
-                                const resetCountdown = detail ? freezeResetCountdown(detail) : "";
+                                const freezeCountdown = detail ? freezeResetCountdown(detail, now) : "";
                                 return (
                                   <li key={id} className="flex flex-wrap items-center justify-between gap-2">
                                     <span className="min-w-0 truncate font-mono text-[11px]" title={detail ? freezeReasonText(detail) : undefined}>
                                       {item.provider_id} · {item.key_name}
-                                      {resetCountdown ? <span className="ml-1.5 font-sans text-ink-3">（{resetCountdown}）</span> : null}
+                                      {freezeCountdown ? <span className="ml-1.5 font-sans text-ink-3">（{freezeCountdown}）</span> : null}
                                     </span>
                                     <Button
                                       size="sm"
@@ -844,6 +877,11 @@ export default function AccountsPage() {
                                         <Badge tone="critical">额度用尽</Badge>
                                       </span>
                                     ) : null}
+                                    {account.quota_below_floor ? (
+                                      <span title="该账号至少有一个窗口的剩余额度低于配置的 5h/7d 底限；不是配置里的停用">
+                                        <Badge tone="warn">低于底限</Badge>
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </div>
                               </div>
@@ -867,7 +905,7 @@ export default function AccountsPage() {
                                 ) : null}
                               </div>
 
-                              <QuotaSection account={account} />
+                              <QuotaSection account={account} now={now} />
 
                               <div className="space-y-1">
                                 <div className="flex items-center justify-between text-meta">

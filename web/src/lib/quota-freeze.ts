@@ -9,6 +9,8 @@ import { formatDateTime } from "./format";
 import { queryKeys } from "./query-keys";
 import type { QuotaFreeze } from "./types";
 
+export { useDeadlineRefresh, useNow } from "./hooks/useNow";
+
 // 供应商 ID 与 Key 名都可能含分隔符，用 NUL 拼索引键，避免 "a|b" + "c" 与 "a" + "b|c" 撞车。
 const SEPARATOR = "\u0000";
 
@@ -28,23 +30,29 @@ export function indexQuotaFreezes(freezes: QuotaFreeze[] | null | undefined): Ma
 
 /** 界面直接显示的人话原因；后端没给时退回一句兜底文案，不留空白。 */
 export function freezeReasonText(freeze: QuotaFreeze): string {
-  return freeze.reason?.trim() || `${freeze.vendor || freeze.provider_id} 的额度窗口已耗尽`;
+  const reason = freeze.reason?.trim();
+  if (reason) return reason;
+  const target = freeze.vendor || freeze.provider_id;
+  return freeze.trigger === "threshold" ? `${target} 的额度低于冻结底限` : `${target} 的额度窗口已耗尽`;
 }
 
 /**
- * 重置倒计时。优先用窗口重置时间 reset_at；没有就退回冻结的兜底到期时间 expires_at
- * （后端拿不到 reset_at 时按 now + 10 分钟到期），两者都没有时返回空串。
+ * 冻结倒计时。expires_at 是后端内置计时器的解冻时刻，是唯一主口径；reset_at 只是
+ * 额度窗口刷新时间，仅在没有 expires_at 的旧数据里兜底，避免把「窗口重置」误当成
+ * 「冻结一定会在这时解除」。
  */
 export function freezeResetCountdown(freeze: QuotaFreeze, now: number = Date.now()): string {
-  const reset = Date.parse(String(freeze.reset_at ?? ""));
-  if (Number.isFinite(reset)) return countdownText(reset - now, "重置");
   const expires = Date.parse(String(freeze.expires_at ?? ""));
   if (Number.isFinite(expires)) return countdownText(expires - now, "自动解冻");
+  const reset = Date.parse(String(freeze.reset_at ?? ""));
+  if (Number.isFinite(reset)) return countdownText(reset - now, "重置");
   return "";
 }
 
 function countdownText(remainingMs: number, verb: "重置" | "自动解冻"): string {
-  if (remainingMs <= 0) return verb === "重置" ? "即将重置" : "即将自动解冻";
+  // 到点时后端正在清理冻结；这一瞬间不能继续显示「即将自动解冻」，否则用户会
+  // 以为还要再等一轮。旧数据只有 reset_at 时也按冻结正在解除处理。
+  if (remainingMs <= 0) return "正在自动解冻…";
   // 刚过一秒也显示「1 分钟后」：写「0 分钟后」等于没有信息。
   const minutes = Math.max(1, Math.round(remainingMs / 60000));
   if (minutes < 60) return `${minutes} 分钟后${verb}`;
@@ -53,14 +61,19 @@ function countdownText(remainingMs: number, verb: "重置" | "自动解冻"): st
   return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时后${verb}`;
 }
 
-/** 窗口重置的绝对时刻（tooltip 用）；没有或解析不出来时返回空串。 */
+/** trigger=threshold 表示低于配置底限的提前冻结；缺省按硬性耗尽处理。 */
+export function freezeTriggerText(freeze: QuotaFreeze): "提前冻结" | "额度冻结" {
+  return freeze.trigger === "threshold" ? "提前冻结" : "额度冻结";
+}
+
+/** 窗口刷新的绝对时刻（tooltip 用）；没有或解析不出来时返回空串。 */
 export function freezeResetAtText(freeze: QuotaFreeze): string {
   if (!freeze.reset_at) return "";
   const text = formatDateTime(freeze.reset_at);
   return text === "-" ? "" : text;
 }
 
-/** 兜底到期时刻（自动解冻）；没有时返回空串。 */
+/** 内置计时器的绝对解冻时刻；没有时返回空串。 */
 export function freezeExpiresAtText(freeze: QuotaFreeze): string {
   if (!freeze.expires_at) return "";
   const text = formatDateTime(freeze.expires_at);

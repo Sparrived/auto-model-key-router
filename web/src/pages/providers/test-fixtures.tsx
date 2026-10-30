@@ -219,13 +219,19 @@ export function createFakeBackend(seed: Partial<FakeState> = {}) {
     }
 
     if (path === "/api/quota-freezes" && method === "GET") {
+      // 真实后端按内置计时器懒惰清理到期冻结；假后端也过滤一次，才能验收
+      // 「到点 refetch 后徽标自己消失」。
+      const now = Date.now();
       return response({
         fetched_at: "2026-10-24T17:00:00+08:00",
         enabled: true,
         interval_seconds: 60,
         last_evaluated_at: "2026-10-24T17:00:00+08:00",
         last_error: "",
-        freezes: clone(state.freezes),
+        freezes: clone(state.freezes).filter((freeze) => {
+          const expires = Date.parse(String(freeze.expires_at ?? ""));
+          return !Number.isFinite(expires) || expires > now;
+        }),
       });
     }
     const unfreeze = path.match(/^\/api\/quota-freezes\/([^/]+)\/([^/]+)$/);

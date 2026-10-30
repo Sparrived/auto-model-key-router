@@ -240,7 +240,7 @@ describe("账号资源页", () => {
     const resetAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
     const subscriptionReason = "本月窗口已用尽（剩余 0%），额度重置后自动解除";
 
-    function frozenSubscription() {
+    function frozenSubscription(freezeOverrides: Record<string, unknown> = {}) {
       return {
         ...report.subscriptions[0],
         freeze: {
@@ -251,18 +251,27 @@ describe("账号资源页", () => {
           window_label: "本月",
           remaining: 0,
           status: "rejected",
+          trigger: "hard",
           reset_at: resetAt,
           expires_at: resetAt,
           reason: subscriptionReason,
+          ...freezeOverrides,
         },
       };
     }
 
-    function frozenSubscriptionReport() {
-      const subscription = frozenSubscription();
+    function frozenSubscriptionReport(freezeOverrides: Record<string, unknown> = {}) {
+      const subscription = frozenSubscription(freezeOverrides);
       return {
         ...report,
-        guard: { enabled: true, interval_seconds: 60, last_evaluated_at: "2026-10-24T17:00:00+08:00", last_error: "" },
+        guard: {
+          enabled: true,
+          interval_seconds: 60,
+          threshold_5h: 0.1,
+          threshold_7d: 0,
+          last_evaluated_at: "2026-10-24T17:00:00+08:00",
+          last_error: "",
+        },
         freezes: [subscription.freeze],
         subscriptions: [subscription],
       };
@@ -303,15 +312,16 @@ describe("账号资源页", () => {
       };
     }
 
-    it("订阅冻结显示徽标、原因与重置倒计时，解冻后同时失效账号资源与冻结列表", async () => {
+    it("订阅冻结显示徽标、原因与自动解冻倒计时，解冻后同时失效账号资源与冻结列表", async () => {
       const user = userEvent.setup();
       const calls = installFetch({ reports: [frozenSubscriptionReport(), clearedSubscriptionReport()] });
       const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
       const invalidate = vi.spyOn(client, "invalidateQueries");
       renderPage(client);
 
-      // 页头说明按后端给的巡检间隔写出来（不从配置猜）。
+      // 页头说明按后端给的巡检间隔与底限写出来（不从配置猜）。
       expect(await screen.findByText(/后台每 60 秒自动检测/)).toBeInTheDocument();
+      expect(screen.getByText(/提前冻结底限：5h 10%、7d 未启用/)).toBeInTheDocument();
 
       const panel = (await screen.findByRole("heading", { name: "OpenCode Go" })).closest("section") as HTMLElement;
       expect(within(panel).getByText("额度冻结")).toBeInTheDocument();
@@ -336,6 +346,97 @@ describe("账号资源页", () => {
         JSON.stringify(queryKeys.quotaFreezes()),
       ]));
       expect(await screen.findByText(/已解除 opencode · team 的额度冻结/)).toBeInTheDocument();
+    });
+
+    it("threshold 冻结显示提前冻结徽标与文案，倒计时仍以自动解冻为准", async () => {
+      installFetch({
+        report: frozenSubscriptionReport({
+          trigger: "threshold",
+          threshold: 0.05,
+          remaining: 0.03,
+          reset_at: new Date(Date.now() + 46 * 60_000).toISOString(),
+          expires_at: new Date(Date.now() + 2 * 60_000).toISOString(),
+        }),
+      });
+      renderPage();
+
+      const panel = (await screen.findByRole("heading", { name: "OpenCode Go" })).closest("section") as HTMLElement;
+      expect(within(panel).getByText("提前冻结")).toBeInTheDocument();
+      expect(within(panel).queryByText("额度冻结")).not.toBeInTheDocument();
+      expect(within(panel).getByText("此 Key 已被提前冻结")).toBeInTheDocument();
+      // reset_at 更晚，但倒计时必须跟 expires_at 走。
+      expect(within(panel).getByText(/2 分钟后自动解冻/)).toBeInTheDocument();
+      expect(within(panel).queryByText(/46 分钟/)).not.toBeInTheDocument();
+    });
+
+    it("冻结到 expires_at 自动重新拉取账号资源，徽标不需要手动刷新就消失", async () => {
+      const expiresAt = new Date(Date.now() + 500).toISOString();
+      const calls = installFetch({
+        reports: [
+          frozenSubscriptionReport({ expires_at: expiresAt }),
+          clearedSubscriptionReport(),
+        ],
+      });
+      renderPage();
+
+      expect(await screen.findByText("此 Key 已被自动冻结")).toBeInTheDocument();
+      expect(calls.filter((call) => call.path === "/api/cpa-accounts").length).toBeGreaterThanOrEqual(1);
+
+      // 页面不轮询，只有 expires_at 到点的那一次 refetch；测试用很短的到期时间代替
+      // fake timers，避免 React Query 的调度也被假时钟冻结。
+      await waitFor(
+        () => expect(calls.filter((call) => call.path === "/api/cpa-accounts")).toHaveLength(2),
+        { timeout: 3000 },
+      );
+      await waitFor(() => expect(screen.queryByText("此 Key 已被自动冻结")).not.toBeInTheDocument());
+      expect(screen.queryByText("提前冻结")).not.toBeInTheDocument();
+    });
+
+    it("账号低于底限时显示 warn 徽标，实例级横幅说明全部账号低于冻结底限", async () => {
+      const base = report.instances[0];
+      const belowFloorFreeze = {
+        provider_id: "cpa-main",
+        key_name: "key-a",
+        scope: "cpa_instance",
+        instance_id: "cpa-main",
+        window_label: "5 小时",
+        remaining: 0.03,
+        status: "allowed",
+        trigger: "threshold",
+        threshold: 0.05,
+        expires_at: resetAt,
+        reason: "5 小时窗口剩余 3%，低于 5% 底限",
+      };
+      installFetch({
+        report: {
+          ...report,
+          guard: { enabled: true, interval_seconds: 60, threshold_5h: 0.05, threshold_7d: 0 },
+          freezes: [belowFloorFreeze],
+          instances: [
+            {
+              ...base,
+              all_accounts_exhausted: false,
+              all_accounts_below_floor: true,
+              frozen_keys: [{ provider_id: "cpa-main", key_name: "key-a" }],
+              accounts: base.accounts.map((account) => ({ ...account, quota_below_floor: true })),
+            },
+            report.instances[1],
+          ],
+        },
+      });
+      renderPage();
+
+      expect(await screen.findByText(
+        "实例内全部账号额度均已低于冻结底限，已冻结指向该实例的 1 把 Key",
+      )).toBeInTheDocument();
+      expect(screen.getAllByText("低于底限")).toHaveLength(2);
+      expect(screen.queryByText("额度用尽")).not.toBeInTheDocument();
+
+      const banner = screen.getByText(
+        "实例内全部账号额度均已低于冻结底限，已冻结指向该实例的 1 把 Key",
+      ).closest('[role="status"]') as HTMLElement;
+      expect(within(banner).getByText(/cpa-main · key-a/)).toBeInTheDocument();
+      expect(within(banner).getByRole("button", { name: "解冻" })).toBeInTheDocument();
     });
 
     it("实例内账号全部耗尽时显示联动横幅，逐把解冻并刷新", async () => {

@@ -609,10 +609,14 @@ export interface QuotaFreeze {
   remaining?: number;
   /** 触发时上游给的窗口状态词（rejected / exceeded…）。 */
   status?: string;
-  /** 窗口重置时间；缺省表示未知。 */
+  /** 冻结触发方式：硬性耗尽或低于配置底限；旧后端缺省按 hard 处理。 */
+  trigger?: "hard" | "threshold";
+  /** trigger=threshold 时命中的底限（0..1）。 */
+  threshold?: number;
+  /** 额度窗口刷新时间；只用于说明，不作为自动解冻倒计时。 */
   reset_at?: string;
   frozen_at?: string;
-  /** 到期自动解冻时刻。 */
+  /** 内置计时器的自动解冻时刻（首次写入后只可提前、不会延后）；倒计时以此为准。 */
   expires_at?: string;
   /** 一句人话，界面直接显示。 */
   reason?: string;
@@ -634,6 +638,10 @@ export interface QuotaFreezesResponse {
 export interface QuotaGuardStatus {
   enabled?: boolean;
   interval_seconds?: number;
+  /** 5h 窗口的提前冻结底限（0..1）；0 表示不按底限提前冻结。 */
+  threshold_5h?: number;
+  /** 7d 窗口的提前冻结底限（0..1）；0 表示不按底限提前冻结。 */
+  threshold_7d?: number;
   last_evaluated_at?: string;
   last_error?: string;
   [key: string]: unknown;
@@ -651,6 +659,8 @@ export interface QuotaFreezeReleaseResponse {
 export interface CPAAccount {
   /** 该账号是否有硬性耗尽的额度窗口。 */
   quota_exhausted?: boolean;
+  /** 该账号是否有低于 5h/7d 配置底限的额度窗口。 */
+  quota_below_floor?: boolean;
   auth_index?: string | number;
   name?: string;
   label?: string;
@@ -689,6 +699,8 @@ export interface CPAAccountInstance {
   linked_providers?: string[];
   /** 实例内启用账号是否全部硬性耗尽。 */
   all_accounts_exhausted?: boolean;
+  /** 实例内启用账号是否全部低于配置的 5h/7d 底限；可与 all_accounts_exhausted 同为 true。 */
+  all_accounts_below_floor?: boolean;
   /** 该实例关联供应商下当前被冻结的 Key。 */
   frozen_keys?: Array<{ provider_id: string; key_name: string }>;
   [key: string]: unknown;

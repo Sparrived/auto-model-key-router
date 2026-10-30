@@ -12,6 +12,7 @@ import {
   freezeReasonText,
   freezeResetAtText,
   freezeResetCountdown,
+  freezeTriggerText,
 } from "@/lib/quota-freeze";
 import type { Provider, ProviderKey, ProvidersResponse, QuotaFreeze } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
@@ -34,6 +35,8 @@ interface KeysTableProps {
   onOpenModels: (key: ProviderKey) => void;
   /** 「供应商 + Key → 冻结记录」索引；缺省表示没有冻结数据（测试与旧调用方兼容）。 */
   freezes?: Map<string, QuotaFreeze>;
+  /** 页面级 useNow 的当前时刻；冻结 tooltip 与行内倒计时都按它重算。 */
+  now: number;
   /** 解除一把 Key 的冻结；由页面负责调接口、刷新与提示。 */
   onReleaseFreeze?: (freeze: QuotaFreeze) => void;
 }
@@ -56,23 +59,26 @@ function concurrencyBadge(value: number | null | undefined) {
   return <Badge tone={limited ? "good" : "neutral"}>{limited ? `并发 ${limit}` : "并发不限"}</Badge>;
 }
 
-// 冻结 tooltip：原因 + 重置/自动解冻时间。绝对时刻与倒计时都给，扫一眼不用自己换算。
-function FreezeTooltip({ freeze }: { freeze: QuotaFreeze }) {
-  const countdown = freezeResetCountdown(freeze);
+// 冻结 tooltip：原因 + 自动解冻倒计时与绝对时刻。expires_at 是内置计时器的解冻点；
+// 只有旧数据缺 expires_at 时才退回 reset_at 的窗口刷新倒计时。
+function FreezeTooltip({ freeze, now }: { freeze: QuotaFreeze; now: number }) {
+  const countdown = freezeResetCountdown(freeze, now);
   const resetAt = freezeResetAtText(freeze);
   const expiresAt = freezeExpiresAtText(freeze);
   return (
     <div className="space-y-0.5">
       <div>{freezeReasonText(freeze)}</div>
-      {countdown ? <div>重置倒计时：{countdown}</div> : null}
-      {resetAt ? <div>窗口重置：{resetAt}</div> : null}
-      {expiresAt ? <div>最迟 {expiresAt} 自动解冻</div> : null}
+      {countdown ? (
+        <div>{countdown === "正在自动解冻…" ? countdown : `${expiresAt ? "自动解冻倒计时" : "窗口重置倒计时"}：${countdown}`}</div>
+      ) : null}
+      {expiresAt ? <div>自动解冻时刻：{expiresAt}</div> : null}
+      {resetAt ? <div>窗口刷新：{resetAt}</div> : null}
       <div>冻结不会改动启用开关</div>
     </div>
   );
 }
 
-export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenModels, freezes, onReleaseFreeze }: KeysTableProps) {
+export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenModels, freezes, now, onReleaseFreeze }: KeysTableProps) {
   const client = useQueryClient();
   const impactConfirm = useImpactConfirm();
   const [editing, setEditing] = useState<string | null>(null);
@@ -209,7 +215,7 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <span className="truncate font-mono text-dense font-medium text-ink">{key.name}</span>
                       {freeze ? (
-                        <Tooltip content={<FreezeTooltip freeze={freeze} />}>
+                        <Tooltip content={<FreezeTooltip freeze={freeze} now={now} />}>
                           <span
                             tabIndex={0}
                             className="inline-flex"
@@ -217,7 +223,9 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
                             onClick={(event) => event.stopPropagation()}
                             onKeyDown={(event) => event.stopPropagation()}
                           >
-                            <Badge tone="critical" dot>额度冻结</Badge>
+                            <Badge tone={freeze.trigger === "threshold" ? "warn" : "critical"} dot>
+                              {freezeTriggerText(freeze)}
+                            </Badge>
                           </span>
                         </Tooltip>
                       ) : null}

@@ -92,6 +92,7 @@ describe("Key 行内编辑与删除", () => {
         provider={backend.state.providers[0]}
         revision={backend.state.revision}
         boundModels={new Map()}
+        now={Date.now()}
         onRefresh={async () => backend.snapshot()}
         onOpenModels={vi.fn()}
       />,
@@ -115,6 +116,7 @@ describe("Key 行内编辑与删除", () => {
         provider={backend.state.providers[0]}
         revision={backend.state.revision}
         boundModels={new Map([["openai|main", ["gpt-4o-mini", "gpt-4o", "o3-mini"]]])}
+        now={Date.now()}
         onRefresh={async () => backend.snapshot()}
         onOpenModels={vi.fn()}
       />,
@@ -140,6 +142,7 @@ describe("Key 行内编辑与删除", () => {
         provider={backend.state.providers[0]}
         revision={backend.state.revision}
         boundModels={new Map()}
+        now={Date.now()}
         onRefresh={async () => backend.snapshot()}
         onOpenModels={vi.fn()}
       />,
@@ -299,6 +302,7 @@ describe("Key 行的额度冻结", () => {
         revision={backend.state.revision}
         boundModels={new Map()}
         freezes={new Map([[freezeLookupKey("openai", "main"), freeze]])}
+        now={Date.now()}
         onReleaseFreeze={onReleaseFreeze}
         onRefresh={async () => backend.snapshot()}
         onOpenModels={vi.fn()}
@@ -312,9 +316,9 @@ describe("Key 行的额度冻结", () => {
 
     await user.hover(screen.getByText("额度冻结"));
     expect(await screen.findByText("5 小时窗口已用尽（剩余 0%），重置后自动解冻")).toBeInTheDocument();
-    expect(screen.getByText(/^重置倒计时：/)).toBeInTheDocument();
-    expect(screen.getByText(/^窗口重置：/)).toBeInTheDocument();
-    expect(screen.getByText(/^最迟 .+ 自动解冻$/)).toBeInTheDocument();
+    expect(screen.getByText(/^自动解冻倒计时：.+自动解冻$/)).toBeInTheDocument();
+    expect(screen.getByText(/^自动解冻时刻：/)).toBeInTheDocument();
+    expect(screen.getByText(/^窗口刷新：/)).toBeInTheDocument();
     expect(screen.getByText("冻结不会改动启用开关")).toBeInTheDocument();
 
     // 未冻结的 Key 菜单里没有「解除冻结」。
@@ -329,6 +333,35 @@ describe("Key 行的额度冻结", () => {
       key_name: "main",
     }));
   });
+
+  it("threshold 冻结显示提前冻结徽标，tooltip 仍是自动解冻口径", async () => {
+    const backend = createFakeBackend();
+    installBackend(backend);
+    const user = userEvent.setup();
+    const freeze = {
+      ...freezeFor("openai", "main"),
+      trigger: "threshold" as const,
+      threshold: 0.05,
+      remaining: 0.03,
+    };
+    renderWithProviders(
+      <KeysTable
+        provider={backend.state.providers[0]}
+        revision={backend.state.revision}
+        boundModels={new Map()}
+        freezes={new Map([[freezeLookupKey("openai", "main"), freeze]])}
+        now={Date.now()}
+        onRefresh={async () => backend.snapshot()}
+        onOpenModels={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("提前冻结")).toBeInTheDocument();
+    expect(screen.queryByText("额度冻结")).not.toBeInTheDocument();
+    await user.hover(screen.getByText("提前冻结"));
+    expect(await screen.findByText(/^自动解冻倒计时：/)).toBeInTheDocument();
+    expect(screen.getByText(/^自动解冻时刻：/)).toBeInTheDocument();
+  });
 });
 
 describe("供应商页的额度冻结", () => {
@@ -340,7 +373,7 @@ describe("供应商页的额度冻结", () => {
     renderWithProviders(<ProvidersPage />);
 
     expect(await screen.findByText(
-      "1 把上游 Key 因额度耗尽被自动冻结（不影响启用开关）",
+      "1 把上游 Key 因额度耗尽或低于底限被自动冻结（不影响启用开关）",
     )).toBeInTheDocument();
     expect(await screen.findByText("额度冻结")).toBeInTheDocument();
 
@@ -351,7 +384,7 @@ describe("供应商页的额度冻结", () => {
     ).toHaveLength(1));
     // 解冻后冻结列表重新读取（页面提示与 Key 行徽标一起消失），供应商也重新读一次。
     await waitFor(() => expect(screen.queryByText(
-      "1 把上游 Key 因额度耗尽被自动冻结（不影响启用开关）",
+      "1 把上游 Key 因额度耗尽或低于底限被自动冻结（不影响启用开关）",
     )).not.toBeInTheDocument());
     await waitFor(() => expect(
       backend.calls.filter((call) => call.method === "GET" && call.path === "/api/quota-freezes").length,
@@ -359,6 +392,28 @@ describe("供应商页的额度冻结", () => {
     await waitFor(() => expect(
       backend.calls.filter((call) => call.method === "GET" && call.path === "/api/providers").length,
     ).toBeGreaterThanOrEqual(2));
+  });
+
+  it("冻结到 expires_at 自动刷新冻结列表，徽标与页面提示自己消失", async () => {
+    window.location.hash = "#/providers?id=openai";
+    const freeze = {
+      ...freezeFor("openai", "main"),
+      expires_at: new Date(Date.now() + 500).toISOString(),
+    };
+    const backend = createFakeBackend({ freezes: [freeze] });
+    installBackend(backend);
+    renderWithProviders(<ProvidersPage />);
+
+    expect(await screen.findByText("额度冻结")).toBeInTheDocument();
+    // 页面不轮询：第二次 GET 只能来自 expires_at 到点的一次性 timer。
+    await waitFor(
+      () => expect(
+        backend.calls.filter((call) => call.method === "GET" && call.path === "/api/quota-freezes").length,
+      ).toBeGreaterThanOrEqual(2),
+      { timeout: 3000 },
+    );
+    await waitFor(() => expect(screen.queryByText("额度冻结")).not.toBeInTheDocument());
+    expect(screen.queryByText(/把上游 Key 因额度耗尽或低于底限被自动冻结/)).not.toBeInTheDocument();
   });
 
   it("提示可以跳到账号资源页", async () => {
@@ -390,7 +445,7 @@ describe("供应商页的额度冻结", () => {
     renderWithProviders(<ProvidersPage />);
 
     expect(await screen.findByRole("heading", { name: "openai" })).toBeInTheDocument();
-    expect(screen.queryByText(/把上游 Key 因额度耗尽被自动冻结/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/把上游 Key 因额度耗尽或低于底限被自动冻结/)).not.toBeInTheDocument();
     expect(screen.queryByText("额度冻结")).not.toBeInTheDocument();
   });
 });

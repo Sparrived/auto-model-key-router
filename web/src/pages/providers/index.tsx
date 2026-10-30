@@ -5,7 +5,13 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { errorText, formatDateTime, shortRevision } from "@/lib/format";
 import { writeWithImpactConfirm, type Impact } from "@/lib/model-impact";
-import { freezeLookupKey, indexQuotaFreezes, invalidateFreezeViews } from "@/lib/quota-freeze";
+import {
+  freezeLookupKey,
+  indexQuotaFreezes,
+  invalidateFreezeViews,
+  useDeadlineRefresh,
+  useNow,
+} from "@/lib/quota-freeze";
 import { queryKeys } from "@/lib/query-keys";
 import { ProviderIcon } from "@/lib/brand-icons";
 import type { Provider, ProviderKey, ProvidersResponse, QuotaFreeze } from "@/lib/types";
@@ -61,6 +67,16 @@ export default function ProvidersPage() {
   });
   const freezes = useMemo(() => freezesQuery.data?.freezes ?? [], [freezesQuery.data]);
   const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
+  // 页面不轮询：倒计时本地重算，只有最近一条 expires_at 到点才拉一次冻结列表，
+  // 让 Key 行徽标与顶部提示自己消失。
+  const now = useNow();
+  const freezeDeadlines = useMemo(
+    () => freezes.map((freeze) => freeze.expires_at),
+    [freezes],
+  );
+  useDeadlineRefresh(freezeDeadlines, () => {
+    void freezesQuery.refetch();
+  });
   // 同一时刻只放行一次解冻，避免连点发出多个 DELETE（第二次会 404）。
   const releasingRef = useRef<string | null>(null);
 
@@ -181,14 +197,14 @@ export default function ProvidersPage() {
       {freezes.length ? (
         <Banner
           tone="warn"
-          title={`${freezes.length} 把上游 Key 因额度耗尽被自动冻结（不影响启用开关）`}
+          title={`${freezes.length} 把上游 Key 因额度耗尽或低于底限被自动冻结（不影响启用开关）`}
           action={(
             <Button size="sm" variant="secondary" onClick={() => navigate("accounts")}>
               前往账号资源
             </Button>
           )}
         >
-          冻结只影响 AMKR 的选路，不会改动配置里的启用状态；额度窗口重置或观测到有余额后会自动解除。
+          冻结只影响 AMKR 的选路，不会改动配置里的启用状态；内置计时器到点会自动解除，不需要手动刷新。
         </Banner>
       ) : null}
 
@@ -304,6 +320,7 @@ export default function ProvidersPage() {
                   revision={revision}
                   boundModels={boundModels}
                   freezes={freezeIndex}
+                  now={now}
                   onReleaseFreeze={(freeze) => void releaseFreeze(freeze)}
                   onRefresh={refreshProviders}
                   onOpenModels={(key: ProviderKey) => setBindingTarget({ provider: selected.id, key: key.name })}
