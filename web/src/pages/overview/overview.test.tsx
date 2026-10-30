@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __setIndexForTest } from "@/lib/pricing";
+import { ConfirmProvider } from "@/components/ui/ConfirmProvider";
 import type { FilteredMetricsResponse, RequestItem, StatusMonitorResponse, UsageBreakdownResponse } from "@/lib/types";
 import OverviewPage from "./index";
 
@@ -97,8 +98,9 @@ function breakdownResponse(): UsageBreakdownResponse {
   } as unknown as UsageBreakdownResponse;
 }
 
-function installFetch(options: { pricing?: boolean } = {}): Call[] {
+function installFetch(options: { pricing?: boolean; streamItems?: RequestItem[] } = {}): Call[] {
   const calls: Call[] = [];
+  const streamItems = options.streamItems ?? STREAM_ITEMS;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     calls.push({ path: url.pathname, search: url.searchParams });
@@ -113,8 +115,8 @@ function installFetch(options: { pricing?: boolean } = {}): Call[] {
     if (url.pathname === "/ui/filtered-metrics.json") {
       const limit = Number(url.searchParams.get("limit") || 0);
       const hours = Number(url.searchParams.get("hours") || 0);
-      if (limit === 200) return json({ ...streamResponse(STREAM_ITEMS.filter((item) => !item.success)), snapshot: { ...mainResponse().snapshot, total: stats({ requests: 2, successes: 0, failures: 2 }) } });
-      if (limit === 40) return json(streamResponse());
+      if (limit === 200) return json({ ...streamResponse(streamItems.filter((item) => !item.success)), snapshot: { ...mainResponse().snapshot, total: stats({ requests: 2, successes: 0, failures: 2 }) } });
+      if (limit === 40) return json(streamResponse(streamItems));
       if (hours === 1) return json(mainResponse());
       return json(mainResponse());
     }
@@ -148,7 +150,7 @@ function json(body: unknown, status = 200): Response {
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  return render(<QueryClientProvider client={client}><OverviewPage /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><ConfirmProvider><OverviewPage /></ConfirmProvider></QueryClientProvider>);
 }
 
 beforeEach(() => {
@@ -207,5 +209,42 @@ describe("概览页", () => {
     await waitFor(() => expect(within(list).getAllByRole("button")).toHaveLength(2));
     expect(screen.getByText("失败 · HTTP 401")).toBeInTheDocument();
     expect(screen.queryByText("成功 · HTTP 200")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { label: "CPA 流式显式读为零", stream: true, cacheRead: 0, cached: 41798, compact: "41.8K", exact: "41,798" },
+    { label: "CPA 非流式显式读为零", stream: false, cacheRead: 0, cached: 41798, compact: "41.8K", exact: "41,798" },
+    { label: "显式读缺失时回退", stream: true, cacheRead: undefined, cached: 41798, compact: "41.8K", exact: "41,798" },
+    { label: "正数显式读优先且不叠加", stream: true, cacheRead: 2048, cached: 41798, compact: "2K", exact: "2,048" },
+    { label: "真实零值不当作缺失", stream: true, cacheRead: 0, cached: 0, compact: "0", exact: "0" },
+    { label: "两字段缺失保留横线", stream: true, cacheRead: undefined, cached: undefined, compact: "-", exact: "-" },
+  ])("缓存读在列表、提示和详情一致：$label", async ({ stream, cacheRead, cached, compact, exact }) => {
+    const item: RequestItem = {
+      id: 152947, requests: 1, created_at: "2026-10-26T10:29:06+08:00",
+      model_id: "gemini-cache-qa", provider_id: "cpa", key_name: "qa",
+      success: true, status_code: 200, stream, api_format: "chat/completions",
+      prompt_tokens: 44068, completion_tokens: 128, total_tokens: 44196,
+      cached_tokens: cached, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: 0,
+    };
+    const original = JSON.parse(JSON.stringify(item));
+    installFetch({ streamItems: [item] });
+    const user = userEvent.setup();
+    renderPage();
+    const list = await screen.findByRole("list", { name: "实时请求流" });
+    const row = within(list).getByRole("button", { name: /gemini-cache-qa/ });
+    // 新行淡入有 220ms 定时更新；等待其结束后再操作，避免把动画异步更新误报为 act 警告。
+    await waitFor(() => expect(row.className).not.toContain("amkr-stream-in"));
+    const cacheLine = within(row).getByText(`缓存读 ${compact} · 缓存写 0`);
+    expect(cacheLine.parentElement?.title.split("\n")).toContain(`缓存读 ${exact}`);
+    expect(within(row).getByText(stream ? "流式" : "非流式")).toBeInTheDocument();
+
+    await user.click(row);
+    const dialog = await screen.findByRole("dialog", { name: "请求详情" });
+    expect(within(dialog).getByText("缓存读 / 写").nextElementSibling?.textContent).toBe(`${exact} / 0`);
+    expect(JSON.parse(dialog.querySelector("pre")!.textContent!)).toEqual(original);
+    await user.click(within(dialog).getByRole("button", { name: "复制 复制" }));
+    expect(JSON.parse(await navigator.clipboard.readText())).toEqual(original);
+    await user.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "请求详情" })).not.toBeInTheDocument());
   });
 });

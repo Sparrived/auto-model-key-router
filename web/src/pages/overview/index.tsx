@@ -210,12 +210,18 @@ function sourceTitle(item: RequestItem): string {
   ].join("\n");
 }
 
+function cacheReadTokens(item: RequestItem): number | null | undefined {
+  // OpenAI / CPA 的缓存命中量记在 cached_tokens，显式缓存读为正时仍优先。
+  const explicit = item.cache_read_input_tokens as number | null | undefined;
+  return explicit != null && explicit > 0 ? explicit : item.cached_tokens ?? explicit;
+}
+
 function tokenTitle(item: RequestItem): string {
   const speed = decodeSpeed(item);
   return [
     `输入 ${formatCount(item.prompt_tokens)}（未缓存 ${formatCount(item.uncached_prompt_tokens as number | undefined)}）`,
     `输出 ${formatCount(item.completion_tokens)}`,
-    `缓存读 ${formatCount(item.cache_read_input_tokens as number | undefined)}`,
+    `缓存读 ${formatCount(cacheReadTokens(item))}`,
     `缓存写 ${formatCount(item.cache_creation_input_tokens as number | undefined)}`,
     `缓存合计 ${formatCount(item.cached_tokens)}`,
     `总计 ${formatCount(item.total_tokens)}`,
@@ -287,7 +293,7 @@ function RequestRow({
         {item.total_tokens ? (
           <>
             <div>输入 {formatCompact(item.prompt_tokens)} · 输出 {formatCompact(item.completion_tokens)}</div>
-            <div className="text-ink-3">缓存读 {formatCompact(item.cache_read_input_tokens as number | undefined)} · 缓存写 {formatCompact(item.cache_creation_input_tokens as number | undefined)}</div>
+            <div className="text-ink-3">缓存读 {formatCompact(cacheReadTokens(item))} · 缓存写 {formatCompact(item.cache_creation_input_tokens as number | undefined)}</div>
             <div className="text-ink-3">合计 {formatCompact(item.total_tokens)} · {speed ? `${formatCompact(speed.tps)} tok/s` : "— tok/s"}</div>
           </>
         ) : <div className="text-ink-3">无 Token 读数</div>}
@@ -363,7 +369,7 @@ function RequestDetailSheet({
         <DetailSection title="Token 与成本">
           <DetailField label="输入" value={formatCount(item.prompt_tokens)} />
           <DetailField label="输出" value={formatCount(item.completion_tokens)} />
-          <DetailField label="缓存读 / 写" value={`${formatCount(item.cache_read_input_tokens as number | undefined)} / ${formatCount(item.cache_creation_input_tokens as number | undefined)}`} />
+          <DetailField label="缓存读 / 写" value={`${formatCount(cacheReadTokens(item))} / ${formatCount(item.cache_creation_input_tokens as number | undefined)}`} />
           <DetailField label="合计" value={formatCount(item.total_tokens)} />
           <DetailField label="生成速度" value={speed ? `${speed.tps.toFixed(1)} tok/s（生成阶段 ${formatDuration(speed.spanMS)}）` : "—"} />
           <DetailField label="估算成本" value={requestCostText(pricingIndex, item)} />
