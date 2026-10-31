@@ -729,3 +729,51 @@ func TestQuotaFreezeThresholdWhitelist(t *testing.T) {
 		t.Fatalf("错误文案应带字段与下标: %v", err)
 	}
 }
+
+// TestQuotaFreezePolicies 钉住账号级冻结策略的解析口径：CPA 实例与订阅条目
+// 各自对应一个稳定 target；阈值/白名单的 null 表示继承，空数组表示明确为空。
+func TestQuotaFreezePolicies(t *testing.T) {
+	base := `{"config_version":4,"local_api_key":"k",` +
+		`"providers":{"p":{"base_url":"https://p.example","keys":{"k":{"api_key":"x"}}}},` +
+		`"models":{"m":{"targets":[{"provider":"p","key":"k","upstream_model":"u"}],` +
+		`"aliases":["alias-m"]}},` +
+		`"cpa_instances":{"jp":{"base_url":"http://127.0.0.1:8317","management_key":"mk"}}`
+	cfg, err := FromDict(mustParse(t, base+`,"quota_freeze_policies":[`+
+		`{"scope":"cpa_instance","target":"jp","enabled":true,`+
+		`"threshold_5h":0.05,"threshold_7d":0.1,"whitelist":["alias-m"]},`+
+		`{"scope":"subscription","target":"p/k","enabled":false,"whitelist":[]}]}`))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(cfg.QuotaFreezePolicies) != 2 {
+		t.Fatalf("策略数量 = %d，期望 2", len(cfg.QuotaFreezePolicies))
+	}
+	first := cfg.QuotaFreezePolicies[0]
+	if first.Scope != "cpa_instance" || first.Target != "jp" || !first.Enabled ||
+		first.Threshold5h == nil || *first.Threshold5h != 0.05 ||
+		first.Threshold7d == nil || *first.Threshold7d != 0.1 ||
+		!first.WhitelistSet || len(first.Whitelist) != 1 || first.Whitelist[0] != "alias-m" {
+		t.Fatalf("CPA 策略解析结果不符: %+v", first)
+	}
+	second := cfg.QuotaFreezePolicies[1]
+	if second.Scope != "subscription" || second.Target != "p/k" || second.Enabled ||
+		second.Threshold5h != nil || second.Threshold7d != nil ||
+		!second.WhitelistSet || len(second.Whitelist) != 0 {
+		t.Fatalf("订阅策略解析结果不符: %+v", second)
+	}
+
+	for name, policy := range map[string]string{
+		"未知 scope":    `{"scope":"nope","target":"jp"}`,
+		"未知实例":        `{"scope":"cpa_instance","target":"missing"}`,
+		"未知订阅 key":    `{"scope":"subscription","target":"p/missing"}`,
+		"非法订阅 target": `{"scope":"subscription","target":"p"}`,
+		"重复 target":   `{"scope":"cpa_instance","target":"jp"},{"scope":"cpa_instance","target":"jp"}`,
+		"未知模型":        `{"scope":"cpa_instance","target":"jp","whitelist":["missing"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := FromDict(mustParse(t, base+`,"quota_freeze_policies":[`+policy+`]}`)); err == nil {
+				t.Fatalf("无效策略应报错: %s", policy)
+			}
+		})
+	}
+}

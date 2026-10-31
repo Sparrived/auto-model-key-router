@@ -114,6 +114,7 @@ func EmptyConfigDict() (*canonical.Value, error) {
 		canonical.ObjectPair{Key: "quota_freeze_threshold_5h", Value: canonical.NewFloat(0)},
 		canonical.ObjectPair{Key: "quota_freeze_threshold_7d", Value: canonical.NewFloat(0)},
 		canonical.ObjectPair{Key: "quota_freeze_threshold_whitelist", Value: canonical.NewArray()},
+		canonical.ObjectPair{Key: "quota_freeze_policies", Value: canonical.NewArray()},
 		canonical.ObjectPair{Key: "endpoint_capabilities_path", Value: canonical.NewString(capsPath)},
 		canonical.ObjectPair{Key: "metrics_db_path", Value: canonical.NewString(metricsPath)},
 		canonical.ObjectPair{Key: "log_file_path", Value: canonical.NewString(logPath)},

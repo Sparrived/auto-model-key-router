@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **额度冻结支持账号级策略。** 新增配置 `quota_freeze_policies`：可按 CPA 实例
+  （`scope=cpa_instance`，target 为实例 ID）或订阅条目（`scope=subscription`，target 为
+  `provider_id/key_name`）覆盖 5h / 7d 提前冻结底限与模型白名单，或设置 `enabled=false`
+  关闭该账号的自动冻结；未配置的字段继承全局 `quota_freeze_threshold_*` 默认值，显式
+  `whitelist: []` 表示该账号不豁免任何模型。账号策略只影响自动冻结，不改变上游 Key 的
+  人工启用开关；硬性耗尽仍不可被白名单绕过。账号资源页的 CPA 实例与订阅卡片新增
+  「冻结规则」入口和策略状态徽标，页头原入口改为「默认冻结规则」编辑全局默认。
+  `GET/PUT /api/settings` 增 `quota_freeze_policies`，删除实例/Key 或改名时策略 target
+  与白名单会随引用清理或跟随更新。
+
 ## [7.0.3] - 2026-10-30
 
 ### 新增

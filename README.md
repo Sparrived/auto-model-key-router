@@ -49,7 +49,7 @@
   - 遇到 `401/403/429/5xx` 自动重试并切换候选 Key，并在进程内临时冷却异常节点。
   - **欠费智能熔断与恢复**：精准识别 `402`、`insufficient_quota`、`Insufficient Balance`、`欠费` 等余额不足信号，按阶梯窗口（初始 300s，翻倍退避至 30 分钟）自动限流该账号，窗口期满自动半开探测并在恢复时立即重入池，候选全被熔断时安全返回 503 避免无效重试。
   - **并发上限（供应商级 + Key 级）**：用 `providers.<id>.max_concurrency` 限制该供应商所有 Key、所有模型上同时在途的请求数，用 `providers.<id>.keys.<key>.max_concurrency` 限制单把上游 Key 的在途请求数（同一把 Key 被多个模型引用时共用一个计数）；缺省、`null` 或 `0` 表示不限制。达到上限的 Key 与供应商会被硬性排除（不做冷却式软回退），某个模型的所有候选都被挡下时直接返回 `429`，不向上游发出注定失败或排队的请求。
-  - **账号额度自动冻结**：账号资源页的额度读数直接参与选路——订阅类供应商或 CPA 实例的 5h / 7d 等窗口耗尽后，对应的上游 Key 自动退出候选（不写回配置的启用开关）；还可配置 5h / 7d 的剩余比例底限，在额度见底前**提前冻结**，并用 `quota_freeze_threshold_whitelist` 让指定模型继续用到额度完全耗尽（硬性耗尽后白名单也失效）。每条冻结在首次命中时捕获窗口的刷新时间作为服务端内置计时器，到点自动解冻并落盘，不依赖下一轮巡检或页面刷新；供应商页与账号资源页双向可见，可手工解冻。避免额度用完后仍向上游发送注定失败的请求。
+  - **账号额度自动冻结**：账号资源页的额度读数直接参与选路——订阅类供应商或 CPA 实例的 5h / 7d 等窗口耗尽后，对应的上游 Key 自动退出候选（不写回配置的启用开关）；还可配置 5h / 7d 的剩余比例底限，在额度见底前**提前冻结**，并用 `quota_freeze_threshold_whitelist` 让指定模型继续用到额度完全耗尽（硬性耗尽后白名单也失效）。每个 CPA 实例与订阅条目还可通过 `quota_freeze_policies` 单独覆盖底限/白名单或关闭自动冻结，未配置时继承全局默认。每条冻结在首次命中时捕获窗口的刷新时间作为服务端内置计时器，到点自动解冻并落盘，不依赖下一轮巡检或页面刷新；供应商页与账号资源页双向可见，可手工解冻。避免额度用完后仍向上游发送注定失败的请求。
 - 🎯 **统一模型名 (`unified-model`)**：客户端固定请求 `unified-model`，路由器按入站端点族（对话、图像、嵌入、语音合成、语音识别、视频、重排）动态分流到预设模型，换模型无需改动客户端代码。
 - 📋 **任务路由 (`TASK_XXXXXX`)**：将业务任务抽象为模型名。服务端统一固化主选模型、备选模型与采样参数（`temperature`、`top_p`、`reasoning_effort`、`max_tokens` 等），调用方不可篡改，实现提示词与推理参数集中治理。
 - 🏢 **多租户工作空间 (Workspaces)**：
@@ -341,6 +341,7 @@ AMKR 的核心配置文件为 JSON 格式（自动兼容迁移历史版本配置
   "quota_freeze_threshold_5h": 0,
   "quota_freeze_threshold_7d": 0,
   "quota_freeze_threshold_whitelist": [],
+  "quota_freeze_policies": [],
   "local_api_key": "amkr_sec_prod_gateway_key",
   "webui_enabled": true,
   "ops_enabled": true,
@@ -414,6 +415,7 @@ AMKR 的核心配置文件为 JSON 格式（自动兼容迁移历史版本配置
 | `quota_freeze_threshold_5h` | number | 5h 窗口的剩余比例底限（0..1，默认 0 = 关闭）；`remaining <= 该值` 时提前冻结对应 Key，并在窗口 `reset_at` 自动解冻 |
 | `quota_freeze_threshold_7d` | number | 7d 窗口的剩余比例底限（0..1，默认 0 = 关闭）；规则同上 |
 | `quota_freeze_threshold_whitelist` | string[] | 达到上述底限后仍允许继续使用的模型名（真实 ID 或别名，默认为空）；只豁免提前冻结，额度硬性耗尽后所有模型都会停用 |
+| `quota_freeze_policies` | object[] | 账号级冻结策略覆盖：`{scope, target, enabled, threshold_5h, threshold_7d, whitelist}`；`scope` 为 `cpa_instance`（target=实例 ID）或 `subscription`（target=`provider/key`），未填字段继承全局默认，`enabled=false` 关闭该账号自动冻结 |
 | `ops_enabled` | bool | 是否启用宿主机运维接口（日志读取、服务注册、客户端配置改写；容器环境建议设为 `false`） |
 | `webui_enabled` | bool | 是否挂载内置 Web 管理控制台 |
 | `providers.<id>.max_concurrency` | int / null | 该供应商**所有 Key、所有模型**上同时在途的上游请求上限；缺省、`null` 或 `0` 表示不限制 |

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +41,9 @@ type Freeze struct {
 	Trigger string `json:"trigger,omitempty"`
 	// Threshold 是触发时的底限（0..1；Trigger=threshold 时有值）。
 	Threshold float64 `json:"threshold,omitempty"`
+	// Whitelist 是本次冻结生效的模型白名单（真实模型 ID）。
+	// nil 表示旧记录没有策略（回退全局）；非 nil 空切片表示策略明确为空。
+	Whitelist []string `json:"whitelist"`
 	// ResetAt 是窗口重置时间；零值表示上游没给。
 	ResetAt time.Time `json:"reset_at,omitempty"`
 	// FrozenAt 是首次冻结时刻（后续刷新保留），ExpiresAt 是到期自动解冻时刻。
@@ -192,6 +196,20 @@ func (s *Store) FrozenTrigger(providerID, keyName string) string {
 	return freeze.Trigger
 }
 
+// FrozenWhitelist 返回当前生效冻结的模型白名单副本。
+//
+// 未冻结或旧版本记录（没有 whitelist 字段）返回 nil，调用方据此回退全局策略；
+// 明确的空策略返回非 nil 的空切片，两者不能混为一谈。
+func (s *Store) FrozenWhitelist(providerID, keyName string) []string {
+	freeze, found := s.Get(providerID, keyName)
+	if !found || freeze.Whitelist == nil {
+		return nil
+	}
+	result := make([]string, len(freeze.Whitelist))
+	copy(result, freeze.Whitelist)
+	return result
+}
+
 // Upsert 新增或刷新一条冻结记录；返回是否真的发生了变化（调用方据此决定是否打日志）。
 //
 // 同一把 Key 只保留一条：刷新窗口、原因等字段，但**沿用仍生效记录的首次
@@ -206,6 +224,7 @@ func (s *Store) Upsert(freeze Freeze) (bool, error) {
 	if freeze.ProviderID == "" || freeze.KeyName == "" {
 		return false, errors.New("额度冻结记录缺少 provider_id / key_name")
 	}
+	freeze.Whitelist = normalizeWhitelist(freeze.Whitelist)
 	now := s.clock()
 	if freeze.FrozenAt.IsZero() {
 		freeze.FrozenAt = now
@@ -242,7 +261,51 @@ func sameFreeze(a, b Freeze) bool {
 	a.ResetAt, b.ResetAt = a.ResetAt.Round(0).UTC(), b.ResetAt.Round(0).UTC()
 	a.FrozenAt, b.FrozenAt = a.FrozenAt.Round(0).UTC(), b.FrozenAt.Round(0).UTC()
 	a.ExpiresAt, b.ExpiresAt = a.ExpiresAt.Round(0).UTC(), b.ExpiresAt.Round(0).UTC()
-	return a == b
+	// slices.Equal 把 nil 与空切片视为相等；本字段的 nil 有「旧记录无策略」语义，
+	// 不能借一次刷新悄悄换掉，所以先单独比较 nilness。
+	if (a.Whitelist == nil) != (b.Whitelist == nil) {
+		return false
+	}
+	return a.ProviderID == b.ProviderID &&
+		a.KeyName == b.KeyName &&
+		a.Vendor == b.Vendor &&
+		a.Scope == b.Scope &&
+		a.Source == b.Source &&
+		a.Account == b.Account &&
+		a.InstanceID == b.InstanceID &&
+		a.WindowKey == b.WindowKey &&
+		a.WindowLabel == b.WindowLabel &&
+		a.Remaining == b.Remaining &&
+		a.Status == b.Status &&
+		a.Trigger == b.Trigger &&
+		a.Threshold == b.Threshold &&
+		a.ResetAt.Equal(b.ResetAt) &&
+		a.FrozenAt.Equal(b.FrozenAt) &&
+		a.ExpiresAt.Equal(b.ExpiresAt) &&
+		a.Reason == b.Reason &&
+		slices.Equal(a.Whitelist, b.Whitelist)
+}
+
+// normalizeWhitelist 去空白、丢空串、去重并排序；nil 保持 nil，非 nil 空切片保持非 nil。
+func normalizeWhitelist(models []string) []string {
+	if models == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	result := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		if _, found := seen[model]; found {
+			continue
+		}
+		seen[model] = struct{}{}
+		result = append(result, model)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // Release 手工解除一条冻结；返回被解除的记录。

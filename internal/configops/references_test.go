@@ -270,3 +270,89 @@ func TestUpdateProviderRenameFollowsAccessKeyList(t *testing.T) {
 		t.Errorf("模型 target 的 provider = %q，期望 prov-c", got)
 	}
 }
+
+// TestQuotaFreezePolicyTargetFollowsProviderAndKeyRename 固化 provider/key 改名也会
+// 跟随 subscription target，否则改名后策略指向旧坐标，下一次保存配置直接 422。
+func TestQuotaFreezePolicyTargetFollowsProviderAndKeyRename(t *testing.T) {
+	fixture := `{
+		"config_version": 4,
+		"providers": {"p": {"base_url": "https://p.example", "keys": {"k": {"api_key": "x"}}}},
+		"models": {"model-a": {"targets": [{"provider": "p", "key": "k", "upstream_model": "u"}]}},
+		"quota_freeze_policies": [
+			{"scope": "subscription", "target": "p/k", "whitelist": ["model-a"]}
+		]
+	}`
+	data := mustParse(t, fixture)
+	if _, err := UpdateProvider(data, "p", UpdateProviderOptions{NewID: StringPtr("prov-c")}); err != nil {
+		t.Fatalf("供应商改名失败: %v", err)
+	}
+	policies := lookup(data, "quota_freeze_policies")
+	if got := lookup(policies.Arr[0], "target").StringValue(); got != "prov-c/k" {
+		t.Fatalf("供应商改名后策略 target = %q，期望 prov-c/k", got)
+	}
+	if _, err := UpdateProviderKey(data, "prov-c", "k", UpdateProviderKeyOptions{NewName: StringPtr("k2")}); err != nil {
+		t.Fatalf("Key 改名失败: %v", err)
+	}
+	if got := lookup(lookup(data, "quota_freeze_policies").Arr[0], "target").StringValue(); got != "prov-c/k2" {
+		t.Errorf("Key 改名后策略 target = %q，期望 prov-c/k2", got)
+	}
+}
+
+// TestQuotaFreezePoliciesRepairAndRename 固化账号级冻结策略的引用跟随：
+// 白名单摘模型、策略 target 随实例/Key 删除而消失、改名时 target 与白名单一起改。
+func TestQuotaFreezePoliciesRepairAndRename(t *testing.T) {
+	fixture := `{
+		"config_version": 4,
+		"providers": {"p": {"base_url": "https://p.example", "keys": {"k": {"api_key": "x"}}}},
+		"models": {
+			"model-a": {"aliases": ["alias-a"], "targets": [{"provider": "p", "key": "k", "upstream_model": "u"}]},
+			"model-b": {"targets": [{"provider": "p", "key": "k", "upstream_model": "u"}]}
+		},
+		"cpa_instances": {"jp": {"base_url": "http://127.0.0.1:8317", "management_key": "mk"}},
+		"quota_freeze_policies": [
+			{"scope": "cpa_instance", "target": "jp", "whitelist": ["model-a", "alias-a"]},
+			{"scope": "subscription", "target": "p/k", "whitelist": ["model-b"]}
+		]
+	}`
+	data := mustParse(t, fixture)
+	if err := RepairReferenceLists(data); err != nil {
+		t.Fatalf("修复引用清单失败: %v", err)
+	}
+	policies := lookup(data, "quota_freeze_policies")
+	if !policies.IsArray() || len(policies.Arr) != 2 {
+		t.Fatalf("策略数量 = %#v，期望 2", policies)
+	}
+	if names, _ := listNames(t, policies.Arr[0], "whitelist"); !slices.Equal(names, []string{"model-a", "alias-a"}) {
+		t.Errorf("合法策略白名单被误改: %v", names)
+	}
+
+	// 删除模型：两处白名单里的 model-a / alias-a 都要摘掉。
+	mustLookup(t, data, "models").DeleteKey("model-a")
+	if err := RepairReferenceLists(data); err != nil {
+		t.Fatalf("删除模型后修复失败: %v", err)
+	}
+	if names, _ := listNames(t, lookup(data, "quota_freeze_policies").Arr[0], "whitelist"); len(names) != 0 {
+		t.Errorf("账号策略白名单 = %v，期望空数组（字段保留）", names)
+	}
+
+	// 删除订阅 Key：对应的 subscription 策略整条消失。
+	mustLookup(t, mustLookup(t, data, "providers"), "p").SetKey("keys", canonical.NewObject())
+	if err := RepairReferenceLists(data); err != nil {
+		t.Fatalf("删除 Key 后修复失败: %v", err)
+	}
+	if got := len(lookup(data, "quota_freeze_policies").Arr); got != 1 {
+		t.Fatalf("删 Key 后策略数量 = %d，期望只剩 CPA 策略", got)
+	}
+	if target := lookup(lookup(data, "quota_freeze_policies").Arr[0], "target").StringValue(); target != "jp" {
+		t.Errorf("剩余策略 target = %q，期望 jp", target)
+	}
+
+	// 删除 CPA 实例：对应 cpa_instance 策略也整条消失。
+	lookup(data, "cpa_instances").DeleteKey("jp")
+	if err := RepairReferenceLists(data); err != nil {
+		t.Fatalf("删除实例后修复失败: %v", err)
+	}
+	if got := len(lookup(data, "quota_freeze_policies").Arr); got != 0 {
+		t.Errorf("删实例后策略数量 = %d，期望 0", got)
+	}
+}

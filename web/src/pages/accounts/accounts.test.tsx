@@ -100,6 +100,8 @@ function installFetch(options: {
   report?: unknown;
   /** 按顺序回放账号资源响应；用完之后重复最后一份（模拟解冻后的重新读取）。 */
   reports?: unknown[];
+  /** 页面读取账号冻结策略所用的 settings 响应。 */
+  settings?: unknown;
 } = {}): Call[] {
   const calls: Call[] = [];
   let accountReads = 0;
@@ -144,6 +146,7 @@ function installFetch(options: {
       return json({ instance: "cpa-main", auth_index: "0", credit_id: "c1" });
     }
     if (url.pathname === "/api/cpa-instances") return json({ config_revision: "rev-1", instances: {} });
+    if (url.pathname === "/api/settings" && options.settings !== undefined) return json(options.settings);
     return json({ detail: "not found" }, 404);
   }));
   return calls;
@@ -206,6 +209,24 @@ describe("账号资源页", () => {
     await waitFor(() => expect(calls.filter((call) => call.path === "/api/cpa-accounts").length).toBe(before + 1));
     expect(search).toHaveValue("codex");
     await waitFor(() => expect(document.activeElement).toBe(search));
+  });
+
+  it("保存管理实例后同时失效 settings，刷新实例删除后的策略徽标", async () => {
+    const user = userEvent.setup();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    installFetch({ settings: { config_revision: "rev-1", settings: {} } });
+    renderPage(client);
+
+    await user.click(await screen.findByRole("button", { name: "管理实例" }));
+    const dialog = await screen.findByRole("dialog", { name: "管理 CPA 实例" });
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(
+      invalidate.mock.calls.some(([arg]) => (
+        JSON.stringify((arg as { queryKey?: unknown } | undefined)?.queryKey) === JSON.stringify(queryKeys.settings())
+      )),
+    ).toBe(true));
   });
 
   it("重置卡 404 时整个入口隐藏", async () => {
@@ -437,6 +458,26 @@ describe("账号资源页", () => {
       ).closest('[role="status"]') as HTMLElement;
       expect(within(banner).getByText(/cpa-main · key-a/)).toBeInTheDocument();
       expect(within(banner).getByRole("button", { name: "解冻" })).toBeInTheDocument();
+    });
+
+    it("实例策略关闭时隐藏实例联动横幅，但保留账号额度事实徽标", async () => {
+      installFetch({
+        report: allExhaustedReport(),
+        settings: {
+          config_revision: "rev-1",
+          settings: {
+            quota_freeze_policies: [
+              { scope: "cpa_instance", target: "cpa-main", enabled: false },
+            ],
+          },
+        },
+      });
+      renderPage();
+
+      // 策略徽标先确认页面已读到 settings；此时联动横幅不能继续宣称 Key 已被冻结。
+      expect(await screen.findByText("已关闭自动冻结")).toBeInTheDocument();
+      expect(screen.getAllByText("额度用尽")).toHaveLength(2);
+      expect(screen.queryByText(/实例内全部账号额度均已用尽/)).not.toBeInTheDocument();
     });
 
     it("实例内账号全部耗尽时显示联动横幅，逐把解冻并刷新", async () => {

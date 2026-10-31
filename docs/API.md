@@ -86,7 +86,7 @@ x-api-key: your-local-api-key
 | `POST` | `/api/cpa-reset-credits/use` | 仅本地 | 消费一张重置卡；默认选**最快过期**的可用卡（会真实改变上游账号状态） |
 | `GET` | `/api/quota-freezes` | 仅本地 | 列出当前额度冻结（哪把上游 Key 因哪个额度窗口被摘出选路）与后台巡检状态 |
 | `DELETE` | `/api/quota-freezes/{provider_id}/{key_name}` | 仅本地 | 手工解除一把 Key 的额度冻结（附最短 10 分钟的抑制窗口） |
-| `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时、重试，以及 5h/7d 提前冻结阈值和模型白名单 |
+| `GET/PUT` | `/api/settings` | 仅本地 | 查询或更新监听、超时、重试，以及 5h/7d 提前冻结阈值、模型白名单与账号级冻结策略 |
 | `POST` | `/api/settings/local-api-key` | 仅本地 | 重置本地鉴权 Key；新 Key 仅在本次响应返回 |
 | `POST` | `/api/update/check` | 仅本地 | 复用 CLI 的 GitHub Releases 版本检查 |
 | `POST` | `/api/probes/keys` | 仅本地 | 异步探测指定 Provider 下 Key 的模型列表与各端点可用性（逐 Key 兼容接口） |
@@ -1829,6 +1829,7 @@ curl -X DELETE "http://127.0.0.1:8000/api/quota-freezes/cpa-claude/claude-pro" \
       "window_key": "claude/5h", "window_label": "5 小时",
       "remaining": 0.03, "status": "allowed",
       "trigger": "threshold", "threshold": 0.05,
+      "whitelist": ["gemini-3-flash"],
       "reset_at": "2026-10-25T15:00:00Z",
       "frozen_at": "2026-10-25T11:00:00Z",
       "expires_at": "2026-10-25T15:00:00Z",
@@ -1864,6 +1865,11 @@ curl -X DELETE "http://127.0.0.1:8000/api/quota-freezes/cpa-claude/claude-pro" \
 
 - **提前冻结白名单**：`quota_freeze_threshold_whitelist` 里的模型（真实 ID 或别名）在提前
   冻结期间仍可使用该 Key，直到额度硬性耗尽；其它模型立即停用，硬性耗尽对白名单也不豁免。
+- **账号级冻结策略**：配置项 `quota_freeze_policies` 可为单个 CPA 实例或订阅条目覆盖
+  5h / 7d 底限与白名单；`enabled=false` 表示该账号不参与自动冻结。未配置策略或字段为
+  `null` 时继承全局 `quota_freeze_threshold_*`；显式 `whitelist: []` 表示明确不放行任何
+  模型。策略 target 分别为 CPA 实例 ID 与 `provider_id/key_name`，删除对应实例/Key 时
+  配置操作会自动清理失效策略。
 - **无意见不改变现状**：额度读取失败、实例不可达、账号额度未知时既不冻也不解冻——不能把
   「读不到」当成「有余额」。
 - **多账号实例不按单次响应直接冻**：一个实例后面挂多个账号时，单次限流响应只说明刚才那个账号

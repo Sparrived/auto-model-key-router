@@ -804,6 +804,19 @@ export interface V1ModelsResponse {
   [key: string]: unknown;
 }
 
+export interface QuotaFreezePolicy {
+  scope: "cpa_instance" | "subscription";
+  /** CPA 实例 ID，或 provider_id/key_name。 */
+  target: string;
+  /** 缺省视为 true；false 表示该账号不参与自动冻结。 */
+  enabled?: boolean;
+  /** null/缺省表示继承全局；数值范围为 0..1。 */
+  threshold_5h?: number | null;
+  threshold_7d?: number | null;
+  /** null/缺省表示继承全局；[] 表示明确无白名单。 */
+  whitelist?: string[] | null;
+}
+
 export interface SettingsData {
   host?: string;
   port?: number;
@@ -814,6 +827,7 @@ export interface SettingsData {
   quota_freeze_threshold_5h?: number;
   quota_freeze_threshold_7d?: number;
   quota_freeze_threshold_whitelist?: string[];
+  quota_freeze_policies?: QuotaFreezePolicy[];
   local_auth_enabled?: boolean;
   local_api_key_fingerprint?: string;
   [key: string]: unknown;

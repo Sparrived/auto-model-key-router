@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -826,5 +828,156 @@ func TestStoreConcurrentAccess(t *testing.T) {
 	reloaded := NewStore(path)
 	if snapshot := reloaded.Snapshot(); len(snapshot) > workers {
 		t.Errorf("重载后冻结条数异常: %d", len(snapshot))
+	}
+}
+
+// TestFreezeWhitelistJSONShape 钉住 whitelist 的 JSON 形状：没有 omitempty，
+// 显式空策略必须落成 []，而不是被省略或写成 null。
+func TestFreezeWhitelistJSONShape(t *testing.T) {
+	encoded, err := json.Marshal(Freeze{ProviderID: "p", KeyName: "k", Whitelist: []string{}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"whitelist":[]`) {
+		t.Errorf("空白名单应序列化成 whitelist:[]，实际 %s", encoded)
+	}
+}
+
+// TestStoreFrozenWhitelist 钉住白名单的读取口径：副本、nil 与空切片的区别、旧记录兼容。
+func TestStoreFrozenWhitelist(t *testing.T) {
+	t.Run("新冻结空白名单落盘为数组", func(t *testing.T) {
+		now := testNow()
+		path := filepath.Join(t.TempDir(), "quota-freezes.json")
+		clock := newTestClock(now)
+		store := NewStoreWithClock(path, clock.Now)
+		if _, err := store.Upsert(Freeze{
+			ProviderID: "p", KeyName: "k",
+			ExpiresAt: now.Add(time.Hour),
+			Whitelist: []string{},
+		}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+
+		got := store.FrozenWhitelist("p", "k")
+		if got == nil || len(got) != 0 {
+			t.Errorf("明确的空白名单应返回非 nil 空切片: %#v", got)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if !strings.Contains(string(content), `"whitelist": []`) {
+			t.Errorf("空白名单应落成 JSON 数组: %s", content)
+		}
+		reloaded := NewStoreWithClock(path, clock.Now)
+		if got := reloaded.FrozenWhitelist("p", "k"); got == nil || len(got) != 0 {
+			t.Errorf("重载后应保持明确的空策略而非旧记录: %#v", got)
+		}
+	})
+
+	t.Run("非空白名单去重排序并返回副本", func(t *testing.T) {
+		now := testNow()
+		path := filepath.Join(t.TempDir(), "quota-freezes.json")
+		clock := newTestClock(now)
+		store := NewStoreWithClock(path, clock.Now)
+		if _, err := store.Upsert(Freeze{
+			ProviderID: "p", KeyName: "k",
+			ExpiresAt: now.Add(time.Hour),
+			Whitelist: []string{" gpt-4o ", "claude-3", "gpt-4o", "", "  ", "claude-3"},
+		}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+
+		want := []string{"claude-3", "gpt-4o"}
+		got := store.FrozenWhitelist("p", "k")
+		if !slices.Equal(got, want) {
+			t.Fatalf("白名单应去空白、丢空串、去重并排序: %#v，期望 %#v", got, want)
+		}
+		got[0] = "mutated"
+		if again := store.FrozenWhitelist("p", "k"); !slices.Equal(again, want) {
+			t.Errorf("FrozenWhitelist 必须返回副本，实际 %#v", again)
+		}
+
+		reloaded := NewStoreWithClock(path, clock.Now)
+		if got := reloaded.FrozenWhitelist("p", "k"); !slices.Equal(got, want) {
+			t.Errorf("重载后白名单不对: %#v，期望 %#v", got, want)
+		}
+	})
+
+	t.Run("旧状态文件缺字段返回 nil", func(t *testing.T) {
+		now := testNow()
+		path := filepath.Join(t.TempDir(), "quota-freezes.json")
+		legacy := `{"version":1,"freezes":[` +
+			`{"provider_id":"p","key_name":"old","expires_at":"2026-10-25T13:00:00Z"},` +
+			`{"provider_id":"p","key_name":"explicit","expires_at":"2026-10-25T13:00:00Z","whitelist":[]}` +
+			`],"suppressions":[]}`
+		if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		store := NewStoreWithClock(path, newTestClock(now).Now)
+
+		if got := store.FrozenWhitelist("p", "old"); got != nil {
+			t.Errorf("旧记录没有 whitelist 字段时应返回 nil，实际 %#v", got)
+		}
+		if got := store.FrozenWhitelist("p", "explicit"); got == nil || len(got) != 0 {
+			t.Errorf("显式空策略应返回非 nil 空切片，实际 %#v", got)
+		}
+		if got := store.FrozenWhitelist("p", "missing"); got != nil {
+			t.Errorf("未冻结应返回 nil，实际 %#v", got)
+		}
+	})
+}
+
+// TestStoreUpsertWhitelistChange 钉住「只有白名单变化也算变化」，且 nil 与空切片不互相覆盖。
+func TestStoreUpsertWhitelistChange(t *testing.T) {
+	now := testNow()
+	store := NewStoreWithClock("", newTestClock(now).Now)
+
+	base := Freeze{
+		ProviderID: "p", KeyName: "k",
+		ExpiresAt: now.Add(time.Hour),
+		Whitelist: []string{"a"},
+	}
+	if changed, err := store.Upsert(base); err != nil || !changed {
+		t.Fatalf("首次写入应算变化: changed=%v err=%v", changed, err)
+	}
+
+	// 其他字段完全相同，只改白名单 → 必须落成新记录。
+	updated := base
+	updated.Whitelist = []string{"b"}
+	changed, err := store.Upsert(updated)
+	if err != nil || !changed {
+		t.Fatalf("仅白名单变化应算变化: changed=%v err=%v", changed, err)
+	}
+	if got := store.FrozenWhitelist("p", "k"); !slices.Equal(got, []string{"b"}) {
+		t.Errorf("白名单应已刷新，实际 %#v", got)
+	}
+
+	// 完全相同的记录再写一次不产生变化。
+	if changed, err := store.Upsert(updated); err != nil || changed {
+		t.Errorf("内容未变时应返回 false: changed=%v err=%v", changed, err)
+	}
+
+	// 非 nil 空切片是「明确空策略」；与 nil（旧记录回退全局）是两种状态。
+	empty := base
+	empty.Whitelist = []string{}
+	if changed, err := store.Upsert(empty); err != nil || !changed {
+		t.Fatalf("切到明确空策略应算变化: changed=%v err=%v", changed, err)
+	}
+	if got := store.FrozenWhitelist("p", "k"); got == nil || len(got) != 0 {
+		t.Errorf("明确空策略应返回非 nil 空切片，实际 %#v", got)
+	}
+	if changed, err := store.Upsert(empty); err != nil || changed {
+		t.Errorf("重复写入明确空策略应返回 false: changed=%v err=%v", changed, err)
+	}
+
+	// nil 与空切片之间的切换也必须落盘，不能借 sameFreeze 的切片比较被吃掉。
+	noPolicy := base
+	noPolicy.Whitelist = nil
+	if changed, err := store.Upsert(noPolicy); err != nil || !changed {
+		t.Fatalf("切回无策略应算变化: changed=%v err=%v", changed, err)
+	}
+	if got := store.FrozenWhitelist("p", "k"); got != nil {
+		t.Errorf("无策略应返回 nil，实际 %#v", got)
 	}
 }

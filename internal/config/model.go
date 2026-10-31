@@ -344,15 +344,23 @@ type RouterConfig struct {
 	// QuotaFreezeThresholdWhitelist 是达到 5h / 7d 底限后仍允许继续使用的模型名
 	// （真实 ID 或别名）。它只豁免「提前冻结」：额度硬性耗尽后所有模型仍立即停用，
 	// 因此白名单模型最多把额度用到完全耗尽。空表示不豁免任何模型。
+	//
+	// 它是**默认值**：`quota_freeze_policies` 里为某个 CPA 实例或订阅条目配置了
+	// 白名单时，该账号用自己的清单，不再合并这里。
 	QuotaFreezeThresholdWhitelist []string
-	EndpointCapabilitiesPath      string
-	MetricsDBPath                 string
-	LogFilePath                   string
-	LocalAPIKey                   string
-	Models                        []ModelConfig
-	StreamFirstByteTimeout        float64
-	StreamIdleTimeout             float64
-	Providers                     []ProviderConfig
+	// QuotaFreezePolicies 是账号级冻结策略覆盖；未配置的账号继承上面的全局默认。
+	//
+	// 目前有两类 scope：cpa_instance（target 是 CPA 实例 ID）与 subscription
+	// （target 是 provider_id/key_name）。策略只改冻结规则，不改变账号的 enabled。
+	QuotaFreezePolicies      []QuotaFreezePolicy
+	EndpointCapabilitiesPath string
+	MetricsDBPath            string
+	LogFilePath              string
+	LocalAPIKey              string
+	Models                   []ModelConfig
+	StreamFirstByteTimeout   float64
+	StreamIdleTimeout        float64
+	Providers                []ProviderConfig
 	// UpstreamRoutes 是「上游 URL -> {模式: 路径}」。
 	//
 	// 重要：它**只**由 providers[].routes 汇总而来。配置文件顶层的
@@ -380,6 +388,22 @@ type RouterConfig struct {
 	OpsEnabled   bool
 	// ReasoningEffortByModel 是 model.id -> reasoning_effort（仅非空项）。
 	ReasoningEffortByModel map[string]string
+}
+
+// QuotaFreezePolicy 是单个账号资源（CPA 实例或订阅条目）的冻结策略覆盖。
+//
+// 零值字段表示继承 RouterConfig 上的全局默认：Threshold5h / Threshold7d 为 nil 时
+// 用全局底限；WhitelistSet=false 时用全局白名单。Whitelist 因此必须用独立布尔值
+// 记录“字段是否存在”，否则空数组（明确不放行任何模型）会与“未配置”混为一谈。
+type QuotaFreezePolicy struct {
+	Scope  string
+	Target string
+	// Enabled=false 表示该账号不参与自动冻结；它不会改变上游 Key 的人工 enabled。
+	Enabled      bool
+	Threshold5h  *float64
+	Threshold7d  *float64
+	Whitelist    []string
+	WhitelistSet bool
 }
 
 // FromDict 解析并校验原始配置。
@@ -538,6 +562,11 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 	config.Models = models
 	config.QuotaFreezeThresholdWhitelist, err = parseQuotaFreezeThresholdWhitelist(
 		raw.Lookup("quota_freeze_threshold_whitelist"), modelIDsByName(models))
+	if err != nil {
+		return nil, err
+	}
+	config.QuotaFreezePolicies, err = parseQuotaFreezePolicies(
+		raw.Lookup("quota_freeze_policies"), models, providerKeys, raw.Lookup("cpa_instances"))
 	if err != nil {
 		return nil, err
 	}
@@ -1224,6 +1253,132 @@ func parseQuotaFreezeThresholdWhitelist(raw *canonical.Value, idsByName map[stri
 		out = append(out, name)
 	}
 	return out, nil
+}
+
+// parseQuotaFreezePolicies 解析 `quota_freeze_policies`：账号级冻结策略覆盖。
+//
+// target 的稳定性是这份配置的引用边界：
+//   - cpa_instance 的 target 是 `cpa_instances` 的键；
+//   - subscription 的 target 是 `provider_id/key_name`，对应订阅卡片的条目 ID。
+//
+// 这里只做存在性校验，别名/模型 ID 的归一仍留给运行时 keypool；配置保留用户写的
+// 原样，编辑面板回显的才是用户自己写的内容。
+func parseQuotaFreezePolicies(
+	raw *canonical.Value,
+	models []ModelConfig,
+	providerKeys map[[2]string]providerKeyRef,
+	cpaInstances *canonical.Value,
+) ([]QuotaFreezePolicy, error) {
+	if raw == nil || raw.IsNull() {
+		return nil, nil
+	}
+	if !raw.IsArray() {
+		return nil, errf("quota_freeze_policies 必须是数组")
+	}
+	idsByName := modelIDsByName(models)
+	seen := make(map[string]bool, len(raw.Arr))
+	out := make([]QuotaFreezePolicy, 0, len(raw.Arr))
+	for index, item := range raw.Arr {
+		if !item.IsObject() {
+			return nil, errf("quota_freeze_policies[%d] 必须是对象", index)
+		}
+		scope := strings.TrimSpace(item.Lookup("scope").StringValue())
+		switch scope {
+		case "cpa_instance", "subscription":
+		default:
+			return nil, errf("quota_freeze_policies[%d].scope 必须是 cpa_instance 或 subscription", index)
+		}
+		target := strings.TrimSpace(item.Lookup("target").StringValue())
+		if target == "" {
+			return nil, errf("quota_freeze_policies[%d].target 不能为空", index)
+		}
+		switch scope {
+		case "cpa_instance":
+			if cpaInstances == nil || !cpaInstances.IsObject() || !cpaInstances.Obj.Has(target) {
+				return nil, errf("quota_freeze_policies[%d].target 引用了未配置的 CPA 实例: %s", index, target)
+			}
+		case "subscription":
+			providerID, keyName, ok := strings.Cut(target, "/")
+			if !ok || providerID == "" || keyName == "" {
+				return nil, errf("quota_freeze_policies[%d].target 必须是 provider/key 形式", index)
+			}
+			if _, exists := providerKeys[[2]string{providerID, keyName}]; !exists {
+				return nil, errf("quota_freeze_policies[%d].target 引用了未配置的供应商 Key: %s", index, target)
+			}
+		}
+		identity := scope + "\x00" + target
+		if seen[identity] {
+			return nil, errf("quota_freeze_policies[%d] 重复配置了账号: %s/%s", index, scope, target)
+		}
+		seen[identity] = true
+
+		enabled := true
+		if rawEnabled := item.Lookup("enabled"); rawEnabled != nil {
+			if !rawEnabled.IsBool() {
+				return nil, errf("quota_freeze_policies[%d].enabled 必须是布尔值", index)
+			}
+			enabled = rawEnabled.Bool
+		}
+		threshold5h, err := parseQuotaFreezePolicyThreshold(
+			item.Lookup("threshold_5h"), "quota_freeze_policies[%d].threshold_5h", index)
+		if err != nil {
+			return nil, err
+		}
+		threshold7d, err := parseQuotaFreezePolicyThreshold(
+			item.Lookup("threshold_7d"), "quota_freeze_policies[%d].threshold_7d", index)
+		if err != nil {
+			return nil, err
+		}
+
+		var whitelist []string
+		whitelistSet := false
+		if rawWhitelist := item.Lookup("whitelist"); rawWhitelist != nil && !rawWhitelist.IsNull() {
+			if !rawWhitelist.IsArray() {
+				return nil, errf("quota_freeze_policies[%d].whitelist 必须是数组", index)
+			}
+			whitelistSet = true
+			whitelist = make([]string, 0, len(rawWhitelist.Arr))
+			for itemIndex, rawName := range rawWhitelist.Arr {
+				name := strings.TrimSpace(rawName.StringValue())
+				if name == "" {
+					return nil, errf("quota_freeze_policies[%d].whitelist[%d] 不能为空", index, itemIndex)
+				}
+				if _, ok := idsByName[name]; !ok {
+					return nil, errf("quota_freeze_policies[%d].whitelist[%d] 引用了未配置的模型: %s", index, itemIndex, name)
+				}
+				whitelist = append(whitelist, name)
+			}
+		}
+
+		out = append(out, QuotaFreezePolicy{
+			Scope:        scope,
+			Target:       target,
+			Enabled:      enabled,
+			Threshold5h:  threshold5h,
+			Threshold7d:  threshold7d,
+			Whitelist:    whitelist,
+			WhitelistSet: whitelistSet,
+		})
+	}
+	return out, nil
+}
+
+// parseQuotaFreezePolicyThreshold 解析账号级策略里的 0..1 底限；null/缺失=继承。
+func parseQuotaFreezePolicyThreshold(raw *canonical.Value, field string, index int) (*float64, error) {
+	if raw == nil || raw.IsNull() {
+		return nil, nil
+	}
+	number, err := canonical.ToFloat(raw)
+	if err != nil {
+		return nil, errf(field+" 必须是数字", index)
+	}
+	if number < 0 {
+		number = 0
+	}
+	if number > 1 {
+		number = 1
+	}
+	return &number, nil
 }
 
 // parseAccessKeyModels 解析 `access_keys.<id>.models`。

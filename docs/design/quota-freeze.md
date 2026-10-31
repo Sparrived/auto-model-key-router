@@ -16,6 +16,11 @@
 - **提前冻结白名单**：`quota_freeze_threshold_whitelist` 里的模型只豁免 `trigger=threshold`
   的冻结，可以继续把该 Key 的额度用到硬性耗尽；`trigger=hard` 对所有模型都不可豁免。
   同一把 Key 的一次冻结只要汇总出任意硬性耗尽窗口，就必须记为 `hard`，不能被白名单绕过。
+- **账号级冻结策略**：`quota_freeze_policies` 可按 CPA 实例（`scope=cpa_instance`，
+  target 是实例 ID）或订阅条目（`scope=subscription`，target 是
+  `provider_id/key_name`）覆盖 5h / 7d 底限与白名单；`enabled=false` 表示该账号不参与
+  自动冻结。未配置策略或字段为 `null` 时继承全局默认；显式 `whitelist: []` 表示该账号
+  明确不放行任何模型。策略只改冻结规则，不改变上游 Key 的人工 `enabled` 开关。
 - 冻结状态**持久化**（独立状态文件，不进配置）：进程重启、配置热重载都不能让耗尽的
   Key 复活。状态文件损坏/缺失按空表处理。
 - 每条冻结在**首次写入时**捕获一个解冻时刻（窗口的 `reset_at`；拿不到时 `now + 10 分钟`），
@@ -84,6 +89,7 @@ type Freeze struct {
     Status      string    // 触发时上游给的窗口状态词（可空）
     Trigger     string    // "hard"（硬性耗尽）| "threshold"（低于底限）
     Threshold   float64   // 触发时的底限（0..1；trigger=threshold 时有值）
+    Whitelist   []string  // 本次冻结生效的模型白名单（真实 ID）；nil=回退全局，[]=明确为空
     ResetAt     time.Time // 触发时捕获的窗口刷新时间（零值=未知）
     FrozenAt    time.Time // 首次冻结时刻
     ExpiresAt   time.Time // 内置计时器的解冻时刻；首次写入后只可提前、不可延后
@@ -99,6 +105,7 @@ func NewStoreWithClock(path string, clock func() time.Time) *Store
 func (s *Store) Snapshot() []Freeze                              // 未过期，按 provider/key 排序
 func (s *Store) Get(providerID, keyName string) (Freeze, bool)   // 未过期
 func (s *Store) IsFrozen(providerID, keyName string) bool        // 选路热路径用
+func (s *Store) FrozenWhitelist(providerID, keyName string) []string // 记录白名单；nil=旧记录回退全局
 func (s *Store) Upsert(f Freeze) (bool, error)                   // 新增或刷新；见下方计时器规则
 func (s *Store) Release(providerID, keyName string, suppressUntil time.Time) (Freeze, bool, error)
 func (s *Store) Suppressed(providerID, keyName string) bool
@@ -154,8 +161,13 @@ func (g *QuotaGuard) Status() QuotaGuardStatus
   不重复扇出。启动时立即评估一次（不阻塞服务启动）。
 - 阈值判定读取当前运行时配置的 `quota_freeze_threshold_5h` / `quota_freeze_threshold_7d`
   （0..1 的剩余比例，0 关闭），与硬性耗尽共用 `quota.TriggerWindows` 这一份筛选实现。
+  每条账号先按 `quota_freeze_policies` 合并出 effective 底限与白名单：订阅条目 target 为
+  `provider/key`，CPA 实例 target 为实例 ID；没有策略时完全沿用全局默认。策略
+  `enabled=false` 时不产生新冻结，并解除该账号由同一层规则产生的旧冻结。
   `quota_freeze_threshold_whitelist` 在 keypool 侧生效：只豁免 `trigger=threshold` 的冻结；
-  一次冻结只要汇总出任意硬性耗尽窗口就必须记 `hard`，白名单不能绕过。
+  一次冻结只要汇总出任意硬性耗尽窗口就必须记 `hard`，白名单不能绕过。账号策略显式设置
+  白名单时，生效名单写入 `Freeze.Whitelist`（真实模型 ID）；未设置时保持 `nil`，keypool
+  继续动态回退全局名单，保证全局热改对旧冻结的行为不变。
 - `ObserveUpstreamQuota` 在**代理请求路径**上被调用：只做「有没有额度头 → 解析 →
   非阻塞投递一个信号」，绝不在这里做文件 IO 或网络请求。信号由后台循环合并处理。
 - `ApplyReport` 更新「供应商 → CPA 实例」关联表（供 L3 判断单/多账号实例）并落盘变化。
@@ -168,14 +180,17 @@ func (g *QuotaGuard) Status() QuotaGuardStatus
 - `SetQuotaFreezes(freezes QuotaFreezes)`：装配层注入；`nil` 表示不启用（测试默认）。
   keypool 只依赖一个最小接口（`IsFrozen` / `FrozenReason`），不 import `internal/quota`——
   选路层不该依赖状态文件包，这也让冻结表在测试里可以用假实现替换。白名单需要额外的
-  `FrozenTrigger` 时做可选接口探测；探测不到按 hard 保守处理。
+  `FrozenTrigger` / `FrozenWhitelist` 时做可选接口探测；探测不到按 hard 保守处理。
 - 冻结是**候选集合级**的硬过滤（在 `keysForModelLocked` 里剔除），因此
   `KeyCount` / `KeysForModel` / 选路三处天然一致。`AvailableModelIDs` 是例外：它只看
   配置上的启用 Key，不因冻结把模型从 `/v1/models` 摘掉，冻结期间的调用在选路层失败。
+- **白名单优先级**：冻结记录的 `FrozenWhitelist` 非 `nil`（包括显式空切片）时严格按
+  账号策略名单放行，不合并全局；返回 `nil`（旧记录/实现不支持）时回退全局
+  `quota_freeze_threshold_whitelist`。`hard` 冻结不查白名单。
 - `NextKey` 的软回退（冷却放行）**不**放行冻结 Key；`only_first` 模式下第一把被冻结时
   直接失败。
 - 点名路径（`KeyByName` / `AcquireKey`）遇到冻结 Key 也要失败，不能绕过；提前冻结对
-  `quota_freeze_threshold_whitelist` 里的模型是唯一例外，硬性耗尽仍按硬约束处理。
+  生效白名单里的模型是唯一例外，硬性耗尽仍按硬约束处理。
 - 新增哨兵 `ErrQuotaFrozen` 与带明细的错误类型；全部候选被冻结时的文案要指出是
   「额度冻结」以及窗口/重置时间，不要退化成「没有可用 key」。
 - 代理侧把 `ErrQuotaFrozen` 映射成 503，响应体沿用现有错误信封。
@@ -246,9 +261,12 @@ func (g *QuotaGuard) Status() QuotaGuardStatus
   自动解冻倒计时 + 「解除冻结」按钮（调用 DELETE，成功后刷新账号资源与冻结列表查询）。
 - CPA 实例区块：`all_accounts_exhausted` 或 `all_accounts_below_floor` 时显示横幅
   「实例内全部账号额度均已用尽/均已低于冻结底限，已冻结指向该实例的 N 把 Key」，
-  列出 `frozen_keys` 与逐把「解冻」按钮。
+  列出 `frozen_keys` 与逐把「解冻」按钮；实例策略 `enabled=false` 时不显示该冻结横幅。
 - 账号卡片：`quota_exhausted` 显示「额度用尽」徽标，`quota_below_floor` 显示
   「低于底限」徽标。
+- 页头「默认冻结规则」编辑全局默认；每个 CPA 实例与订阅卡片各有「冻结规则」入口，
+  打开单账号策略抽屉，可覆盖 5h/7d 底限、白名单或关闭自动冻结。抽屉保存时整份
+  `quota_freeze_policies` 数组替换，只改当前 scope+target 的条目，并保留其它账号策略。
 
 ### 7.2 供应商页
 
@@ -267,6 +285,7 @@ func (g *QuotaGuard) Status() QuotaGuardStatus
 | `quota_freeze_threshold_5h` | number | `0` | 5h 窗口的剩余比例底限（0..1）；`remaining <= 该值` 时提前冻结，`0` 表示只在硬性耗尽时冻结 |
 | `quota_freeze_threshold_7d` | number | `0` | 7d 窗口的剩余比例底限（0..1）；规则同上 |
 | `quota_freeze_threshold_whitelist` | string[] | `[]` | 提前冻结期间仍允许使用 Key 的模型名（ID 或别名）；只豁免 `threshold` 冻结，`hard` 冻结对所有模型生效 |
+| `quota_freeze_policies` | object[] | `[]` | 账号级覆盖：`{scope, target, enabled, threshold_5h, threshold_7d, whitelist}`；`scope` 为 `cpa_instance` / `subscription`，未填字段继承全局默认 |
 
 - 状态文件路径不新增配置键：固定为 `<config 文件目录>/quota-freezes.json`。
 - `config.EmptyConfigDict` 的键序、README / docs/USAGE.md 的配置表、`router-config.example.json`

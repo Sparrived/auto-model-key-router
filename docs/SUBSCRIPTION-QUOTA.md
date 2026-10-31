@@ -407,8 +407,10 @@ description}`），因此**不需要写 `mapping`**。配好后 auth-files 里�
 - **已接额度冻结（不再「只看不拦」）**：硬性耗尽（剩余 0%，或上游明确 `rejected`）或 5h/7d
   剩余比例低于配置底限时，会冻结对应的上游 Key，让它立即退出选路；首次冻结捕获窗口 `reset_at`
   作为服务端内置计时器，到点自动解冻并落盘。`quota_freeze_threshold_whitelist` 里的模型
-  在提前冻结期间仍可使用 Key，直到额度硬性耗尽；硬性耗尽后白名单同样失效。判定、解冻与
-  配置见 [`docs/USAGE.md`](USAGE.md#42-额度用尽后自动冻结-key) 与
+  在提前冻结期间仍可使用 Key，直到额度硬性耗尽；硬性耗尽后白名单同样失效。单个订阅条目还可在
+  `quota_freeze_policies` 里用 `scope=subscription,target=provider/key` 覆盖底限/白名单或关闭
+  自动冻结；未配置时继承全局。判定、解冻与配置见
+  [`docs/USAGE.md`](USAGE.md#42-额度用尽后自动冻结-key) 与
   [`docs/API.md`](API.md#额度冻结接口)。冻结是运行时状态，不写回配置的启用开关。
 - **没有落 `quota` 字段、没有缓存**。每次 `/api/cpa-accounts` 都是一次真实扇出，60 秒总预算。
   所以同一把 key 的用量读数不会与推理 Key 的能力缓存混在一起，也就不存在两套刷新节奏。

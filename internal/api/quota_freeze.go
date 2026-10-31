@@ -24,7 +24,8 @@ import (
 //
 // 可选字段用 omitempty：vendor/account/instance_id 只对某些 scope 有意义，
 // status/reset_at 上游可能没给，trigger/threshold 则是老记录没有的新字段：给空串/零值
-// 比给一个编出来的值更诚实。
+// 比给一个编出来的值更诚实。whitelist 例外：必须保留 null（继承全局）与非 nil 空数组
+// （账号策略明确不放行）的区别，因此不能 omitempty。
 type QuotaFreezeView struct {
 	ProviderID  string  `json:"provider_id"`
 	KeyName     string  `json:"key_name"`
@@ -39,10 +40,13 @@ type QuotaFreezeView struct {
 	Status      string  `json:"status,omitempty"`
 	Trigger     string  `json:"trigger,omitempty"`
 	Threshold   float64 `json:"threshold,omitempty"`
-	ResetAt     string  `json:"reset_at,omitempty"`
-	FrozenAt    string  `json:"frozen_at"`
-	ExpiresAt   string  `json:"expires_at"`
-	Reason      string  `json:"reason"`
+	// Whitelist 是本次冻结生效的模型白名单（真实模型 ID）。nil 表示沿用全局默认，
+	// 空数组表示账号策略明确不放行任何模型；与 quota.Freeze 的 JSON 口径一致。
+	Whitelist []string `json:"whitelist"`
+	ResetAt   string   `json:"reset_at,omitempty"`
+	FrozenAt  string   `json:"frozen_at"`
+	ExpiresAt string   `json:"expires_at"`
+	Reason    string   `json:"reason"`
 }
 
 // quotaFreezeView 把内部冻结记录转成接口视图。
@@ -61,6 +65,7 @@ func quotaFreezeView(freeze quota.Freeze) QuotaFreezeView {
 		Status:      freeze.Status,
 		Trigger:     freeze.Trigger,
 		Threshold:   freeze.Threshold,
+		Whitelist:   freeze.Whitelist,
 		ResetAt:     formatFreezeTime(freeze.ResetAt),
 		FrozenAt:    formatFreezeTime(freeze.FrozenAt),
 		ExpiresAt:   formatFreezeTime(freeze.ExpiresAt),

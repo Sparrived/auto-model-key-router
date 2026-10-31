@@ -35,6 +35,7 @@ import type {
   CPASubscription,
   CPAQuotaWindow,
   QuotaFreeze,
+  QuotaFreezePolicy,
   QuotaGuardStatus,
 } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
@@ -55,6 +56,7 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { useConfirm } from "@/components/ui/ConfirmProvider";
 import { Meter } from "@/components/charts";
 import { QuotaFreezeConfigSheet } from "./quota-freeze-config";
+import { QuotaFreezePolicySheet } from "./quota-freeze-policy";
 
 type StatusFilter = "all" | "usable" | "cooling" | "alert";
 
@@ -63,6 +65,27 @@ interface InstanceRow {
   label: string;
   base_url: string;
   management_key: string;
+}
+
+interface PolicyTarget {
+  scope: QuotaFreezePolicy["scope"];
+  target: string;
+  title: string;
+}
+
+function findAccountPolicy(
+  policies: QuotaFreezePolicy[] | undefined,
+  scope: QuotaFreezePolicy["scope"],
+  target: string,
+): QuotaFreezePolicy | undefined {
+  return (policies ?? []).find((policy) => policy.scope === scope && policy.target === target);
+}
+
+function PolicyBadge({ policy, available }: { policy?: QuotaFreezePolicy; available: boolean }) {
+  if (!available) return null;
+  if (!policy) return <Badge tone="neutral">继承全局</Badge>;
+  if (policy.enabled === false) return <Badge tone="warn">已关闭自动冻结</Badge>;
+  return <Badge tone="accent">自定义</Badge>;
 }
 
 const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
@@ -335,9 +358,20 @@ interface SubscriptionCardProps {
   releasingFreeze: ((freeze: QuotaFreeze) => void) | null;
   /** 正在解冻的 Key（freezeLookupKey 结果），用于只给被点的那把按钮上 loading。 */
   releasingKey: string | null;
+  policy?: QuotaFreezePolicy;
+  policyAvailable: boolean;
+  onConfigurePolicy: (() => void) | null;
 }
 
-function SubscriptionCard({ entry, now, releasingFreeze, releasingKey }: SubscriptionCardProps) {
+function SubscriptionCard({
+  entry,
+  now,
+  releasingFreeze,
+  releasingKey,
+  policy,
+  policyAvailable,
+  onConfigurePolicy,
+}: SubscriptionCardProps) {
   const windows = entry.windows ?? [];
   const freeze = entry.freeze;
   const freezeId = freeze ? freezeLookupKey(freeze.provider_id, freeze.key_name) : "";
@@ -351,8 +385,17 @@ function SubscriptionCard({ entry, now, releasingFreeze, releasingKey }: Subscri
       actions={(
         <div className="flex flex-wrap items-center gap-2">
           {freeze ? <Badge tone={threshold ? "warn" : "critical"} dot>{freezeTriggerText(freeze)}</Badge> : null}
+          <PolicyBadge policy={policy} available={policyAvailable} />
           <Badge tone="neutral">{entry.key_name ? `${entry.provider_id} · ${entry.key_name}` : entry.provider_id || "订阅"}</Badge>
           {entry.plan || entry.tier_id ? <Badge tone="neutral">{[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}</Badge> : null}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!onConfigurePolicy}
+            onClick={() => onConfigurePolicy?.()}
+          >
+            冻结规则
+          </Button>
           {entry.ok && entry.observed_at ? <span className="text-[11px] text-ink-3">查询于 {formatDateTime(entry.observed_at)}</span> : null}
         </div>
       )}
@@ -425,6 +468,12 @@ export default function AccountsPage() {
     retry: false,
     refetchOnWindowFocus: false,
   });
+  const settingsQuery = useQuery({
+    queryKey: queryKeys.settings(),
+    queryFn: api.settings,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
   const client = useQueryClient();
   // 页面刻意不轮询：倒计时只重算本地时间；到最近一条 expires_at 才 refetch 一次。
   const now = useNow();
@@ -439,6 +488,7 @@ export default function AccountsPage() {
   const [resetError, setResetError] = useState("");
   const [managing, setManaging] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [policyTarget, setPolicyTarget] = useState<PolicyTarget | null>(null);
   const [manageLoading, setManageLoading] = useState(false);
   const [manageSaving, setManageSaving] = useState(false);
   const [manageError, setManageError] = useState("");
@@ -448,6 +498,14 @@ export default function AccountsPage() {
   const report = accountsQuery.data as CPAAccountsResponse | undefined;
   const instances = report?.instances ?? [];
   const subscriptions = report?.subscriptions ?? [];
+  const settings = settingsQuery.data?.settings;
+  const policies = settings?.quota_freeze_policies;
+  const policyAvailable = Boolean(settings);
+
+  function openPolicy(scope: QuotaFreezePolicy["scope"], target: string, title: string) {
+    if (!target) return;
+    setPolicyTarget({ scope, target, title });
+  }
   // 冻结列表随账号资源响应一起回来（顶层 freezes），不再单独请求一次；逐 Key 的徽标/明细
   // 按 provider_id + key_name 索引出来。顶层数组缺省（后端过渡版本）时退回逐条字段汇总，
   // 不让「有冻结徽标但计数为 0」这种自相矛盾的画面出现。
@@ -621,7 +679,11 @@ export default function AccountsPage() {
       await api.saveCPAInstances(manageRevision, object);
       setManaging(false);
       toast.success("实例已保存。");
-      await accountsQuery.refetch();
+      // 删除实例会连带清理指向它的账号级冻结策略；同步刷新页面上的策略徽标与设置缓存。
+      await Promise.all([
+        accountsQuery.refetch(),
+        client.invalidateQueries({ queryKey: queryKeys.settings() }),
+      ]);
     } catch (error) {
       setManageError(error instanceof ApiError && error.status === 409
         ? "配置已被其它改动更新，请重新打开本窗口后再保存。"
@@ -666,7 +728,7 @@ export default function AccountsPage() {
           <Button size="sm" variant="secondary" loading={accountsQuery.isFetching} onClick={() => void refreshAccounts()}>
             刷新
           </Button>
-          <Button size="sm" variant="secondary" onClick={() => setConfigOpen(true)}>冻结规则</Button>
+          <Button size="sm" variant="secondary" onClick={() => setConfigOpen(true)}>默认冻结规则</Button>
           <Button size="sm" onClick={() => void openManage()}>管理实例</Button>
         </>
       )}
@@ -752,15 +814,26 @@ export default function AccountsPage() {
         </Panel>
       ) : (
         <>
-          {subscriptions.map((entry) => (
-            <SubscriptionCard
-              key={entry.id || `${entry.provider_id}-${entry.key_name}`}
-              entry={entry}
-              now={now}
-              releasingFreeze={releaseFreeze}
-              releasingKey={releasing}
-            />
-          ))}
+          {subscriptions.map((entry) => {
+            const target = entry.provider_id && entry.key_name
+              ? `${entry.provider_id}/${entry.key_name}`
+              : "";
+            const policy = target ? findAccountPolicy(policies, "subscription", target) : undefined;
+            return (
+              <SubscriptionCard
+                key={entry.id || `${entry.provider_id}-${entry.key_name}`}
+                entry={entry}
+                now={now}
+                releasingFreeze={releaseFreeze}
+                releasingKey={releasing}
+                policy={policy}
+                policyAvailable={policyAvailable}
+                onConfigurePolicy={target
+                  ? () => openPolicy("subscription", target, `${entry.vendor || entry.id || target} · 冻结规则`)
+                  : null}
+              />
+            );
+          })}
 
           {filteredInstances.map((instance) => {
             const totalCalls = (instance.accounts ?? []).reduce((sum, account) => sum + (Number(account.success) || 0) + (Number(account.failed) || 0), 0);
@@ -771,11 +844,13 @@ export default function AccountsPage() {
               return lowest !== null && lowest <= 0.2;
             }).length;
             const offset = (instance.accounts ?? []).find((account) => account.server_time_offset_ms !== undefined)?.server_time_offset_ms;
-            // 实例级联动：全部启用账号都硬性耗尽或都低于底限时，指向该实例的每一把 Key 都会被冻结。
+            // 实例级联动：全部启用账号都硬性耗尽或都低于底限时，默认会冻结指向该实例的 Key；
+            // 若该实例的账号策略关闭了自动冻结，则不展示这条“已冻结”结论。
             const frozenKeys = instance.frozen_keys ?? [];
             const linkedProviders = instance.linked_providers ?? [];
             const allExhausted = Boolean(instance.all_accounts_exhausted);
             const allBelowFloor = Boolean(instance.all_accounts_below_floor);
+            const policy = findAccountPolicy(policies, "cpa_instance", instance.id);
             return (
               <Panel
                 key={instance.id}
@@ -786,6 +861,14 @@ export default function AccountsPage() {
                     <Badge tone={instance.ok === false ? "critical" : "neutral"}>
                       {instance.ok === false ? "读取失败" : `${instance.originalAccountCount ?? instance.accounts?.length ?? 0} 个账号`}
                     </Badge>
+                    <PolicyBadge policy={policy} available={policyAvailable} />
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => openPolicy("cpa_instance", instance.id, `${instance.label || instance.id} · 冻结规则`)}
+                    >
+                      冻结规则
+                    </Button>
                     {linkedProviders.length ? (
                       <Tooltip
                         content={(
@@ -807,7 +890,7 @@ export default function AccountsPage() {
                   <div className="p-4"><Banner tone="critical">{instance.error}</Banner></div>
                 ) : (
                   <>
-                    {allExhausted || allBelowFloor ? (
+                    {policy?.enabled !== false && (allExhausted || allBelowFloor) ? (
                       <div className="border-b border-rule px-4 py-3">
                         <Banner
                           tone={allExhausted ? "critical" : "warn"}
@@ -1030,6 +1113,20 @@ export default function AccountsPage() {
           open={configOpen}
           onOpenChange={setConfigOpen}
           onSaved={() => setConfigOpen(false)}
+        />
+      ) : null}
+
+      {policyTarget ? (
+        <QuotaFreezePolicySheet
+          key={`${policyTarget.scope}:${policyTarget.target}`}
+          open
+          onOpenChange={(open) => {
+            if (!open) setPolicyTarget(null);
+          }}
+          scope={policyTarget.scope}
+          target={policyTarget.target}
+          title={policyTarget.title}
+          onSaved={() => setPolicyTarget(null)}
         />
       ) : null}
     </div>

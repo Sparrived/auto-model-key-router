@@ -7,17 +7,18 @@ import (
 )
 
 // 本文件管「模型/供应商清单」这类**引用**：`access_keys.<id>.models`、
-// `access_keys.<id>.providers`、`workspaces.<空间>.models`，以及顶层的
-// `quota_freeze_threshold_whitelist`。
+// `access_keys.<id>.providers`、`workspaces.<空间>.models`、顶层的
+// `quota_freeze_threshold_whitelist`，以及 `quota_freeze_policies[].whitelist`
+// 和策略 target。
 //
 // 它们与 tasks、unified_model 是同一类东西——写的是别处的名字。被引用的目标没了，
 // 留着这个名字整份配置就再也解析不过去（config.parseAccessKeyModels /
-// parseWorkspaceModels / parseQuotaFreezeThresholdWhitelist 直接报「引用了未配置的模型」），
-// 于是「删掉一个没人用的模型」会被一句引用错误顶回来：用户想删的恰恰是那个模型，却因为
-// 一份清单里还写着它而删不动。
+// parseWorkspaceModels / parseQuotaFreezeThresholdWhitelist /
+// parseQuotaFreezePolicies 直接报「引用了未配置的模型/供应商」），于是「删掉一个没人用的
+// 模型」会被一句引用错误顶回来：用户想删的恰恰是那个模型，却因为一份清单里还写着它而删不动。
 //
 // 这里负责把失效的名字摘掉（RepairReferenceLists）与陪着改名一起走（FollowModelRename /
-// FollowProviderRename）；「动手之前先算出会摘掉谁」在 impact.go。
+// FollowProviderRename / FollowProviderKeyRename）；「动手之前先算出会摘掉谁」在 impact.go。
 
 // RepairReferenceLists 摘掉配置里指向已不存在模型/供应商的名字。
 //
@@ -50,7 +51,69 @@ func RepairReferenceLists(data *canonical.Value) error {
 	// 白名单与访问密钥/工作空间清单同源：写的是模型 ID 或别名。它摘空后也是空数组
 	// （没有任何模型豁免），保留字段可以让编辑界面明确显示「当前没有白名单」。
 	pruneNameList(lookup(data, "quota_freeze_threshold_whitelist"), knownModels)
+	pruneQuotaFreezePolicies(data, knownModels)
 	return nil
+}
+
+// PruneQuotaFreezePolicies 清理失效的账号冻结策略 target 与白名单引用。
+//
+// 供「整体替换 CPA 实例清单」这类只动一个配置段、却可能删掉策略 target 的写操作调用；
+// 避免用户删掉实例后，保存被一条无法解析的旧策略挡住。
+func PruneQuotaFreezePolicies(data *canonical.Value) error {
+	knownModels, err := knownModelNames(data)
+	if err != nil {
+		return err
+	}
+	pruneQuotaFreezePolicies(data, knownModels)
+	return nil
+}
+
+// pruneQuotaFreezePolicies 摘掉账号策略里失效的白名单名字，以及 target 已消失的策略。
+//
+// 策略 target 是强引用：CPA 实例被删、订阅 Key 被删之后保留这份策略，配置层会直接
+// 拒绝保存。与空数组不同，策略本身没有「不限制」语义，所以整条删除是正确的收口；
+// 未知字段（包括未来新增的策略字段）随原对象一起保留。
+func pruneQuotaFreezePolicies(data *canonical.Value, knownModels map[string]bool) {
+	policies := lookup(data, "quota_freeze_policies")
+	if policies == nil || !policies.IsArray() {
+		return
+	}
+	knownInstances := map[string]bool{}
+	for _, pair := range objectItems(lookup(data, "cpa_instances")) {
+		knownInstances[pair.Key] = true
+	}
+	knownProviderKeys := map[string]bool{}
+	for _, provider := range objectItems(lookup(data, "providers")) {
+		for _, key := range objectItems(lookup(provider.Value, "keys")) {
+			knownProviderKeys[provider.Key+"/"+key.Key] = true
+		}
+	}
+	kept := make([]*canonical.Value, 0, len(policies.Arr))
+	for _, item := range policies.Arr {
+		if !item.IsObject() {
+			kept = append(kept, item)
+			continue
+		}
+		scope := strings.TrimSpace(lookup(item, "scope").StringValue())
+		target := strings.TrimSpace(lookup(item, "target").StringValue())
+		switch scope {
+		case "cpa_instance":
+			if !knownInstances[target] {
+				continue
+			}
+		case "subscription":
+			if !knownProviderKeys[target] {
+				continue
+			}
+		default:
+			// 未知 scope 交给 config 层报错，别在这里静默删掉用户新写的策略。
+			kept = append(kept, item)
+			continue
+		}
+		pruneNameList(lookup(item, "whitelist"), knownModels)
+		kept = append(kept, item)
+	}
+	policies.Arr = kept
 }
 
 // knownModelNames 返回所有可被引用的模型名（真实 ID + 别名）。
@@ -104,12 +167,19 @@ func pruneNameList(list *canonical.Value, known map[string]bool) {
 //
 // unified_model 的跟随由 ReplaceUnifiedModelName 负责（它要处理 primary/fallback 的结构
 // 与迁移副本），这里管 access_keys / workspaces 的模型清单、任务的 model / fallback_model，
-// 以及提前冻结白名单。
+// 以及提前冻结白名单（全局默认与账号策略里的白名单）。
 //
 // 只改**与旧 ID 完全相同**的那些名字：清单与任务里允许写别名，而别名不随 ID 改名失效，
 // 跟着改反而会把一个仍然有效的别名改没。
 func FollowModelRename(data *canonical.Value, oldName, newName string) {
 	renameListItems(lookup(data, "quota_freeze_threshold_whitelist"), oldName, newName)
+	if policies := lookup(data, "quota_freeze_policies"); policies != nil && policies.IsArray() {
+		for _, item := range policies.Arr {
+			if item.IsObject() {
+				renameListItems(lookup(item, "whitelist"), oldName, newName)
+			}
+		}
+	}
 	for _, pair := range objectItems(lookup(data, "access_keys")) {
 		if pair.Value.IsObject() {
 			renameListItems(lookup(pair.Value, "models"), oldName, newName)
@@ -125,15 +195,47 @@ func FollowModelRename(data *canonical.Value, oldName, newName string) {
 	renameTaskModels(lookup(data, "tasks"), oldName, newName)
 }
 
-// FollowProviderRename 把访问密钥的供应商清单里的旧供应商 ID 改成新 ID。
+// FollowProviderRename 把访问密钥的供应商清单与账号级冻结策略的订阅 target 改成新 ID。
 //
 // 与模型清单同一件事：供应商只是换了个名字，那把密钥仍然打得动这个上游，摘掉清单项就是
 // 静默减权。模型 target 里的 `provider` 由 UpdateProvider 自己改写（那份要连带处理
-// targets 结构），这里只管访问密钥清单。
+// targets 结构），这里只管访问密钥清单与冻结策略的 `provider/key` 坐标。
 func FollowProviderRename(data *canonical.Value, oldName, newName string) {
 	for _, pair := range objectItems(lookup(data, "access_keys")) {
 		if pair.Value.IsObject() {
 			renameListItems(lookup(pair.Value, "providers"), oldName, newName)
+		}
+	}
+	if policies := lookup(data, "quota_freeze_policies"); policies != nil && policies.IsArray() {
+		prefix := oldName + "/"
+		for _, item := range policies.Arr {
+			if !item.IsObject() || lookup(item, "scope").StringValue() != "subscription" {
+				continue
+			}
+			target := strings.TrimSpace(lookup(item, "target").StringValue())
+			if strings.HasPrefix(target, prefix) {
+				item.SetKey("target", canonical.NewString(newName+"/"+strings.TrimPrefix(target, prefix)))
+			}
+		}
+	}
+}
+
+// FollowProviderKeyRename 把账号级冻结策略的订阅 target 从 provider/oldKey 改成 provider/newKey。
+//
+// 模型编辑里的 Key 改名不会经过供应商整体改名，但策略 target 和 Key 是强引用：不跟随的话，
+// 改完 Key 名下一次保存配置就会因为 target 不存在而被拒绝。
+func FollowProviderKeyRename(data *canonical.Value, providerID, oldKey, newKey string) {
+	policies := lookup(data, "quota_freeze_policies")
+	if policies == nil || !policies.IsArray() {
+		return
+	}
+	oldTarget := providerID + "/" + oldKey
+	for _, item := range policies.Arr {
+		if !item.IsObject() || lookup(item, "scope").StringValue() != "subscription" {
+			continue
+		}
+		if strings.TrimSpace(lookup(item, "target").StringValue()) == oldTarget {
+			item.SetKey("target", canonical.NewString(providerID+"/"+newKey))
 		}
 	}
 }

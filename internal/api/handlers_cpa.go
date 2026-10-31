@@ -285,7 +285,6 @@ func (s *Server) handleListCPAAccounts(w http.ResponseWriter, r *http.Request) {
 // 显示上一轮巡检的旧结论，而「命中额度后打开页面立刻能看到已冻结」正是这一页的意义。
 func (s *Server) cpaAccountsView(cfg *config.RouterConfig, report cpaAccountsReport) cpaAccountsResponse {
 	links, providersByInstance := instanceLinkIndex(cfg, report.Instances)
-	thresholds := thresholdsFromConfig(cfg)
 
 	var freezes []quota.Freeze
 	if s.QuotaFreezes != nil {
@@ -311,17 +310,25 @@ func (s *Server) cpaAccountsView(cfg *config.RouterConfig, report cpaAccountsRep
 
 	instances := make([]cpaInstanceAccountView, 0, len(report.Instances))
 	for _, instance := range report.Instances {
+		// 账号卡片与实例横幅共用该实例的账号级策略底限：同一屏里两个「低于底限」
+		// 不能一个按全局、一个按策略算，否则会出现徽标与横幅互相打架。
+		policy := effectiveQuotaFreezePolicy(cfg, quotaFreezeScopeCPAInstance, instance.ID)
 		// 账号与实例都复制一份再填展示字段：采集结果还被评估器用过，别让展示层的
 		// 派生值（quota_exhausted / quota_below_floor）回灌到判定输入里。
 		accounts := make([]cpaAccount, len(instance.Accounts))
 		copy(accounts, instance.Accounts)
 		for index := range accounts {
 			accounts[index].QuotaExhausted = len(hardQuotaWindows(accounts[index].Windows)) > 0
-			accounts[index].QuotaBelowFloor = accountBelowFloor(accounts[index], thresholds)
+			accounts[index].QuotaBelowFloor = accountBelowFloor(accounts[index], policy.Thresholds)
 		}
 		enabled := enabledAccounts(accounts)
 		allExhausted := instanceAllHardExhausted(enabled)
-		allBelowFloor := instanceAllBelowFloor(enabled, thresholds)
+		allBelowFloor := instanceAllBelowFloor(enabled, policy.Thresholds)
+		if !policy.Enabled {
+			// 策略关闭时不存在“已冻结”的横幅语义：阈值读数仍可展示在账号徽标上，
+			// 但实例级 all_accounts_below_floor 必须为 false，不能让人以为 Key 被冻了。
+			allBelowFloor = false
+		}
 		frozenKeys := frozenByInstance[instance.ID]
 		if frozenKeys == nil {
 			// 空数组而不是 null：前端把 frozen_keys 当列表渲染，null 会让 .map 炸掉。

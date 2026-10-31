@@ -168,7 +168,7 @@ func TestEmptyConfigDictKeyOrder(t *testing.T) {
 		"max_retries", "key_failure_threshold", "key_cooldown_seconds",
 		"key_balance_cooldown_seconds", "quota_freeze_interval_seconds",
 		"quota_freeze_threshold_5h", "quota_freeze_threshold_7d",
-		"quota_freeze_threshold_whitelist",
+		"quota_freeze_threshold_whitelist", "quota_freeze_policies",
 		"endpoint_capabilities_path", "metrics_db_path", "log_file_path",
 		"local_api_key", "webui_enabled", "ops_enabled", "providers", "models",
 	}
@@ -197,6 +197,7 @@ func TestEmptyConfigDictKeyOrder(t *testing.T) {
 		"quota_freeze_threshold_5h":        "0.0",
 		"quota_freeze_threshold_7d":        "0.0",
 		"quota_freeze_threshold_whitelist": "[]",
+		"quota_freeze_policies":            "[]",
 		"webui_enabled":                    "true",
 		"ops_enabled":                      "true",
 		"config_version":                   "4",

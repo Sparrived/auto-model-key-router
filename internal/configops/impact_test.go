@@ -79,6 +79,30 @@ func TestModelEditImpactOfReportsCleared(t *testing.T) {
 	}
 }
 
+// TestModelEditImpactReportsPolicyWhitelist 固化账号级策略白名单也进入预演：
+// 删模型时不仅要清理全局白名单，策略里的同名引用也要列出来。
+func TestModelEditImpactReportsPolicyWhitelist(t *testing.T) {
+	fixture := `{
+		"config_version": 4,
+		"providers": {"p": {"base_url": "https://p.example", "keys": {"k": {"api_key": "x"}}}},
+		"models": {"model-a": {"targets": [{"provider": "p", "key": "k", "upstream_model": "u"}]}},
+		"quota_freeze_threshold_whitelist": ["model-a"],
+		"quota_freeze_policies": [
+			{"scope": "subscription", "target": "p/k", "whitelist": ["model-a"]}
+		]
+	}`
+	before := mustParse(t, fixture)
+	after := mustParse(t, fixture)
+	mustLookup(t, after, "models").DeleteKey("model-a")
+	if err := RepairReferenceLists(after); err != nil {
+		t.Fatalf("修复引用失败: %v", err)
+	}
+	impact := ModelEditImpactOf(before, after)
+	if !slices.Equal(impact.QuotaFreezeWhitelist, []string{"model-a"}) {
+		t.Errorf("策略白名单变更 = %v，期望 [model-a]", impact.QuotaFreezeWhitelist)
+	}
+}
+
 // TestTaskIdentitiesQualifyNamedWorkspace 固化任务标识的形状：命名空间带 `空间/` 前缀。
 //
 // 两个空间可能有同名任务，确认框要能说清被删的是哪一个。

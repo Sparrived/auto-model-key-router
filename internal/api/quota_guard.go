@@ -470,25 +470,31 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 		providers[provider.ID] = provider
 	}
 	links, providersByInstance := instanceLinkIndex(cfg, report.Instances)
-	thresholds := thresholdsFromConfig(cfg)
 
 	// —— 1. 订阅类账号资源：条目级判定 ——
 
 	for _, entry := range report.Subscriptions {
+		policy := effectiveQuotaFreezePolicy(cfg, quotaFreezeScopeSubscription, entry.ProviderID+"/"+entry.KeyName)
+		if !policy.Enabled {
+			// 账号策略明确关闭自动冻结：不新建，并清掉这条订阅规则此前下的结论。
+			// 实例级冻结不在这里动（两条规则各自负责自己的 scope）。
+			evaluation.Changed += g.releaseFreeze(entry.ProviderID, entry.KeyName, "subscription", "upstream")
+			continue
+		}
 		if !entry.OK {
 			// 无意见：读不到不等于有余额，不动现状。
 			continue
 		}
-		triggered := quota.TriggerWindows(quotaWindowsFromCPA(entry.Windows), thresholds)
+		triggered := quota.TriggerWindows(quotaWindowsFromCPA(entry.Windows), policy.Thresholds)
 		if len(triggered) > 0 {
 			expiresAt, ok := freezeExpiresAt(now, triggered)
 			if !ok {
 				// 最晚的 reset_at 已经过去：读数过期，不新建冻结（设计稿 2）。
 				continue
 			}
-			trigger := triggerKindForWindows(triggered, thresholds)
-			window := reasonWindowForTrigger(triggered, thresholds, trigger)
-			threshold := windowTriggerThreshold(window, thresholds, trigger)
+			trigger := triggerKindForWindows(triggered, policy.Thresholds)
+			window := reasonWindowForTrigger(triggered, policy.Thresholds, trigger)
+			threshold := windowTriggerThreshold(window, policy.Thresholds, trigger)
 			evaluation.Changed += g.upsertFreeze(quota.Freeze{
 				ProviderID:  entry.ProviderID,
 				KeyName:     entry.KeyName,
@@ -502,6 +508,7 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 				Status:      window.Status,
 				Trigger:     trigger,
 				Threshold:   threshold,
+				Whitelist:   policy.Whitelist,
 				ResetAt:     window.ResetAt,
 				FrozenAt:    now,
 				ExpiresAt:   expiresAt,
@@ -518,6 +525,17 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 	configuredInstances := make(map[string]bool, len(report.Instances))
 	for _, instance := range report.Instances {
 		configuredInstances[instance.ID] = true
+		linked := providersByInstance[instance.ID]
+		policy := effectiveQuotaFreezePolicy(cfg, quotaFreezeScopeCPAInstance, instance.ID)
+		if !policy.Enabled {
+			// 实例策略明确关闭自动冻结：解掉该实例关联 Key 的实例级/上游信号冻结。
+			for _, providerID := range linked {
+				for _, key := range providers[providerID].Keys {
+					evaluation.Changed += g.releaseFreeze(providerID, key.Name, "cpa_instance", "upstream")
+				}
+			}
+			continue
+		}
 		if !instance.OK {
 			// 实例不可达：无意见（不能把「读不到」当成「账号有余额」）。
 			continue
@@ -532,15 +550,14 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 			// 证明「有余额」，保持现状（设计稿 2 的「无意见」）。
 			continue
 		}
-		linked := providersByInstance[instance.ID]
-		allTriggered, account, window, trigger := instanceTrigger(enabled, thresholds)
+		allTriggered, account, window, trigger := instanceTrigger(enabled, policy.Thresholds)
 		if allTriggered {
 			expiresAt, ok := freezeExpiresAt(now, []quota.Window{window})
 			if !ok {
 				// 触发窗口的 reset_at 已经过去：不拿过期读数冻整台实例。
 				continue
 			}
-			threshold := windowTriggerThreshold(window, thresholds, trigger)
+			threshold := windowTriggerThreshold(window, policy.Thresholds, trigger)
 			for _, providerID := range linked {
 				for _, key := range providers[providerID].Keys {
 					if !key.Enabled {
@@ -560,6 +577,7 @@ func (g *QuotaGuard) applyReportLocked(cfg *config.RouterConfig, report cpaAccou
 						Status:      window.Status,
 						Trigger:     trigger,
 						Threshold:   threshold,
+						Whitelist:   policy.Whitelist,
 						ResetAt:     window.ResetAt,
 						FrozenAt:    now,
 						ExpiresAt:   expiresAt,
@@ -684,10 +702,14 @@ func (g *QuotaGuard) releaseFreeze(providerID, keyName string, scopes ...string)
 
 // ObserveUpstreamQuota 是 L3 观察点：代理请求路径上每次拿到上游响应头都调一次。
 //
-// 这里只做三件廉价的事：有没有额度头（前缀判断）→ 解析出窗口 → 按当前底限筛出
-// 触发窗口后非阻塞投递一个信号。**不做文件 IO、不发网络请求、不取评估锁**：它跑在
-// 请求的关键路径上，任何阻塞都会直接变成用户可见的延迟。真正的判定与落盘在 Run
-// 循环里做。
+// 这里只做三件廉价的事：有没有额度头（前缀判断）→ 解析出窗口 → 按**该账号策略的
+// effective 底限**筛出触发窗口后非阻塞投递一个信号。策略关闭时直接跳过。**不做文件
+// IO、不发网络请求、不取评估锁**：它跑在请求的关键路径上，任何阻塞都会直接变成用户
+// 可见的延迟。真正的判定与落盘在 Run 循环里做。
+//
+// 关联表尚未就绪时沿用全局底限（之后 handleSignal 会走「先重评估」的保守路径）；
+// 关联表就绪后：已关联 CPA 实例（含单账号）走 cpa_instance 策略，未关联实例才走
+// subscription 策略——与 applyReportLocked 的两层规则保持一致。
 func (g *QuotaGuard) ObserveUpstreamQuota(providerID, keyName string, headers http.Header) {
 	if g == nil || g.store == nil {
 		return
@@ -695,7 +717,17 @@ func (g *QuotaGuard) ObserveUpstreamQuota(providerID, keyName string, headers ht
 	if !quota.HasQuotaHeaders(headers) {
 		return
 	}
-	triggered := quota.TriggerWindows(quota.HeaderWindows(headers), thresholdsFromConfig(g.currentConfig()))
+	cfg := g.currentConfig()
+	thresholds := thresholdsFromConfig(cfg)
+	if scope, target, ok := g.quotaSignalPolicyTarget(providerID, keyName); ok {
+		var enabled bool
+		thresholds, enabled = effectiveQuotaFreezeThresholds(cfg, scope, target)
+		if !enabled {
+			// 账号策略明确关闭自动冻结：不投递、不落地。
+			return
+		}
+	}
+	triggered := quota.TriggerWindows(quota.HeaderWindows(headers), thresholds)
 	if len(triggered) == 0 {
 		// 没有触发窗口（预警状态且高于底限）：不投递。硬约束宁可晚一次请求，也
 		// 不能误伤还有额度的 Key。
@@ -706,6 +738,24 @@ func (g *QuotaGuard) ObserveUpstreamQuota(providerID, keyName string, headers ht
 	default:
 		// 缓冲满：丢弃。信号不是事实来源，下一轮巡检会把状态重新算对。
 	}
+}
+
+// quotaSignalPolicyTarget 返回 L3 信号应使用的账号策略坐标。
+//
+// ok=false 表示关联表尚未评估出来：调用方沿用全局底限，handleSignal 会先要求一次
+// 即时重评估，不拿未知的实例归属冒进冻结。只要已关联 CPA 实例（无论实例里启用账号
+// 数是多少），账号策略都由该实例的 cpa_instance 策略决定；只有未关联实例的供应商
+// 才使用 subscription 策略（target=provider/key）。单/多账号的差别只在 handleSignal
+// 是否直接冻结：单账号可直接落 upstream 冻结，多账号必须先走实例级重评估。
+func (g *QuotaGuard) quotaSignalPolicyTarget(providerID, keyName string) (scope, target string, ok bool) {
+	link, linked, ready := g.instanceLink(providerID)
+	if !ready {
+		return "", "", false
+	}
+	if linked {
+		return quotaFreezeScopeCPAInstance, link.InstanceID, true
+	}
+	return quotaFreezeScopeSubscription, providerID + "/" + keyName, true
 }
 
 // handleSignal 处理一条 L3 信号（只在 Run 循环里调用，单线程，顺序确定）。
@@ -735,20 +785,35 @@ func (g *QuotaGuard) handleSignal(signal quotaSignal) {
 		return
 	}
 	link, linked, linksReady := g.instanceLink(signal.ProviderID)
-	if !linksReady || (linked && link.EnabledAccounts != 1) {
-		// 多账号实例（或关联关系尚未评估出来）：单次响应的限额头只说明「刚才那个
-		// 账号」用完了，不代表整把 Key 不可用，交给实例级规则决定。
+	if !linksReady {
+		// 关联关系尚未评估出来：沿用原有保守路径，先要求一次即时重评估（评估层
+		// 会按账号策略落盘），不拿未知的实例归属直接冻结。
 		g.Trigger()
 		return
 	}
-	thresholds := thresholdsFromConfig(g.currentConfig())
-	// 信号是在观察点按当时的底限筛出来的；落地前再按**当前**配置筛一次：
-	// 两次之间热重载可能把底限调低或关掉，旧信号不该继续产生冻结。
-	triggered := quota.TriggerWindows(signal.Windows, thresholds)
+	scope, target := quotaFreezeScopeSubscription, signal.ProviderID+"/"+signal.KeyName
+	if linked {
+		scope, target = quotaFreezeScopeCPAInstance, link.InstanceID
+	}
+	policy := effectiveQuotaFreezePolicy(g.currentConfig(), scope, target)
+	if !policy.Enabled {
+		// 账号策略明确关闭自动冻结：L3 不落地。
+		return
+	}
+	if linked && link.EnabledAccounts != 1 {
+		// 多账号实例：单次响应的限额头只说明「刚才那个账号」用完了，不代表整把
+		// Key 不可用，按实例策略交给实例级规则决定。
+		g.Trigger()
+		return
+	}
+	// 信号是在观察点按当时的底限筛出来的；落地前再按**当前**账号策略筛一次：
+	// 两次之间热重载可能把底限调低、关掉或把策略改成 disabled，旧信号不该继续
+	// 产生冻结。
+	triggered := quota.TriggerWindows(signal.Windows, policy.Thresholds)
 	if len(triggered) == 0 {
 		return
 	}
-	trigger := triggerKindForWindows(triggered, thresholds)
+	trigger := triggerKindForWindows(triggered, policy.Thresholds)
 	if alreadyFrozen && trigger != "hard" {
 		// 已有提前冻结 + 新的提前冻结信号：计时器、窗口与原因都已存在，无需重写。
 		return
@@ -765,8 +830,8 @@ func (g *QuotaGuard) handleSignal(signal quotaSignal) {
 		// 到期时间沿用原记录（Upsert 会保留更早的值），不凭过期读数延长冻结。
 		expiresAt = existing.ExpiresAt
 	}
-	window := reasonWindowForTrigger(triggered, thresholds, trigger)
-	threshold := windowTriggerThreshold(window, thresholds, trigger)
+	window := reasonWindowForTrigger(triggered, policy.Thresholds, trigger)
+	threshold := windowTriggerThreshold(window, policy.Thresholds, trigger)
 	g.upsertFreeze(quota.Freeze{
 		ProviderID:  signal.ProviderID,
 		KeyName:     signal.KeyName,
@@ -778,6 +843,7 @@ func (g *QuotaGuard) handleSignal(signal quotaSignal) {
 		Status:      window.Status,
 		Trigger:     trigger,
 		Threshold:   threshold,
+		Whitelist:   policy.Whitelist,
 		ResetAt:     window.ResetAt,
 		FrozenAt:    now,
 		ExpiresAt:   expiresAt,
@@ -919,6 +985,149 @@ func thresholdsFromConfig(cfg *config.RouterConfig) quota.Thresholds {
 		FiveHour: cfg.QuotaFreezeThreshold5h,
 		SevenDay: cfg.QuotaFreezeThreshold7d,
 	}.Normalize()
+}
+
+// 账号级冻结策略的 scope 取值，与 config.QuotaFreezePolicy.Scope 一致。
+const (
+	quotaFreezeScopeSubscription = "subscription"
+	quotaFreezeScopeCPAInstance  = "cpa_instance"
+)
+
+// quotaFreezeEffectivePolicy 是一个账号合并后的冻结规则。
+type quotaFreezeEffectivePolicy struct {
+	// Enabled=false 表示该账号不参与自动冻结；已有冻结由调用方解除。
+	Enabled bool
+	// Thresholds 是合并后的 5h/7d 底限。
+	Thresholds quota.Thresholds
+	// Whitelist 是真实模型 ID 去重排序后的白名单；nil 表示沿用旧记录的全局回退语义。
+	Whitelist []string
+}
+
+// lookupQuotaFreezePolicy 按 scope+target 找账号级策略。
+//
+// 配置层已保证同一 scope/target 不重复；这里仍只取第一条，避免手工构造的配置在
+// 运行时出现「后者覆盖前者」这种难以解释的行为。
+func lookupQuotaFreezePolicy(cfg *config.RouterConfig, scope, target string) (config.QuotaFreezePolicy, bool) {
+	if cfg == nil || target == "" {
+		return config.QuotaFreezePolicy{}, false
+	}
+	for _, policy := range cfg.QuotaFreezePolicies {
+		if policy.Scope == scope && policy.Target == target {
+			return policy, true
+		}
+	}
+	return config.QuotaFreezePolicy{}, false
+}
+
+// effectiveQuotaFreezeThresholds 只合并账号策略的开关与底限，不解析白名单。
+//
+// 它给 L3 观察点用：代理请求路径每次上游响应都会调用一次，不能为了白名单去遍历
+// 模型表。未找到策略时 enabled=true、完全继承全局。
+func effectiveQuotaFreezeThresholds(cfg *config.RouterConfig, scope, target string) (quota.Thresholds, bool) {
+	thresholds := thresholdsFromConfig(cfg)
+	enabled := true
+	if policy, found := lookupQuotaFreezePolicy(cfg, scope, target); found {
+		enabled = policy.Enabled
+		if policy.Threshold5h != nil {
+			thresholds.FiveHour = *policy.Threshold5h
+		}
+		if policy.Threshold7d != nil {
+			thresholds.SevenDay = *policy.Threshold7d
+		}
+	}
+	return thresholds.Normalize(), enabled
+}
+
+// effectiveQuotaFreezePolicy 合并账号级冻结策略：
+//
+//   - 没有策略：阈值继承全局；白名单保持 nil（由 keypool 动态回退全局名单）；
+//   - Threshold5h / Threshold7d 为 nil：继承全局对应档，非 nil 覆盖；
+//   - WhitelistSet=false：白名单保持 nil（动态继承全局）；true：使用策略自身
+//     （可以为空数组，表示明确不放行）；
+//   - Enabled=false：该账号不参与自动冻结。
+//
+// 白名单只有策略**显式设置**时才写入新的冻结记录（真实模型 ID，别名归一、去重排序）。
+// 未配置或 WhitelistSet=false 时保持 nil：keypool 会动态回退全局
+// quota_freeze_threshold_whitelist，这样全局名单热改仍对已生效冻结生效（与 7.0.3
+// 的旧行为一致）。策略显式给空数组时返回非 nil 空切片，表示明确不放行任何模型。
+func effectiveQuotaFreezePolicy(cfg *config.RouterConfig, scope, target string) quotaFreezeEffectivePolicy {
+	thresholds := thresholdsFromConfig(cfg)
+	enabled := true
+	var whitelist []string
+	if policy, found := lookupQuotaFreezePolicy(cfg, scope, target); found {
+		enabled = policy.Enabled
+		if policy.Threshold5h != nil {
+			thresholds.FiveHour = *policy.Threshold5h
+		}
+		if policy.Threshold7d != nil {
+			thresholds.SevenDay = *policy.Threshold7d
+		}
+		if policy.WhitelistSet {
+			var models []config.ModelConfig
+			if cfg != nil {
+				models = cfg.Models
+			}
+			if policy.Whitelist == nil {
+				// 显式设置但没有给名字，等价于空数组（明确不放行任何模型）；不能
+				// 退化成 nil 的“继承全局”语义。
+				whitelist = []string{}
+			} else {
+				whitelist = normalizeQuotaFreezeWhitelist(models, policy.Whitelist)
+			}
+		}
+	}
+	return quotaFreezeEffectivePolicy{
+		Enabled:    enabled,
+		Thresholds: thresholds.Normalize(),
+		Whitelist:  whitelist,
+	}
+}
+
+// normalizeQuotaFreezeWhitelist 把配置里的模型名（真实 ID 或别名）归一成真实 ID，
+// 再去重排序。names 为 nil 时返回 nil（旧记录/未配置的「回退全局」语义）；非 nil 空
+// 切片返回非 nil 空切片（账号策略明确不放行任何模型）。
+func normalizeQuotaFreezeWhitelist(models []config.ModelConfig, names []string) []string {
+	if names == nil {
+		return nil
+	}
+	idsByName := make(map[string]string, len(models)*2+len(names))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := idsByName[id]; !exists {
+			idsByName[id] = id
+		}
+		for _, alias := range model.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue
+			}
+			if _, exists := idsByName[alias]; !exists {
+				idsByName[alias] = id
+			}
+		}
+	}
+	seen := make(map[string]struct{}, len(names))
+	normalized := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		id := name
+		if resolved, ok := idsByName[name]; ok {
+			id = resolved
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 // triggerKindForWindows 汇总一组触发窗口的冻结类型：任一窗口硬性耗尽即 hard，

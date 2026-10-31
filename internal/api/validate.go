@@ -423,6 +423,17 @@ var specRouteUpdate = newModelSpec("RouteUpdate",
 	nul("endpoints", kindAnyDict),
 )
 
+// specQuotaFreezePolicy 是 settings.quota_freeze_policies[] 的元素。
+// threshold/whitelist 为 null/缺省表示继承全局；enabled 缺省为 true（由 config 层兜底）。
+var specQuotaFreezePolicy = newModelSpec("QuotaFreezePolicy",
+	req("scope", kindStr).minLenOf(1),
+	req("target", kindStr).minLenOf(1),
+	def("enabled", kindBool),
+	nul("threshold_5h", kindFloat).geV(floatGe0).leV(floatLe1),
+	nul("threshold_7d", kindFloat).geV(floatGe0).leV(floatLe1),
+	nul("whitelist", kindStrList),
+)
+
 // specSettingsUpdate 对应 SettingsUpdate。
 var specSettingsUpdate = newModelSpec("SettingsUpdate",
 	req("config_revision", kindStr).minLenOf(1),
@@ -435,6 +446,7 @@ var specSettingsUpdate = newModelSpec("SettingsUpdate",
 	nul("quota_freeze_threshold_5h", kindFloat).geV(floatGe0).leV(floatLe1),
 	nul("quota_freeze_threshold_7d", kindFloat).geV(floatGe0).leV(floatLe1),
 	nul("quota_freeze_threshold_whitelist", kindStrList),
+	nul("quota_freeze_policies", kindNestedList).withNested(specQuotaFreezePolicy),
 )
 
 // validationError 是一条 Pydantic 校验错误，渲染顺序固定为

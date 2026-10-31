@@ -77,7 +77,9 @@ func ReplaceCPAInstances(data *canonical.Value, incoming *canonical.Value) error
 		normalized.SetKey(trimmed, entry)
 	}
 	data.SetKey(cpaInstancesKey, normalized)
-	return nil
+	// 实例被删掉后，指向它的账号级冻结策略也失去了 target：同一次写操作里一并清掉，
+	// 否则下一次配置解析会以「引用了未配置的 CPA 实例」拒绝保存。
+	return PruneQuotaFreezePolicies(data)
 }
 
 // normalizeCPAInstance 校验单个实例并返回写回配置的对象。

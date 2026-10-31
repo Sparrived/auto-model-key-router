@@ -2,6 +2,7 @@ package keypool
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,37 +20,58 @@ import (
 // fakeQuotaFreezes 是 QuotaFreezes 的假实现：按 (provider, key) 查一张冻结表。
 //
 // 生产实现是 *quota.Store（带持久化），选路层只依赖这两个读方法。假实现同样加锁，
-// 因为 SetQuotaFreezes 与读会并发（见并发用例）。
+// 因为 SetQuotaFreezes 与读会并发（见并发用例）。它还实现可选的白名单扩展，便于
+// 覆盖账号级策略；legacyQuotaFreezes 则收窄成旧版接口，专门验证兼容回退。
 type fakeQuotaFreezes struct {
-	mu       sync.Mutex
-	reasons  map[[2]string]string
-	triggers map[[2]string]string
+	mu         sync.Mutex
+	reasons    map[[2]string]string
+	triggers   map[[2]string]string
+	whitelists map[[2]string][]string
 }
 
 // newFakeQuotaFreezes 构造空的冻结表。
 func newFakeQuotaFreezes() *fakeQuotaFreezes {
 	return &fakeQuotaFreezes{
-		reasons:  map[[2]string]string{},
-		triggers: map[[2]string]string{},
+		reasons:    map[[2]string]string{},
+		triggers:   map[[2]string]string{},
+		whitelists: map[[2]string][]string{},
 	}
 }
 
 // Freeze 冻结一把 Key，并记下原因（硬性耗尽，白名单不可豁免）。
 func (f *fakeQuotaFreezes) Freeze(providerID, keyName, reason string) {
-	f.freeze(providerID, keyName, reason, "hard")
+	f.freeze(providerID, keyName, reason, "hard", nil)
+}
+
+// FreezeWithWhitelist 冻结一把 Key 为硬性耗尽，同时带上一条白名单记录。
+// 记录里的白名单对 hard 没有意义，仅用于证明硬性冻结不会被它放行。
+func (f *fakeQuotaFreezes) FreezeWithWhitelist(providerID, keyName, reason string, whitelist []string) {
+	f.freeze(providerID, keyName, reason, "hard", whitelist)
 }
 
 // FreezeThreshold 冻结一把 Key，并标记为提前冻结（白名单模型可豁免）。
+// 不设置记录级白名单，模拟没有该字段的旧记录。
 func (f *fakeQuotaFreezes) FreezeThreshold(providerID, keyName, reason string) {
-	f.freeze(providerID, keyName, reason, "threshold")
+	f.freeze(providerID, keyName, reason, "threshold", nil)
 }
 
-func (f *fakeQuotaFreezes) freeze(providerID, keyName, reason, trigger string) {
+// FreezeThresholdWithWhitelist 冻结一把 Key，并写入账号级白名单。
+// whitelist 为 nil 表示旧记录；非 nil 空切片表示策略明确不放行任何模型。
+func (f *fakeQuotaFreezes) FreezeThresholdWithWhitelist(providerID, keyName, reason string, whitelist []string) {
+	f.freeze(providerID, keyName, reason, "threshold", whitelist)
+}
+
+func (f *fakeQuotaFreezes) freeze(providerID, keyName, reason, trigger string, whitelist []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := [2]string{providerID, keyName}
 	f.reasons[key] = reason
 	f.triggers[key] = trigger
+	if whitelist == nil {
+		delete(f.whitelists, key)
+		return
+	}
+	f.whitelists[key] = cloneWhitelist(whitelist)
 }
 
 // Release 解除一把 Key 的冻结。
@@ -59,6 +81,7 @@ func (f *fakeQuotaFreezes) Release(providerID, keyName string) {
 	key := [2]string{providerID, keyName}
 	delete(f.reasons, key)
 	delete(f.triggers, key)
+	delete(f.whitelists, key)
 }
 
 // IsFrozen 报告是否在冻结表里。
@@ -81,6 +104,47 @@ func (f *fakeQuotaFreezes) FrozenTrigger(providerID, keyName string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.triggers[[2]string{providerID, keyName}]
+}
+
+// FrozenWhitelist 返回记录级白名单副本；没有记录或记录没有该字段返回 nil。
+// 明确的空策略必须返回非 nil 空切片，否则调用方无法与「旧记录」区分。
+func (f *fakeQuotaFreezes) FrozenWhitelist(providerID, keyName string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	whitelist, found := f.whitelists[[2]string{providerID, keyName}]
+	if !found || whitelist == nil {
+		return nil
+	}
+	return cloneWhitelist(whitelist)
+}
+
+// cloneWhitelist 保留 nil 与空切片的区别。
+func cloneWhitelist(whitelist []string) []string {
+	if whitelist == nil {
+		return nil
+	}
+	result := make([]string, len(whitelist))
+	copy(result, whitelist)
+	return result
+}
+
+// legacyQuotaFreezes 只暴露旧版最小接口（IsFrozen / FrozenReason / FrozenTrigger），
+// 用于固化「新增白名单是可选扩展」：没有 FrozenWhitelist 的实现仍按全局白名单回退，
+// 旧测试假实现与嵌入方不必为它重写。
+type legacyQuotaFreezes struct {
+	inner *fakeQuotaFreezes
+}
+
+func (l legacyQuotaFreezes) IsFrozen(providerID, keyName string) bool {
+	return l.inner.IsFrozen(providerID, keyName)
+}
+
+func (l legacyQuotaFreezes) FrozenReason(providerID, keyName string) string {
+	return l.inner.FrozenReason(providerID, keyName)
+}
+
+func (l legacyQuotaFreezes) FrozenTrigger(providerID, keyName string) string {
+	return l.inner.FrozenTrigger(providerID, keyName)
 }
 
 // frozenReasonText 是测试里统一使用的冻结原因，形态与生产 quota.Store 写入的一致。
@@ -109,6 +173,38 @@ func newFrozenPool(t *testing.T, routingMode string) (*KeyPool, *fakeQuotaFreeze
 	t.Helper()
 	freezes := newFakeQuotaFreezes()
 	pool := New(freezeModelConfig(t, routingMode), nil, func() float64 { return 1000 })
+	pool.SetQuotaFreezes(freezes)
+	return pool, freezes
+}
+
+// freezeWhitelistConfig 构造「两个模型共用一把 Key」的配置，全局白名单由参数给出。
+//
+// 另给 m 配一个别名 alias-m：冻结记录按真实模型 ID 存放，请求写别名时也必须命中。
+func freezeWhitelistConfig(t *testing.T, globalWhitelist ...string) *config.RouterConfig {
+	t.Helper()
+	quoted := make([]string, len(globalWhitelist))
+	for i, name := range globalWhitelist {
+		quoted[i] = strconv.Quote(name)
+	}
+	raw := `{
+		"config_version": 4, "local_api_key": "local",
+		"quota_freeze_threshold_whitelist": [` + strings.Join(quoted, ",") + `],
+		"providers": {"p": {"base_url": "https://a.example", "keys": {"k": {"api_key": "1"}}}},
+		"models": {
+			"m": {"aliases": ["alias-m"], "targets": [
+				{"provider": "p", "key": "k", "upstream_model": "u"}]},
+			"other": {"targets": [
+				{"provider": "p", "key": "k", "upstream_model": "u"}]}
+		}
+	}`
+	return mustConfig(t, raw)
+}
+
+// newWhitelistFrozenPool 构造注入冻结表的白名单测试池子。
+func newWhitelistFrozenPool(t *testing.T, globalWhitelist ...string) (*KeyPool, *fakeQuotaFreezes) {
+	t.Helper()
+	freezes := newFakeQuotaFreezes()
+	pool := New(freezeWhitelistConfig(t, globalWhitelist...), nil, func() float64 { return 1000 })
 	pool.SetQuotaFreezes(freezes)
 	return pool, freezes
 }
@@ -280,6 +376,118 @@ func TestThresholdFreezeWhitelist(t *testing.T) {
 	}
 	if _, err := pool.NextKey("m", nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
 		t.Fatalf("硬性耗尽后应返回 ErrQuotaFrozen，实得 %v", err)
+	}
+}
+
+// TestThresholdFreezeAccountWhitelistOverridesGlobal 固化账号级白名单优先于全局默认。
+//
+// 全局清单只允许 other，冻结记录只允许 m：两个方向都必须按记录判——m 放行（全局
+// 不允许也不算数），other 拒绝（全局允许也不算数，账号策略不与全局合并）。请求写
+// 别名时按真实模型 ID 命中记录里的 m。
+func TestThresholdFreezeAccountWhitelistOverridesGlobal(t *testing.T) {
+	pool, freezes := newWhitelistFrozenPool(t, "other")
+	freezes.FreezeThresholdWithWhitelist("p", "k", frozenReasonText, []string{"m"})
+
+	if got := pool.KeyCount("m"); got != 1 {
+		t.Fatalf("账号白名单里的模型应放行: KeyCount=%d want 1", got)
+	}
+	key, err := pool.NextKey("alias-m", nil, nil, "")
+	if err != nil || key.Name != "k" {
+		t.Fatalf("别名应解析为真实 ID 并命中账号白名单: key=%+v err=%v", key, err)
+	}
+	pool.ReleaseKey("m", key.Name)
+	if err := pool.AcquireKey("m", "k"); err != nil {
+		t.Fatalf("点名路径也应命中账号白名单: %v", err)
+	}
+	pool.ReleaseKey("m", "k")
+
+	if got := pool.KeyCount("other"); got != 0 {
+		t.Fatalf("未进入账号白名单的模型必须被拒绝（不能合并全局）: KeyCount=%d want 0", got)
+	}
+	if got := pool.FrozenKeyCount("other", nil); got != 1 {
+		t.Fatalf("未进入账号白名单的模型应计为冻结候选: FrozenKeyCount=%d want 1", got)
+	}
+	if _, err := pool.NextKey("other", nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
+		t.Fatalf("未进入账号白名单的模型应返回 ErrQuotaFrozen，实得 %v", err)
+	}
+	if err := pool.QuotaFrozenError("other", nil); !errors.Is(err, ErrQuotaFrozen) {
+		t.Fatalf("诊断接口应与选路层同口径，实得 %v", err)
+	}
+}
+
+// TestThresholdFreezeExplicitEmptyWhitelistOverridesGlobal 固化「明确空策略」不是
+// 「没有策略」：记录里非 nil 的空白名单表示谁都不放行，必须压过全局允许。
+func TestThresholdFreezeExplicitEmptyWhitelistOverridesGlobal(t *testing.T) {
+	pool, freezes := newWhitelistFrozenPool(t, "m")
+	freezes.FreezeThresholdWithWhitelist("p", "k", frozenReasonText, []string{})
+
+	if got := pool.KeyCount("m"); got != 0 {
+		t.Fatalf("明确空白名单必须覆盖全局允许: KeyCount=%d want 0", got)
+	}
+	if _, err := pool.NextKey("m", nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
+		t.Fatalf("明确空白名单应返回 ErrQuotaFrozen，实得 %v", err)
+	}
+}
+
+// TestThresholdFreezeNilWhitelistFallsBackToGlobal 固化旧记录/旧实现的兼容回退。
+//
+// 两条路径都必须落到全局 quota_freeze_threshold_whitelist：记录没有 whitelist 字段
+// （FrozenWhitelist 返回 nil），以及实现根本没提供可选接口。全局允许 m、不允许 other。
+func TestThresholdFreezeNilWhitelistFallsBackToGlobal(t *testing.T) {
+	cases := []struct {
+		name string
+		wrap func(*fakeQuotaFreezes) QuotaFreezes
+	}{
+		{
+			name: "旧记录没有白名单字段",
+			wrap: func(f *fakeQuotaFreezes) QuotaFreezes { return f },
+		},
+		{
+			name: "实现未提供可选接口",
+			wrap: func(f *fakeQuotaFreezes) QuotaFreezes { return legacyQuotaFreezes{inner: f} },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			freezes := newFakeQuotaFreezes()
+			pool := New(freezeWhitelistConfig(t, "m"), nil, func() float64 { return 1000 })
+			pool.SetQuotaFreezes(tc.wrap(freezes))
+			freezes.FreezeThreshold("p", "k", frozenReasonText)
+
+			if got := pool.KeyCount("m"); got != 1 {
+				t.Fatalf("全局白名单里的模型应放行: KeyCount=%d want 1", got)
+			}
+			key, err := pool.NextKey("m", nil, nil, "")
+			if err != nil || key.Name != "k" {
+				t.Fatalf("全局白名单模型应能选中 k: key=%+v err=%v", key, err)
+			}
+			pool.ReleaseKey("m", key.Name)
+
+			if got := pool.KeyCount("other"); got != 0 {
+				t.Fatalf("不在全局白名单里的模型应被拒绝: KeyCount=%d want 0", got)
+			}
+			if _, err := pool.NextKey("other", nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
+				t.Fatalf("不在全局白名单里的模型应返回 ErrQuotaFrozen，实得 %v", err)
+			}
+		})
+	}
+}
+
+// TestHardFreezeIgnoresWhitelists 固化硬性耗尽不接受任何白名单豁免。
+//
+// 全局白名单与冻结记录白名单都点名 m，两个来源都「允许」，hard 仍然必须拒绝：
+// 白名单只属于 threshold，不能把已经见底的额度继续打出去。
+func TestHardFreezeIgnoresWhitelists(t *testing.T) {
+	pool, freezes := newWhitelistFrozenPool(t, "m")
+	freezes.FreezeWithWhitelist("p", "k", "5 小时窗口已用尽（剩余 0%）", []string{"m"})
+
+	for _, modelID := range []string{"m", "other"} {
+		if got := pool.KeyCount(modelID); got != 0 {
+			t.Fatalf("hard 冻结下 %s 必须停用: KeyCount=%d want 0", modelID, got)
+		}
+		if _, err := pool.NextKey(modelID, nil, nil, ""); !errors.Is(err, ErrQuotaFrozen) {
+			t.Fatalf("hard 冻结下 %s 应返回 ErrQuotaFrozen，实得 %v", modelID, err)
+		}
 	}
 }
 

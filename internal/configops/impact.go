@@ -60,9 +60,10 @@ type ModelEditImpact struct {
 	// EndpointPlans 报告是否有模型的端点计划被一并改写：被删的模型被别的模型的端点
 	// 计划引用时，那些端点会被移除（该模型不再按那个端点分派）。
 	EndpointPlans bool
-	// QuotaFreezeWhitelist 是提前冻结白名单里被本次操作移除或改名的旧名字（升序）。
-	// 白名单只影响 threshold 冻结的豁免，但它同样是配置层的硬引用：删模型或改 ID 时
-	// 不同步更新，整份配置会被「引用了未配置的模型」挡住。
+	// QuotaFreezeWhitelist 是提前冻结白名单里被本次操作移除的旧名字（升序）。
+	// 包含全局默认与账号级冻结策略里的白名单；白名单只影响 threshold 冻结的豁免，
+	// 但它同样是配置层的硬引用：删模型或改 ID 时不同步更新，整份配置会被
+	// 「引用了未配置的模型」挡住。
 	QuotaFreezeWhitelist []string
 }
 
@@ -76,20 +77,69 @@ func ModelEditImpactOf(before, after *canonical.Value) ModelEditImpact {
 			objectKeys(lookup(before, "models")),
 			objectKeys(lookup(after, "models")),
 		),
-		RemovedKeys:   removedProviderKeys(before, after),
-		RemovedTasks:  removedNames(taskIdentities(before), taskIdentities(after)),
-		AccessKeys:    accessKeyListChanges(before, after),
-		Workspaces:    workspaceListChanges(before, after),
-		UnifiedModel:  !pyEqualValues(lookup(before, "unified_model"), lookup(after, "unified_model")),
-		EndpointPlans: endpointPlansChanged(before, after),
-		QuotaFreezeWhitelist: func() []string {
-			removed, _ := listRemovals(
-				lookup(before, "quota_freeze_threshold_whitelist"),
-				lookup(after, "quota_freeze_threshold_whitelist"),
-			)
-			return removed
-		}(),
+		RemovedKeys:          removedProviderKeys(before, after),
+		RemovedTasks:         removedNames(taskIdentities(before), taskIdentities(after)),
+		AccessKeys:           accessKeyListChanges(before, after),
+		Workspaces:           workspaceListChanges(before, after),
+		UnifiedModel:         !pyEqualValues(lookup(before, "unified_model"), lookup(after, "unified_model")),
+		EndpointPlans:        endpointPlansChanged(before, after),
+		QuotaFreezeWhitelist: quotaFreezeWhitelistRemovals(before, after),
 	}
+}
+
+// quotaFreezeWhitelistRemovals 汇总全局默认与账号级策略里被摘掉的白名单名字。
+func quotaFreezeWhitelistRemovals(before, after *canonical.Value) []string {
+	removed := map[string]bool{}
+	add := func(names []string) {
+		for _, name := range names {
+			removed[name] = true
+		}
+	}
+	global, _ := listRemovals(
+		lookup(before, "quota_freeze_threshold_whitelist"),
+		lookup(after, "quota_freeze_threshold_whitelist"),
+	)
+	add(global)
+
+	afterPolicies := map[string]*canonical.Value{}
+	policies := lookup(after, "quota_freeze_policies")
+	if policies != nil && policies.IsArray() {
+		for _, item := range policies.Arr {
+			if item.IsObject() {
+				afterPolicies[quotaFreezePolicyIdentity(item)] = item
+			}
+		}
+	}
+	beforePolicies := lookup(before, "quota_freeze_policies")
+	if beforePolicies != nil && beforePolicies.IsArray() {
+		for _, item := range beforePolicies.Arr {
+			if !item.IsObject() {
+				continue
+			}
+			identity := quotaFreezePolicyIdentity(item)
+			afterItem := afterPolicies[identity]
+			if afterItem == nil {
+				// 策略因 target 消失被整条移除：它原来的白名单也不再有引用。
+				if whitelist := lookup(item, "whitelist"); whitelist != nil && whitelist.IsArray() {
+					for _, rawName := range whitelist.Arr {
+						if rawName.Kind == canonical.KindString {
+							removed[rawName.Str] = true
+						}
+					}
+				}
+				continue
+			}
+			names, _ := listRemovals(lookup(item, "whitelist"), lookup(afterItem, "whitelist"))
+			add(names)
+		}
+	}
+	return sortedSet(removed)
+}
+
+// quotaFreezePolicyIdentity 返回策略的稳定身份；格式只用于本地比较，不对外承诺。
+func quotaFreezePolicyIdentity(item *canonical.Value) string {
+	return strings.TrimSpace(lookup(item, "scope").StringValue()) + "\x00" +
+		strings.TrimSpace(lookup(item, "target").StringValue())
 }
 
 // removedProviderKeys 算出本次写操作清理掉的供应商 Key（升序）。

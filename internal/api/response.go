@@ -295,9 +295,42 @@ func settingsResponse(cfg *config.RouterConfig) *canonical.Value {
 		canonical.ObjectPair{Key: "quota_freeze_threshold_5h", Value: canonical.NewFloat(cfg.QuotaFreezeThreshold5h)},
 		canonical.ObjectPair{Key: "quota_freeze_threshold_7d", Value: canonical.NewFloat(cfg.QuotaFreezeThreshold7d)},
 		canonical.ObjectPair{Key: "quota_freeze_threshold_whitelist", Value: stringArray(cfg.QuotaFreezeThresholdWhitelist)},
+		canonical.ObjectPair{Key: "quota_freeze_policies", Value: quotaFreezePoliciesValue(cfg.QuotaFreezePolicies)},
 		canonical.ObjectPair{Key: "local_auth_enabled", Value: canonical.NewBool(cfg.LocalAPIKey != "")},
 		canonical.ObjectPair{Key: "local_api_key_fingerprint", Value: fingerprint},
 	)
+}
+
+// quotaFreezePoliciesValue 把账号级冻结策略序列化进 settings 响应。
+//
+// threshold/whitelist 的 null 表示“继承全局默认”，空数组表示“明确不放行任何模型”；
+// 两者不能合并，否则前端无法正确回显“恢复全局”与“清空白名单”两种操作。
+func quotaFreezePoliciesValue(policies []config.QuotaFreezePolicy) *canonical.Value {
+	items := make([]*canonical.Value, 0, len(policies))
+	for _, policy := range policies {
+		item := canonical.NewObjectOf(
+			canonical.ObjectPair{Key: "scope", Value: canonical.NewString(policy.Scope)},
+			canonical.ObjectPair{Key: "target", Value: canonical.NewString(policy.Target)},
+			canonical.ObjectPair{Key: "enabled", Value: canonical.NewBool(policy.Enabled)},
+		)
+		if policy.Threshold5h != nil {
+			item.SetKey("threshold_5h", canonical.NewFloat(*policy.Threshold5h))
+		} else {
+			item.SetKey("threshold_5h", canonical.NewNull())
+		}
+		if policy.Threshold7d != nil {
+			item.SetKey("threshold_7d", canonical.NewFloat(*policy.Threshold7d))
+		} else {
+			item.SetKey("threshold_7d", canonical.NewNull())
+		}
+		if policy.WhitelistSet {
+			item.SetKey("whitelist", stringArray(policy.Whitelist))
+		} else {
+			item.SetKey("whitelist", canonical.NewNull())
+		}
+		items = append(items, item)
+	}
+	return canonical.NewArray(items...)
 }
 
 // probeResponse 对应 management_api.py:1260 的 _probe_response。

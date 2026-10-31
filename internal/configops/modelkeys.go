@@ -225,6 +225,7 @@ func UpdateModelKey(data *canonical.Value, modelID, keyName string, options Upda
 		keys.DeleteKey(rawName)
 		keys.SetKey(actual, moved)
 		target.SetKey("key", canonical.NewString(actual))
+		FollowProviderKeyRename(data, lookup(target, "provider").StringValue(), rawName, actual)
 	}
 	if options.Enabled != nil && !*options.Enabled {
 		if err := clearUnifiedKeysFromProvider(data, lookup(target, "provider").StringValue(), StringPtr(actual)); err != nil {

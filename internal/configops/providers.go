@@ -274,6 +274,9 @@ func UpdateProviderKey(data *canonical.Value, providerID, keyName string, option
 		moved, _ := keys.LookupOK(keyName)
 		keys.DeleteKey(keyName)
 		keys.SetKey(targetName, moved)
+		// 供应商页的 Key 改名同样要跟随账号级冻结策略的 subscription target；
+		// 否则策略会指向不存在的 provider/key，下一次保存配置直接 422。
+		FollowProviderKeyRename(data, providerID, keyName, targetName)
 		allModels, err := Models(data)
 		if err != nil {
 			return "", err

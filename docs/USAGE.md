@@ -113,6 +113,7 @@ cp router-config.example.json router-config.json
   "quota_freeze_threshold_5h": 0,
   "quota_freeze_threshold_7d": 0,
   "quota_freeze_threshold_whitelist": [],
+  "quota_freeze_policies": [],
   "local_api_key": "amkr_your-local-api-key",
   "providers": {
     "openai": {
@@ -335,13 +336,19 @@ Claude 的重置卡可能被 Anthropic 按 surface 门禁限定在 Claude.ai 网
   内不会被同一读数重新冻回去。底层接口是 `DELETE /api/quota-freezes/{provider_id}/{key_name}`，
   `GET /api/quota-freezes` 可以看当前全部冻结，见 [`docs/API.md`](API.md) 的「额度冻结接口」。
 
-**配置**：WebUI 的账号资源页右上角「冻结规则」可以直接编辑 5h / 7d 底限和白名单，保存后
-热重载生效；也可以继续在配置文件里手改。`quota_freeze_interval_seconds`（默认 60）是后台巡检间隔。
+**配置**：WebUI 的账号资源页右上角「默认冻结规则」可以直接编辑全局 5h / 7d 底限和白名单；
+每个 CPA 实例与订阅卡片的「冻结规则」按钮可单独覆盖该账号的底限、白名单或关闭自动冻结，
+保存后热重载生效；也可以继续在配置文件里手改。账号策略写在 `quota_freeze_policies`：
+`scope` 为 `cpa_instance`（target 是实例 ID）或 `subscription`（target 是
+`provider_id/key_name`），字段 `threshold_5h` / `threshold_7d` / `whitelist` 为 `null`
+或省略时继承全局，`enabled=false` 关闭该账号的自动冻结。`quota_freeze_interval_seconds`
+（默认 60）是后台巡检间隔。
 `quota_freeze_threshold_5h`
 与 `quota_freeze_threshold_7d`（默认 0 = 关闭）是 5h / 7d 窗口的剩余比例底限，取值 0..1
 （例如 `0.05` 表示剩余 5%），命中后提前冻结。`quota_freeze_threshold_whitelist` 可列出
 需要继续使用到额度完全耗尽的模型名（真实 ID 或别名）：提前冻结只停用不在白名单里的模型，
 白名单模型的请求仍会选中被提前冻结的 Key；额度硬性耗尽后白名单同样失效，所有模型立即停用。
+账号策略显式设置白名单时优先于全局；显式 `[]` 表示该账号不豁免任何模型。
 `quota_freeze_interval_seconds` 取 0 关闭整套机制（后台巡检、上游响应头信号、页面即时评估
 都不再生效），因此不会产生新的冻结；但**已有的冻结记录仍会展示、仍参与选路**，直到内置
 计时器到期或手工解冻。巡检间隔只影响检测频率，不影响已经生效的冻结的计时器。

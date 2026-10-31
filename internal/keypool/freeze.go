@@ -2,6 +2,7 @@ package keypool
 
 import (
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/config"
@@ -17,6 +18,7 @@ import (
 // 基本接口只保留两个方法：这是选路层真正依赖的最小面，旧实现/测试假实现不必为了
 // 白名单增加方法而重写。白名单需要知道冻结类型时，再可选探测下面的
 // quotaFreezeTrigger；探测不到就按 hard 处理（宁可少放行，不把耗尽额度打出去）。
+// 冻结记录自带的账号级白名单同理，走可选探测 quotaFreezeWhitelister。
 type QuotaFreezes interface {
 	IsFrozen(providerID, keyName string) bool
 	FrozenReason(providerID, keyName string) string
@@ -26,6 +28,17 @@ type QuotaFreezes interface {
 // 只有提前冻结能被模型白名单豁免，硬性耗尽永远不豁免。
 type quotaFreezeTrigger interface {
 	FrozenTrigger(providerID, keyName string) string
+}
+
+// quotaFreezeWhitelister 是 QuotaFreezes 的可选扩展：返回冻结记录自带的模型白名单
+// （真实模型 ID）。账号级冻结策略会把它写进每条 threshold 冻结，优先级高于全局
+// quota_freeze_threshold_whitelist。
+//
+// nil 与空切片是两种语义，不能混为一谈：nil 表示旧版本记录没有该字段（或实现方
+// 不支持），调用方回退全局默认；非 nil 空切片表示策略明确「谁都不放行」。因此探测
+// 不到本接口时也走全局回退，旧实现和测试假实现不必为它增加方法。
+type quotaFreezeWhitelister interface {
+	FrozenWhitelist(providerID, keyName string) []string
 }
 
 // ErrQuotaFrozen 表示模型的候选 Key 全部因额度冻结被停用。
@@ -112,22 +125,29 @@ func (p *KeyPool) frozenLocked(key config.KeyConfig) bool {
 
 // frozenForModelLocked 报告该 Key 对指定模型是否不可用。
 //
-// 提前冻结（trigger=threshold）只停用未进入 quota_freeze_threshold_whitelist 的模型；
-// 硬性耗尽（含旧记录/未知 trigger）对所有模型都不可豁免。白名单按真实模型 ID 存放，
-// 解析与别名归一在 applyConfig 完成，因此这里只做一次 map 查找。
+// 提前冻结（trigger=threshold）只停用不在白名单里的模型；硬性耗尽（含旧记录/未知
+// trigger）对所有模型都不可豁免。threshold 的白名单有两层：冻结记录自带的账号级
+// 策略优先（FrozenWhitelist 非 nil，哪怕是空切片），记录没有该字段时才回退全局
+// quota_freeze_threshold_whitelist。白名单按真实模型 ID 存放，解析与别名归一在
+// applyConfig / resolveModelID 完成，因此这里只做一次切片查找。
 func (p *KeyPool) frozenForModelLocked(modelID string, key config.KeyConfig) bool {
 	if !p.frozenLocked(key) {
 		return false
 	}
-	if !p.thresholdWhitelist[modelID] {
-		return true
-	}
 	trigger, ok := p.quotaFreezes.(quotaFreezeTrigger)
-	if !ok {
-		// 旧实现没有提供冻结类型：按 hard 处理，宁可不豁免。
+	if !ok || trigger.FrozenTrigger(key.Provider, key.Name) != "threshold" {
+		// 旧实现没有提供冻结类型时按 hard 处理；硬性耗尽不豁免任何模型。
 		return true
 	}
-	return trigger.FrozenTrigger(key.Provider, key.Name) != "threshold"
+	// 账号级策略优先，不与全局白名单合并：账号配置了自己的清单时，全局那份只是
+	// 未配置账号的默认值（config.QuotaFreezePolicy 的既有语义）。
+	if whitelister, ok := p.quotaFreezes.(quotaFreezeWhitelister); ok {
+		if whitelist := whitelister.FrozenWhitelist(key.Provider, key.Name); whitelist != nil {
+			return !slices.Contains(whitelist, modelID)
+		}
+	}
+	// 旧冻结记录没有 whitelist 字段（或实现只提供基础接口）：回退全局默认。
+	return !p.thresholdWhitelist[modelID]
 }
 
 // frozenReasonLocked 返回冻结的人话原因；未冻结返回空串。调用方须持 p.mu。
