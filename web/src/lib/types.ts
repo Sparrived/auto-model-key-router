@@ -613,6 +613,8 @@ export interface QuotaFreeze {
   trigger?: "hard" | "threshold";
   /** trigger=threshold 时命中的底限（0..1）。 */
   threshold?: number;
+  /** 本次冻结生效的模型白名单（真实 ID）；null 表示沿用全局默认。 */
+  whitelist?: string[] | null;
   /** 额度窗口刷新时间；只用于说明，不作为自动解冻倒计时。 */
   reset_at?: string;
   frozen_at?: string;
