@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-10-31
+
 ### 新增
 
 - **额度冻结支持账号级策略。** 新增配置 `quota_freeze_policies`：可按 CPA 实例
