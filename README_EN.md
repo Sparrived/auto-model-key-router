@@ -417,6 +417,7 @@ AMKR uses a JSON configuration file (with automatic backward-compatible schema m
 | `quota_freeze_policies` | object[] | Per-account override: `{scope, target, enabled, threshold_5h, threshold_7d, whitelist}`; `scope` is `cpa_instance` (target=instance ID) or `subscription` (target=`provider/key`); omitted fields inherit global defaults, `enabled=false` disables automatic freezing for that account |
 | `ops_enabled` | bool | Toggle for host management APIs (log viewing, system service control, client config writes; disable in Docker) |
 | `webui_enabled` | bool | Mount status of the embedded WebUI |
+| `log_level` | string | Log level for the log file: `debug` / `info` / `warning` / `error` (case-insensitive, `warn` = `warning`, default `info`). The default level filters out 2xx / 3xx access lines such as `/metrics` and `/ui/*` polling, while real upstream calls, state changes (quota freeze/unfreeze) and 4xx / 5xx access lines are still written; `debug` writes the filtered access lines into `log_file_path` as well |
 | `providers.<id>.max_concurrency` | int / null | Maximum in-flight upstream requests for **every key and every model** of this provider; omitted, `null`, or `0` means unlimited |
 | `providers.<id>.keys.<key>.max_concurrency` | int / null | Maximum in-flight requests for this upstream key, shared by all models referencing the same key; omitted, `null`, or `0` means unlimited. With both levels enabled, the limits of this provider's **enabled** keys must not sum to more than the provider limit, or config validation fails |
 

@@ -94,6 +94,16 @@ type Options struct {
 	// uvicorn.access、应用侧走 auto_model_key_router.app），落到文件后 logger 名要能
 	// 区分，因此不能共用同一个 *slog.Logger。
 	AccessLogger *slog.Logger
+	// LogLevel 是日志文件的级别开关，由装配方（cmd/amkr）从 logfiles.Sink 取来注入。
+	//
+	// nil 表示**没有可调级别的日志文件**（未打开日志文件、或嵌入方自备 logger），
+	// 此时热重载不做级别同步。非 nil 时 reload 会在读到新配置后把它的值改成
+	// 配置里的 log_level——它由 Sink 与三个 handler 共享，改一次即对全部生效，
+	// 不必重新打开文件。
+	//
+	// 用 *slog.LevelVar 而不是 slog.Level：后者是值，热重载拿不到写回通道；而
+	// LevelVar 本身就是 slog 为「运行时改级别」提供的唯一并发安全类型。
+	LogLevel *slog.LevelVar
 	// MountPrefix 是嵌入到宿主时的挂载前缀（独立运行时为空串）。它只影响 /health
 	// 报出的 webui_path（app.py:418 的 mount_path 语义）。
 	MountPrefix string

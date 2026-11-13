@@ -418,6 +418,7 @@ AMKR 的核心配置文件为 JSON 格式（自动兼容迁移历史版本配置
 | `quota_freeze_policies` | object[] | 账号级冻结策略覆盖：`{scope, target, enabled, threshold_5h, threshold_7d, whitelist}`；`scope` 为 `cpa_instance`（target=实例 ID）或 `subscription`（target=`provider/key`），未填字段继承全局默认，`enabled=false` 关闭该账号自动冻结 |
 | `ops_enabled` | bool | 是否启用宿主机运维接口（日志读取、服务注册、客户端配置改写；容器环境建议设为 `false`） |
 | `webui_enabled` | bool | 是否挂载内置 Web 管理控制台 |
+| `log_level` | string | 日志文件的级别：`debug` / `info` / `warning` / `error`（大小写不敏感，`warn` 等价 `warning`，默认 `info`）。默认级别会滤掉 WebUI 轮询（`/metrics`、`/ui/*`）这类 2xx / 3xx 访问日志，但仍会写入真实上游调用、额度冻结/解冻等状态变化、以及 4xx / 5xx 访问日志；改成 `debug` 可把被滤掉的访问日志一并写进 `log_file_path` |
 | `providers.<id>.max_concurrency` | int / null | 该供应商**所有 Key、所有模型**上同时在途的上游请求上限；缺省、`null` 或 `0` 表示不限制 |
 | `providers.<id>.keys.<key>.max_concurrency` | int / null | 该上游 Key 同时在途的请求上限，同一把 Key 被多个模型引用时共用一个计数；缺省、`null` 或 `0` 表示不限制。同时启用两级上限时，该供应商**启用中**的 Key 的上限之和不得大于供应商上限，否则配置校验失败 |
 

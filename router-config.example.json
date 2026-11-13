@@ -17,6 +17,7 @@
   "endpoint_capabilities_path": "",
   "metrics_db_path": "",
   "log_file_path": "",
+  "log_level": "info",
   "local_api_key": "amkr-generated-local-api-key",
   "providers": {
     "openai": {

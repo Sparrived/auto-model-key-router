@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -211,5 +212,55 @@ func TestReloadWithoutConfigPathIsNoop(t *testing.T) {
 	parsed := serve(app, http.MethodGet, "/health", "").Body.String()
 	if !strings.Contains(parsed, `"config_path":""`) {
 		t.Errorf("/health 的 config_path 应为空串: %s", parsed)
+	}
+}
+
+// withLogLevel 往配置文本里插一个 log_level（紧跟 config_version，免得跟末尾大括号
+// 的格式纠缠）。
+func withLogLevel(text, level string) string {
+	return strings.Replace(text, `"config_version": 4,`,
+		`"config_version": 4, "log_level": "`+level+`",`, 1)
+}
+
+// TestReloadUpdatesLogLevel 断言热重载把新配置的 log_level 写回 Sink 的 LevelVar。
+//
+// reload.go 里紧跟 config.Load 的那三行太容易被后人无意改坏：只要把它挪到「指标库
+// 打不开就 return」之后，某次把 metrics_db_path 写坏时日志级别就会静默不生效，而现有
+// 测试全都不会红。这里单独守住它，顺带钉住两个配套语义：
+//
+//  1. 启动时 reload **不动**这个变量——初始值由调用方（cmd/amkr）按启动配置设好，
+//     reload 只负责后续变更，两边职责不混；
+//  2. 配置文件解析失败时（reload 静默保留旧配置）级别也不该跟着变。
+func TestReloadUpdatesLogLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, true, false)
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("载入配置失败: %v", err)
+	}
+	level := new(slog.LevelVar)
+	level.Set(loaded.SlogLevel())
+	app, err := New(Options{ConfigPath: path, Config: loaded, Version: testVersion, LogLevel: level})
+	if err != nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	if got := level.Level(); got != slog.LevelInfo {
+		t.Fatalf("启动配置缺省 info，LevelVar 应为 Info，实际 %v", got)
+	}
+
+	// 热重载由 app 面请求触发（withLease），所以这里必须真的发一个请求。
+	rewriteConfig(t, path, withLogLevel(emptyModelsConfig(dir), "debug"))
+	serve(app, http.MethodGet, "/v1/models", fullAuthorization)
+	if got := level.Level(); got != slog.LevelDebug {
+		t.Fatalf("热重载后 LevelVar 应为 Debug，实际 %v（reload 里的 Set 可能被挪到提前 return 之后）", got)
+	}
+
+	// 配置写坏时 reload 静默保留旧配置，级别也必须停在 Debug。
+	rewriteConfig(t, path, `{"config_version": 4, "log_level": "error"`)
+	serve(app, http.MethodGet, "/v1/models", fullAuthorization)
+	if got := level.Level(); got != slog.LevelDebug {
+		t.Errorf("配置解析失败时应保留旧级别 Debug，实际 %v", got)
 	}
 }

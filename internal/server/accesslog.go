@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,9 +24,37 @@ import (
 //
 //	2026-09-18 09:22:44,361 INFO uvicorn.access 127.0.0.1:50874 - "GET /metrics?hours=1 HTTP/1.1" 200
 //
-// 访问日志不是可有可无的装饰：历史日志里 1,618,926 行 uvicorn.access 占了全部
-// 1,630,000 余行的 99% 以上。没有它，log_file_path 只在出错时才有内容，WebUI 的
-// 「服务日志」面板在正常运行时几乎永远是空的——这正是本次要修的现象。
+// 行内容与格式照旧对齐上面的实现，级别则**有意偏离**：参照实现一律 INFO（挂着的
+// AccessLogLevelFilter 读 record.status_code，而访问日志用位置参数记录，过滤器恒不
+// 生效）。那条历史依据恰好说明了照搬的代价——1,618,926 行 uvicorn.access 占全部
+// 1,630,000 余行的 99% 以上，其中绝大多数是 WebUI 每秒一次的 `/metrics`、`/ui/*`
+// 轮询；真出问题时反而要在噪声里翻。因此 Go 侧按状态码分级（见 accessLevel）：
+//
+//   - 2xx / 3xx → Debug。一次成功的轮询、一次「请求确实打进来了」都不值得默认落盘；
+//     要确认访问轨迹时把 log_level 调成 debug，它们就回来了。
+//   - 4xx → Info。调用方配错（路径、Key、模型名）是用户必须看得见的问题，留在默认
+//     级别，配错当下日志里就有痕迹。
+//   - 5xx → Warn。服务端自身故障，升一级便于直接筛出来。
+//
+// 于是「WebUI 服务日志面板不空」这件事**不再由访问日志承担**：它现在由
+// internal/proxy 的 recordMetric 在每次上游调用时写的「上游调用完成」（Info）与
+// 「上游调用失败」（Info）承担。访问日志降级不会让面板变空——正常运行时面板里是
+// 真实的上游调用，而不是一串 /metrics 轮询。
+
+// accessLevel 把状态码映射成访问日志级别：2xx/3xx → Debug，4xx → Info，5xx → Warn。
+//
+// 分级口径与理由见文件头说明：成功的轮询不该占住默认日志，而 4xx 是调用方配错、
+// 5xx 是服务端故障，两者都得在默认级别下看得见。
+func accessLevel(status int) slog.Level {
+	switch {
+	case status >= http.StatusInternalServerError:
+		return slog.LevelWarn
+	case status >= http.StatusBadRequest:
+		return slog.LevelInfo
+	default:
+		return slog.LevelDebug
+	}
+}
 
 // accessLog 包装整棵路由树，为每个 HTTP 请求写一行 uvicorn.access 形态的访问日志。
 //
@@ -51,8 +80,12 @@ func (a *App) accessLog(next http.Handler) http.Handler {
 		// 而不是等响应结束。对**流式响应**这不是细节——一条跑几分钟的 SSE 请求，
 		// 参照实现里访问日志在开头就出现了，等结束再记会让日志里的顺序与真实请求
 		// 发生顺序完全错位。
+		//
+		// 级别在回调里按状态码现算（accessLevel），一处管两条路径：处理器写出响应时
+		// 由 WriteHeader/Write 触发，下面兜底的 report(http.StatusOK) 走的是同一个
+		// 回调，因此「一个字都没写的 200」自然也是 Debug，不需要第二套分级。
 		recorder.onStart = func(status int) {
-			logger.Info(accessLine(r, status))
+			logger.Log(r.Context(), accessLevel(status), accessLine(r, status))
 		}
 		next.ServeHTTP(recorder, r)
 		// 兜底：处理器一个字都没写就返回时，net/http 会隐式回 200，此时回调还没

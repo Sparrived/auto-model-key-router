@@ -294,3 +294,133 @@ func TestLoadMigratesLegacyVersionInPlace(t *testing.T) {
 		t.Errorf("写回后 config_version 应为整数 4，实际 %s", got)
 	}
 }
+
+// TestEmptyConfigDictOmitsLogLevel 钉住「缺省值不落盘」。
+//
+// log_level 的缺省值刻意**不**写进 EmptyConfigDict：新建配置文件的字节是契约，
+// 任何一次默认保存都不该给所有人的配置多出一行没意义的 "log_level": "info"。
+// 键序用例（TestEmptyConfigDictKeyOrder）同时覆盖了「不在顶层字段清单里」这一点。
+func TestEmptyConfigDictOmitsLogLevel(t *testing.T) {
+	data, err := EmptyConfigDict()
+	if err != nil {
+		t.Fatalf("构造失败: %v", err)
+	}
+	if data.Obj.Has("log_level") {
+		t.Fatal("新建配置不该写 log_level（缺省值不落盘）")
+	}
+
+	// 落盘文本里同样不能出现——那才是用户真正看到的东西。
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router-config.json")
+	if err := SaveConfigData(path, data); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取失败: %v", err)
+	}
+	if strings.Contains(string(written), "log_level") {
+		t.Errorf("新建配置的落盘文本不该含 log_level:\n%s", string(written))
+	}
+
+	// 不写键仍然必须解析成 info：否则「不落盘」就变成了「功能没生效」。
+	cfg, err := FromDict(data)
+	if err != nil {
+		t.Fatalf("默认配置解析失败: %v", err)
+	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("默认配置的 log_level 应为 info，实际 %q", cfg.LogLevel)
+	}
+}
+
+// TestLogLevelSurvivesSaveAndReload 钉住 log_level 的读-改-写往返。
+//
+// 这是本字段最容易埋坑的地方：缺省值不落盘，但**用户写了**的 log_level 必须在每一
+// 次保存后仍然存在。管理接口的真实路径是 LoadConfigData -> MigrateConfigData ->
+// 就地修改 -> SaveConfigData，因此这里逐步复刻它，而不是只断言 FromDict 读得出来。
+//
+// 落盘保留用户原文（"WARN"），规范化只发生在解析期：这样用户手写的配置不会被一次
+// 保存悄悄改写掉，规范化值只影响运行期。
+func TestLogLevelSurvivesSaveAndReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router-config.json")
+	data := mustParse(t, `{"config_version":4,"local_api_key":"k","log_level":"WARN","models":{},"providers":{}}`)
+	if err := SaveConfigData(path, data); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	loaded, err := LoadConfigData(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if cfg, err := FromDict(loaded); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	} else if cfg.LogLevel != "warning" {
+		t.Fatalf("读回的 log_level 应为 warning，实际 %q", cfg.LogLevel)
+	}
+
+	// 管理接口落盘的是**迁移后**的副本，而不是调用方的原始数据：确认迁移不会重建
+	// 顶层对象、把不认识的键丢掉。
+	migrated, err := MigrateConfigData(loaded)
+	if err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	if !migrated.Obj.Has("log_level") {
+		t.Fatal("MigrateConfigData 丢掉了 log_level")
+	}
+	if err := SaveConfigData(path, migrated); err != nil {
+		t.Fatalf("写回失败: %v", err)
+	}
+
+	reloaded, err := LoadConfigData(path)
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if got := canonical.Dumps(reloaded.Lookup("log_level")); got != `"WARN"` {
+		t.Errorf("往返后 log_level 应保留用户原文，实际 %s", got)
+	}
+	if cfg, err := FromDict(reloaded); err != nil {
+		t.Fatalf("重新解析失败: %v", err)
+	} else if cfg.LogLevel != "warning" {
+		t.Errorf("往返后解析值应为 warning，实际 %q", cfg.LogLevel)
+	}
+}
+
+// TestLoadKeepsLogLevelOnLegacyUpgrade 钉住旧版本配置「就地升级」不丢 log_level。
+//
+// Load 在版本落后时会把迁移结果**写回磁盘**（见 TestLoadMigratesLegacyVersionInPlace）。
+// 缺省值不落盘说的是「不凭空加键」，不是「迁移时把用户写过的键抹掉」——一旦抹掉，
+// 用户升级一次就永久丢了自己的日志级别。
+func TestLoadKeepsLogLevelOnLegacyUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router-config.json")
+	legacy := `{"config_version":3,"local_api_key":"k","log_level":"debug",` +
+		`"providers":{"p":{"base_url":"https://a.example","keys":{"k1":{"api_key":"1"}},"pools":{"pool":{"keys":["k1"]}}}},` +
+		`"models":{"m":{"targets":[{"provider":"p","pool":"pool","upstream_model":"u"}]}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatalf("写入旧配置失败: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载旧配置失败: %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("迁移后 log_level 应为 debug，实际 %q", cfg.LogLevel)
+	}
+
+	// 磁盘上的文件已被升级为 v4，log_level 必须跟着写回去。
+	reloaded, err := LoadConfigData(path)
+	if err != nil {
+		t.Fatalf("重新加载失败: %v", err)
+	}
+	if !reloaded.Obj.Has("log_level") {
+		t.Fatal("就地升级把 log_level 抹掉了")
+	}
+	if got := canonical.Dumps(reloaded.Lookup("log_level")); got != `"debug"` {
+		t.Errorf("写回后 log_level 应保留，实际 %s", got)
+	}
+	if version, err := configVersionOf(reloaded); err != nil || version != CONFIG_VERSION {
+		t.Errorf("写回后 config_version 应为 %d，实际 %d (err=%v)", CONFIG_VERSION, version, err)
+	}
+}

@@ -18,13 +18,16 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/logfiles"
 )
 
-// messageRecorder 是只收集消息文本的 slog.Handler。
+// messageRecorder 是只收集消息文本与级别的 slog.Handler。
 //
 // 不用 slog.NewTextHandler：它会把消息里的双引号转义成 \"，断言访问日志的引号形态
-// 会变得又脆又难读。这里直接拿 record.Message 原文。
+// 会变得又脆又难读。这里直接拿 record.Message 原文与 record.Level。
 type messageRecorder struct {
 	mu       sync.Mutex
 	messages []string
+	// levels 与 messages 一一对应：访问日志按状态码分级（见 accessLevel），用例既要
+	// 断言文本，也要断言这行落在哪个级别。
+	levels []slog.Level
 }
 
 func (r *messageRecorder) Enabled(context.Context, slog.Level) bool { return true }
@@ -35,6 +38,7 @@ func (r *messageRecorder) Handle(_ context.Context, record slog.Record) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.messages = append(r.messages, record.Message)
+	r.levels = append(r.levels, record.Level)
 	return nil
 }
 
@@ -42,6 +46,12 @@ func (r *messageRecorder) collected() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.messages...)
+}
+
+func (r *messageRecorder) collectedLevels() []slog.Level {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]slog.Level(nil), r.levels...)
 }
 
 // newAccessLogApp 装配一个注入访问日志收集器的 App。
@@ -95,6 +105,64 @@ func TestAccessLogRecordsRequestLine(t *testing.T) {
 			}
 			if messages[0] != testCase.wantLine {
 				t.Errorf("访问日志不符\n期望: %s\n实际: %s", testCase.wantLine, messages[0])
+			}
+		})
+	}
+}
+
+// TestAccessLogLevelByStatus 钉住访问日志的**状态码分级**（见 accessLevel）：
+//
+//	< 400（2xx / 3xx）→ Debug：轮询噪声，默认 info 级别下不落盘
+//	400–499          → Info ：调用方配错，默认级别下必须看得见
+//	>= 500           → Warn ：服务端故障（落盘时由 logfiles 的 pythonLevelName
+//	                          渲染成 WARNING，与 Python 的 levelname 一致）
+//
+// 走真实 handler 断言，而不是只测 accessLevel：分级若没在 onStart 里接上，纯函数
+// 测试是发现不了的。表里同时覆盖两条记日志的路径——处理器显式写头，以及一个字都不
+// 写、由结尾兜底的 report(http.StatusOK) 补记的 200。
+func TestAccessLogLevelByStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		writeHeader bool // false 表示处理器什么都不写，走兜底的 report(200)
+		wantLevel   slog.Level
+	}{
+		{"200 显式写头", http.StatusOK, true, slog.LevelDebug},
+		{"200 兜底", http.StatusOK, false, slog.LevelDebug},
+		{"301 重定向", http.StatusMovedPermanently, true, slog.LevelDebug},
+		{"400 参数错误", http.StatusBadRequest, true, slog.LevelInfo},
+		{"404 路由不存在", http.StatusNotFound, true, slog.LevelInfo},
+		{"499 客户端断开", 499, true, slog.LevelInfo},
+		{"500 服务端错误", http.StatusInternalServerError, true, slog.LevelWarn},
+		{"503 无可用 Key", http.StatusServiceUnavailable, true, slog.LevelWarn},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := &messageRecorder{}
+			app := newAccessLogApp(t, recorder)
+			status := testCase.status
+			inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if testCase.writeHeader {
+					w.WriteHeader(status)
+				}
+			})
+
+			response := httptest.NewRecorder()
+			app.accessLog(inner).ServeHTTP(response,
+				httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+			if response.Code != testCase.status {
+				t.Fatalf("状态码 = %d, 期望 %d", response.Code, testCase.status)
+			}
+			levels := recorder.collectedLevels()
+			if len(levels) != 1 {
+				t.Fatalf("期望 1 行访问日志，得到 %d 行: levels=%v messages=%q",
+					len(levels), levels, recorder.collected())
+			}
+			if levels[0] != testCase.wantLevel {
+				t.Errorf("状态码 %d 的访问日志级别 = %v, 期望 %v",
+					testCase.status, levels[0], testCase.wantLevel)
 			}
 		})
 	}
@@ -244,6 +312,11 @@ func sameHandler(left, right http.Handler) bool {
 // uvicorn_log_config 的 file handler：log_file_path 没有任何写入方，于是
 // /api/logs 恒返回 text=""，前端渲染成「日志为空。」。因此这里断言的不是「日志里有
 // 某一行」，而是「这个文件确实被写入了」——后者才是回归真正会打破的性质。
+//
+// 访问日志按状态码分级后（见 accessLevel），/health 的 200 落到 DEBUG，被 sink 的
+// 默认 info 级别滤掉；能落盘的是 404 那行 INFO。注意「面板不空」如今主要由
+// internal/proxy 的上游调用日志（Info）保证，本测试守的是「访问日志仍有一条落盘
+// 路径、/api/logs 仍交得出内容」。
 func TestLogFileFeedsOpsLogsEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	configPath := writeFixture(t, dir, true, false)
@@ -270,12 +343,22 @@ func TestLogFileFeedsOpsLogsEndpoint(t *testing.T) {
 	}
 	defer func() { _ = app.Close() }()
 
-	// 制造流量：一条成功、一条 404，再读日志本身。
+	// 制造流量：一条成功（200 → DEBUG，默认 info 级别下被滤掉）、一条 404
+	// （INFO，落盘），再读日志本身。
 	for _, target := range []string{"/health", "/does-not-exist"} {
 		request := httptest.NewRequest(http.MethodGet, target, nil)
 		request.RemoteAddr = "127.0.0.1:50874"
 		app.Handler().ServeHTTP(httptest.NewRecorder(), request)
 	}
+	// 再造一条 503：真实路由要触发 5xx 得先有上游，这里直接把一个写 503 的处理器
+	// 挂到同一套访问日志包装（AccessLogger 是同一个 sink）上，验证 Warn 档确实以
+	// WARNING 落盘。
+	boom := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	boomRequest := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	boomRequest.RemoteAddr = "127.0.0.1:50874"
+	app.accessLog(boom).ServeHTTP(httptest.NewRecorder(), boomRequest)
 
 	// 直接读文件：这就是 /api/logs 的数据来源（api.handleOpsLogs 读同一路径）。
 	data, err := os.ReadFile(loaded.LogFilePath)
@@ -286,13 +369,19 @@ func TestLogFileFeedsOpsLogsEndpoint(t *testing.T) {
 	if strings.TrimSpace(text) == "" {
 		t.Fatal("日志文件为空：这正是用户报的『服务日志不显示』")
 	}
-	for _, want := range []string{
-		`INFO uvicorn.access 127.0.0.1:50874 - "GET /health HTTP/1.1" 200`,
-		`INFO uvicorn.access 127.0.0.1:50874 - "GET /does-not-exist HTTP/1.1" 404`,
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("日志缺少 %q\n实际内容:\n%s", want, text)
-		}
+	// 404 是 Info：默认级别下必须落盘。
+	if want := `INFO uvicorn.access 127.0.0.1:50874 - "GET /does-not-exist HTTP/1.1" 404`; !strings.Contains(text, want) {
+		t.Errorf("日志缺少 %q\n实际内容:\n%s", want, text)
+	}
+	// 503 是 Warn：落盘时按 Python 的 levelname 渲染成 WARNING（slog 自己没有
+	// LevelWarning，其 WARN 档的文本名是 WARN，见 logfiles 的 pythonLevelName）。
+	if want := `WARNING uvicorn.access 127.0.0.1:50874 - "GET /v1/chat/completions HTTP/1.1" 503`; !strings.Contains(text, want) {
+		t.Errorf("日志缺少 %q\n实际内容:\n%s", want, text)
+	}
+	// 200 是 Debug：不该再以 INFO 出现（被 sink 滤掉，或将来调成 debug 后写成
+	// DEBUG，两者都算符合分级）。
+	if unwanted := `INFO uvicorn.access 127.0.0.1:50874 - "GET /health HTTP/1.1" 200`; strings.Contains(text, unwanted) {
+		t.Errorf("200 的访问日志应降到 DEBUG，不该以 INFO 落盘（%q）:\n%s", unwanted, text)
 	}
 
 	// 再从 /api/logs 取一次，确认运维接口真的把内容交出来（端到端闭环）。
@@ -312,7 +401,7 @@ func TestLogFileFeedsOpsLogsEndpoint(t *testing.T) {
 	if strings.TrimSpace(body.Text) == "" {
 		t.Error("/api/logs 的 text 为空，WebUI 会显示「日志为空。」")
 	}
-	if !strings.Contains(body.Text, `"GET /health HTTP/1.1" 200`) {
+	if !strings.Contains(body.Text, `"GET /does-not-exist HTTP/1.1" 404`) {
 		t.Errorf("/api/logs 的 text 不含刚发生的访问日志:\n%s", body.Text)
 	}
 }

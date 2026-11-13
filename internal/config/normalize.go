@@ -25,6 +25,14 @@ const DefaultAccessKeyName = "访问密钥"
 // reasoningEfforts 是允许的推理强度取值。
 var reasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
+// logLevels 是允许的日志级别取值（规范化之后）。
+//
+// 顺序即报错信息里的列举顺序，也是「从宽到严」的自然读法。规范化只把大小写、首尾
+// 空白与别名 warn 折叠进来（见 logLevelOr），不引入第五档：日志过滤、访问日志分级
+// 与 Sink 的 LevelVar 都按这四档实现，多一个同义写法就会出现「配置里写对了、日志却
+// 没按预期出」这种最难查的问题。
+var logLevels = []string{"debug", "info", "warning", "error"}
+
 // taskSamplingParams 是任务可固定的采样参数（含 max_tokens 这个输出上限）。
 var taskSamplingParams = []string{
 	"temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "seed", "stop",

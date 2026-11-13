@@ -115,11 +115,16 @@ func (h *Handler) runProbe(
 
 	supported, reason := proxysupport.NativeEndpointSupported(statusCode)
 	if !supported {
-		h.logger.Warn("原生端点不存在，按不支持处理",
+		// Info 而不是 Warn：端点不存在是**探测得出的正常结论**（供应商本就没开这个
+		// 原生端点），不是故障。保留一行是为了让「为什么这个 key 没用原生端点」
+		// 事后可查；真正的探测失败（请求都没发出去）仍是上面那条 Warn。
+		h.logger.Info("原生端点不存在，按不支持处理",
 			"upstream_url", target, "status", statusCode)
 		return false, reason
 	}
-	h.logger.Info("原生端点存在", "upstream_url", target, "status", statusCode)
+	// Debug 而不是 Info：每个 key × 每种端点都会探一次，是典型的周期性基础日志。
+	// 探测成功本身不携带异常信息，开了 Debug 才需要看。
+	h.logger.Debug("原生端点存在", "upstream_url", target, "status", statusCode)
 	return true, reason
 }
 

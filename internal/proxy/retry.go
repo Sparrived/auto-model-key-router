@@ -1119,7 +1119,10 @@ func (h *Handler) recordDownstreamCancellation(context *RequestContext, key conf
 		DurationMS:   durationMS,
 		FirstTokenMS: durationMS,
 	})
-	h.logger.Info("downstream request canceled",
+	// Debug 而不是 Info：下游取消是客户端主动挂断，不是上游故障，而且这次调用本身
+	// 已经由 recordMetric 的「上游调用失败」那行 Info 记下了。这里只补取消原因，
+	// 属于排查细节。
+	h.logger.Debug("downstream request canceled",
 		"error", contextOf(context.Request).Err(),
 		"model_id", context.ModelID,
 		"key_name", key.Name,
@@ -1149,9 +1152,6 @@ func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyC
 // 这样调用点只需要给出真正因分支而异的部分（状态码、usage、duration、retried、
 // failed），其余字段的填充只有一个来源，避免某条分支漏填 provider/upstream_model。
 func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, record MetricRecord) {
-	if h.metrics == nil {
-		return
-	}
 	record.ModelID = context.ModelID
 	record.KeyName = key.Name
 	record.RequestedModelID = context.RequestedModelID
@@ -1181,7 +1181,120 @@ func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, re
 	record.Stream = context.IsStream
 	record.APIFormat = context.Path
 	record.ReasoningEffort = context.ReasoningEffort
+	// 调用日志刻意排在 h.metrics == nil 短路**之前**：指标库是可选装配
+	// （Options.Metrics 可为 nil），而「这次请求真的打了哪个上游、结果如何」是
+	// 运维第一个要看的东西，没有指标库时更不能缺。此时上下文派生字段已经补齐，
+	// 所以这一行与落库那份记录同源，不会出现两套口径。
+	h.logUpstreamCall(key, record)
+	if h.metrics == nil {
+		return
+	}
 	_ = h.metrics.Record(contextOf(context.Request), record)
+}
+
+// logUpstreamCall 为每一次真实的上游调用写一行 App 日志。
+//
+// 这一行就是访问日志降级之后「服务日志面板不空」的承担者：访问日志的 2xx/3xx 已经
+// 降到 Debug（见 internal/server/accesslog.go），默认 info 级别下默认看得见的，
+// 正是一次请求打到了哪个上游、用了哪把 key、耗时多久、成没成。
+//
+// 失败也用 Info 而不是 Warn/Error：上游非 200 的告警已经由 logUpstreamNotOK 单独
+// 记过一条 Warn，这里再记一条 Warning 等于同一次失败打两遍告警，只会让真正的告警
+// 被淹没。本函数的定位是**调用流水**，不是告警通道。
+func (h *Handler) logUpstreamCall(key config.KeyConfig, record MetricRecord) {
+	message := "上游调用完成"
+	if record.Failed {
+		message = "上游调用失败"
+	}
+	// 字段顺序即可读性：先定位（模型、哪把 key、哪个上游），再形态（流式与否、
+	// 走哪条 API），最后结果（状态码、耗时、用量）。
+	attrs := make([]any, 0, 24)
+	attrs = append(attrs, "model_id", record.ModelID)
+	// requested_model 只在**与生效模型不同**时才带：相同时两个字段完全重复，
+	// 每条日志多一段无用文本，反而把真正的别名映射埋掉。
+	if record.RequestedModelID != "" && record.RequestedModelID != record.ModelID {
+		attrs = append(attrs, "requested_model", record.RequestedModelID)
+	}
+	attrs = append(attrs, "provider", key.Provider, "key_name", key.Name)
+	if record.UpstreamModelID != nil {
+		attrs = append(attrs, "upstream_model", *record.UpstreamModelID)
+	}
+	// status 为 nil 表示上游请求压根没拿到响应（连接失败、超时），此时省略而不是
+	// 写 0：0 不是合法状态码，写出来会被当成异常读数。
+	if record.StatusCode != nil {
+		attrs = append(attrs, "status", *record.StatusCode)
+	}
+	attrs = append(attrs, "stream", record.Stream, "api_format", record.APIFormat,
+		"duration_ms", record.DurationMS)
+	// first_token_ms 只对流式有意义：非流式整段响应一次到齐，「首字节」就是总耗时，
+	// 写出来只是把 duration_ms 抄一遍。
+	if record.Stream {
+		attrs = append(attrs, "first_token_ms", record.FirstTokenMS)
+	}
+	attrs = append(attrs, "retried", record.Retried)
+	if record.Workspace != "" {
+		attrs = append(attrs, "workspace", record.Workspace)
+	}
+	attrs = append(attrs, usageAttrs(record.Usage)...)
+	h.logger.Info(message, attrs...)
+}
+
+// usageAttrs 把 usage 里的 token 用量摊平成日志属性。
+//
+// 只认两套**同义键名**，不做任何折算：OpenAI 系的 prompt_tokens/completion_tokens
+// 与 Anthropic 系的 input_tokens/output_tokens 指的是同一件事，前一套缺失就用后
+// 一套。这一步必须做——上游 usage 是 DefaultExtractUsage 原样取出来的、没有归一化，
+// 而「原生端点」（/v1/messages）是本服务的一等路径；少了它，这些调用在日志里一个
+// token 字段都不会有，「上游调用完成」这行的用量信息就成了摆设。
+//
+// 刻意不做的部分，是缓存字段与 details 对象的折算（Anthropic 的计费口径要把
+// cache_read/cache_creation 加回 input）：那是 internal/metrics 的 _normalize_usage
+// 的职责，而本包不依赖存储层。internal/protocol 对 extract_usage 已有同款先例
+// （见其注释：转换层不该依赖存储层，宁可重复十行）。日志要的是「这次调用报了多少」，
+// 不是账单口径。
+//
+// total_tokens 缺失时用 prompt+completion 兜底：两个分量都读到了，和就是总数，不写
+// 反而让 Anthropic 路径的「用量」永远空着。一个分量都读不到的字段一律不带——绝不
+// 补 0 冒充读数。
+func usageAttrs(usage *canonical.Value) []any {
+	if !usage.IsObject() {
+		return nil
+	}
+	prompt, promptOK := usageInt(usage, "prompt_tokens", "input_tokens")
+	completion, completionOK := usageInt(usage, "completion_tokens", "output_tokens")
+	total, totalOK := usageInt(usage, "total_tokens")
+	if !totalOK && promptOK && completionOK {
+		total, totalOK = prompt+completion, true
+	}
+
+	attrs := make([]any, 0, 6)
+	if promptOK {
+		attrs = append(attrs, "prompt_tokens", prompt)
+	}
+	if completionOK {
+		attrs = append(attrs, "completion_tokens", completion)
+	}
+	if totalOK {
+		attrs = append(attrs, "total_tokens", total)
+	}
+	return attrs
+}
+
+// usageInt 按顺序取第一个「存在且能解析成整数」的 token 字段。
+//
+// 多个键名是**同义写法**而不是回退链：OpenAI 与 Anthropic 各用一套，先命中的为准。
+// 存在但解析不出整数（null、字符串、对象）的字段当成读不到，继续看下一个名字。
+func usageInt(usage *canonical.Value, names ...string) (int64, bool) {
+	for _, name := range names {
+		value, present := usage.LookupOK(name)
+		if !present {
+			continue
+		}
+		if tokens, ok := value.AsInt(); ok {
+			return tokens, true
+		}
+	}
+	return 0, false
 }
 
 // upstreamModelOr 返回上游模型名，缺省时退回请求模型 ID。

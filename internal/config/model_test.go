@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -775,5 +776,145 @@ func TestQuotaFreezePolicies(t *testing.T) {
 				t.Fatalf("无效策略应报错: %s", policy)
 			}
 		})
+	}
+}
+
+// logLevelConfigText 拼一份含 log_level 的最小 v4 配置；fragment 为 "" 表示不写该键。
+//
+// 用它而不是把 log_level 塞进每个用例的长字面量：字段出现位置（顶层、与
+// log_file_path 相邻）本身不参与解析，用例只需要一个能通过校验的骨架。
+func logLevelConfigText(fragment string) string {
+	if fragment == "" {
+		return `{"config_version":4,"local_api_key":"k","models":{},"providers":{}}`
+	}
+	return `{"config_version":4,"local_api_key":"k","log_level":` + fragment +
+		`,"models":{},"providers":{}}`
+}
+
+// TestLogLevelNormalizesValues 钉住 log_level 的规范化口径。
+//
+// 规范化只做三件事：大小写、首尾空白、别名 warn。合法取值集合固定为四档——它是
+// 与 internal/logfiles 的 Sink、internal/server 的访问日志分级共享的契约，多一个
+// 同义写法就会让「配置里写对了、日志却没按预期出」。
+func TestLogLevelNormalizesValues(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		fragment string
+		want     string
+	}{
+		{"debug", `"debug"`, "debug"},
+		{"info", `"info"`, "info"},
+		{"warning", `"warning"`, "warning"},
+		{"error", `"error"`, "error"},
+		{"全大写", `"ERROR"`, "error"},
+		{"大小写混写", `"WaRnInG"`, "warning"},
+		{"别名 warn", `"warn"`, "warning"},
+		{"别名大写 WARN", `"WARN"`, "warning"},
+		{"首尾空白", `"  debug\t"`, "debug"},
+		{"别名带空白", `" Warn "`, "warning"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg, err := FromDict(mustParse(t, logLevelConfigText(testCase.fragment)))
+			if err != nil {
+				t.Fatalf("合法级别 %s 不该报错: %v", testCase.fragment, err)
+			}
+			if cfg.LogLevel != testCase.want {
+				t.Fatalf("log_level = %q，期望 %q", cfg.LogLevel, testCase.want)
+			}
+		})
+	}
+}
+
+// TestLogLevelDefaultsToInfo 钉住缺省值。
+//
+// 三种「没写」都要当成 info：键缺失（老配置文件）、显式 null（接口写回的落盘形态）、
+// 空白串（编辑框被清空）。把它们当非法值会让一份看起来没问题的配置当场加载失败，
+// 这是比「级别没生效」更难排查的故障。
+func TestLogLevelDefaultsToInfo(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		fragment string
+	}{
+		{"键缺失", ""},
+		{"显式 null", `null`},
+		{"空串", `""`},
+		{"仅空白", `"   "`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg, err := FromDict(mustParse(t, logLevelConfigText(testCase.fragment)))
+			if err != nil {
+				t.Fatalf("缺省形态不该报错: %v", err)
+			}
+			if cfg.LogLevel != "info" {
+				t.Fatalf("缺省应为 info，实际 %q", cfg.LogLevel)
+			}
+		})
+	}
+}
+
+// TestLogLevelRejectsUnknown 钉住非法值必须报错，且错误信息带原值。
+//
+// 静默回落 info 是最糟的失败方式：用户以为自己改了级别，日志却还是老样子。错误
+// 信息里带原值，是因为配置文件里可能有多个同名字段（例如任务参数），出错时要能
+// 一眼看出写错的是哪个值。
+func TestLogLevelRejectsUnknown(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		fragment string
+		value    string
+	}{
+		{"拼写错误", `"verbose"`, "verbose"},
+		{"多写一档", `"critical"`, "critical"},
+		{"别名但非本档", `"quiet"`, "quiet"},
+		{"数字", `3`, "3"},
+		{"布尔", `true`, "True"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := FromDict(mustParse(t, logLevelConfigText(testCase.fragment)))
+			if err == nil {
+				t.Fatalf("非法级别 %s 应报错", testCase.fragment)
+			}
+			var configError *ConfigError
+			if !errors.As(err, &configError) {
+				t.Fatalf("应是配置契约错误（ConfigError），实际 %T: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "log_level") {
+				t.Errorf("错误信息应指出字段名: %v", err)
+			}
+			if !strings.Contains(err.Error(), testCase.value) {
+				t.Errorf("错误信息应带上非法值 %q: %v", testCase.value, err)
+			}
+		})
+	}
+}
+
+// TestSlogLevelMapping 钉住配置级别到 slog 级别的映射。
+//
+// warning 对应 slog.LevelWarn：slog 没有 LevelWarning，WARN 档的文本名就是 "WARN"。
+// 未知值与空值按 info 处理——手动构造的 RouterConfig（测试、工具、旧快照）不经过
+// fromMigrated 的规范化，运行期不该再失败一次。
+func TestSlogLevelMapping(t *testing.T) {
+	for _, testCase := range []struct {
+		level string
+		want  slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"info", slog.LevelInfo},
+		{"warning", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"", slog.LevelInfo},
+		{"warn", slog.LevelInfo}, // 未规范化的原始写法不进运行期，按未知值兜底
+		{"verbose", slog.LevelInfo},
+	} {
+		t.Run(testCase.level, func(t *testing.T) {
+			if got := (&RouterConfig{LogLevel: testCase.level}).SlogLevel(); got != testCase.want {
+				t.Fatalf("SlogLevel(%q) = %v，期望 %v", testCase.level, got, testCase.want)
+			}
+		})
+	}
+	// nil 安全：调用方在加载失败的分支里可能还没有配置对象。
+	var nilConfig *RouterConfig
+	if got := nilConfig.SlogLevel(); got != slog.LevelInfo {
+		t.Fatalf("nil 配置的 SlogLevel = %v，期望 %v", got, slog.LevelInfo)
 	}
 }

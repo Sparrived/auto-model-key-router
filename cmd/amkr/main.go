@@ -550,6 +550,11 @@ func serveForeground(configPath string, loaded *config.RouterConfig) int {
 		}
 	}()
 
+	// 级别来自配置的 log_level（缺省 info），在 sink 打开后立刻生效：此后写进文件的
+	// 每一行都按它过滤。不判错——config 在解析阶段已经挡掉了非法值，走到这里的一定
+	// 是四个合法级别之一。sink 为 nil 时 SetLevel 是空操作（与 Close 一致）。
+	sink.SetLevel(loaded.SlogLevel())
+
 	// 自更新由服务进程自己发起时（WebUI/API 的「立即更新」），换完文件后由本进程优雅
 	// 退出、收尾助手接管重启。因此这里要能"从外部"请求关停，并且让出端口。
 	//
@@ -589,6 +594,9 @@ func serveForeground(configPath string, loaded *config.RouterConfig) int {
 	if sink != nil {
 		options.Logger = sink.App
 		options.AccessLogger = sink.Access
+		// 同一个 LevelVar 交给 server：配置热重载读到新的 log_level 时直接改它，
+		// 三个 handler 立刻跟着变，不必重启。
+		options.LogLevel = sink.LevelVar()
 	}
 	app, err := server.New(options)
 	if err != nil {

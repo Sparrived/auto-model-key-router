@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 )
@@ -104,6 +105,38 @@ func pathOr(raw *canonical.Value, primary, secondary, fallback string) string {
 
 // itoa 是 strconv.Itoa 的短别名。
 func itoa(value int) string { return strconv.Itoa(value) }
+
+// logLevelOr 解析并规范化日志级别（log_level）。
+//
+// 规范化做三件事，都是用户在配置文件里实际会写出来的形态：
+//   - 大小写不敏感：手写 JSON 里 "WARN"、"Info" 很常见，严格比对会让一份看起来
+//     完全正常的配置加载失败；
+//   - 接受别名 "warn"：Go slog 自己把 WARN 写成短名，熟悉它的人会顺手这么写，
+//     规范名统一折成 "warning"（SlogLevel 再映射回 slog.LevelWarn）；
+//   - 首尾空白 TrimSpace：从文档或聊天里复制粘贴常带空白。
+//
+// 缺省、null 与空白串都按「未设置」回落到 fallback，与 routing_mode 等字符串枚举
+// 字段一致：把编辑框清空一次不该让整份配置当场加载不了。
+//
+// 其余取值一律报错，且错误信息带上原样写出的值。这里刻意不静默回落 info——用户以为
+// 自己已经改了日志级别、实际却没生效，比直接报错难查得多。
+func logLevelOr(value *canonical.Value, fallback string) (string, error) {
+	if value == nil || value.IsNull() {
+		return fallback, nil
+	}
+	normalized := strings.ToLower(strings.TrimSpace(value.PyStr()))
+	if normalized == "" {
+		return fallback, nil
+	}
+	if normalized == "warn" {
+		return "warning", nil
+	}
+	if !containsString(logLevels, normalized) {
+		return "", errf("log_level 必须是 %s，实际为 %q",
+			strings.Join(logLevels, "、"), strings.TrimSpace(value.PyStr()))
+	}
+	return normalized, nil
+}
 
 // DefaultCacheDir 返回平台的缓存目录。
 //

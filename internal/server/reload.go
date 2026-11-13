@@ -54,6 +54,15 @@ func (a *App) reload() {
 	if err != nil {
 		return
 	}
+	// log_level 随配置热重载生效，不必重启进程：LevelVar 是 slog 专为运行时改级别
+	// 提供的并发安全类型，Sink 的 App/Access/Server 三个 handler 读的是同一个变量，
+	// 改一次就对全部生效，既不用重开文件、也不用重建 logger。
+	//
+	// 放在这里而不是函数末尾的重建之后：下面「指标库打不开、保留旧配置」会提前返回，
+	// 而日志级别跟指标库毫无关系，没道理跟着那次失败一起不生效。
+	if a.options.LogLevel != nil {
+		a.options.LogLevel.Set(runtimeConfig.SlogLevel())
+	}
 
 	current := a.manager.Current()
 	if current == nil {

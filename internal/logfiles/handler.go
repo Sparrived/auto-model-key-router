@@ -23,12 +23,17 @@ import (
 //
 // 与 Python 的四处已记录差异：
 //
-//   - **没有 status_code 等级提升**。参照实现给 file handler 挂了
+//   - **handler 本身不做 status_code 等级提升**。参照实现给 file handler 挂了
 //     AccessLogLevelFilter，但它读 `record.status_code`，而 uvicorn 的访问日志用
 //     `logger.info('%s - "%s %s HTTP/%s" %d', ...)` 的位置参数记录，
 //     `getattr(record, "status_code", None)` 恒为 None，过滤器从不生效。历史日志
 //     实测：1,618,926 行 uvicorn.access **全部 INFO**，WARNING/ERROR 的
-//     uvicorn.access 为 0 行（503/404 也不例外）。这里照实保留「一律 INFO」。
+//     uvicorn.access 为 0 行（503/404 也不例外），Python 侧因此事实上就是「一律
+//     INFO」。Go 侧**不再**照抄这个结果：这个过滤器没做到的事改成由调用方在记录时
+//     选级别来完成——访问日志现在由 internal/server/accesslog.go 按状态码分级
+//     （<400 Debug、400-499 Info、>=500 Warn），因此在 log_level=debug 下能看到
+//     2xx/3xx 行，默认级别下 5xx 落盘为 WARNING。handler 只认 record 的级别，
+//     换算不在这里做。
 //   - **属性渲染成 JSON 对象追加在消息之后**。参照实现是调用方自己
 //     `json.dumps(payload, ensure_ascii=False)` 拼进消息；Go 侧由 handler 统一渲染，
 //     因此行的可读性一致，但键顺序按调用方传参顺序，不保证与 Python 逐字相同。
@@ -56,8 +61,10 @@ const ServerLoggerName = "uvicorn.error"
 // Sink 是写到同一个日志文件的一组 logger，对应 uvicorn_log_config 的 file handler
 // 在 Go 侧的等价物。
 //
-// 三个 logger 共用同一个文件与同一把写锁：参照实现里所有 logger 的 handler 都指向
-// 同一个 FileHandler，行与行之间不会交错。
+// 三个 logger 共用同一个文件、同一把写锁与**同一个级别变量**：参照实现里所有 logger
+// 的 handler 都指向同一个 FileHandler，行与行之间不会交错；而 uvicorn_log_config 给
+// 三个 logger 设的是同一个 level（历史配置为 "INFO"），因此 Go 侧也让它们共用一个
+// *slog.LevelVar。
 type Sink struct {
 	// App 用于应用侧结构化日志（交给 internal/proxy、internal/wsproxy 等），
 	// 对应 `logging.getLogger("auto_model_key_router.app")`。
@@ -66,6 +73,15 @@ type Sink struct {
 	Access *slog.Logger
 	// Server 用于服务器自身的生命周期与握手日志（启动、关停、升级被拒）。
 	Server *slog.Logger
+
+	// level 是三个 handler 的落盘级别（Enabled 都读它），新开 Sink 时为 Info。
+	//
+	// 必须是 *slog.LevelVar 而不是 slog.Level：fileHandler.WithAttrs 是**结构体
+	// 拷贝**，值类型会被冻结在派生那一刻，之后 SetLevel 对派生出来的 handler 就
+	// 失效了；指针则让副本与原 handler 看到同一级别。也正因为共用一个变量，改一次
+	// 即对 App/Access/Server 同时生效，热重载（internal/server/reload.go 直接
+	// 写 LevelVar）与 Sink.SetLevel 才不会打架。
+	level *slog.LevelVar
 
 	file *os.File
 }
@@ -85,10 +101,16 @@ func Open(path string) (*Sink, error) {
 		return nil, err
 	}
 	mu := &sync.Mutex{}
+	// 默认 Info，与参照实现 uvicorn_log_config 给三个 logger 设的 level="INFO"
+	// 对齐。运行期由 SetLevel 改写（cmd/amkr 在打开文件后立刻按 config.log_level
+	// 设置，热重载则经 LevelVar 改同一个变量），因此这里不能在 handler 里写死常量。
+	level := new(slog.LevelVar)
+	level.Set(slog.LevelInfo)
 	return &Sink{
-		App:    slog.New(&fileHandler{name: AppLoggerName, file: file, mu: mu}),
-		Access: slog.New(&fileHandler{name: AccessLoggerName, file: file, mu: mu}),
-		Server: slog.New(&fileHandler{name: ServerLoggerName, file: file, mu: mu}),
+		App:    slog.New(&fileHandler{name: AppLoggerName, file: file, mu: mu, level: level}),
+		Access: slog.New(&fileHandler{name: AccessLoggerName, file: file, mu: mu, level: level}),
+		Server: slog.New(&fileHandler{name: ServerLoggerName, file: file, mu: mu, level: level}),
+		level:  level,
 		file:   file,
 	}, nil
 }
@@ -101,17 +123,57 @@ func (s *Sink) Close() error {
 	return s.file.Close()
 }
 
+// SetLevel 运行时调整落盘级别，三个 logger 同时生效。
+//
+// 与 Close 一样容忍 nil 接收者：cmd/amkr 在日志文件打不开时会把 sink 置为 nil
+// （日志写不进去不该拦住服务），接线方因此不必到处判空。
+func (s *Sink) SetLevel(level slog.Level) {
+	if s == nil || s.level == nil {
+		return
+	}
+	// LevelVar.Set 内部是 atomic，已经在写日志的 goroutine 立刻看到新值。
+	s.level.Set(level)
+}
+
+// Level 返回当前落盘级别。nil 或未经 Open 的 Sink 返回默认的 Info。
+func (s *Sink) Level() slog.Level {
+	if s == nil || s.level == nil {
+		return slog.LevelInfo
+	}
+	return s.level.Level()
+}
+
+// LevelVar 交出内部的级别变量，供 internal/server 做配置热重载。
+//
+// 它必须就是三个 handler 读的那一个变量：reload 里直接 `LogLevel.Set(...)`，
+// 不经过 Sink 也不会漏掉任何一个 handler。nil Sink 返回 nil。
+func (s *Sink) LevelVar() *slog.LevelVar {
+	if s == nil {
+		return nil
+	}
+	return s.level
+}
+
 // fileHandler 把 slog 记录按 Python logging 的行格式写进一个文件。
 type fileHandler struct {
 	name  string
 	file  io.Writer
 	mu    *sync.Mutex
+	level *slog.LevelVar
 	attrs []slog.Attr
 }
 
-// Enabled 对应 file logger 的 level="INFO"。
+// Enabled 按 Sink 的 LevelVar 过滤：默认 Info，可运行期调整。
+//
+// 参照实现给 file logger 设的是 level="INFO"，但那个级别是启动期常量；Go 侧要由
+// config.log_level 决定、并且能在热重载时改，因此读共享的 LevelVar 而不是写死常量。
+// handler 没拿到 LevelVar（只在包内直接构造且没走 Open 时出现）按 Info 处理，与
+// Sink 的默认值一致。
 func (h *fileHandler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= slog.LevelInfo
+	if h.level == nil {
+		return level >= slog.LevelInfo
+	}
+	return level >= h.level.Level()
 }
 
 // Handle 写出一行。写入串行化：slog 允许并发调用 Handle，一行应当原子落盘。
@@ -136,7 +198,8 @@ func (h *fileHandler) Handle(_ context.Context, record slog.Record) error {
 	return err
 }
 
-// WithAttrs 累积属性。mu 是指针，因此这里的结构体拷贝不会复制锁。
+// WithAttrs 累积属性。mu 与 level 都是指针，因此这里的结构体拷贝不会复制锁，也不会
+// 把级别拷成一份互不相干的值——派生 handler 仍与原 handler 共享同一级别。
 func (h *fileHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(attrs) == 0 {
 		return h

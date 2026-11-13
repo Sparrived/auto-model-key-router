@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/hmac"
+	"log/slog"
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
@@ -356,11 +357,26 @@ type RouterConfig struct {
 	EndpointCapabilitiesPath string
 	MetricsDBPath            string
 	LogFilePath              string
-	LocalAPIKey              string
-	Models                   []ModelConfig
-	StreamFirstByteTimeout   float64
-	StreamIdleTimeout        float64
-	Providers                []ProviderConfig
+	// LogLevel 是日志级别，取值只可能是 debug / info / warning / error（缺省 info）。
+	//
+	// 解析时已规范化（大小写不敏感、别名 warn 折成 warning、去掉首尾空白），因此运行
+	// 期不必再做字符串比对；要 slog.Level 时用 SlogLevel。它决定 log_file_path 里的
+	// 文件日志与访问日志的过滤门槛（访问日志另按状态码分级，见
+	// internal/server/accesslog.go）。
+	//
+	// 注意它管的是**文件日志**。终端那几行（启动行、TUI 面板）走的是 fmt/tui，不是
+	// slog，因此不受它影响；而 Sink 打不开时 proxy 退回到 stderr 的兜底 logger 用的是
+	// 固定 Info，也只在你没拿到日志文件时才会出现——那是「日志系统没起来」的最后一道
+	// 兜底，不该被一份读不到的配置牵着走。
+	//
+	// 落盘时**不写缺省值**：EmptyConfigDict 不含该键，用户没配就保持磁盘原样，
+	// 免得每次保存都给所有人的配置文件加一行没意义的 "log_level": "info"。
+	LogLevel               string
+	LocalAPIKey            string
+	Models                 []ModelConfig
+	StreamFirstByteTimeout float64
+	StreamIdleTimeout      float64
+	Providers              []ProviderConfig
 	// UpstreamRoutes 是「上游 URL -> {模式: 路径}」。
 	//
 	// 重要：它**只**由 providers[].routes 汇总而来。配置文件顶层的
@@ -544,6 +560,12 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 			return nil, err
 		}
 		config.LogFilePath = path
+	}
+	// 日志级别紧挨着日志路径解析：两者是同一个 logger 的配置，读这段代码时应能
+	// 一眼看全。规范化与非法值校验都在 logLevelOr 里，这里只负责给缺省值。
+	config.LogLevel, err = logLevelOr(raw.Lookup("log_level"), "info")
+	if err != nil {
+		return nil, err
 	}
 	config.LocalAPIKey = stringOr(raw.Lookup("local_api_key"), "")
 	config.WebUIEnabled = boolOr(raw.Lookup("webui_enabled"), false)
@@ -1868,6 +1890,30 @@ func (c *RouterConfig) UpstreamRoutesForBaseURL(baseURL string) map[string]strin
 		out[mode] = path
 	}
 	return out
+}
+
+// SlogLevel 把配置里的日志级别翻译成 slog 的门槛值。
+//
+// 未知值与空值都按 info 处理，理由有两条：手动构造的 RouterConfig（测试、工具链、
+// 升级过程中的旧快照）不会经过 fromMigrated 的规范化，不该因为一个空字段就把日志
+// 关掉或炸掉；而「配置写错」这件事已经在解析阶段报过错，运行期不该再失败一次。
+//
+// 注意 warning 对应 slog.LevelWarn：slog 本身没有 LevelWarning，其 WARN 档的
+// 文本名就是 "WARN"。
+func (c *RouterConfig) SlogLevel() slog.Level {
+	if c == nil {
+		return slog.LevelInfo
+	}
+	switch c.LogLevel {
+	case "debug":
+		return slog.LevelDebug
+	case "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 // isValidRoutingMode 报告路由模式是否合法。
