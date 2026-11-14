@@ -81,6 +81,10 @@ x-api-key: your-local-api-key
 | `PUT/DELETE` | `/api/access-keys/{key_id}` | 仅本地 | 改名、启停与两份清单（**不换 key**），或删除 |
 | `POST` | `/api/access-keys/{key_id}/rotate` | 仅本地 | 换掉该访问密钥的明文（旧 key 立即失效）；新 key 仅在本次响应返回 |
 | `GET/PUT` | `/api/cpa-instances` | 仅本地 | 列出或**整体替换** CPA 实例清单（配置键 `cpa_instances`；响应含管理密钥明文，故要求完整权限） |
+| `GET/PATCH` | `/api/cpa-instances/{instance_id}/runtime-config` | 仅本地 | 读取或差量更新 CPA 的受控运行配置；写操作要求 CPA ETag |
+| `PATCH` | `/api/cpa-instances/{instance_id}/accounts/status` | 仅本地 | 按 `name + auth_index` 启停 CPA 凭据 |
+| `PATCH` | `/api/cpa-instances/{instance_id}/accounts/fields` | 仅本地 | 修改 CPA 凭据的 `label` / `note`，不开放任意凭据字段 |
+| `POST` | `/api/cpa-instances/{instance_id}/accounts/routing-reset` | 仅本地 | 清除 CPA 的 quota/cooldown 路由状态，不解除 AMKR 冻结或恢复真实额度 |
 | `GET` | `/api/cpa-accounts` | 仅本地 | 服务端扇出各 CPA 实例的账号与额度读数（只读、不缓存） |
 | `GET` | `/api/cpa-reset-credits` | 仅本地 | 服务端扇出各 CPA 实例的 Claude / Codex 重置卡读数（只读、不缓存） |
 | `POST` | `/api/cpa-reset-credits/use` | 仅本地 | 消费一张重置卡；默认选**最快过期**的可用卡（会真实改变上游账号状态） |
@@ -1509,7 +1513,7 @@ curl -X POST http://127.0.0.1:8000/api/routes \
 }
 ```
 
-`management_key` 是 CPA **管理面**（`/v0/management/*`）的密钥，不是模型调用 key。写入时
+`management_key` 是 CPA **管理面**（`/v0/management/*` 与 `/v8/management/*`）的密钥，不是模型调用 key。写入时
 `base_url` 去尾斜杠并要求 `http`/`https`，`management_key` 去空白且非空，`label` 缺省时用实例
 ID 兜底；实例里未知的字段原样保留（与配置整体一致：旧版本写回不该丢新字段）。这个键不在
 `/api/settings` 那批已发布字段里，因此它的增删不会牵动那份逐字对齐的契约。
@@ -1542,6 +1546,26 @@ curl -X PUT http://127.0.0.1:8000/api/cpa-instances \
   -d '{"config_revision":"<上一条响应里的值>","instances":{
         "cpa-a":{"label":"主力 CPA","base_url":"http://127.0.0.1:8317","management_key":"..."}}}'
 ```
+
+#### CPA 实例运行配置与账号操作
+
+账号资源页还可以通过 AMKR 的服务端代理管理支持 v8 管理面的 CPA 实例。所有接口都要求完整管理权限；
+浏览器只提交实例 ID 和受控字段，不能指定上游 URL、路径、方法或请求头，也不会获得完整 CPA 配置树。
+
+| AMKR 接口 | 请求体与作用 |
+| --- | --- |
+| `GET /api/cpa-instances/{id}/runtime-config` | 返回 `instance`、`etag`、`debug`、`request_retry`、`strategy`、`client_api_keys`；只含白名单字段 |
+| `PATCH /api/cpa-instances/{id}/runtime-config` | `etag` 必填，至少携带 `debug` / `request_retry` / `strategy` / `client_api_keys` 中一项；以 `If-Match` 调用 `PATCH /v8/management/config`，成功后重读实际配置 |
+| `PATCH /api/cpa-instances/{id}/accounts/status` | `name + auth_index + disabled`；启用或停用 CPA 凭据，与 AMKR 的额度冻结无关 |
+| `PATCH /api/cpa-instances/{id}/accounts/fields` | `name + auth_index`，以及至少一个 `label` / `note`；不开放 token、请求头等任意凭据字段 |
+| `POST /api/cpa-instances/{id}/accounts/routing-reset` | `auth_index`；清除 CPA 的 quota/cooldown 路由状态，不代表恢复上游真实额度 |
+
+`request_retry` 是非负整数，`strategy` 支持 `round-robin` / `fill-first` / `weighted-round-robin`。
+`client_api_keys` 是**完整替换**的字符串数组，空数组会清空客户端密钥；它对应 CPA 的 `access.api-keys`，
+不是管理密钥或上游供应商 Key。CPA 返回 `412` 时 AMKR 映射为 `409`，调用方应重新读取后再决定是否提交。
+配置写入分别落到 `observability.logs.debug`、`routing.retry.request-retry`、`routing.strategy` 与
+`access.api-keys`；账号操作对应 v8 的 `credentials/status`、`credentials/fields` 与
+`routing/cooldown/reset`。旧实例若不支持这些 v8 接口，会在对应弹层或操作中返回错误，不会静默降级到 v0 写入。
 
 `GET /api/cpa-accounts` 由 AMKR 的**服务端**替调用方去问各实例与各订阅端点，返回归一化后的账号与
 额度。`instances[]` 是 CPA 实例，`subscriptions[]` 是订阅类供应商：

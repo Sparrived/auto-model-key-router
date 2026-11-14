@@ -175,6 +175,7 @@ type cpaAccount struct {
 	AccountType   string            `json:"account_type,omitempty"`
 	ProjectID     string            `json:"project_id,omitempty"`
 	Label         string            `json:"label,omitempty"`
+	Note          string            `json:"note,omitempty"`
 	Email         string            `json:"email,omitempty"`
 	Status        string            `json:"status,omitempty"`
 	StatusMessage string            `json:"status_message,omitempty"`
@@ -454,6 +455,7 @@ func (s *Server) collectCPAInstance(ctx context.Context, instance configops.CPAI
 			AccountType:    file.AccountType,
 			ProjectID:      file.ProjectID,
 			Label:          file.Label,
+			Note:           file.Note,
 			Email:          file.Email,
 			Status:         file.Status,
 			StatusMessage:  file.StatusMessage,
@@ -647,7 +649,7 @@ func firstNonEmpty(values ...string) string {
 // 劫走。
 var cpaHTTPClient = &http.Client{Timeout: cpaAccountsBudget}
 
-// cpaManagementClient 只读地访问一个 CPA 实例的管理面。
+// cpaManagementClient 访问一个 CPA 实例的管理面；写操作只由受控处理器构造固定路径。
 type cpaManagementClient struct {
 	baseURL string
 	key     string
@@ -659,17 +661,36 @@ type cpaManagementClient struct {
 // 只发 Authorization 一种凭据头：CPA 同时认 X-Management-Key，但同一把 key 出现在两个
 // 头里没有任何好处，只会多一处泄漏点（上游日志、抓包都多一份）。
 func (c cpaManagementClient) do(ctx context.Context, method, path string, body, out any) error {
+	_, err := c.doWithHeaders(ctx, method, path, body, out, nil)
+	return err
+}
+
+// cpaManagementError 保留上游状态码，配置写入据此把 412 翻译为可恢复的并发冲突。
+type cpaManagementError struct {
+	status int
+	text   string
+}
+
+func (e *cpaManagementError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.status, e.text) }
+
+// doWithHeaders 支持 v8 配置的 If-Match，并把强 ETag 等响应头交回调用方。
+func (c cpaManagementClient) doWithHeaders(ctx context.Context, method, path string, body, out any, headers http.Header) (http.Header, error) {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("构造请求失败: %w", err)
+			return nil, fmt.Errorf("构造请求失败: %w", err)
 		}
 		payload = bytes.NewReader(encoded)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, payload)
 	if err != nil {
-		return fmt.Errorf("构造请求失败: %w", err)
+		return nil, fmt.Errorf("构造请求失败: %w", err)
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			request.Header.Add(name, value)
+		}
 	}
 	request.Header.Set("Authorization", "Bearer "+c.key)
 	request.Header.Set("Accept", "application/json")
@@ -679,23 +700,23 @@ func (c cpaManagementClient) do(ctx context.Context, method, path string, body, 
 
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("无法连接 CPA: %w", err)
+		return nil, fmt.Errorf("无法连接 CPA: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, cpaResponseLimit))
 	if err != nil {
-		return fmt.Errorf("读取 CPA 响应失败: %w", err)
+		return nil, fmt.Errorf("读取 CPA 响应失败: %w", err)
 	}
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d: %s", response.StatusCode, cpaErrorText(raw))
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return response.Header, &cpaManagementError{status: response.StatusCode, text: cpaErrorText(raw)}
 	}
 	if out == nil {
-		return nil
+		return response.Header, nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("CPA 响应不是合法 JSON: %w", err)
+		return response.Header, fmt.Errorf("CPA 响应不是合法 JSON: %w", err)
 	}
-	return nil
+	return response.Header, nil
 }
 
 // cpaErrorText 从 CPA 的错误响应里取可读文本。
@@ -741,6 +762,7 @@ type cpaAuthFileEntry struct {
 	AccountType   string              `json:"account_type"`
 	ProjectID     string              `json:"project_id"`
 	Label         string              `json:"label"`
+	Note          string              `json:"note"`
 	Email         string              `json:"email"`
 	Status        string              `json:"status"`
 	StatusMessage string              `json:"status_message"`

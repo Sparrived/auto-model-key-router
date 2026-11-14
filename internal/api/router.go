@@ -62,6 +62,11 @@ func (s *Server) register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/cpa-instances", s.handleListCPAInstances)
 	mux.HandleFunc("PUT /api/cpa-instances", s.handleReplaceCPAInstances)
 	mux.HandleFunc("GET /api/cpa-accounts", s.handleListCPAAccounts)
+	mux.HandleFunc("GET /api/cpa-instances/{instance_id}/runtime-config", s.handleGetCPARuntimeConfig)
+	mux.HandleFunc("PATCH /api/cpa-instances/{instance_id}/runtime-config", s.handlePatchCPARuntimeConfig)
+	mux.HandleFunc("PATCH /api/cpa-instances/{instance_id}/accounts/status", s.handlePatchCPAAccountStatus)
+	mux.HandleFunc("PATCH /api/cpa-instances/{instance_id}/accounts/fields", s.handlePatchCPAAccountFields)
+	mux.HandleFunc("POST /api/cpa-instances/{instance_id}/accounts/routing-reset", s.handleResetCPAAccountRouting)
 	// 重置卡是另一条通道：读取只是代打上游只读接口，消费会真的用掉一张卡。
 	mux.HandleFunc("GET /api/cpa-reset-credits", s.handleListCPAResetCredits)
 	mux.HandleFunc("POST /api/cpa-reset-credits/use", s.handleUseCPAResetCredit)
@@ -213,6 +218,11 @@ func workspacePatterns() []string {
 		"GET /api/cpa-instances",
 		"PUT /api/cpa-instances",
 		"GET /api/cpa-accounts",
+		"GET /api/cpa-instances/{instance_id}/runtime-config",
+		"PATCH /api/cpa-instances/{instance_id}/runtime-config",
+		"PATCH /api/cpa-instances/{instance_id}/accounts/status",
+		"PATCH /api/cpa-instances/{instance_id}/accounts/fields",
+		"POST /api/cpa-instances/{instance_id}/accounts/routing-reset",
 		"GET /api/cpa-reset-credits",
 		"POST /api/cpa-reset-credits/use",
 		"GET /api/quota-freezes",

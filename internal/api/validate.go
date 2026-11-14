@@ -309,6 +309,31 @@ var specCPAInstances = newModelSpec("CPAInstances",
 // 默认不指定 credit_id：服务端读一遍当前卡片，挑最快过期的那张。credit_id 只用于
 // 「我在界面上明确点了某一张」或客户端重试时钉住同一张；request_id 是幂等键，重试时
 // 原样带回，避免网络抖动把一张已经用掉的卡再花一次。
+var specCPAConfigUpdate = newModelSpec("CPAConfigUpdate",
+	req("etag", kindStr).minLenOf(1),
+	def("debug", kindBool),
+	def("request_retry", kindInt).geV(intGe0),
+	def("strategy", kindStr).minLenOf(1),
+	def("client_api_keys", kindStrList),
+)
+
+var specCPAAccountStatus = newModelSpec("CPAAccountStatus",
+	req("name", kindStr).minLenOf(1),
+	req("auth_index", kindStr).minLenOf(1),
+	req("disabled", kindBool),
+)
+
+var specCPAAccountFields = newModelSpec("CPAAccountFields",
+	req("name", kindStr).minLenOf(1),
+	req("auth_index", kindStr).minLenOf(1),
+	def("label", kindStr),
+	def("note", kindStr),
+)
+
+var specCPAAccountRoutingReset = newModelSpec("CPAAccountRoutingReset",
+	req("auth_index", kindStr).minLenOf(1),
+)
+
 var specCPAUseResetCredit = newModelSpec("CPAUseResetCredit",
 	req("instance", kindStr).minLenOf(1),
 	req("auth_index", kindStr).minLenOf(1),
