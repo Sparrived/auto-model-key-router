@@ -311,7 +311,13 @@ export function createFakeBackend(seed: Partial<FakeState> = {}) {
       const models = provider.id === "openai" ? ["gpt-4o-mini", "gpt-4o"] : ["deepseek-chat"];
       key.capabilities = { models, checked_at: new Date().toISOString() };
       bump();
-      return response({ status: "complete", config_revision: state.revision });
+      // 真实接口回的是「探测后的 Key 快照 + 新 revision」，前端据此更新 discovered 与保存用的 revision。
+      return response({
+        status: "complete",
+        config_revision: state.revision,
+        provider: clone(provider),
+        key: clone(key),
+      });
     }
 
     match = path.match(/^\/api\/providers\/([^/]+)\/keys\/([^/]+)$/);

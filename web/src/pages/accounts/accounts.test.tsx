@@ -1,9 +1,9 @@
 // 账号资源页验收：额度口径、故障隔离、刷新请求数、重置卡按需读取与危险确认，
 // 以及额度冻结的展示与手工解冻（徽标/原因/倒计时、实例级联动横幅、刷新范围）。
 
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfirmProvider } from "@/components/ui/ConfirmProvider";
@@ -211,6 +211,94 @@ describe("账号资源页", () => {
     await waitFor(() => expect(document.activeElement).toBe(search));
   });
 
+  it("页面每 60 秒自动刷新一次账号读数", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = installFetch();
+      const reads = () => calls.filter((call) => call.path === "/api/cpa-accounts").length;
+      renderPage();
+      // 首次加载走正常请求；此后只有 60 秒周期会再发一次。
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(reads()).toBe(1);
+      // 页头如实写清节奏（不用 find* 等待，避免假时钟被 waitFor 自动推进）。
+      expect(screen.getByText(/页面每 60 秒自动刷新/)).toBeInTheDocument();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+      expect(reads()).toBe(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(reads()).toBe(2);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("30 秒内切回标签页不重复扇出，读数过期后切回才补刷", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = installFetch();
+      const reads = () => calls.filter((call) => call.path === "/api/cpa-accounts").length;
+      renderPage();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(reads()).toBe(1);
+
+      // 读数还新鲜：来回切标签页不发请求。
+      await act(async () => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(reads()).toBe(1);
+
+      // 超过 30 秒（但未到 60 秒周期）后切回：补刷一次。
+      await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+      expect(reads()).toBe(1);
+      await act(async () => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(reads()).toBe(2);
+    } finally {
+      focusManager.setFocused(undefined);
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it("60 秒自动刷新不打断搜索、筛选与「管理实例」里正在编辑的内容", async () => {
+    vi.useFakeTimers();
+    try {
+      installFetch();
+      renderPage();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      const search = screen.getByLabelText("搜索账号、邮箱、供应商或项目");
+      fireEvent.change(search, { target: { value: "codex" } });
+      fireEvent.click(screen.getByRole("radio", { name: /可用/ }));
+      expect(screen.getByText(/显示 1 \/ 2 个账号/)).toBeInTheDocument();
+
+      // 「管理实例」弹层里正在编辑的内容也不能被后台刷新冲掉。
+      fireEvent.click(screen.getByRole("button", { name: "管理实例" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const dialog = screen.getByRole("dialog", { name: "管理 CPA 实例" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "添加实例" }));
+      const idInput = within(dialog).getByLabelText("实例 ID");
+      fireEvent.change(idInput, { target: { value: "cpa-new" } });
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+      // 后台刷新只换读数：搜索词、筛选结果与弹层里的草稿都还在。
+      expect(search).toHaveValue("codex");
+      expect(screen.getByText(/显示 1 \/ 2 个账号/)).toBeInTheDocument();
+      expect(within(dialog).getByLabelText("实例 ID")).toHaveValue("cpa-new");
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
   it("保存管理实例后同时失效 settings，刷新实例删除后的策略徽标", async () => {
     const user = userEvent.setup();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -403,8 +491,8 @@ describe("账号资源页", () => {
       expect(await screen.findByText("此 Key 已被自动冻结")).toBeInTheDocument();
       expect(calls.filter((call) => call.path === "/api/cpa-accounts").length).toBeGreaterThanOrEqual(1);
 
-      // 页面不轮询，只有 expires_at 到点的那一次 refetch；测试用很短的到期时间代替
-      // fake timers，避免 React Query 的调度也被假时钟冻结。
+      // 页面每 60 秒自动刷新；这里用很短的到期时间单独验证 expires_at 到点的那次额外
+      // refetch，不依赖 60 秒周期，也避免用假时钟冻住 React Query 的调度。
       await waitFor(
         () => expect(calls.filter((call) => call.path === "/api/cpa-accounts")).toHaveLength(2),
         { timeout: 3000 },

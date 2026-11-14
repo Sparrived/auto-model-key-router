@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus, Search } from "lucide-react";
+import { Loader2, Plus, Radar, Search } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { errorText } from "@/lib/format";
+import { errorText, formatRelative } from "@/lib/format";
 import {
   ENDPOINT_FAMILY,
   endpointLabel,
@@ -15,7 +15,8 @@ import {
   type ModelKindsIndex,
 } from "@/lib/model-kinds";
 import { writeWithImpactConfirm, type Impact } from "@/lib/model-impact";
-import type { Provider, ProviderKey } from "@/lib/types";
+import type { Provider, ProviderKey, ProvidersResponse } from "@/lib/types";
+import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -396,17 +397,67 @@ interface ModelBindingSheetProps {
   revision: string;
   onClose: () => void;
   onSaved: () => void;
+  onProbed: () => Promise<ProvidersResponse>;
 }
 
-export function ModelBindingSheet({ provider, providerKey, revision, onClose, onSaved }: ModelBindingSheetProps) {
+export function ModelBindingSheet({ provider, providerKey, revision, onClose, onSaved, onProbed }: ModelBindingSheetProps) {
+  // 探测会写回 key.capabilities，配置 revision 随之变化：保存必须用探测后的新 revision，
+  // 而父组件的刷新是异步的，所以这里留一份本地读数兜底，避免拿旧 revision 保存撞 409。
+  const [liveRevision, setLiveRevision] = useState(revision);
+  useEffect(() => setLiveRevision(revision), [revision]);
   const binding = useKeyModelBinding({
     providerId: provider.id,
     keyName: providerKey.name,
-    revision,
+    revision: liveRevision,
     discovered: providerKey.capabilities?.models || [],
     onSaved,
   });
+  const [probing, setProbing] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const [probeResult, setProbeResult] = useState<{ count: number; checkedAt: string } | null>(null);
+  const activeRef = useRef(false);
+  const autoStartedRef = useRef(false);
+  const generationRef = useRef(0);
   const changed = binding.added > 0 || binding.removed > 0;
+
+  async function runProbe() {
+    const generation = ++generationRef.current;
+    setProbing(true);
+    setProbeError(null);
+    setProbeResult(null);
+    try {
+      // 探测本身也会改 revision（写回 key.capabilities），重复探测必须用最新的那一份。
+      await api.probeKey(liveRevision, provider.id, providerKey.name);
+      if (!activeRef.current || generation !== generationRef.current) return;
+      const data = await onProbed();
+      if (!activeRef.current || generation !== generationRef.current) return;
+      if (data.config_revision) setLiveRevision(data.config_revision);
+      const fresh = data.providers.find((item) => item.id === provider.id)?.keys.find((item) => item.name === providerKey.name);
+      const models = fresh?.capabilities?.models ?? providerKey.capabilities?.models ?? [];
+      setProbeResult({
+        count: models.length,
+        checkedAt: fresh?.capabilities?.checked_at || new Date().toISOString(),
+      });
+      setProbing(false);
+    } catch (failure) {
+      if (!activeRef.current || generation !== generationRef.current) return;
+      setProbeError(errorText(failure));
+      setProbing(false);
+    }
+  }
+
+  useEffect(() => {
+    activeRef.current = true;
+    // StrictMode 会重复执行 setup/cleanup；已发起标记保证自动探测只 POST 一次，
+    // 第二次 setup 会让同一次请求继续收尾，而真正卸载后 activeRef 不会再恢复。
+    if (!autoStartedRef.current) {
+      autoStartedRef.current = true;
+      void runProbe();
+    }
+    return () => {
+      activeRef.current = false;
+    };
+  }, []);
 
   return (
     <Sheet
@@ -426,7 +477,7 @@ export function ModelBindingSheet({ provider, providerKey, revision, onClose, on
             <Button
               variant="primary"
               loading={binding.saving}
-              disabled={!changed}
+              disabled={!changed || probing}
               onClick={() => {
                 void binding.save().then((ok) => {
                   if (ok) {
@@ -442,7 +493,35 @@ export function ModelBindingSheet({ provider, providerKey, revision, onClose, on
         </div>
       }
     >
-      <KeyModelBindingBody binding={binding} />
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {probing ? (
+            <Badge tone="accent">
+              <Loader2 aria-hidden className="size-3.5 animate-spin motion-reduce:animate-none" />
+              正在探测上游模型…
+            </Badge>
+          ) : probeResult ? (
+            <>
+              <Badge tone="good">已探测，发现 {probeResult.count} 个模型</Badge>
+              <span className="text-meta text-ink-3">{formatRelative(probeResult.checkedAt)}</span>
+            </>
+          ) : null}
+          <span className="flex-1" />
+          <Button
+            size="sm"
+            variant="ghost"
+            leadingIcon={<Radar aria-hidden className="size-3.5" />}
+            disabled={probing}
+            onClick={() => void runProbe()}
+          >
+            重新探测
+          </Button>
+        </div>
+        {probeError && !probing ? (
+          <Banner tone="warn">自动探测失败：{probeError}，下方列表来自上次缓存的探测结果</Banner>
+        ) : null}
+        <KeyModelBindingBody binding={binding} />
+      </div>
     </Sheet>
   );
 }

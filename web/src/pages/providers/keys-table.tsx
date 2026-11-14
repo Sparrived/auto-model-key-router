@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Radar, Trash2, Unlock } from "lucide-react";
+import { MoreHorizontal, Pencil, Trash2, Unlock } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -82,13 +82,6 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
   const client = useQueryClient();
   const impactConfirm = useImpactConfirm();
   const [editing, setEditing] = useState<string | null>(null);
-  const [probeState, setProbeState] = useState<Record<string, "idle" | "pending" | "success" | "error">>({});
-  const timers = useRef<number[]>([]);
-
-  useEffect(() => () => {
-    for (const timer of timers.current) window.clearTimeout(timer);
-    timers.current = [];
-  }, []);
 
   async function toggle(key: ProviderKey, enabled: boolean) {
     const keyQuery = queryKeys.providers();
@@ -108,24 +101,6 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
       if (previous) client.setQueryData(keyQuery, previous);
       toast.error(errorText(failure));
       if (failure instanceof ApiError && failure.isConflict) void onRefresh();
-    }
-  }
-
-  async function probeOne(key: ProviderKey) {
-    setProbeState((current) => ({ ...current, [key.name]: "pending" }));
-    try {
-      await api.probeKey(revision, provider.id, key.name);
-      const data = await onRefresh();
-      setProbeState((current) => ({ ...current, [key.name]: "success" }));
-      const fresh = data.providers.find((item) => item.id === provider.id)?.keys.find((item) => item.name === key.name);
-      const count = fresh?.capabilities?.models?.length || 0;
-      toast(count ? `Key ${key.name} 探测成功，发现 ${count} 个模型。` : `Key ${key.name} 探测完成（未发现模型）。`);
-      timers.current.push(window.setTimeout(() => {
-        setProbeState((current) => ({ ...current, [key.name]: "idle" }));
-      }, 2400));
-    } catch (failure) {
-      setProbeState((current) => ({ ...current, [key.name]: "error" }));
-      toast.error(`Key ${key.name} 探测失败: ${errorText(failure)}`);
     }
   }
 
@@ -327,20 +302,6 @@ export function KeysTable({ provider, revision, boundModels, onRefresh, onOpenMo
                         {Object.values(key.capabilities?.errors || {}).filter(Boolean).join("；")}
                       </span>
                     ) : null}
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      loading={probeState[key.name] === "pending"}
-                      leadingIcon={probeState[key.name] === "pending" ? undefined : <Radar aria-hidden className="size-3.5" />}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void probeOne(key);
-                      }}
-                      onKeyDown={(event) => event.stopPropagation()}
-                    >
-                      {probeState[key.name] === "pending" ? "探测中" : probeState[key.name] === "success" ? "已探测" : "探测"}
-                    </Button>
-                    {probeState[key.name] === "error" ? <span className="text-meta text-critical-ink">探测失败</span> : null}
                   </div>
                 </td>
                 <td className="px-2 py-2.5 align-top">{concurrencyBadge(key.max_concurrency)}</td>

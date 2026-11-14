@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -224,8 +225,11 @@ describe("Key 服务模型绑定", () => {
         revision={backend.state.revision}
         onClose={vi.fn()}
         onSaved={onSaved}
+        onProbed={async () => backend.snapshot()}
       />,
     );
+    // 打开即自动探测；等「已探测」出现再操作，否则「保存模型」在探测期间是禁用的。
+    expect(await screen.findByText(/已探测，发现 2 个模型/)).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "关闭模型 gpt-4o" }));
     expect(screen.getByText("新增 0 · 移除 1")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存模型" }));
@@ -256,8 +260,11 @@ describe("Key 服务模型绑定", () => {
         revision={backend.state.revision}
         onClose={vi.fn()}
         onSaved={onSaved}
+        onProbed={async () => backend.snapshot()}
       />,
     );
+    // 打开即自动探测；等「已探测」出现再操作，否则「保存模型」在探测期间是禁用的。
+    expect(await screen.findByText(/已探测，发现 2 个模型/)).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "关闭模型 gpt-4o" }));
     await user.click(screen.getByRole("button", { name: "保存模型" }));
     const dialog = await screen.findByRole("dialog");
@@ -267,6 +274,126 @@ describe("Key 服务模型绑定", () => {
     const writes = backend.calls.filter((call) => call.method === "PUT" && call.path === "/api/providers/openai/keys/main/models");
     expect(writes).toHaveLength(1);
     expect(writes[0].search).toContain("dry_run=1");
+  });
+});
+
+// 模型选择 Sheet：打开即自动探测；失败不挡选择与保存；「重新探测」可重复触发。
+// Key 行里的单 Key 探测按钮已经删除，探测入口只剩「打开模型选择」与页面级「批量探测」。
+function probeCalls(backend: ReturnType<typeof createFakeBackend>, keyName = "main") {
+  return backend.calls.filter(
+    (call) => call.method === "POST" && call.path === `/api/providers/openai/keys/${keyName}/probe`,
+  );
+}
+
+function bindingSheet(backend: ReturnType<typeof createFakeBackend>, onSaved: () => void = vi.fn()) {
+  return (
+    <ModelBindingSheet
+      provider={backend.state.providers[0]}
+      providerKey={backend.state.providers[0].keys[0]}
+      revision={backend.state.revision}
+      onClose={vi.fn()}
+      onSaved={onSaved}
+      onProbed={async () => backend.snapshot()}
+    />
+  );
+}
+
+describe("模型选择 Sheet 的自动探测", () => {
+  it("打开即探测一次，StrictMode 下也不会重复请求", async () => {
+    const backend = createFakeBackend();
+    installBackend(backend);
+    renderWithProviders(<StrictMode>{bindingSheet(backend)}</StrictMode>);
+
+    expect(await screen.findByText(/已探测，发现 2 个模型/)).toBeInTheDocument();
+    expect(probeCalls(backend)).toHaveLength(1);
+  });
+
+  it("探测中「保存模型」禁用，但仍可勾选模型；探测完成后恢复", async () => {
+    const backend = createFakeBackend();
+    const handle = backend.fetch;
+    let releaseProbe: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if ((init?.method || "GET").toUpperCase() === "POST" && url.pathname.endsWith("/probe")) await gate;
+      return handle(input, init);
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(bindingSheet(backend));
+
+    expect(await screen.findByText("正在探测上游模型…")).toBeInTheDocument();
+    // 探测期间照常勾选：关掉一个已绑定模型，让「保存模型」本来会变成可点。
+    await user.click(await screen.findByRole("button", { name: "关闭模型 gpt-4o" }));
+    expect(screen.getByText("新增 0 · 移除 1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存模型" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重新探测" })).toBeDisabled();
+
+    releaseProbe();
+    expect(await screen.findByText(/已探测，发现 2 个模型/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存模型" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "重新探测" })).toBeEnabled();
+  });
+
+  it("探测失败显示 warn 提示，列表来自缓存且仍可勾选与保存", async () => {
+    const backend = createFakeBackend();
+    const handle = backend.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if ((init?.method || "GET").toUpperCase() === "POST" && url.pathname.endsWith("/probe")) {
+        return new Response(JSON.stringify({ error: "上游鉴权失败" }), {
+          status: 502,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return handle(input, init);
+    }));
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    renderWithProviders(bindingSheet(backend, onSaved));
+
+    expect(await screen.findByText(/自动探测失败：/)).toBeInTheDocument();
+    expect(screen.getByText(/下方列表来自上次缓存的探测结果/)).toBeInTheDocument();
+    expect(screen.queryByText("正在探测上游模型…")).not.toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "关闭模型 gpt-4o" }));
+    expect(screen.getByText("新增 0 · 移除 1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存模型" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "保存模型" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    const writes = backend.calls.filter((call) => call.method === "PUT" && call.path === "/api/providers/openai/keys/main/models");
+    expect(writes).toHaveLength(2);
+    expect(writes[1].body?.models).toEqual(["gpt-4o-mini"]);
+  });
+
+  it("点「重新探测」会再发一次探测请求", async () => {
+    const backend = createFakeBackend();
+    installBackend(backend);
+    const user = userEvent.setup();
+    renderWithProviders(bindingSheet(backend));
+
+    expect(await screen.findByText(/已探测，发现 2 个模型/)).toBeInTheDocument();
+    expect(probeCalls(backend)).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "重新探测" }));
+    await waitFor(() => expect(probeCalls(backend)).toHaveLength(2));
+    expect(await screen.findByText(/已探测，发现 2 个模型/)).toBeInTheDocument();
+  });
+});
+
+describe("Key 表格的探测列", () => {
+  it("行内不再有单 Key 探测按钮，批量探测与只读探测结果仍在", async () => {
+    window.location.hash = "#/providers?id=openai";
+    const backend = createFakeBackend();
+    installBackend(backend);
+    renderWithProviders(<ProvidersPage />);
+
+    expect(await screen.findByRole("heading", { name: "openai" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批量探测" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "探测" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "探测中" })).not.toBeInTheDocument();
+    // 只读展示保留：列头、模型数量徽标与探测时刻。
+    expect(screen.getByRole("columnheader", { name: "探测" })).toBeInTheDocument();
+    expect(screen.getAllByText("2 个模型").length).toBeGreaterThan(0);
   });
 });
 

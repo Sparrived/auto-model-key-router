@@ -3,7 +3,7 @@
 // 口径（与 legacy accounts.js 一致）：
 // - 浏览器不直接访问 CPA，所有读数走 /api/cpa-accounts 的服务端扇出；
 // - 进页只取账号读数，管理密钥只在打开「管理实例」时读取；
-// - 只读、不轮询；刷新由用户或冻结到期触发，一次刷新只发一次账号请求；
+// - 每 60 秒自动刷新一次，后台标签页暂停；手动刷新或冻结到期另外触发，一次刷新只发一次账号请求；
 // - 额度显示**剩余**比例，≤5% 用 critical，≤20% 用 warn；
 // - 单个实例读取失败只影响自己的面板，搜索/筛选对所有实例统一生效；
 // - 额度冻结是后台的临时状态，不写回配置的 enabled 开关（见 docs/design/quota-freeze.md）。
@@ -57,6 +57,9 @@ import { useConfirm } from "@/components/ui/ConfirmProvider";
 import { Meter } from "@/components/charts";
 import { QuotaFreezeConfigSheet } from "./quota-freeze-config";
 import { QuotaFreezePolicySheet } from "./quota-freeze-policy";
+
+const AUTO_REFRESH_MS = 60_000;
+const FOCUS_REFRESH_STALE_MS = 30_000;
 
 type StatusFilter = "all" | "usable" | "cooling" | "alert";
 
@@ -464,9 +467,14 @@ export default function AccountsPage() {
   const accountsQuery = useQuery({
     queryKey: queryKeys.cpaAccounts(),
     queryFn: api.cpaAccounts,
-    // 明确不轮询：每次刷新都是对 CPA 与上游的一次真实扇出。
+    // 自动刷新只替换查询数据；后台标签页暂停，切回前台时补刷一次。
+    // 每次刷新都是对 CPA 与上游的一次真实扇出：读数 30 秒内视为新鲜，来回切标签页
+    // 不会连发请求。staleTime 只拦切回前台这一路，周期刷新、手动刷新与冻结到期不受影响。
     retry: false,
-    refetchOnWindowFocus: false,
+    staleTime: FOCUS_REFRESH_STALE_MS,
+    refetchInterval: AUTO_REFRESH_MS,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings(),
@@ -475,7 +483,7 @@ export default function AccountsPage() {
     refetchOnWindowFocus: false,
   });
   const client = useQueryClient();
-  // 页面刻意不轮询：倒计时只重算本地时间；到最近一条 expires_at 才 refetch 一次。
+  // 倒计时只重算本地时间；60 秒周期刷新之外，到最近一条 expires_at 还会额外 refetch 一次。
   const now = useNow();
   const [keyword, setKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -527,7 +535,7 @@ export default function AccountsPage() {
   }, [report]);
   const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
   // 顶层 freezes 已包含全部冻结；订阅条目里的 freeze 再合并一次，兼容顶层数组暂缺的
-  // 过渡版本。expires_at 是唯一会触发自动刷新的时间，不能用 reset_at 代替。
+  // 过渡版本。expires_at 是冻结到期额外补刷的时间，不能用 reset_at 代替。
   const freezeDeadlines = useMemo(() => {
     const list = [
       ...(report?.freezes ?? []),
@@ -536,7 +544,7 @@ export default function AccountsPage() {
     return list.map((freeze) => freeze.expires_at);
   }, [report?.freezes, report?.subscriptions]);
   useDeadlineRefresh(freezeDeadlines, () => {
-    // 到点徽标必须自己消失：不依赖用户点刷新，也不改成全局轮询。
+    // 到点徽标必须自己消失：周期刷新之外，expires_at 到点再补一次 refetch。
     void accountsQuery.refetch();
   });
   const guard = report?.guard;
@@ -720,7 +728,7 @@ export default function AccountsPage() {
   const pageHead = (
     <PageHeader
       title="账号资源"
-      description={`账号资源：CPA 实例的账号，以及 OpenCode Go、Command Code 这类订阅的剩余额度。读数由服务端代问，页面本身不轮询。${guardDescription(guard)}`}
+      description={`账号资源：CPA 实例的账号，以及 OpenCode Go、Command Code 这类订阅的剩余额度。读数由服务端代问，页面每 60 秒自动刷新（标签页在后台时暂停）。${guardDescription(guard)}`}
       actions={(
         <>
           {report?.fetched_at ? <span className="hidden text-meta text-ink-3 sm:inline">读取于 {formatDateTime(report.fetched_at)}</span> : null}

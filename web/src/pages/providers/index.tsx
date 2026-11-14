@@ -396,6 +396,7 @@ export default function ProvidersPage() {
           revision={revision}
           onClose={() => setBindingTarget(null)}
           onSaved={() => { void refreshProviders(); }}
+          onProbed={refreshProviders}
         />
       ) : null}
     </div>
