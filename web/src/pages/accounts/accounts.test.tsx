@@ -174,7 +174,7 @@ describe("账号资源页", () => {
     expect(warning?.getAttribute("data-tone")).toBe("warn");
   });
 
-  it("额度卡的倒计时只出现一次，授权与项目各自成徽标", async () => {
+  it("额度卡的倒计时只出现一次，授权与项目收在诊断信息里", async () => {
     installFetch();
     renderPage();
     const codexCard = (await screen.findByText("codex-main.json")).closest("article") as HTMLElement;
@@ -182,8 +182,10 @@ describe("账号资源页", () => {
     expect(within(codexCard).getAllByText(/后重置|即将重置/)).toHaveLength(1);
     const claudeCard = screen.getByText("claude-team.json").closest("article") as HTMLElement;
     expect(within(claudeCard).getAllByText("现场查询")).toHaveLength(1);
-    expect(within(codexCard).getByText("授权 oauth")).toBeInTheDocument();
-    expect(within(codexCard).getByText("项目 aicode-consumers")).toBeInTheDocument();
+    // 授权类型与项目不再占据首屏徽标，收进默认折叠的诊断信息。
+    expect(within(codexCard).getByText("诊断信息")).toBeInTheDocument();
+    expect(within(codexCard).getByText(/授权类型：oauth/)).toBeInTheDocument();
+    expect(within(codexCard).getByText(/项目：aicode-consumers/)).toBeInTheDocument();
   });
 
   it("搜索跨实例生效，且单个实例失败不影响另一个实例", async () => {
@@ -221,7 +223,7 @@ describe("账号资源页", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(reads()).toBe(1);
       // 页头如实写清节奏（不用 find* 等待，避免假时钟被 waitFor 自动推进）。
-      expect(screen.getByText(/页面每 60 秒自动刷新/)).toBeInTheDocument();
+      expect(screen.getByText(/每 60 秒自动刷新/)).toBeInTheDocument();
 
       await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
       expect(reads()).toBe(1);
@@ -428,9 +430,8 @@ describe("账号资源页", () => {
       const invalidate = vi.spyOn(client, "invalidateQueries");
       renderPage(client);
 
-      // 页头说明按后端给的巡检间隔与底限写出来（不从配置猜）。
-      expect(await screen.findByText(/后台每 60 秒自动检测/)).toBeInTheDocument();
-      expect(screen.getByText(/提前冻结底限：5h 10%、7d 未启用/)).toBeInTheDocument();
+      // 巡检节奏与底限不再铺在页头：首屏只留核心读数，细节按需查看。
+      expect(await screen.findByText("冻结 Key")).toBeInTheDocument();
 
       const panel = (await screen.findByRole("heading", { name: "OpenCode Go" })).closest("section") as HTMLElement;
       expect(within(panel).getByText("额度冻结")).toBeInTheDocument();
@@ -576,11 +577,11 @@ describe("账号资源页", () => {
       expect(await screen.findByText(
         "实例内全部账号额度均已用尽，已冻结指向该实例的 2 把 Key",
       )).toBeInTheDocument();
-      expect(screen.getByText("关联 2 个供应商")).toBeInTheDocument();
+      expect(screen.getByText(/关联 2 个供应商/)).toBeInTheDocument();
       // 账号卡片标出「额度用尽」——这是额度状态，不改配置里的停用/冷却。
       expect(screen.getAllByText("额度用尽")).toHaveLength(2);
       // 冻结计数进指标条（label 唯一：本场景没有订阅冻结徽标）。
-      const metric = screen.getByText("额度冻结").parentElement as HTMLElement;
+      const metric = screen.getByText("冻结 Key").parentElement as HTMLElement;
       expect(within(metric).getByText("2")).toBeInTheDocument();
 
       const banner = screen.getByText(
@@ -612,10 +613,10 @@ describe("账号资源页", () => {
       const panel = (await screen.findByRole("heading", { name: "OpenCode Go" })).closest("section") as HTMLElement;
       expect(within(panel).getByText("额度冻结")).toBeInTheDocument();
       // 指标条里是同一份计数：不能出现「卡片说冻结、指标说 0」。
-      // 「额度告警」既是筛选项标签又是指标标题，取不是按钮的那个。
-      const alertLabel = screen.getAllByText("额度告警").find((element) => element.tagName === "DIV") as HTMLElement;
+      // 首屏指标只剩三项，直接按标题定位到指标条。
+      const alertLabel = screen.getByText("额度告警");
       const strip = alertLabel.parentElement?.parentElement as HTMLElement;
-      const freezeLabel = within(strip).getByText("额度冻结");
+      const freezeLabel = within(strip).getByText("冻结 Key");
       expect(within(freezeLabel.parentElement as HTMLElement).getByText("1")).toBeInTheDocument();
     });
   });

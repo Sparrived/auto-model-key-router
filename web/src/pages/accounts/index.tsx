@@ -24,7 +24,7 @@ import {
   useDeadlineRefresh,
   useNow,
 } from "@/lib/quota-freeze";
-import { cn } from "@/lib/cn";
+import { ChevronDown, MoreHorizontal } from "lucide-react";
 import type {
   CPAAccount,
   CPAAccountInstance,
@@ -36,32 +36,32 @@ import type {
   CPAQuotaWindow,
   QuotaFreeze,
   QuotaFreezePolicy,
-  QuotaGuardStatus,
 } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
-import { Button } from "@/components/ui/Button";
+import { Button, IconButton } from "@/components/ui/Button";
 import { CopyChip } from "@/components/ui/CopyChip";
+import { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/DropdownMenu";
 import { Empty } from "@/components/ui/Empty";
 import { Field } from "@/components/ui/Field";
 import { Input } from "@/components/ui/Input";
 import { MetricCell, MetricStrip } from "@/components/ui/MetricStrip";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel } from "@/components/ui/Panel";
-import { ProgressBar } from "@/components/ui/ProgressBar";
 import { Segmented } from "@/components/ui/Segmented";
 import { Sheet } from "@/components/ui/Sheet";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { Tooltip } from "@/components/ui/Tooltip";
 import { useConfirm } from "@/components/ui/ConfirmProvider";
 import { Meter } from "@/components/charts";
 import { QuotaFreezeConfigSheet } from "./quota-freeze-config";
 import { QuotaFreezePolicySheet } from "./quota-freeze-policy";
+import { CPARuntimeConfigSheet } from "./cpa-runtime-config";
+import { CPAAccountConfigSheet } from "./cpa-account-config";
 
 const AUTO_REFRESH_MS = 60_000;
 const FOCUS_REFRESH_STALE_MS = 30_000;
 
-type StatusFilter = "all" | "usable" | "cooling" | "alert";
+type StatusFilter = "all" | "usable" | "attention";
 
 interface InstanceRow {
   id: string;
@@ -74,6 +74,11 @@ interface PolicyTarget {
   scope: QuotaFreezePolicy["scope"];
   target: string;
   title: string;
+}
+
+interface AccountConfigTarget {
+  instance: CPAAccountInstance;
+  account: CPAAccount;
 }
 
 function findAccountPolicy(
@@ -94,8 +99,7 @@ function PolicyBadge({ policy, available }: { policy?: QuotaFreezePolicy; availa
 const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
   { value: "all", label: "全部" },
   { value: "usable", label: "可用" },
-  { value: "cooling", label: "停用/冷却" },
-  { value: "alert", label: "额度告警" },
+  { value: "attention", label: "需处理" },
 ];
 
 function clampPercent(value: unknown): number {
@@ -107,6 +111,14 @@ function clampPercent(value: unknown): number {
 function lowestRemaining(account: { windows?: CPAQuotaWindow[] }): number | null {
   const values = (account.windows ?? []).map((window) => clampPercent(window.remaining));
   return values.length ? Math.min(...values) : null;
+}
+
+// 「需处理」同时覆盖停用、冷却与低额度三类事实；计数与筛选共用同一份判定，
+// 避免两处条件漂移后出现「标签显示 3 个、筛出来 2 个」。
+function needsAttention(account: CPAAccount): boolean {
+  const lowest = lowestRemaining(account);
+  return Boolean(account.disabled || account.unavailable || account.quota_exhausted || account.quota_below_floor)
+    || (lowest !== null && lowest <= 0.2);
 }
 
 function quotaTone(remaining: number): "critical" | "warn" | "good" {
@@ -156,29 +168,6 @@ function quotaHint(account: CPAAccount): string {
   }
   if (account.quota_error.includes("501")) return "对端没有额度提供者（未装额度插件，也没配 quota_probe）";
   return account.quota_error;
-}
-
-// 页头说明里的检测节奏：配置关掉整套机制（interval_seconds=0）时要说「已关闭」，
-// 不能写成「每 0 秒」；字段缺省（旧后端）时退回「定时」而不是报错。
-//
-// 关闭档的文案必须与后端一致：interval=0 时后台巡检、上游响应头信号、页面即时评估
-// **都不产生新冻结**（internal/api/quota_guard.go），已有冻结仍在选路里生效到到期或
-// 手工解冻（docs/USAGE.md 4.2）。所以关闭档不能复用「进页会立即评估一次」这句。
-function thresholdDescription(value: number | undefined): string {
-  const ratio = Number(value);
-  if (!Number.isFinite(ratio) || ratio <= 0) return "未启用";
-  return `${Math.round(ratio * 1000) / 10}%`;
-}
-
-function guardDescription(guard?: QuotaGuardStatus): string {
-  const thresholds = `提前冻结底限：5h ${thresholdDescription(guard?.threshold_5h)}、7d ${thresholdDescription(guard?.threshold_7d)}。`;
-  if (guard?.enabled === false) {
-    return `后台自动检测已在配置里关闭；进页也不会产生新冻结，已有冻结仍展示、仍参与选路，直到到期或手工解冻。${thresholds}`;
-  }
-  const tail = "进页会立即评估一次；命中硬性额度或剩余比例不高于 5h/7d 底限时对应 Key 会被自动冻结（不写回配置的启用开关），冻结按内置计时器自动解冻。";
-  const seconds = Number(guard?.interval_seconds);
-  const every = Number.isFinite(seconds) && seconds > 0 ? `每 ${seconds} 秒` : "定时";
-  return `后台${every}自动检测；${tail}${thresholds}`;
 }
 
 function normalizeInstances(value: unknown): InstanceRow[] {
@@ -323,26 +312,25 @@ function QuotaSection({ account, now }: { account: CPAAccount; now: number }) {
   );
 }
 
+// 最近调用分布来自 CPA 随 auth-files 一起回的十分钟桶，不额外发请求；默认收在诊断信息里。
 function RecentBars({ buckets }: { buckets: CPAAccount["recent_requests"] }) {
   const list = buckets ?? [];
   if (!list.length) return null;
-  // 不筛掉空桶：十个时间片必须等距，否则一次静默的间隔会让相邻柱看起来“更密”。
+  // 不筛掉空桶：时间片必须等距，否则一次静默的间隔会让相邻柱看起来更密。
   const peak = Math.max(...list.map((bucket) => (Number(bucket.success) || 0) + (Number(bucket.failed) || 0)), 1);
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between text-[11px] text-ink-3">
-        <span>最近调用</span>
-        <span>{list.length} 个 10 分钟桶</span>
-      </div>
+      <div className="font-sans">最近调用（{list.length} 个 10 分钟桶）</div>
       <div className="flex h-5 items-end gap-1" aria-label="最近调用分布">
         {list.map((bucket, index) => {
           const success = Number(bucket.success) || 0;
           const failed = Number(bucket.failed) || 0;
           const height = Math.max(3, Math.round(((success + failed) / peak) * 18));
+          const tone = failed ? "bg-critical" : success ? "bg-accent" : "bg-rule-strong";
           return (
             <div
               key={`${bucket.time ?? index}-${index}`}
-              className={cn("w-1.5 rounded-[2px]", failed ? "bg-critical" : success ? "bg-accent" : "bg-rule-strong")}
+              className={`w-1.5 rounded-[2px] ${tone}`}
               style={{ height }}
               title={`${bucket.time ?? `第 ${index + 1} 个桶`}：成功 ${success} / 失败 ${failed}`}
             />
@@ -361,9 +349,9 @@ interface SubscriptionCardProps {
   releasingFreeze: ((freeze: QuotaFreeze) => void) | null;
   /** 正在解冻的 Key（freezeLookupKey 结果），用于只给被点的那把按钮上 loading。 */
   releasingKey: string | null;
+  onConfigurePolicy: (() => void) | null;
   policy?: QuotaFreezePolicy;
   policyAvailable: boolean;
-  onConfigurePolicy: (() => void) | null;
 }
 
 function SubscriptionCard({
@@ -371,9 +359,9 @@ function SubscriptionCard({
   now,
   releasingFreeze,
   releasingKey,
+  onConfigurePolicy,
   policy,
   policyAvailable,
-  onConfigurePolicy,
 }: SubscriptionCardProps) {
   const windows = entry.windows ?? [];
   const freeze = entry.freeze;
@@ -384,13 +372,11 @@ function SubscriptionCard({
   return (
     <Panel
       title={entry.vendor || entry.kind || entry.id || "订阅"}
-      description={[entry.base_url, entry.account ? `账号 ${entry.account}` : null, entry.plan || entry.tier_id ? `档位 ${[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}` : null].filter(Boolean).join(" · ")}
+      description={[entry.key_name ? `${entry.provider_id} · ${entry.key_name}` : entry.provider_id, entry.account ? `账号 ${entry.account}` : null, entry.plan || entry.tier_id ? `档位 ${[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}` : null].filter(Boolean).join(" · ")}
       actions={(
         <div className="flex flex-wrap items-center gap-2">
           {freeze ? <Badge tone={threshold ? "warn" : "critical"} dot>{freezeTriggerText(freeze)}</Badge> : null}
           <PolicyBadge policy={policy} available={policyAvailable} />
-          <Badge tone="neutral">{entry.key_name ? `${entry.provider_id} · ${entry.key_name}` : entry.provider_id || "订阅"}</Badge>
-          {entry.plan || entry.tier_id ? <Badge tone="neutral">{[entry.plan, entry.tier_id].filter(Boolean).join(" / ")}</Badge> : null}
           <Button
             size="sm"
             variant="secondary"
@@ -399,7 +385,6 @@ function SubscriptionCard({
           >
             冻结规则
           </Button>
-          {entry.ok && entry.observed_at ? <span className="text-[11px] text-ink-3">查询于 {formatDateTime(entry.observed_at)}</span> : null}
         </div>
       )}
     >
@@ -497,6 +482,9 @@ export default function AccountsPage() {
   const [managing, setManaging] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [policyTarget, setPolicyTarget] = useState<PolicyTarget | null>(null);
+  const [runtimeConfigTarget, setRuntimeConfigTarget] = useState<CPAAccountInstance | null>(null);
+  const [accountConfigTarget, setAccountConfigTarget] = useState<AccountConfigTarget | null>(null);
+  const [accountAction, setAccountAction] = useState("");
   const [manageLoading, setManageLoading] = useState(false);
   const [manageSaving, setManageSaving] = useState(false);
   const [manageError, setManageError] = useState("");
@@ -551,6 +539,7 @@ export default function AccountsPage() {
   const accounts = useMemo(() => instances.flatMap((instance) => instance.accounts ?? []), [instances]);
   const readableInstances = instances.filter((instance) => instance.ok !== false);
   const usableAccounts = accounts.filter((account) => !account.disabled && !account.unavailable);
+  const attentionAccountCount = accounts.filter(needsAttention).length;
   const lowAccounts = accounts.filter((account) => {
     const lowest = lowestRemaining(account);
     return lowest !== null && lowest <= 0.2;
@@ -572,11 +561,7 @@ export default function AccountsPage() {
       originalAccountCount: (instance.accounts ?? []).length,
       accounts: (instance.accounts ?? []).filter((account) => {
         if (statusFilter === "usable" && (account.disabled || account.unavailable)) return false;
-        if (statusFilter === "cooling" && !account.disabled && !account.unavailable) return false;
-        if (statusFilter === "alert") {
-          const lowest = lowestRemaining(account);
-          if (lowest === null || lowest > 0.2) return false;
-        }
+        if (statusFilter === "attention" && !needsAttention(account)) return false;
         if (!query) return true;
         return [account.label, account.name, account.email, account.provider, account.project_id, account.plan, account.tier_id]
           .filter(Boolean)
@@ -701,6 +686,55 @@ export default function AccountsPage() {
     }
   }
 
+  async function changeAccountStatus(instance: CPAAccountInstance, account: CPAAccount) {
+    const authIndex = String(account.auth_index ?? "");
+    if (!authIndex || !account.name || accountAction) return;
+    const disabled = !account.disabled;
+    if (disabled) {
+      const accepted = await confirm({
+        title: "停用 CPA 账号",
+        message: "将停用 " + (account.label || account.name) + "。该账号会立即退出 CPA 自己的候选池；这不是 AMKR 的额度冻结，也不会修改 AMKR 的供应商 Key 配置。",
+        confirmLabel: "停用账号",
+        danger: true,
+      });
+      if (!accepted) return;
+    }
+    const actionId = instance.id + ":" + authIndex + ":status";
+    setAccountAction(actionId);
+    try {
+      await api.setCPAAccountStatus(instance.id, authIndex, account.name, disabled);
+      toast.success(disabled ? "CPA 账号已停用。" : "CPA 账号已启用。");
+      await accountsQuery.refetch();
+    } catch (error) {
+      toast.error("修改 CPA 账号状态失败：" + errorText(error));
+    } finally {
+      setAccountAction("");
+    }
+  }
+
+  async function resetAccountRouting(instance: CPAAccountInstance, account: CPAAccount) {
+    const authIndex = String(account.auth_index ?? "");
+    if (!authIndex || accountAction) return;
+    const accepted = await confirm({
+      title: "清除 CPA 冷却与路由状态",
+      message: "将仅清除 " + (account.label || account.name || authIndex) + " 在 CPA 中的 quota/cooldown 路由状态。这不会解除 AMKR 额度冻结、不修改 AMKR 供应商 Key，也不会恢复上游真实额度；若上游仍限流，CPA 可能再次进入冷却。",
+      confirmLabel: "清除冷却状态",
+      danger: true,
+    });
+    if (!accepted) return;
+    const actionId = instance.id + ":" + authIndex + ":reset";
+    setAccountAction(actionId);
+    try {
+      await api.resetCPAAccountRouting(instance.id, authIndex);
+      toast.success("CPA 冷却与路由状态已清除。");
+      await accountsQuery.refetch();
+    } catch (error) {
+      toast.error("清除 CPA 冷却状态失败：" + errorText(error));
+    } finally {
+      setAccountAction("");
+    }
+  }
+
   // 手工解冻：DELETE 只解除本次冻结并附抑制窗口，不写配置；成功后账号资源与
   // 冻结列表两个查询一起失效（供应商页共用同一份冻结列表缓存）。
   async function releaseFreeze(freeze: Pick<QuotaFreeze, "provider_id" | "key_name">) {
@@ -728,10 +762,9 @@ export default function AccountsPage() {
   const pageHead = (
     <PageHeader
       title="账号资源"
-      description={`账号资源：CPA 实例的账号，以及 OpenCode Go、Command Code 这类订阅的剩余额度。读数由服务端代问，页面每 60 秒自动刷新（标签页在后台时暂停）。${guardDescription(guard)}`}
+      description="集中查看账号状态与剩余额度，每 60 秒自动刷新；配置与冻结规则按需处理。"
       actions={(
         <>
-          {report?.fetched_at ? <span className="hidden text-meta text-ink-3 sm:inline">读取于 {formatDateTime(report.fetched_at)}</span> : null}
           {accountsQuery.isFetching && report ? <span className="text-meta text-ink-3">正在刷新…</span> : null}
           <Button size="sm" variant="secondary" loading={accountsQuery.isFetching} onClick={() => void refreshAccounts()}>
             刷新
@@ -761,29 +794,27 @@ export default function AccountsPage() {
       ) : null}
       {resetError ? <Banner tone="critical" title="读取重置卡失败">{resetError}</Banner> : null}
 
-      <MetricStrip className="cols-5">
+      <MetricStrip>
         <MetricCell
           className="stat"
-          label="实例"
-          value={formatCount(instances.length)}
-          hint={readableInstances.length < instances.length ? `${instances.length - readableInstances.length} 个读取失败` : "全部可读"}
+          label="可用账号"
+          value={`${usableAccounts.length} / ${accounts.length}`}
+          hint={`${instances.length} 个实例 · ${subscriptions.length} 条订阅${readableInstances.length < instances.length ? ` · ${instances.length - readableInstances.length} 个实例读取失败` : ""}`}
           tone={readableInstances.length < instances.length ? "critical" : "neutral"}
         />
-        <MetricCell className="stat" label="订阅" value={formatCount(subscriptions.length)} hint={subscriptions.length ? `${subscriptions.filter((entry) => entry.ok).length} 条可读` : "未配置订阅端点"} />
-        <MetricCell className="stat" label="账号" value={formatCount(accounts.length)} hint={`${usableAccounts.length} 可用 · ${accounts.length - usableAccounts.length} 停用/冷却`} />
         <MetricCell
           className="stat"
           label="额度告警"
           value={formatCount(alertCount)}
-          hint={alertCount ? `其中 ${drainedCount} 个已用尽` : "都还有 20% 以上"}
+          hint={alertCount ? `其中 ${drainedCount} 个已用尽` : "没有低于 20% 的额度窗口"}
           tone={drainedCount ? "critical" : alertCount ? "warn" : "neutral"}
         />
         <MetricCell
           className="stat"
-          label="额度冻结"
+          label="冻结 Key"
           value={formatCount(freezes.length)}
           hint={freezes.length
-            ? "对应 Key 已从选路里摘出"
+            ? "对应 Key 已退出 AMKR 选路"
             : guard?.enabled === false ? "后台自动检测已关闭" : "当前没有 Key 被冻结"}
           tone={freezes.length ? "critical" : "neutral"}
         />
@@ -806,7 +837,9 @@ export default function AccountsPage() {
           onValueChange={(value) => setStatusFilter(value as StatusFilter)}
           options={STATUS_FILTERS.map((option) => ({
             ...option,
-            label: option.value === "all" ? `${option.label} (${accounts.length})` : option.label,
+            label: option.value === "all"
+              ? `${option.label} (${accounts.length})`
+              : option.value === "usable" ? `${option.label} (${usableAccounts.length})` : `${option.label} (${attentionAccountCount})`,
           }))}
         />
         <span className="ml-auto text-meta text-ink-3">显示 {shownAccounts} / {accounts.length} 个账号</span>
@@ -834,11 +867,11 @@ export default function AccountsPage() {
                 now={now}
                 releasingFreeze={releaseFreeze}
                 releasingKey={releasing}
-                policy={policy}
-                policyAvailable={policyAvailable}
                 onConfigurePolicy={target
                   ? () => openPolicy("subscription", target, `${entry.vendor || entry.id || target} · 冻结规则`)
                   : null}
+                policy={policy}
+                policyAvailable={policyAvailable}
               />
             );
           })}
@@ -863,33 +896,19 @@ export default function AccountsPage() {
               <Panel
                 key={instance.id}
                 title={instance.label || instance.id}
-                description={instance.base_url || "未填写地址"}
+                description={`${usable} / ${instance.accounts?.length ?? 0} 个账号可用${low ? ` · ${low} 个额度告警` : " · 额度正常"}`}
                 actions={(
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge tone={instance.ok === false ? "critical" : "neutral"}>
-                      {instance.ok === false ? "读取失败" : `${instance.originalAccountCount ?? instance.accounts?.length ?? 0} 个账号`}
-                    </Badge>
-                    <PolicyBadge policy={policy} available={policyAvailable} />
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => openPolicy("cpa_instance", instance.id, `${instance.label || instance.id} · 冻结规则`)}
+                  <div className="flex items-center gap-2">
+                    {instance.ok === false ? <Badge tone="critical">读取失败</Badge> : null}
+                    <DropdownMenu
+                      align="end"
+                      trigger={<Button size="sm" variant="secondary" trailingIcon={<ChevronDown aria-hidden className="size-3.5" />}>实例操作</Button>}
                     >
-                      冻结规则
-                    </Button>
-                    {linkedProviders.length ? (
-                      <Tooltip
-                        content={(
-                          <div className="space-y-0.5">
-                            <div>地址指向这个实例的供应商：</div>
-                            {linkedProviders.map((id) => <div key={id} className="font-mono">{id}</div>)}
-                          </div>
-                        )}
-                      >
-                        <span tabIndex={0}><Badge tone="neutral">关联 {linkedProviders.length} 个供应商</Badge></span>
-                      </Tooltip>
-                    ) : null}
-                    {instance.observed_at ? <span className="text-[11px] text-ink-3">CPA 观测于 {formatDateTime(instance.observed_at)}</span> : null}
+                      <DropdownMenuItem onSelect={() => setRuntimeConfigTarget(instance)}>实例配置</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => openPolicy("cpa_instance", instance.id, `${instance.label || instance.id} · 冻结规则`)}>
+                        冻结规则
+                      </DropdownMenuItem>
+                    </DropdownMenu>
                   </div>
                 )}
                 padding={false}
@@ -934,16 +953,17 @@ export default function AccountsPage() {
                         </Banner>
                       </div>
                     ) : null}
-                    <div className="grid gap-3 border-b border-rule bg-sunken/40 px-4 py-3 text-meta sm:grid-cols-2 xl:grid-cols-5">
-                      <div className="min-w-0">
-                        <div className="text-ink-3">实例端点</div>
-                        <div className="mt-1"><CopyChip text={instance.base_url || "-"} label="点击复制 CPA 实例地址" /></div>
+                    <details className="border-b border-rule bg-sunken/30 px-4 py-2.5 text-meta">
+                      <summary className="w-fit cursor-pointer text-ink-3">实例详情</summary>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        <div className="min-w-0"><div className="text-ink-3">实例端点</div><div className="mt-1"><CopyChip text={instance.base_url || "-"} label="点击复制 CPA 实例地址" /></div></div>
+                        <div><div className="text-ink-3">冻结策略</div><div className="mt-1"><PolicyBadge policy={policy} available={policyAvailable} /></div></div>
+                        <div><div className="text-ink-3">关联供应商</div><div className="mt-1 text-ink">{linkedProviders.length ? `关联 ${linkedProviders.length} 个供应商（${linkedProviders.join("、")}）` : "未关联"}</div></div>
+                        <div><div className="text-ink-3">调度统计</div><div className="mt-1 text-ink">{formatCount(totalCalls)} 次 · 成功率 {formatPercent(totalSuccess, totalCalls)}</div></div>
+                        {offset !== undefined ? <div><div className="text-ink-3">时钟同步</div><div className="mt-1 text-ink">{offset}ms（{Math.abs(Number(offset)) < 2000 ? "同步良好" : "时差较大"}）</div></div> : null}
+                        {instance.observed_at ? <div><div className="text-ink-3">CPA 观测时间</div><div className="mt-1 text-ink">{formatDateTime(instance.observed_at)}</div></div> : null}
                       </div>
-                      <div><div className="text-ink-3">账号可用率</div><div className="mt-1 text-ink">{usable} / {instance.accounts?.length ?? 0} 可用</div></div>
-                      <div><div className="text-ink-3">调度总量</div><div className="mt-1 text-ink">{formatCount(totalCalls)} 次（{formatPercent(totalSuccess, totalCalls)} 成功）</div></div>
-                      <div><div className="text-ink-3">额度健康</div><div className="mt-1 text-ink">{low ? `${low} 个账号告警` : "全部充足"}</div></div>
-                      {offset !== undefined ? <div><div className="text-ink-3">时钟同步</div><div className="mt-1 text-ink">{offset}ms（{Math.abs(Number(offset)) < 2000 ? "同步良好" : "时差较大"}）</div></div> : null}
-                    </div>
+                    </details>
                     {(instance.originalAccountCount ?? instance.accounts?.length ?? 0) === 0 ? (
                       <div className="p-4"><Empty title="这个实例上还没有账号。" /></div>
                     ) : (instance.accounts ?? []).length === 0 ? (
@@ -958,26 +978,42 @@ export default function AccountsPage() {
                           const resetInfo = resetInfoFor(resetData, instance, account);
                           const supported = ["codex", "claude"].includes(String(account.provider || "").toLowerCase());
                           return (
-                            <article key={`${instance.id}-${authIndex || index}`} className="account-card flex min-w-0 flex-col gap-4 rounded-panel border border-rule bg-panel p-3">
+                            <article key={`${instance.id}-${authIndex || index}`} className="account-card flex min-w-0 flex-col gap-3 rounded-panel border border-rule bg-panel p-3">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="min-w-0">
                                   <h3 className="truncate text-body font-semibold text-ink">{title}</h3>
                                   <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                    {authIndex ? <span className="rounded-chip bg-sunken px-1.5 py-0.5 font-mono text-[11px] text-ink-3">#{authIndex}</span> : null}
                                     <Badge tone="neutral">{account.provider || "未知"}</Badge>
                                     <span title={account.status_message || undefined}><Badge tone={status.tone}>{status.text}</Badge></span>
-                                    {account.quota_exhausted ? (
-                                      <span title="该账号至少有一个硬性耗尽的额度窗口；不是配置里的停用">
-                                        <Badge tone="critical">额度用尽</Badge>
-                                      </span>
-                                    ) : null}
-                                    {account.quota_below_floor ? (
-                                      <span title="该账号至少有一个窗口的剩余额度低于配置的 5h/7d 底限；不是配置里的停用">
-                                        <Badge tone="warn">低于底限</Badge>
-                                      </span>
-                                    ) : null}
+                                    {account.quota_exhausted ? <Badge tone="critical">额度用尽</Badge> : null}
+                                    {account.quota_below_floor ? <Badge tone="warn">低于底限</Badge> : null}
                                   </div>
                                 </div>
+                                <DropdownMenu
+                                  align="end"
+                                  trigger={(
+                                    <IconButton
+                                      aria-label={`${title} 的账号操作`}
+                                      size="sm"
+                                      loading={accountAction.startsWith(`${instance.id}:${authIndex}:`)}
+                                    >
+                                      <MoreHorizontal aria-hidden className="size-4" />
+                                    </IconButton>
+                                  )}
+                                >
+                                  <DropdownMenuItem onSelect={() => setAccountConfigTarget({ instance, account })}>账号配置</DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    danger={!account.disabled}
+                                    disabled={Boolean(accountAction) || !authIndex || !account.name}
+                                    onSelect={() => void changeAccountStatus(instance, account)}
+                                  >
+                                    {account.disabled ? "启用账号" : "停用账号"}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem disabled={Boolean(accountAction) || !authIndex} onSelect={() => void resetAccountRouting(instance, account)}>
+                                    清除冷却
+                                  </DropdownMenuItem>
+                                </DropdownMenu>
                               </div>
 
                               {/* 邮箱/名称/档位一行；授权与项目另起一行——project_id 可能是长串，
@@ -985,49 +1021,31 @@ export default function AccountsPage() {
                               <div className="flex flex-wrap items-center gap-1.5">
                                 {account.email && account.email !== title ? <span className="text-meta text-ink-3">{account.email}</span> : null}
                                 {account.name && account.name !== title ? <span className="text-meta text-ink-3">{account.name}</span> : null}
+                                {account.note ? <span className="w-full text-meta text-ink-3">{String(account.note)}</span> : null}
                                 {account.plan ? <Badge tone="neutral">{account.plan}</Badge> : null}
                                 {account.tier_id ? <Badge tone="neutral">{account.tier_id}</Badge> : null}
-                                {account.account_type || account.project_id ? (
-                                  <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5">
-                                    {account.account_type ? <Badge tone="neutral">授权 {account.account_type}</Badge> : null}
-                                    {account.project_id ? (
-                                      <Badge tone="neutral" className="min-w-0 max-w-full">
-                                        <span className="truncate" title={`项目 ${account.project_id}`}>项目 {account.project_id}</span>
-                                      </Badge>
-                                    ) : null}
-                                  </div>
-                                ) : null}
                               </div>
 
                               <QuotaSection account={account} now={now} />
 
-                              <div className="space-y-1">
-                                <div className="flex items-center justify-between text-meta">
-                                  <span className="text-ink-3">调用统计（{formatCount(total)} 次 · 成功率 {formatPercent(account.success, total)}）</span>
-                                  <span className="text-ink-2">
-                                    <span className="text-good">✓ {formatCount(account.success)} 成功</span>
-                                    <span className="mx-1 text-ink-3">/</span>
-                                    <span className={Number(account.failed) > 0 ? "text-critical-ink" : "text-ink-3"}>✗ {formatCount(account.failed)} 失败</span>
-                                  </span>
+                              <details className="text-meta text-ink-3">
+                                <summary className="w-fit cursor-pointer">诊断信息</summary>
+                                <div className="mt-2 space-y-1.5 rounded-control bg-sunken/50 p-2.5">
+                                  {authIndex ? <div>凭据标识：<span className="font-mono">{authIndex}</span></div> : null}
+                                  {account.account_type ? <div>授权类型：{account.account_type}</div> : null}
+                                  {account.project_id ? <div className="break-all">项目：{account.project_id}</div> : null}
+                                  <div>调用 {formatCount(total)} 次 · 成功率 {formatPercent(account.success, total)} · 成功 {formatCount(account.success)} / 失败 {formatCount(account.failed)}</div>
+                                  <RecentBars buckets={account.recent_requests} />
+                                  {account.signals && Object.keys(account.signals).length ? (
+                                    <div className="space-y-0.5 font-mono text-[11px]">
+                                      <div className="font-sans">原始信号（{Object.keys(account.signals).length} 项）</div>
+                                      {Object.entries(account.signals).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => (
+                                        <div key={name}>{name}: {String(value)}</div>
+                                      ))}
+                                    </div>
+                                  ) : null}
                                 </div>
-                                <ProgressBar
-                                  value={total ? (Number(account.success) || 0) / total * 100 : 0}
-                                  tone={(Number(account.failed) || 0) > 0 ? "warn" : "good"}
-                                  aria-label={`${title} 调用成功率`}
-                                />
-                                <RecentBars buckets={account.recent_requests} />
-                              </div>
-
-                              {account.signals && Object.keys(account.signals).length ? (
-                                <details className="text-meta text-ink-3">
-                                  <summary className="cursor-pointer">原始信号 · {Object.keys(account.signals).length} 项</summary>
-                                  <div className="mt-1 space-y-0.5 font-mono text-[11px]">
-                                    {Object.entries(account.signals).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => (
-                                      <div key={name}>{name}: {String(value)}</div>
-                                    ))}
-                                  </div>
-                                </details>
-                              ) : null}
+                              </details>
 
                               {supported && !resetHidden ? (
                                 <div className="rounded-control border border-rule bg-sunken/40 p-2.5">
@@ -1115,6 +1133,29 @@ export default function AccountsPage() {
           </div>
         )}
       </Sheet>
+
+      {runtimeConfigTarget ? (
+        <CPARuntimeConfigSheet
+          key={runtimeConfigTarget.id}
+          instance={runtimeConfigTarget}
+          open
+          onOpenChange={(open) => {
+            if (!open) setRuntimeConfigTarget(null);
+          }}
+        />
+      ) : null}
+
+      {accountConfigTarget ? (
+        <CPAAccountConfigSheet
+          key={accountConfigTarget.instance.id + ":" + String(accountConfigTarget.account.auth_index ?? "")}
+          instance={accountConfigTarget.instance}
+          account={accountConfigTarget.account}
+          open
+          onOpenChange={(open) => {
+            if (!open) setAccountConfigTarget(null);
+          }}
+        />
+      ) : null}
 
       {configOpen ? (
         <QuotaFreezeConfigSheet

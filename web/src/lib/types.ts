@@ -555,6 +555,30 @@ export interface CPAInstancesResponse {
   config_revision?: string;
 }
 
+export interface CPARuntimeConfigResponse {
+  instance: string;
+  /** CPA 配置的强 ETag；保存时必须原样回传，不能与 AMKR config_revision 混用。 */
+  etag: string;
+  debug?: boolean;
+  request_retry?: number;
+  strategy?: string;
+  client_api_keys?: string[];
+}
+
+export interface CPARuntimeConfigPatch {
+  etag: string;
+  debug?: boolean;
+  request_retry?: number;
+  strategy?: string;
+  client_api_keys?: string[];
+}
+
+export interface CPAAccountActionResponse {
+  instance: string;
+  auth_index: string;
+  action: "status" | "fields" | "routing-reset";
+}
+
 export interface CPAQuotaWindow {
   key?: string;
   label?: string;
@@ -666,6 +690,7 @@ export interface CPAAccount {
   auth_index?: string | number;
   name?: string;
   label?: string;
+  note?: string;
   email?: string;
   provider?: string;
   account_type?: string;

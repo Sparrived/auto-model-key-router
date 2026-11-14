@@ -20,6 +20,9 @@ import type {
   ConfigRevisionResponse,
   CPAAccountsResponse,
   CPAInstancesResponse,
+  CPAAccountActionResponse,
+  CPARuntimeConfigPatch,
+  CPARuntimeConfigResponse,
   CPAResetCreditUseResponse,
   CPAResetCreditsResponse,
   FilteredMetricsResponse,
@@ -652,6 +655,27 @@ export const api = {
       body: { config_revision: revision, instances },
     }),
   cpaAccounts: (): Promise<CPAAccountsResponse> => request("/api/cpa-accounts"),
+  cpaRuntimeConfig: (instanceId: string): Promise<CPARuntimeConfigResponse> =>
+    request("/api/cpa-instances/" + encodeURIComponent(instanceId) + "/runtime-config"),
+  patchCPARuntimeConfig: (instanceId: string, patch: CPARuntimeConfigPatch): Promise<CPARuntimeConfigResponse> =>
+    request("/api/cpa-instances/" + encodeURIComponent(instanceId) + "/runtime-config", { method: "PATCH", body: patch }),
+  updateCPAAccountFields: (
+    instanceId: string,
+    authIndex: string,
+    name: string,
+    fields: { label?: string; note?: string },
+  ): Promise<CPAAccountActionResponse> =>
+    request("/api/cpa-instances/" + encodeURIComponent(instanceId) + "/accounts/fields", {
+      method: "PATCH", body: { auth_index: authIndex, name, ...fields },
+    }),
+  setCPAAccountStatus: (instanceId: string, authIndex: string, name: string, disabled: boolean): Promise<CPAAccountActionResponse> =>
+    request("/api/cpa-instances/" + encodeURIComponent(instanceId) + "/accounts/status", {
+      method: "PATCH", body: { auth_index: authIndex, name, disabled },
+    }),
+  resetCPAAccountRouting: (instanceId: string, authIndex: string): Promise<CPAAccountActionResponse> =>
+    request("/api/cpa-instances/" + encodeURIComponent(instanceId) + "/accounts/routing-reset", {
+      method: "POST", body: { auth_index: authIndex },
+    }),
 
   // 额度冻结：窗口硬性耗尽后自动摘出选路的 Key 列表，以及手工解冻。
   //
