@@ -73,6 +73,10 @@ func (h *Handler) handleSingleTarget(context *RequestContext) attempt {
 		key := *selected // 每轮独立副本，避免闭包捕获到下一轮的值
 		result, retryError := h.runAttempt(context, key, attemptIndex, excluded)
 		if retryError != nil {
+			if !context.upstreamCalls.hasRemaining() && attemptIndex+1 < context.Attempts {
+				context.upstreamCalls.take()
+				return retryError
+			}
 			lastError = retryError
 			continue
 		}
@@ -106,8 +110,9 @@ func (h *Handler) runAttempt(
 		defer context.pool().ReleaseKey(context.ModelID, key.Name)
 	}
 	if outcome.retryErr != nil {
-		if downstreamCanceled(context) || (!outcome.retrySameKey && !rotatesKeys(context)) {
-			// 下游已结束，或首字节超时且不会换 Key：直接返回，不再开下一轮。
+		if downstreamCanceled(context) || (context.upstreamCalls != nil && context.upstreamCalls.blocked) ||
+			(!outcome.retrySameKey && !rotatesKeys(context)) {
+			// 调用预算耗尽或下游已结束时不能继续；首字节超时且不会换 Key 也一样。
 			return outcome.retryErr, nil
 		}
 		return nil, outcome.retryErr
@@ -197,6 +202,8 @@ func internalErrorResult(message string) *attemptResult {
 // 移植 proxy_handler.py:439。这是全链路最长的一段，分支顺序不可交换。
 func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, attemptIndex int) attemptOutcome {
 	if downstreamCanceled(context) {
+		h.logger.Debug("请求取消，上游调用未发起", "model_id", context.ModelID,
+			"key_name", key.Name, "provider", key.Provider, "path", "/v1/"+context.Path)
 		return attemptOutcome{response: downstreamCancellationResult()}
 	}
 	upstreamRoutes := context.Config.UpstreamRoutesForBaseURL(key.BaseURL)
@@ -218,7 +225,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			if downstreamCanceled(context) {
 				return attemptOutcome{response: downstreamCancellationResult()}
 			}
-			_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
+			if reason != "not_sent" {
+				_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
+			}
 			nativeSupport = &supported
 		}
 		useNative = *nativeSupport
@@ -229,7 +238,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			if downstreamCanceled(context) {
 				return attemptOutcome{response: downstreamCancellationResult()}
 			}
-			_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
+			if reason != "not_sent" {
+				_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
+			}
 			nativeSupport = &supported
 		}
 		useNative = *nativeSupport
@@ -260,6 +271,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			context.IsStream, false, context.ModelID, context.TaskParams, context.Path)
 	}
 	if bodyErr != nil {
+		h.logUpstreamNotSent(context, key, "构造上游请求体失败: "+bodyErr.Error())
 		return attemptOutcome{
 			retryErr:     internalErrorResult("构造上游请求体失败: " + bodyErr.Error()),
 			retrySameKey: false,
@@ -286,13 +298,17 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	finished := context.now()
 	if sendErr != nil {
 		durationMS := elapsedMS(started, finished)
+		name, retrySameKey := classifyOutcome(sendErr)
+		wantRetry := attemptIndex+1 < context.Attempts && (retrySameKey || rotatesKeys(context))
+		retried := context.upstreamCalls.hasRemaining() && wantRetry
+		if wantRetry && !retried && !downstreamCanceled(context) {
+			context.upstreamCalls.take()
+		}
+		// 先区分本地拒绝，才能避免取消竞态产生虚假的上游指标。
+		h.recordUpstreamFailure(context, key, sendErr, durationMS, retried)
 		if downstreamCanceled(context) {
-			h.recordDownstreamCancellation(context, key, nil, nil, durationMS)
 			return attemptOutcome{response: downstreamCancellationResult()}
 		}
-		name, retrySameKey := classifyOutcome(sendErr)
-		retried := attemptIndex+1 < context.Attempts && (retrySameKey || rotatesKeys(context))
-		h.recordUpstreamFailure(context, key, durationMS, retried)
 		return attemptOutcome{
 			retryErr:     jsonResult(http.StatusBadGateway, jsonErrorResponse("上游请求失败: "+name)),
 			retrySameKey: retrySameKey,
@@ -311,12 +327,18 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			return attemptOutcome{response: errorResponseFromContent(
 				response.StatusCode, content, context.Path == "messages")}
 		}
+		canFallback := context.upstreamCalls.hasRemaining()
 		h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
-			content, durationMS, true, false)
-		h.logNativeFallback(key, response.StatusCode, upstreamURL, upstreamPath)
+			content, durationMS, canFallback, false)
 		if context.Path == "messages" || context.Path == "responses" {
 			_ = context.pool().UpdateNativeEndpoint(key.BaseURL, false, nativeRoutePath, "unsupported")
 		}
+		if !canFallback {
+			context.upstreamCalls.take()
+			return attemptOutcome{response: errorResponseFromContent(
+				response.StatusCode, content, context.Path == "messages")}
+		}
+		h.logNativeFallback(key, response.StatusCode, upstreamURL, upstreamPath)
 		fallbackPath := upstreamPathFor(context.Path, context.Payload, false, upstreamRoutes)
 		fallbackURL := proxysupport.JoinURL(key.BaseURL, fallbackPath)
 		var fallbackBody []byte
@@ -329,6 +351,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				context.IsStream, false, context.ModelID, context.TaskParams, context.Path)
 		}
 		if fallbackBodyErr != nil {
+			h.logUpstreamNotSent(context, key, "构造上游请求体失败: "+fallbackBodyErr.Error())
 			return attemptOutcome{
 				retryErr:     internalErrorResult("构造上游请求体失败: " + fallbackBodyErr.Error()),
 				retrySameKey: false,
@@ -340,13 +363,16 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		fallbackFinished := context.now()
 		if fallbackErr != nil {
 			fallbackDuration := elapsedMS(fallbackStarted, fallbackFinished)
+			name, retrySameKey := classifyOutcome(fallbackErr)
+			wantRetry := attemptIndex+1 < context.Attempts && (retrySameKey || rotatesKeys(context))
+			retried := context.upstreamCalls.hasRemaining() && wantRetry
+			if wantRetry && !retried && !downstreamCanceled(context) {
+				context.upstreamCalls.take()
+			}
+			h.recordUpstreamFailure(context, key, fallbackErr, fallbackDuration, retried)
 			if downstreamCanceled(context) {
-				h.recordDownstreamCancellation(context, key, nil, nil, fallbackDuration)
 				return attemptOutcome{response: downstreamCancellationResult()}
 			}
-			name, retrySameKey := classifyOutcome(fallbackErr)
-			retried := attemptIndex+1 < context.Attempts && (retrySameKey || rotatesKeys(context))
-			h.recordUpstreamFailure(context, key, fallbackDuration, retried)
 			return attemptOutcome{
 				retryErr:     jsonResult(http.StatusBadGateway, jsonErrorResponse("上游请求失败: "+name)),
 				retrySameKey: retrySameKey,
@@ -361,7 +387,10 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		useNative = false
 	}
 
-	if IsRetryableStatus(response.StatusCode) && attemptIndex+1 < context.Attempts {
+	if IsRetryableStatus(response.StatusCode) && attemptIndex+1 < context.Attempts && !context.upstreamCalls.hasRemaining() {
+		context.upstreamCalls.take()
+	}
+	if IsRetryableStatus(response.StatusCode) && attemptIndex+1 < context.Attempts && context.upstreamCalls.hasRemaining() {
 		content, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
 		if downstreamCanceled(context) {
@@ -407,6 +436,14 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				response.StatusCode, content, context.Path == "messages")}
 		}
 		if proxysupport.IsToolError(content) {
+			if !context.upstreamCalls.hasRemaining() {
+				context.upstreamCalls.take()
+				_ = response.Body.Close()
+				h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
+					content, durationMS, false, false)
+				return attemptOutcome{response: errorResponseFromContent(
+					response.StatusCode, content, context.Path == "messages")}
+			}
 			h.recordUpstreamResponse(context, key, response.StatusCode, response.Header,
 				content, durationMS, true, false)
 			_ = response.Body.Close()
@@ -422,6 +459,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 					context.IsStream, context.ModelID, context.TaskParams)
 			}
 			if filteredErr != nil {
+				h.logUpstreamNotSent(context, key, "构造上游请求体失败: "+filteredErr.Error())
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
@@ -431,10 +469,8 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			retryFinished := context.now()
 			retryDuration := elapsedMS(retryStarted, retryFinished)
 			if retryErr != nil {
-				// 重试请求本身失败：返回**原始** 400 错误体，并记一次 key 失败
-				// （proxy_handler.py:791）。注意这条指标行的 retried 是**默认的**
-				// False——参照实现此处没有传 retried=True。
-				h.recordUpstreamFailure(context, key, retryDuration, false)
+				// 返回原始 400；只有重试真正发起后才记录失败并影响 key。
+				h.recordUpstreamFailure(context, key, retryErr, retryDuration, false)
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
@@ -583,6 +619,8 @@ func (h *Handler) keySelectionFailure(context *RequestContext, err error) attemp
 		return jsonResult(http.StatusServiceUnavailable, jsonErrorResponse(err.Error()))
 	}
 	if context.AccessKey != nil && context.RequestedKeyName != nil && *context.RequestedKeyName != "" {
+		h.logModelNotConfigured(context.Path, context.RequestedModelID, context.ModelID,
+			context.Workspace, "key_selection_forbidden")
 		return jsonResult(http.StatusForbidden, jsonErrorResponse(
 			"访问密钥 "+context.AccessKey.Name+" 无权访问模型 key: "+context.RequestedModelName+
 				"["+*context.RequestedKeyName+"]"))
@@ -602,6 +640,13 @@ func (h *Handler) keySelectionFailure(context *RequestContext, err error) attemp
 			"path", "/v1/"+context.Path,
 			"workspace", context.Workspace,
 			"reason", reason)
+	} else {
+		h.logger.Warn("没有可用 key",
+			"model_id", context.ModelID,
+			"requested_model_id", context.RequestedModelID,
+			"path", "/v1/"+context.Path,
+			"workspace", context.Workspace,
+			"reason", err.Error())
 	}
 	return jsonResult(http.StatusServiceUnavailable, jsonErrorResponse(err.Error()))
 }
@@ -665,18 +710,21 @@ func (h *Handler) logNativeFallback(key config.KeyConfig, statusCode int, url, u
 // 本函数只负责第一层；第二、三层在 pumpUpstream 里。
 func (h *Handler) sendUpstream(context *RequestContext, upstreamURL string, headers map[string]string, body []byte) (*http.Response, error) {
 	if err := contextOf(context.Request).Err(); err != nil {
-		return nil, err
-	}
-	if !context.upstreamCalls.take() {
-		return nil, &upstreamCapError{message: context.upstreamCalls.exhaustedMessage()}
+		return nil, &upstreamNotSentError{err: err}
 	}
 	client := upstreamClientOf(context.Runtime)
 	if client == nil {
-		return nil, errors.New("上游客户端未装配")
+		return nil, &upstreamNotSentError{err: errors.New("上游客户端未装配")}
 	}
 	request, err := newUpstreamRequest(context, upstreamURL, headers, body)
 	if err != nil {
-		return nil, err
+		return nil, &upstreamNotSentError{err: err}
+	}
+	if err := contextOf(context.Request).Err(); err != nil {
+		return nil, &upstreamNotSentError{err: err}
+	}
+	if !context.upstreamCalls.take() {
+		return nil, &upstreamNotSentError{err: &upstreamCapError{message: context.upstreamCalls.exhaustedMessage()}}
 	}
 	if context.IsStream {
 		return client.DoStream(request)
@@ -715,12 +763,31 @@ func newUpstreamRequest(context *RequestContext, upstreamURL string, headers map
 	request, err := http.NewRequestWithContext(
 		contextOf(context.Request), context.Request.Method, target, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		// 原始解析错误可能包含 URL 凭据，日志不应泄漏。
+		return nil, errors.New("构造上游请求失败，请检查供应商地址")
 	}
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	if err := validateUpstreamRequest(request); err != nil {
+		return nil, err
+	}
 	return request, nil
+}
+
+// net/http 会在发送前拒绝这类请求，不能把它们记成上游故障。
+func validateUpstreamRequest(request *http.Request) error {
+	if (request.URL.Scheme != "http" && request.URL.Scheme != "https") || request.URL.Hostname() == "" {
+		return errors.New("上游地址无效")
+	}
+	for _, values := range request.Header {
+		for _, value := range values {
+			if strings.IndexFunc(value, func(r rune) bool { return r < 32 && r != '\t' || r == 127 }) >= 0 {
+				return errors.New("上游请求头无效")
+			}
+		}
+	}
+	return nil
 }
 
 // upstreamHeaders 构造上游请求头。
@@ -733,11 +800,13 @@ func upstreamHeaders(context *RequestContext, apiKey string) map[string]string {
 	return proxysupport.UpstreamHeaders(map[string][]string(context.Request.Header), apiKey)
 }
 
+// upstreamNotSentError 标记确定尚未进入 HTTP 客户端的失败，避免误记上游统计。
+type upstreamNotSentError struct{ err error }
+
+func (e *upstreamNotSentError) Error() string { return e.err.Error() }
+func (e *upstreamNotSentError) Unwrap() error { return e.err }
+
 // upstreamCapError 表示上游调用次数达到上限。
-//
-// **有意增补**（见 DefaultMaxUpstreamCallsPerRequest）：参照实现没有任何上限。
-// 它被归类成「连接错误」（可原地重试）以便沿用既有分支，但 take() 对超限后的每次
-// 调用都返回 false，所以不会真的多打上游。
 type upstreamCapError struct{ message string }
 
 func (e *upstreamCapError) Error() string { return e.message }
@@ -1131,8 +1200,13 @@ func (h *Handler) recordDownstreamCancellation(context *RequestContext, key conf
 		"duration_ms", durationMS)
 }
 
-// recordUpstreamFailure 写失败指标；只有上游失败才惩罚 key，下游取消中性释放。
-func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyConfig, durationMS int64, retried bool) {
+// recordUpstreamFailure 区分本地拒绝与已发起的调用，避免虚增指标或惩罚 key。
+func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyConfig, err error, durationMS int64, retried bool) {
+	var notSent *upstreamNotSentError
+	if errors.As(err, &notSent) {
+		h.logUpstreamNotSent(context, key, notSent.Error())
+		return
+	}
 	if downstreamCanceled(context) {
 		h.recordDownstreamCancellation(context, key, nil, nil, durationMS)
 		return
@@ -1145,6 +1219,16 @@ func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyC
 		FirstTokenMS: durationMS,
 	})
 	context.pool().MarkFailure(context.ModelID, key.Name, nil, nil)
+}
+
+func (h *Handler) logUpstreamNotSent(context *RequestContext, key config.KeyConfig, reason string) {
+	h.logger.Warn("请求未发往上游",
+		"model_id", context.ModelID,
+		"key_name", key.Name,
+		"provider", key.Provider,
+		"path", "/v1/"+context.Path,
+		"workspace", context.Workspace,
+		"reason", reason)
 }
 
 // recordMetric 是 MetricsSink 的薄包装，顺带补齐上下文派生的字段。

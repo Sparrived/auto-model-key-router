@@ -85,7 +85,8 @@ func (h *Handler) runProbe(
 ) (bool, string) {
 	client := upstreamClientOf(source.Runtime)
 	if client == nil {
-		return false, "error"
+		h.logUpstreamNotSent(source, key, "原生端点探测失败：上游客户端未装配")
+		return false, "not_sent"
 	}
 	target := proxysupport.JoinURL(key.BaseURL, path)
 	ctx, cancel := context.WithTimeout(contextOf(source.Request), probeTimeout)
@@ -94,10 +95,19 @@ func (h *Handler) runProbe(
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target,
 		bytes.NewReader([]byte(canonical.DumpsOrdered(body))))
 	if err != nil {
-		return false, "error"
+		h.logUpstreamNotSent(source, key, "原生端点探测失败：上游地址无效")
+		return false, "not_sent"
 	}
 	for header, value := range headers {
 		request.Header.Set(header, value)
+	}
+	if validateUpstreamRequest(request) != nil {
+		h.logUpstreamNotSent(source, key, "原生端点探测失败：上游地址或请求头无效")
+		return false, "not_sent"
+	}
+	if ctx.Err() != nil {
+		h.logUpstreamNotSent(source, key, "原生端点探测前请求已取消")
+		return false, "not_sent"
 	}
 	// 探测走 Do（非流式）：参照实现用 client.post，响应体被整体读走。
 	response, err := client.Do(request)

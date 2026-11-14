@@ -340,15 +340,16 @@ func buildMultipart(t *testing.T, fields map[string]string) (string, string) {
 
 // --- 决策 1：上游调用上限 -----------------------------------------------------
 
-// TestUpstreamCallCapStopsAmplification 覆盖有意增补的上游调用上限：达到上限后
-// 不再发起新调用，直接 502。
+// TestUpstreamCallCapStopsAmplification 覆盖上限截断后保留最后一次真实上游响应。
 func TestUpstreamCallCapStopsAmplification(t *testing.T) {
 	cfg := simpleChatConfig()
 	cfg.MaxRetries = 5 // attempts = max_retries+1 = 6（单 key）
-	env := newTestEnv(t, cfg, Options{
+	logger, logs := capturingLogger()
+	env := newTestEnvPreservingOptions(t, cfg, Options{
 		MaxUpstreamCallsPerRequest: 2,
 		BodyPolicy:                 BodyPolicyPython,
 		Multipart:                  MultipartPython,
+		Logger:                     logger,
 	})
 	// 一直返回 500：没有上限时会有 6 次上游调用。
 	env.route("/v1/chat/completions", jsonStep(500, `{"error":{"message":"boom"}}`))
@@ -359,11 +360,206 @@ func TestUpstreamCallCapStopsAmplification(t *testing.T) {
 	if len(env.transport.calls) != 2 {
 		t.Fatalf("上游调用数应被上限截断为 2，实得 %d", len(env.transport.calls))
 	}
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("状态码: got %d want 502（body=%s）", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "boom") {
+		t.Fatalf("达到上限应保留最后真实上游响应: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "上游请求失败") {
-		t.Fatalf("响应体应说明上游失败，实得 %s", recorder.Body.String())
+	records := env.metrics.take()
+	if len(records) != 2 {
+		t.Fatalf("仅两次真实上游调用应记指标，实得 %+v", records)
+	}
+	for _, record := range records {
+		if record.StatusCode == nil || *record.StatusCode != http.StatusInternalServerError || record.KeyName != "k1" {
+			t.Fatalf("真实 500 的状态和 key 应保留，实得 %+v", record)
+		}
+	}
+	if !records[0].Retried || records[1].Retried {
+		t.Fatalf("只应标记确实发生的重试: %+v", records)
+	}
+	if !strings.Contains(logs.String(), "上游调用次数达到上限") {
+		t.Fatalf("达到上限应留日志: %s", logs.String())
+	}
+}
+
+// TestUpstreamCallCapDoesNotPenalizeUnsentKey 确认换 Key 时本地截断不会污染下一把 Key。
+func TestUpstreamCallCapDoesNotPenalizeUnsentKey(t *testing.T) {
+	cfg := &config.RouterConfig{
+		KeyFailureThreshold: 1,
+		Models: []config.ModelConfig{testModel("vendor-model", []config.KeyConfig{
+			testKey("k1", "https://upstream.test"),
+			testKey("k2", "https://upstream.test"),
+			testKey("k3", "https://third.test"),
+		}, func(m *config.ModelConfig) { m.RoutingMode = "priority"; m.NativeFirst = true })},
+	}
+	logger, logs := capturingLogger()
+	env := newTestEnvPreservingOptions(t, cfg, Options{MaxUpstreamCallsPerRequest: 2, Logger: logger})
+	if err := env.pool.UpdateNativeEndpoint("https://upstream.test", true, "v1/messages", "supported"); err != nil {
+		t.Fatal(err)
+	}
+	env.route("/v1/messages", jsonStep(500, `{"error":{"message":"boom"}}`))
+	response := env.request(http.MethodPost, "messages", `{"model":"vendor-model","max_tokens":8,"messages":[]}`, nil)
+
+	records := env.metrics.take()
+	if response.Code != http.StatusInternalServerError || len(env.transport.calls) != 2 || len(records) != 2 {
+		t.Fatalf("应仅发送并记录两次，status=%d calls=%d records=%+v", response.Code, len(env.transport.calls), records)
+	}
+	for i, key := range []string{"k1", "k2"} {
+		if env.transport.calls[i].headers["authorization"] != "Bearer sk-"+key ||
+			records[i].KeyName != key || records[i].StatusCode == nil || *records[i].StatusCode != 500 ||
+			!env.pool.IsCoolingDown("vendor-model", key) {
+			t.Fatalf("真实 500 应记录并惩罚 %s：call=%+v record=%+v", key, env.transport.calls[i], records[i])
+		}
+	}
+	if env.pool.IsCoolingDown("vendor-model", "k3") || env.pool.ActiveCount("vendor-model", "k3") != 0 {
+		t.Fatal("未发送的第三把 Key 不应受罚或占用")
+	}
+	if supported := env.pool.SupportsNativeEndpoint("https://third.test", "v1/messages"); supported != nil {
+		t.Fatalf("预算耗尽后不能探测或缓存第三把 Key 的原生能力: %v", *supported)
+	}
+	if !records[0].Retried || records[1].Retried {
+		t.Fatalf("最后一次真实调用后没有重试: %+v", records)
+	}
+	if !strings.Contains(logs.String(), "上游调用次数达到上限") {
+		t.Fatalf("本地预算截断应留日志: %s", logs.String())
+	}
+}
+
+// TestUpstreamCallCapKeepsPriorFallbackResponse 覆盖原生回退与工具过滤重试在预算耗尽时的记账。
+func TestUpstreamCallCapKeepsPriorFallbackResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body, upstreamPath, upstreamBody string
+		status, wantStatus                           int
+		native                                       bool
+	}{
+		{"原生端点回退", "messages", `{"model":"vendor-model","max_tokens":8,"messages":[]}`, "/v1/messages", `{"error":{"message":"not found"}}`, 404, 404, true},
+		{"过滤工具重试", "chat/completions", `{"model":"vendor-model","tools":[{"type":"web_search"}]}`, "/v1/chat/completions", `{"error":{"message":"unsupported tool type"}}`, 400, 400, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := simpleChatConfig()
+			cfg.KeyFailureThreshold = 1
+			cfg.Models[0].NativeFirst = tc.native
+			logger, logs := capturingLogger()
+			env := newTestEnvPreservingOptions(t, cfg, Options{MaxUpstreamCallsPerRequest: 1, Logger: logger})
+			if tc.native {
+				if err := env.pool.UpdateNativeEndpoint("https://upstream.test", true, "v1/messages", "supported"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env.route(tc.upstreamPath, jsonStep(tc.status, tc.upstreamBody))
+			response := env.request(http.MethodPost, tc.path, tc.body, nil)
+			records := env.metrics.take()
+			if response.Code != tc.wantStatus || len(env.transport.calls) != 1 || len(records) != 1 {
+				t.Fatalf("回退前真实响应应保留、未发送的不另记账: status=%d calls=%d records=%+v body=%s", response.Code, len(env.transport.calls), records, response.Body.String())
+			}
+			if records[0].StatusCode == nil || *records[0].StatusCode != tc.status || records[0].KeyName != "k1" || records[0].Retried {
+				t.Fatalf("真实上游状态应保留，且不应虚记重试: %+v", records[0])
+			}
+			if tc.native {
+				supported := env.pool.SupportsNativeEndpoint("https://upstream.test", "v1/messages")
+				entry := env.pool.EndpointCapabilityStates().Lookup("https://upstream.test|v1/messages")
+				if supported == nil || *supported || entry == nil || entry.Lookup("reason").StringValue() != "unsupported" {
+					t.Fatalf("真实 404 应更新为 unsupported 缓存: supported=%v entry=%s", supported, canonicalText(entry))
+				}
+			}
+			if env.pool.IsCoolingDown("vendor-model", "k1") || env.pool.ActiveCount("vendor-model", "k1") != 0 {
+				t.Fatal("未发出的回退请求不应惩罚或占用 Key")
+			}
+			if !strings.Contains(logs.String(), "上游调用次数达到上限") {
+				t.Fatalf("未发送的回退应留日志: %s", logs.String())
+			}
+		})
+	}
+}
+
+// TestUpstreamCallCapStopsModelFallback 验证预算刚满时不会进入任务、端点或统一模型的备选。
+func TestUpstreamCallCapStopsModelFallback(t *testing.T) {
+	for _, route := range []string{"任务", "端点", "统一模型"} {
+		for _, capCase := range []struct {
+			name  string
+			limit int
+		}{{"提前截断", 1}, {"首选用尽", 2}, {"有剩余预算", 3}} {
+			t.Run(route+"/"+capCase.name, func(t *testing.T) {
+				limit := capCase.limit
+				cfg := &config.RouterConfig{
+					MaxRetries: 1, KeyFailureThreshold: 1,
+					Models: []config.ModelConfig{
+						testModel("primary", []config.KeyConfig{testKey("first", "https://first.test")}),
+						testModel("backup", []config.KeyConfig{testKey("second", "https://second.test")}),
+					},
+				}
+				model := "job"
+				switch route {
+				case "任务":
+					cfg.Tasks = []config.TaskConfig{{Name: model, Model: "primary", FallbackModel: "backup"}}
+				case "端点":
+					model = "primary"
+					cfg.Models[0].Endpoints = map[string]*config.RoutePlan{"default": {
+						Primary: config.RouteTarget{Model: "primary"}, Fallback: &config.RouteTarget{Model: "backup"},
+					}}
+				case "统一模型":
+					model = "unified-model"
+					cfg.UnifiedModel = &config.UnifiedModelConfig{Default: config.RoutePlan{
+						Primary: config.RouteTarget{Model: "primary"}, Fallback: &config.RouteTarget{Model: "backup"},
+					}}
+				}
+				logger, logs := capturingLogger()
+				env := newTestEnvPreservingOptions(t, cfg, Options{MaxUpstreamCallsPerRequest: limit, Logger: logger})
+				env.route("/v1/chat/completions", jsonStep(500, `{"error":{"message":"primary failed"}}`),
+					jsonStep(500, `{"error":{"message":"primary failed"}}`),
+					jsonStep(200, `{"choices":[{"message":{"role":"assistant","content":"backup ok"}}]}`))
+				response := env.request(http.MethodPost, "chat/completions", `{"model":"`+model+`","messages":[]}`, nil)
+				records := env.metrics.take()
+				if limit == 3 {
+					if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "backup ok") ||
+						response.Header().Get("X-AMKR-Fallback") != "true" || len(env.transport.calls) != 3 || len(records) != 3 {
+						t.Fatalf("预算足够时应到达备选: status=%d body=%s calls=%v records=%+v", response.Code, response.Body.String(), describeUpstreams(env.transport.calls), records)
+					}
+					if env.transport.calls[2].headers["authorization"] != "Bearer sk-second" || records[2].ModelID != "backup" ||
+						records[2].KeyName != "second" || records[2].StatusCode == nil || *records[2].StatusCode != http.StatusOK {
+						t.Fatalf("第三次调用应为备选成功: call=%+v record=%+v", env.transport.calls[2], records[2])
+					}
+					return
+				}
+				if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "primary failed") ||
+					len(env.transport.calls) != limit || len(records) != limit || response.Header().Get("X-AMKR-Fallback") != "" {
+					t.Fatalf("应保留首选的真实 500，备选不得产生调用或指标: status=%d body=%s calls=%v records=%+v", response.Code, response.Body.String(), describeUpstreams(env.transport.calls), records)
+				}
+				for i, record := range records {
+					if env.transport.calls[i].headers["authorization"] != "Bearer sk-first" || record.ModelID != "primary" ||
+						record.KeyName != "first" || record.StatusCode == nil || *record.StatusCode != http.StatusInternalServerError ||
+						record.Retried != (i+1 < limit) {
+						t.Fatalf("指标只能对应首选的真实调用: call=%+v record=%+v", env.transport.calls[i], record)
+					}
+				}
+				if env.pool.IsCoolingDown("backup", "second") || env.pool.ActiveCount("backup", "second") != 0 || env.resources.ActiveLeases() != 0 {
+					t.Fatal("备选 Key 不应受罚或被占用，租约应释放")
+				}
+				if !strings.Contains(logs.String(), "上游调用次数达到上限") {
+					t.Fatalf("预算耗尽应留日志: %s", logs.String())
+				}
+			})
+		}
+	}
+}
+
+// TestUpstreamCallCapRecordsLastConnectionFailure 验证真实连接失败消耗最后预算时仍如实记账。
+func TestUpstreamCallCapRecordsLastConnectionFailure(t *testing.T) {
+	cfg := simpleChatConfig()
+	cfg.MaxRetries, cfg.KeyFailureThreshold = 3, 1
+	logger, logs := capturingLogger()
+	env := newTestEnvPreservingOptions(t, cfg, Options{MaxUpstreamCallsPerRequest: 2, Logger: logger})
+	env.route("/v1/chat/completions", upstreamStep{Fail: true})
+	response := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
+	records := env.metrics.take()
+	if response.Code != http.StatusBadGateway || len(env.transport.calls) != 2 || len(records) != 2 {
+		t.Fatalf("连接失败应按实际两次调用记账: status=%d calls=%d records=%+v", response.Code, len(env.transport.calls), records)
+	}
+	for i, record := range records {
+		if !record.Failed || record.StatusCode != nil || record.KeyName != "k1" || record.Retried != (i == 0) {
+			t.Fatalf("真实连接失败的指标与重试标记错误: %+v", record)
+		}
+	}
+	if !env.pool.IsCoolingDown("vendor-model", "k1") || !strings.Contains(logs.String(), "上游调用次数达到上限") {
+		t.Fatalf("真实连接失败应惩罚 Key，预算耗尽应留日志: %s", logs.String())
 	}
 }
 
@@ -394,8 +590,12 @@ func TestDefaultUpstreamCallCapIsApplied(t *testing.T) {
 		t.Fatalf("未设上限时上游调用数应停在默认值 %d，实得 %d",
 			DefaultMaxUpstreamCallsPerRequest, len(env.transport.calls))
 	}
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("状态码: got %d want 502（body=%s）", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("状态码: got %d want 500（body=%s）", recorder.Code, recorder.Body.String())
+	}
+	records := env.metrics.take()
+	if len(records) != DefaultMaxUpstreamCallsPerRequest || records[len(records)-1].Retried {
+		t.Fatalf("默认上限只能记录已发送的调用，最后一行不应虚记重试: %+v", records)
 	}
 }
 
@@ -480,8 +680,10 @@ func TestDownstreamCancellationStopsRetriesWithoutPenalizingKeys(t *testing.T) {
 		status int
 		body   string
 		before bool
+		race   bool
 	}{
 		{name: "发送前取消", path: "chat/completions", before: true},
+		{name: "选Key后发送前取消", path: "chat/completions", race: true},
 		{name: "发送中取消", path: "chat/completions"},
 		{name: "状态码重试前取消", path: "chat/completions", status: 503, body: `{"error":{"message":"busy"},"usage":{"prompt_tokens":3}}`},
 		{name: "原生回退前取消", path: "messages", status: 404, body: `{"error":{"message":"not found"}}`},
@@ -501,10 +703,19 @@ func TestDownstreamCancellationStopsRetriesWithoutPenalizingKeys(t *testing.T) {
 				}},
 			}
 			logger, logs := capturingLogger()
-			env := newTestEnv(t, cfg, Options{Logger: logger})
-			_ = env.pool.UpdateNativeEndpoint("https://upstream.test", true, "/v1/messages", "supported")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			var env *testEnv
+			clockCalled, selectedBeforeCancel := false, false
+			env = newTestEnv(t, cfg, Options{Logger: logger, Clock: func() time.Time {
+				if item.race && !clockCalled {
+					clockCalled = true
+					selectedBeforeCancel = env.pool.ActiveCount("vendor-model", "k1") == 1
+					cancel()
+				}
+				return time.Now()
+			}})
+			_ = env.pool.UpdateNativeEndpoint("https://upstream.test", true, "/v1/messages", "supported")
 			calls := 0
 			env.resources.HTTPClient = requestClientFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
@@ -526,7 +737,7 @@ func TestDownstreamCancellationStopsRetriesWithoutPenalizingKeys(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer "+cfg.LocalAPIKey)
 			env.handler.Handle(httptest.NewRecorder(), req, item.path)
 			wantCalls := 1
-			if item.before {
+			if item.before || item.race {
 				wantCalls = 0
 			}
 			if calls != wantCalls {
@@ -547,6 +758,9 @@ func TestDownstreamCancellationStopsRetriesWithoutPenalizingKeys(t *testing.T) {
 				t.Fatalf("指标行数=%d want=%d", len(records), wantCalls)
 			}
 			if wantCalls == 0 {
+				if item.race && (!selectedBeforeCancel || !strings.Contains(logs.String(), "请求未发往上游")) {
+					t.Fatalf("应在选 Key 后取消并记录未发送日志: selected=%v logs=%s", selectedBeforeCancel, logs.String())
+				}
 				return
 			}
 			if !records[0].Failed || records[0].Retried {
@@ -609,7 +823,8 @@ func TestRetryableStatusCodesInclude401And403(t *testing.T) {
 // 成功会**删除**状态；冷却过滤是软的。
 func TestCooldownRules(t *testing.T) {
 	t.Run("429立即冷却", func(t *testing.T) {
-		env := newTestEnv(t, simpleChatConfig(), Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
+		logger, logs := capturingLogger()
+		env := newTestEnv(t, simpleChatConfig(), Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython, Logger: logger})
 		env.route("/v1/chat/completions",
 			upstreamStep{
 				Status: 429,
@@ -619,9 +834,21 @@ func TestCooldownRules(t *testing.T) {
 				},
 				Body: `{"error":{"message":"slow"}}`,
 			})
-		env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
+		response := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
+		records := env.metrics.take()
+		if response.Code != http.StatusTooManyRequests || len(env.transport.calls) != 2 || len(records) != 2 {
+			t.Fatalf("真实 429 应按实际调用次数记录: status=%d calls=%d records=%+v", response.Code, len(env.transport.calls), records)
+		}
+		for _, record := range records {
+			if record.StatusCode == nil || *record.StatusCode != http.StatusTooManyRequests || record.KeyName != "k1" {
+				t.Fatalf("上游 429 的状态与 Key 应保留: %+v", record)
+			}
+		}
 		if !env.pool.IsCoolingDown("vendor-model", "k1") {
 			t.Fatal("429 之后该 key 应立即处于冷却")
+		}
+		if !strings.Contains(logs.String(), "上游返回非 200") {
+			t.Fatalf("真实 429 应有上游响应日志: %s", logs.String())
 		}
 	})
 
@@ -821,13 +1048,19 @@ func TestEffectiveReasoningEffort(t *testing.T) {
 // TestMetricsRowForConnectionFailure 覆盖「上游请求直接失败」：状态码为 nil，
 // failed=true，retried=true，且 first_token_ms == duration_ms。
 func TestMetricsRowForConnectionFailure(t *testing.T) {
-	env := newTestEnv(t, simpleChatConfig(), Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython})
+	cfg := simpleChatConfig()
+	cfg.KeyFailureThreshold = 1
+	logger, logs := capturingLogger()
+	env := newTestEnv(t, cfg, Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython, Logger: logger})
 	env.route("/v1/chat/completions", upstreamStep{Fail: true})
-	env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
+	response := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
 
 	records := env.metrics.take()
-	if len(records) == 0 {
-		t.Fatal("应至少写一行指标")
+	if response.Code != http.StatusBadGateway || len(env.transport.calls) != 2 || len(records) != 2 {
+		t.Fatalf("已发起的连接失败应逐次记账: status=%d calls=%d records=%+v", response.Code, len(env.transport.calls), records)
+	}
+	if !env.pool.IsCoolingDown("vendor-model", "k1") || !strings.Contains(logs.String(), "上游调用失败") {
+		t.Fatalf("真实连接失败应惩罚 Key 并留日志: %s", logs.String())
 	}
 	first := records[0]
 	if first.StatusCode != nil {
@@ -1389,23 +1622,102 @@ func taskParamsValue(t *testing.T, text string) *canonical.Value {
 // 装配漏掉时必须在请求路径上明确报错，而不是 panic。
 func TestMissingUpstreamClientFailsClosed(t *testing.T) {
 	cfg := simpleChatConfig()
-	pool := keypool.New(cfg, nil, nil)
-	resources := runtime.NewRuntimeResources(cfg, pool, nil, nil)
+	cfg.KeyFailureThreshold = 1
+	logger, logs := capturingLogger()
+	env := newTestEnv(t, cfg, Options{BodyPolicy: BodyPolicyPython, Multipart: MultipartPython, Logger: logger})
 	// 刻意不设置 HTTPClient。
-	manager := runtime.NewRuntimeManager(resources)
-	handler := New(manager, &recordingMetrics{}, Options{
-		BodyPolicy: BodyPolicyPython, Multipart: MultipartPython, Logger: discardLogger()})
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://testserver/v1/chat/completions",
-		strings.NewReader(`{"model":"vendor-model"}`))
-	req.Header.Set("Authorization", "Bearer local-key")
-	handler.Handle(recorder, req, "chat/completions")
+	env.resources.HTTPClient = nil
+	recorder := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
 
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("状态码: got %d want 502（body=%s）", recorder.Code, recorder.Body.String())
 	}
-	if got := resources.ActiveLeases(); got != 0 {
-		t.Fatalf("装配错误路径也必须释放租约，实得 %d", got)
+	if env.metrics.Count() != 0 || len(env.transport.calls) != 0 || env.pool.IsCoolingDown("vendor-model", "k1") {
+		t.Fatalf("未装配客户端不应有上游调用、指标或健康惩罚: calls=%d records=%d", len(env.transport.calls), env.metrics.Count())
+	}
+	if env.resources.ActiveLeases() != 0 || env.pool.ActiveCount("vendor-model", "k1") != 0 {
+		t.Fatal("装配错误路径必须释放租约和 Key")
+	}
+	if !strings.Contains(logs.String(), "请求未发往上游") || !strings.Contains(logs.String(), "上游客户端未装配") {
+		t.Fatalf("装配错误应留日志: %s", logs.String())
+	}
+}
+
+// TestInvalidUpstreamRequestFailsBeforeSend 覆盖请求构造和发送前参数校验。
+func TestInvalidUpstreamRequestFailsBeforeSend(t *testing.T) {
+	for _, tc := range []struct {
+		name, baseURL, apiKey, reason string
+	}{
+		{"URL解析失败", "https://user:secret@[::1", "sk-k1", "构造上游请求失败"},
+		{"URL缺少主机", "https:///missing-host", "sk-k1", "上游地址无效"},
+		{"请求头非法", "https://upstream.test", "bad\nkey", "上游请求头无效"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := simpleChatConfig()
+			cfg.KeyFailureThreshold = 1
+			cfg.Models[0].Keys[0].BaseURL = tc.baseURL
+			cfg.Models[0].Keys[0].APIKey = tc.apiKey
+			logger, logs := capturingLogger()
+			env := newTestEnv(t, cfg, Options{Logger: logger})
+			response := env.request(http.MethodPost, "chat/completions", `{"model":"vendor-model"}`, nil)
+			if response.Code != http.StatusBadGateway || len(env.transport.calls) != 0 || env.metrics.Count() != 0 {
+				t.Fatalf("构造失败不应触达上游或写指标: status=%d calls=%d records=%d", response.Code, len(env.transport.calls), env.metrics.Count())
+			}
+			if env.pool.IsCoolingDown("vendor-model", "k1") || env.pool.ActiveCount("vendor-model", "k1") != 0 || env.resources.ActiveLeases() != 0 {
+				t.Fatal("构造失败不应惩罚 Key，且必须释放 Key 和租约")
+			}
+			if !strings.Contains(logs.String(), "请求未发往上游") || !strings.Contains(logs.String(), tc.reason) {
+				t.Fatalf("构造失败原因应留日志: %s", logs.String())
+			}
+			if strings.Contains(logs.String(), "secret") || strings.Contains(response.Body.String(), "secret") {
+				t.Fatal("地址中的凭据不能出现在日志或响应中")
+			}
+		})
+	}
+}
+
+// TestUnsentNativeProbeDoesNotCache 确保本地未发送不能伪造端点不支持的缓存。
+func TestUnsentNativeProbeDoesNotCache(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+	}{
+		{"messages", "messages", `{"model":"vendor-model","messages":[],"max_tokens":8}`},
+		{"responses", "responses", `{"model":"vendor-model","input":"hi"}`},
+	} {
+		for _, missingClient := range []bool{true, false} {
+			name := tc.name + "/地址无效"
+			if missingClient {
+				name = tc.name + "/客户端未装配"
+			}
+			t.Run(name, func(t *testing.T) {
+				cfg := simpleChatConfig()
+				cfg.KeyFailureThreshold = 1
+				cfg.Models[0].NativeFirst = true
+				baseURL := "https://upstream.test"
+				if !missingClient {
+					baseURL = "https://[invalid"
+					cfg.Models[0].Keys[0].BaseURL = baseURL
+				}
+				logger, logs := capturingLogger()
+				env := newTestEnv(t, cfg, Options{Logger: logger})
+				if missingClient {
+					env.resources.HTTPClient = nil
+				}
+				response := env.request(http.MethodPost, tc.path, tc.body, nil)
+				if response.Code != http.StatusBadGateway || len(env.transport.calls) != 0 || env.metrics.Count() != 0 {
+					t.Fatalf("未发送探测和主请求均不应记账: status=%d calls=%d records=%d body=%s", response.Code, len(env.transport.calls), env.metrics.Count(), response.Body.String())
+				}
+				if supported := env.pool.SupportsNativeEndpoint(baseURL, "v1/"+tc.path); supported != nil {
+					t.Fatalf("本地未发送不能写入能力缓存: %v", *supported)
+				}
+				if env.pool.IsCoolingDown("vendor-model", "k1") || env.pool.ActiveCount("vendor-model", "k1") != 0 || env.resources.ActiveLeases() != 0 {
+					t.Fatal("未发送探测不应惩罚 Key，且必须释放 Key 和租约")
+				}
+				if !strings.Contains(logs.String(), "原生端点探测失败") || !strings.Contains(logs.String(), "请求未发往上游") {
+					t.Fatalf("未发送的探测应有日志: %s", logs.String())
+				}
+			})
+		}
 	}
 }
 

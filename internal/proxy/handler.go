@@ -43,7 +43,7 @@ func (h *Handler) handle(w http.ResponseWriter, request *http.Request, path stri
 	}
 	result := h.handleSingleTarget(prepared)
 	status := result.statusCode()
-	if downstreamCanceled(prepared) || !IsRetryableStatus(status) {
+	if downstreamCanceled(prepared) || prepared.upstreamCalls.blocked || !IsRetryableStatus(status) {
 		result.writeTo(w)
 		return
 	}
@@ -102,6 +102,11 @@ func (h *Handler) writeTaskFallback(w http.ResponseWriter, prepared *RequestCont
 // 「总数」会在将来放开任一入口时静默绕过供应商清单。这里与主路径用同一个判据。
 func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, result attempt, target config.RouteTarget) {
 	if downstreamCanceled(prepared) {
+		result.writeTo(w)
+		return
+	}
+	if !prepared.upstreamCalls.hasRemaining() {
+		prepared.upstreamCalls.take()
 		result.writeTo(w)
 		return
 	}
@@ -597,9 +602,15 @@ func nullIfAbsent(value *canonical.Value) *canonical.Value {
 // **有意增补**（见 DefaultMaxUpstreamCallsPerRequest）：参照实现没有这个上限，
 // 也无从看出放大倍数。计数器挂在 RequestContext 上，因此备选路径共享同一个预算。
 type upstreamCallCounter struct {
-	max    int
-	count  int
-	logger *slog.Logger
+	max     int
+	count   int
+	blocked bool
+	logger  *slog.Logger
+}
+
+// hasRemaining 判断是否仍能发起新的上游调用，不消耗预算。
+func (c *upstreamCallCounter) hasRemaining() bool {
+	return c == nil || c.count < c.max
 }
 
 // take 记一次上游调用；返回 false 表示已达上限、不应再发起调用。
@@ -610,14 +621,15 @@ func (c *upstreamCallCounter) take() bool {
 	if c == nil {
 		return true
 	}
-	c.count++
-	if c.count > c.max {
-		if c.logger != nil {
+	if c.count >= c.max {
+		if !c.blocked && c.logger != nil {
 			c.logger.Warn("上游调用次数达到上限，停止继续重试",
 				"count", c.count, "limit", c.max)
 		}
+		c.blocked = true
 		return false
 	}
+	c.count++
 	return true
 }
 

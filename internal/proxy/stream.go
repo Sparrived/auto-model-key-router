@@ -112,7 +112,10 @@ func (h *Handler) bufferedResponse(
 			jsonErrorResponse("上游请求失败: RemoteProtocolError")), nil
 	}
 	if emptyChatCompletionResponse(context.Path, response, content) {
-		retried := attemptIndex+1 < context.Attempts
+		retried := context.upstreamCalls.hasRemaining() && attemptIndex+1 < context.Attempts
+		if !retried && attemptIndex+1 < context.Attempts && !context.upstreamCalls.hasRemaining() {
+			context.upstreamCalls.take()
+		}
 		h.recordEmptyCompletionAnomaly(context, key, response.StatusCode, content,
 			durationMS, retried)
 		if retried {
