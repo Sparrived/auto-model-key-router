@@ -98,6 +98,8 @@ var specOpsWebUIRequest = newModelSpec("WebUIRequest",
 var specOpsIntegrationRequest = newModelSpec("IntegrationRequest",
 	nul("config_revision", kindStr).minLenOf(1),
 	def("mode", kindStr),
+	def("default_model", kindStr).minLenOf(1),
+	def("reasoning_effort", kindStr).minLenOf(1),
 )
 
 // OpsAgentStatus 对应 agent_config.AgentConfigStatus 里路由用到的字段。
@@ -143,6 +145,8 @@ type OpsIntegrations struct {
 	Status func(agent string) (OpsAgentStatus, error)
 	// Configure 对应 configure_agent：把 AMKR 当前可用的全部模型写进该 Agent 的配置。
 	Configure func(agent string, cfg *config.RouterConfig) (OpsAgentConfigResult, error)
+	// ConfigureWithOptions 仅在请求显式携带默认模型或推理强度时使用。
+	ConfigureWithOptions func(agent string, cfg *config.RouterConfig, model, effort *string) (OpsAgentConfigResult, error)
 	// Rollback 对应 rollback_agent。
 	Rollback func(agent string) (OpsAgentRollbackResult, error)
 }
@@ -507,7 +511,8 @@ func (s *Server) handleOpsListIntegrations(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleOpsApplyIntegration(w http.ResponseWriter, r *http.Request) {
 	s.run(w, http.StatusOK, func() (*canonical.Value, error) {
 		agent := r.PathValue("agent")
-		if _, _, err := decodePayload(r, specOpsIntegrationRequest, true); err != nil {
+		payload, _, err := decodePayload(r, specOpsIntegrationRequest, true)
+		if err != nil {
 			return nil, err
 		}
 		if !s.opsAgentSupportedAt(agent) {
@@ -521,7 +526,17 @@ func (s *Server) handleOpsApplyIntegration(w http.ResponseWriter, r *http.Reques
 		if src == nil || src.Configure == nil {
 			return nil, opsIntegrationsNotWired()
 		}
-		result, err := src.Configure(agent, cfg)
+		model := optString(payload, "default_model")
+		effort := optString(payload, "reasoning_effort")
+		var result OpsAgentConfigResult
+		if model != nil || effort != nil {
+			if src.ConfigureWithOptions == nil {
+				return nil, opsIntegrationsNotWired()
+			}
+			result, err = src.ConfigureWithOptions(agent, cfg, model, effort)
+		} else {
+			result, err = src.Configure(agent, cfg)
+		}
 		if err != nil {
 			// ops_api.py:221-222：OSError / AgentConfigError / ValueError -> 409，
 			// 错误文本原样交给前端。

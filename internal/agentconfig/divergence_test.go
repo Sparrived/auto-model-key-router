@@ -1,6 +1,7 @@
 package agentconfig
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +339,227 @@ func TestDivergenceUnsupportedTomlShapesError(t *testing.T) {
 				t.Error("报错时不应写出备份文件")
 			}
 		})
+	}
+}
+
+// TestIntegrationDefaultsLifecycle 使用临时配置验证选择、重复应用与完整回退。
+func TestIntegrationDefaultsLifecycle(t *testing.T) {
+	cases := []struct {
+		name, agent, targetName, initial string
+		piSettings                       bool
+	}{
+		{"claude", ClaudeCode, "settings.json", "{\"model\":\"alpha\",\"env\":{\"ANTHROPIC_DEFAULT_HAIKU_MODEL\":\"haiku-user\",\"USER_VALUE\":\"keep\"},\"userSetting\":\"keep\"}\n", false},
+		{"codex", Codex, "config.toml", "# 用户注释\nmodel = \"alpha\"\nreview_model = \"user-review-model\" # 不可覆盖\nmodel_reasoning_effort = \"medium\"\napproval_policy = \"on-request\"\n", false},
+		{"pi_existing_settings", PiAgent, "models.json", "{\"providers\":{\"other\":{\"baseUrl\":\"https://example.invalid\"}},\"userSetting\":\"keep\"}\n", true},
+		{"pi_missing_settings", PiAgent, "models.json", "{\"providers\":{\"other\":{\"baseUrl\":\"https://example.invalid\"}},\"userSetting\":\"keep\"}\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			pinBaseEnv(t, root)
+			dir := filepath.Join(root, "client")
+			target := filepath.Join(dir, c.targetName)
+			backup := filepath.Join(root, "backup.json")
+			writeFile(t, target, c.initial)
+			paths := []string{target}
+			if c.agent == Codex {
+				auth := filepath.Join(dir, "auth.json")
+				writeFile(t, auth, "{\"OPENAI_API_KEY\":\"original-fake-key\",\"other\":\"keep\"}\n")
+				paths = append(paths, auth, filepath.Join(dir, "amkr-models.json"))
+			}
+			if c.agent == PiAgent {
+				settings := filepath.Join(dir, "settings.json")
+				if c.piSettings {
+					writeFile(t, settings, "{\"defaultProvider\":\"other\",\"defaultModel\":\"alpha\",\"defaultThinkingLevel\":\"medium\",\"userSetting\":\"keep\"}\n")
+				}
+				paths = append(paths, settings)
+			}
+			original := integrationFileSnapshot(t, paths...)
+			cfg := routerConfig(t, "alpha")
+			opts := Options{BaseDir: root, TargetPath: target, BackupPath: backup}
+			model, effort := "alpha-alias", "high"
+			opts.DefaultModel = &model
+			if c.agent != ClaudeCode {
+				opts.ReasoningEffort = &effort
+			}
+			if _, err := Configure(c.agent, cfg, opts); err != nil {
+				t.Fatalf("首次应用失败: %v", err)
+			}
+			integrationAssertDefaults(t, c.agent, target, model, effort)
+			model, effort = "beta", "low"
+			if _, err := Configure(c.agent, cfg, opts); err != nil {
+				t.Fatalf("更换默认值失败: %v", err)
+			}
+			integrationAssertDefaults(t, c.agent, target, model, effort)
+			opts.DefaultModel, opts.ReasoningEffort = nil, nil
+			if _, err := Configure(c.agent, cfg, opts); err != nil {
+				t.Fatalf("空选项重复应用失败: %v", err)
+			}
+			integrationAssertDefaults(t, c.agent, target, model, effort)
+			status, err := GetStatus(c.agent, opts)
+			if err != nil || !status.BackupAvailable || !status.CurrentIsApplied {
+				t.Fatalf("重复应用后状态错误: %+v, %v", status, err)
+			}
+			result, err := Rollback(c.agent, opts)
+			if err != nil || !result.Restored {
+				t.Fatalf("回退失败: %+v, %v", result, err)
+			}
+			integrationAssertSnapshot(t, original)
+			if _, err := os.Stat(backup); !os.IsNotExist(err) {
+				t.Fatalf("成功回退后备份应删除，实际: %v", err)
+			}
+		})
+	}
+}
+
+// TestIntegrationPiUpgradeAndRejectedOptions 覆盖旧备份升级和错误不落盘。
+func TestIntegrationPiUpgradeAndRejectedOptions(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		name := "missing"
+		if exists {
+			name = "existing"
+		}
+		t.Run("pi_upgrade_"+name, func(t *testing.T) {
+			root := t.TempDir()
+			pinBaseEnv(t, root)
+			target := filepath.Join(root, "agent", "models.json")
+			settings := filepath.Join(root, "agent", "settings.json")
+			backup := filepath.Join(root, "backup.json")
+			writeFile(t, target, "{\"providers\":{}}\n")
+			if exists {
+				writeFile(t, settings, "{\"defaultModel\":\"before\",\"userSetting\":\"keep\"}\n")
+			}
+			original := integrationFileSnapshot(t, target, settings)
+			opts := Options{BaseDir: root, TargetPath: target, BackupPath: backup}
+			cfg := routerConfig(t, "alpha")
+			if _, err := Configure(PiAgent, cfg, opts); err != nil {
+				t.Fatal(err)
+			}
+			integrationAssertSnapshot(t, map[string]integrationFileState{settings: original[settings]})
+			model := "unified-model"
+			opts.DefaultModel = &model
+			if _, err := Configure(PiAgent, cfg, opts); err != nil {
+				t.Fatal(err)
+			}
+			integrationAssertDefaults(t, PiAgent, target, model, "")
+			opts.DefaultModel = nil
+			if _, err := Configure(PiAgent, cfg, opts); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Rollback(PiAgent, opts); err != nil {
+				t.Fatal(err)
+			}
+			integrationAssertSnapshot(t, original)
+		})
+	}
+
+	for _, agent := range []string{ClaudeCode, Codex, PiAgent} {
+		t.Run("invalid_"+agent, func(t *testing.T) {
+			root := t.TempDir()
+			pinBaseEnv(t, root)
+			dir := filepath.Join(root, "agent")
+			target := filepath.Join(dir, "models.json")
+			initial := "{}\n"
+			if agent == ClaudeCode {
+				target = filepath.Join(dir, "settings.json")
+			}
+			if agent == Codex {
+				target, initial = filepath.Join(dir, "config.toml"), "model = \"alpha\"\nreview_model = \"alpha\"\n"
+			}
+			writeFile(t, target, initial)
+			backup := filepath.Join(root, "backup.json")
+			opts := Options{BaseDir: root, TargetPath: target, BackupPath: backup}
+			cfg := routerConfig(t, "alpha")
+			if _, err := Configure(agent, cfg, opts); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{target, backup}
+			if agent == Codex {
+				paths = append(paths, filepath.Join(dir, "auth.json"), filepath.Join(dir, "amkr-models.json"))
+			}
+			if agent == PiAgent {
+				paths = append(paths, filepath.Join(dir, "settings.json"))
+			}
+			before := integrationFileSnapshot(t, paths...)
+			for _, invalid := range []string{"", "unknown-model", "gamma", " alpha"} {
+				opts.DefaultModel = &invalid
+				if _, err := Configure(agent, cfg, opts); err == nil {
+					t.Errorf("非法模型 %q 应被拒绝", invalid)
+				}
+				integrationAssertSnapshot(t, before)
+			}
+			opts.DefaultModel = nil
+			invalidEffort := "not-a-level"
+			opts.ReasoningEffort = &invalidEffort
+			if _, err := Configure(agent, cfg, opts); err == nil {
+				t.Error("非法或不支持的推理强度应被拒绝")
+			}
+			integrationAssertSnapshot(t, before)
+		})
+	}
+}
+
+type integrationFileState struct {
+	exists  bool
+	content string
+}
+
+func integrationFileSnapshot(t *testing.T, paths ...string) map[string]integrationFileState {
+	t.Helper()
+	result := make(map[string]integrationFileState, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("读取测试文件失败: %v", err)
+		}
+		result[path] = integrationFileState{exists: err == nil, content: string(data)}
+	}
+	return result
+}
+
+func integrationAssertSnapshot(t *testing.T, want map[string]integrationFileState) {
+	t.Helper()
+	for path, expected := range want {
+		actual := integrationFileSnapshot(t, path)[path]
+		if actual != expected {
+			t.Errorf("文件状态变化 %s: 存在=%v，期望存在=%v，内容一致=%v", path, actual.exists, expected.exists, actual.content == expected.content)
+		}
+	}
+}
+
+func integrationAssertDefaults(t *testing.T, agent, target, model, effort string) {
+	t.Helper()
+	content := readFile(t, target)
+	if agent == Codex {
+		var doc map[string]any
+		if err := toml.Unmarshal([]byte(content), &doc); err != nil {
+			t.Fatalf("Codex TOML 无法读取: %v", err)
+		}
+		if doc["model"] != model || doc["review_model"] != "user-review-model" || doc["model_reasoning_effort"] != effort || doc["approval_policy"] != "on-request" {
+			t.Errorf("Codex 默认项或无关配置错误: model=%v review=%v effort=%v approval=%v", doc["model"], doc["review_model"], doc["model_reasoning_effort"], doc["approval_policy"])
+		}
+		if !strings.Contains(content, "# 用户注释") || !strings.Contains(content, "# 不可覆盖") {
+			t.Error("Codex 用户注释丢失")
+		}
+		return
+	}
+	if agent == PiAgent {
+		target = filepath.Join(filepath.Dir(target), "settings.json")
+		content = readFile(t, target)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(content), &doc); err != nil {
+		t.Fatalf("客户端设置不是 JSON: %v", err)
+	}
+	if agent == ClaudeCode {
+		env, _ := doc["env"].(map[string]any)
+		if doc["model"] != model || doc["userSetting"] != "keep" || env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "haiku-user" || env["USER_VALUE"] != "keep" {
+			t.Errorf("Claude 默认模型或用户字段错误: model=%v user=%v env=%v", doc["model"], doc["userSetting"], env)
+		}
+		return
+	}
+	if doc["defaultProvider"] != "amkr" || doc["defaultModel"] != model || (effort != "" && doc["defaultThinkingLevel"] != effort) {
+		t.Errorf("Pi 默认设置错误: provider=%v model=%v effort=%v", doc["defaultProvider"], doc["defaultModel"], doc["defaultThinkingLevel"])
 	}
 }
 

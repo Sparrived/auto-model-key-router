@@ -33,6 +33,7 @@ func newBackupBytes(
 	originalContent string,
 	appliedSHA256 string,
 	extra []extraBackupEntry,
+	managedDefaults bool,
 ) []byte {
 	pairs := []canonical.ObjectPair{
 		{Key: "version", Value: canonical.NewIntValue(backupStateVersion)},
@@ -41,6 +42,9 @@ func newBackupBytes(
 		{Key: "original_exists", Value: canonical.NewBool(originalExists)},
 		{Key: "original_content", Value: canonical.NewString(originalContent)},
 		{Key: "applied_sha256", Value: canonical.NewString(appliedSHA256)},
+	}
+	if managedDefaults {
+		pairs = append(pairs, canonical.ObjectPair{Key: "managed_defaults", Value: canonical.NewBool(true)})
 	}
 	if len(extra) > 0 {
 		items := make([]*canonical.Value, 0, len(extra))

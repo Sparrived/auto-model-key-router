@@ -187,6 +187,9 @@ type Options struct {
 	TargetPath string
 	BackupPath string
 	BackupDir  string
+	// DefaultModel 与 ReasoningEffort 为 nil 时保留现有集成语义。
+	DefaultModel    *string
+	ReasoningEffort *string
 }
 
 // Status 对应 agent_config.py:40 的 AgentConfigStatus。
@@ -325,6 +328,9 @@ func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, er
 	if cfg.LocalAPIKey == "" {
 		return Result{}, errf("本地鉴权 key 为空，无法配置 Agent")
 	}
+	if err := validateIntegrationOptions(agent, cfg, opts); err != nil {
+		return Result{}, err
+	}
 	// 没有任何可用模型时直接拒绝：集成的内容就是模型清单，空清单在各客户端上要么
 	// 是空选择器（Claude Code）、要么是**启动失败**（Codex 的目录文件不允许为空），
 	// 写出去只会让用户更难看出问题所在。
@@ -341,6 +347,23 @@ func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, er
 		return Result{}, err
 	}
 	state := loadBackupState(backup)
+	if state == nil && fileExists(backup) {
+		return Result{}, errf("Agent 配置备份无法读取，请先检查备份文件")
+	}
+	if state != nil && (state.str("agent") != agent || state.str("target_path") != target) {
+		return Result{}, errf("现有 Agent 备份与目标不匹配，请先检查备份文件")
+	}
+	if state != nil {
+		if _, err := decodeBackupContent(state); err != nil {
+			return Result{}, err
+		}
+		for _, extra := range extraBackupStates(state) {
+			if _, err := decodeBackupContent(extra); err != nil {
+				return Result{}, err
+			}
+		}
+	}
+	managedDefaults := opts.DefaultModel != nil || opts.ReasoningEffort != nil || state.truthy("managed_defaults")
 
 	// 备份里记录的就是「当前这份被 AMKR 写入的内容」时，沿用更早的原始快照，
 	// 否则用户已经手工改过配置，必须以当前内容为新快照
@@ -382,10 +405,51 @@ func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, er
 		if updated, err = configureClaudeCode(current, cfg, claudeLegacy); err != nil {
 			return Result{}, err
 		}
+		if opts.DefaultModel != nil {
+			updated, err = configureJSONDefaults(updated, map[string]string{"model": *opts.DefaultModel})
+			if err != nil {
+				return Result{}, err
+			}
+		}
 		routeURL = RouterOrigin(cfg)
 	case PiAgent:
 		if updated, err = configurePiAgent(current, cfg); err != nil {
 			return Result{}, err
+		}
+		settingsPath := filepath.Join(filepath.Dir(target), "settings.json")
+		// 已纳入备份的设置文件即使本次不改，也必须继续保留，才能完整回退。
+		previouslyManaged := false
+		for _, extra := range extraBackupStates(state) {
+			if extra.str("target_path") == settingsPath {
+				previouslyManaged = true
+			}
+		}
+		if opts.DefaultModel != nil || opts.ReasoningEffort != nil || previouslyManaged {
+			if settingsPath == target {
+				return Result{}, errf("Pi Agent 的模型配置与设置文件路径不能相同")
+			}
+			settings, readErr := readFileOrEmpty(settingsPath)
+			if readErr != nil {
+				return Result{}, readErr
+			}
+			if opts.DefaultModel != nil || opts.ReasoningEffort != nil {
+				values := map[string]string{}
+				if opts.DefaultModel != nil {
+					values["defaultProvider"] = piProviderID
+					values["defaultModel"] = *opts.DefaultModel
+				}
+				if opts.ReasoningEffort != nil {
+					values["defaultThinkingLevel"] = *opts.ReasoningEffort
+				}
+				settings, err = configureJSONDefaults(settings, values)
+				if err != nil {
+					return Result{}, err
+				}
+			}
+			if settings == nil && previouslyManaged {
+				return Result{}, errf("Pi Agent 已接管的 settings.json 不存在，请先回退或重新选择默认模型")
+			}
+			extraTargets = append(extraTargets, extraTarget{Path: settingsPath, Content: settings})
 		}
 		routeURL = RouterOrigin(cfg) + "/v1"
 	default:
@@ -393,8 +457,19 @@ func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, er
 		// model_catalog_json 指向它）。它和 auth.json 一样是「附加目标」：一起
 		// 备份、一起回退，绝不写进客户端会自行刷新的缓存文件。
 		catalogTarget := filepath.Join(filepath.Dir(target), codexCatalogFileName)
-		if updated, err = configureCodex(current, cfg, catalogTarget, codexLegacy); err != nil {
+		if managedDefaults {
+			// 用户已选择过默认项时，后续应用不得按旧备份撤销这些选择。
+			codexLegacy.Restore = nil
+			codexLegacy.Remove = nil
+		}
+		if updated, err = configureCodex(current, cfg, catalogTarget, codexLegacy, managedDefaults); err != nil {
 			return Result{}, err
+		}
+		if opts.DefaultModel != nil || opts.ReasoningEffort != nil {
+			updated, err = configureCodexDefaults(updated, opts.DefaultModel, opts.ReasoningEffort)
+			if err != nil {
+				return Result{}, err
+			}
 		}
 		authTarget := filepath.Join(filepath.Dir(target), "auth.json")
 		currentAuth, err := readFileOrEmpty(authTarget)
@@ -422,8 +497,11 @@ func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	snapshots := fileSnapshots(append([]string{target}, extraTargetPaths(extraTargets)...))
-	if err := writeAtomic(backup, newBackupBytes(agent, target, originalExists, originalContent, sha256Hex(updated), extraBackup)); err != nil {
+	snapshots, err := fileSnapshots(append([]string{target}, extraTargetPaths(extraTargets)...))
+	if err != nil {
+		return Result{}, err
+	}
+	if err := writeAtomic(backup, newBackupBytes(agent, target, originalExists, originalContent, sha256Hex(updated), extraBackup, managedDefaults)); err != nil {
 		return Result{}, err
 	}
 	if err := writeOutputs(target, updated, extraTargets); err != nil {
@@ -444,6 +522,33 @@ func Configure(agent string, cfg *config.RouterConfig, opts Options) (Result, er
 		RouterURL:        routeURL,
 		ExtraTargetPaths: extraTargetPaths(extraTargets),
 	}, nil
+}
+
+// validateIntegrationOptions 在读取或写入用户文件前检查客户端与模型选项。
+func validateIntegrationOptions(agent string, cfg *config.RouterConfig, opts Options) error {
+	if opts.DefaultModel != nil {
+		name := *opts.DefaultModel
+		if name == "" || strings.TrimSpace(name) != name || !containsName(availableModelNames(cfg), name) {
+			return errf("默认模型 %q 不在当前可用模型清单中", name)
+		}
+	}
+	if opts.ReasoningEffort == nil {
+		return nil
+	}
+	value := *opts.ReasoningEffort
+	var allowed []string
+	switch agent {
+	case Codex:
+		allowed = []string{"minimal", "low", "medium", "high", "xhigh"}
+	case PiAgent:
+		allowed = []string{"off", "minimal", "low", "medium", "high", "xhigh"}
+	default:
+		return errf("%s 暂不支持通过集成设置推理强度", DisplayName(agent))
+	}
+	if !containsName(allowed, value) {
+		return errf("%s 不支持推理强度 %q", DisplayName(agent), value)
+	}
+	return nil
 }
 
 // Rollback 用备份还原 Agent 配置并删除备份（agent_config.py:209）。
@@ -628,17 +733,20 @@ func writeOutputs(target string, content []byte, extras []extraTarget) error {
 }
 
 // fileSnapshots 记录若干文件的当前内容，用于失败回滚（agent_config.py:477）。
-func fileSnapshots(paths []string) []fileSnapshot {
+func fileSnapshots(paths []string) ([]fileSnapshot, error) {
 	snapshots := make([]fileSnapshot, 0, len(paths))
 	for _, path := range paths {
 		content, err := os.ReadFile(path)
-		if err != nil {
+		if os.IsNotExist(err) {
 			snapshots = append(snapshots, fileSnapshot{Path: path, Exists: false})
 			continue
 		}
+		if err != nil {
+			return nil, err
+		}
 		snapshots = append(snapshots, fileSnapshot{Path: path, Exists: true, Content: content})
 	}
-	return snapshots
+	return snapshots, nil
 }
 
 // fileSnapshot 是单个文件的改写前快照。

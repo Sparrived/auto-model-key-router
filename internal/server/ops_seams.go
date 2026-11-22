@@ -65,6 +65,16 @@ func opsIntegrations() *api.OpsIntegrations {
 				ExtraTargetPaths: result.ExtraTargetPaths,
 			}, nil
 		},
+		ConfigureWithOptions: func(agent string, cfg *config.RouterConfig, model, effort *string) (api.OpsAgentConfigResult, error) {
+			selected := options
+			selected.DefaultModel = model
+			selected.ReasoningEffort = effort
+			result, err := agentconfig.Configure(agent, cfg, selected)
+			if err != nil {
+				return api.OpsAgentConfigResult{}, err
+			}
+			return api.OpsAgentConfigResult{TargetPath: result.TargetPath, BackupPath: result.BackupPath, RouterURL: result.RouterURL, ExtraTargetPaths: result.ExtraTargetPaths}, nil
+		},
 		Rollback: func(agent string) (api.OpsAgentRollbackResult, error) {
 			result, err := agentconfig.Rollback(agent, options)
 			if err != nil {

@@ -37,7 +37,7 @@ import (
 //
 // 注意 provider 名是大小写敏感的 "OpenAI"：用户自己的
 // `[model_providers.openai]` 不会被覆盖，两者在 Codex 里是两个 provider。
-func configureCodex(current []byte, cfg *config.RouterConfig, catalogPath string, legacy AgentLegacyPlan) ([]byte, error) {
+func configureCodex(current []byte, cfg *config.RouterConfig, catalogPath string, legacy AgentLegacyPlan, explicitDefault bool) ([]byte, error) {
 	// 空文档对应 tomlkit.document()。**实测**它的根容器 _parsed 是 false，
 	// 因此新增键会走「插入到最后一个非表项之后」，新建表也会拿到一个前导换行
 	// （这正是 `model = "v"\n\n[model_providers.OpenAI]` 里空行的来源）。
@@ -77,6 +77,9 @@ func configureCodex(current []byte, cfg *config.RouterConfig, catalogPath string
 	// 不认识的名字会让新会话直接打到不存在的模型上（`/model` 的切换不受它们影响）。
 	names := availableModelNames(cfg)
 	for _, key := range []string{"model", "review_model"} {
+		if explicitDefault && key == "review_model" {
+			continue
+		}
 		if currentValue, ok := document.scalarString(key); ok && containsName(names, currentValue) {
 			continue
 		}
@@ -95,6 +98,26 @@ func configureCodex(current []byte, cfg *config.RouterConfig, catalogPath string
 	provider.setScalar("base_url", quoteTOMLString(RouterOrigin(cfg)+"/v1"))
 	provider.setScalar("wire_api", quoteTOMLString("responses"))
 	provider.setScalar("requires_openai_auth", "true")
+	return []byte(root.Render()), nil
+}
+
+// configureCodexDefaults 在保真解析后的配置中只写用户明确选择的字段。
+func configureCodexDefaults(current []byte, model, effort *string) ([]byte, error) {
+	text, err := decodeUTF8Sig("Codex", current)
+	if err != nil {
+		return nil, err
+	}
+	root, err := parseTOMLDocument(text)
+	if err != nil {
+		return nil, errf("Codex 配置不是有效的 UTF-8 TOML: %v", err)
+	}
+	document := &codexTable{container: root}
+	if model != nil {
+		document.setScalar("model", quoteTOMLString(*model))
+	}
+	if effort != nil {
+		document.setScalar("model_reasoning_effort", quoteTOMLString(*effort))
+	}
 	return []byte(root.Render()), nil
 }
 

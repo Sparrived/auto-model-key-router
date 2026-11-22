@@ -385,8 +385,9 @@ export const api = {
   runService: (action: string): Promise<ServiceActionResponse> => request(`/api/service/${action}`, { method: "POST" }),
 
   integrations: (): Promise<IntegrationsResponse> => request("/api/integrations"),
-  // 集成没有「路由模式」参数：服务端一律写入 AMKR 当前可用的全部模型。
-  applyIntegration: (agent: string): Promise<ServiceActionResponse> => request(`/api/integrations/${agent}`, { method: "POST" }),
+  // 未选择默认值时保留空请求体，兼容旧版服务端。
+  applyIntegration: (agent: string, options?: { default_model?: string; reasoning_effort?: string }): Promise<ServiceActionResponse> =>
+    request(`/api/integrations/${encodeURIComponent(agent)}`, { method: "POST", body: options }),
   rollbackIntegration: (agent: string): Promise<ServiceActionResponse> =>
     request(`/api/integrations/${agent}/rollback`, { method: "POST" }),
 

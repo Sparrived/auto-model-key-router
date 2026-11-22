@@ -160,6 +160,29 @@ func configurePiAgent(current []byte, cfg *config.RouterConfig) ([]byte, error) 
 	return []byte(canonical.DumpsIndent(data, 2) + "\n"), nil
 }
 
+// configureJSONDefaults 只改指定设置，未选的客户端字段保持不变。
+func configureJSONDefaults(current []byte, values map[string]string) ([]byte, error) {
+	data := canonical.NewObject()
+	if len(current) > 0 {
+		text, err := decodeUTF8Sig("客户端设置", current)
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := canonical.ParseString(text)
+		if err != nil || !parsed.IsObject() {
+			return nil, errf("客户端设置必须是有效的 JSON 对象")
+		}
+		data = parsed
+	}
+	// 固定键序避免 map 遍历使同一配置每次写出不同内容。
+	for _, key := range []string{"model", "defaultProvider", "defaultModel", "defaultThinkingLevel"} {
+		if value, ok := values[key]; ok {
+			data.SetKey(key, canonical.NewString(value))
+		}
+	}
+	return []byte(canonical.DumpsIndent(data, 2) + "\n"), nil
+}
+
 // availableModelNames 返回 AMKR 当前可用的全部对外模型名（去重、排序）。
 //
 // 判定与 internal/keypool.AvailableModelIDs 保持一致：**至少有一个启用 Key** 的
