@@ -722,12 +722,19 @@ func (s *Server) handleGetProviderKeyModels(w http.ResponseWriter, r *http.Reque
 		if _, err := configops.RequireKey(provider, keyName); err != nil {
 			return nil, err
 		}
-		models, err := configops.KeyServiceModels(data, providerID, keyName)
+		models, err := keyServiceModelsForRequest(r, data, providerID, keyName)
 		if err != nil {
 			return nil, err
 		}
 		return withRevision(data, keyServiceModelsResponse(providerID, keyName, models))
 	})
+}
+
+func keyServiceModelsForRequest(r *http.Request, data *canonical.Value, providerID, keyName string) ([]string, error) {
+	if r.URL.Query().Get("model_scope") == "upstream" {
+		return configops.KeyUpstreamModels(data, providerID, keyName)
+	}
+	return configops.KeyServiceModels(data, providerID, keyName)
 }
 
 // keyServiceModelsResponse 构造 models 视图响应（models 升序）。
@@ -753,6 +760,9 @@ func (s *Server) handleSetProviderKeyModels(w http.ResponseWriter, r *http.Reque
 		keyName := r.PathValue("key_name")
 		requested := trailingStringSlice(payload, "models")
 		mutate := func(current *canonical.Value) error {
+			if r.URL.Query().Get("model_scope") == "upstream" {
+				return configops.SetKeyUpstreamModels(current, providerID, keyName, requested)
+			}
 			_, err := configops.SetKeyServiceModels(current, providerID, keyName, requested)
 			return err
 		}
@@ -765,7 +775,7 @@ func (s *Server) handleSetProviderKeyModels(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			return nil, err
 		}
-		models, err := configops.KeyServiceModels(data, providerID, keyName)
+		models, err := keyServiceModelsForRequest(r, data, providerID, keyName)
 		if err != nil {
 			return nil, err
 		}

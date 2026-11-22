@@ -101,7 +101,7 @@ export function AddKeySheet({ provider, revision, onClose, onSaved, loadProvider
         <Button
           variant="primary"
           loading={binding.saving}
-          disabled={!changed}
+          disabled={!changed || Boolean(binding.loadError)}
           onClick={() => {
             void binding.save().then((ok) => {
               if (!ok) return;

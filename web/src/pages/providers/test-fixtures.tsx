@@ -9,6 +9,7 @@ import type {
   Provider,
   QuotaFreeze,
   RouteEntry,
+  RouteTarget,
   UnifiedModel,
 } from "@/lib/types";
 
@@ -263,41 +264,33 @@ export function createFakeBackend(seed: Partial<FakeState> = {}) {
     }
 
     let match = path.match(/^\/api\/providers\/([^/]+)\/keys\/([^/]+)\/models$/);
-    if (match && method === "GET") {
-      const provider = providerOf(match[1]);
-      if (!provider) return response({ error: "not found" }, 404);
-      const models = state.routes
-        .filter((route) => route.targets.some((target) => target.provider === match![1] && target.key === match![2]))
-        .map((route) => route.id);
-      return response({ models, config_revision: state.revision });
-    }
-    if (match && method === "PUT") {
-      if (!checkRevision(body)) return conflict();
+    if (match && (method === "GET" || method === "PUT")) {
       const provider = providerOf(match[1]);
       const key = provider ? keyOf(provider, match[2]) : undefined;
       if (!provider || !key) return response({ error: "not found" }, 404);
-      const nextModels = (body?.models as string[] | undefined) || [];
-      const current = state.routes
-        .filter((route) => route.targets.some((target) => target.provider === provider.id && target.key === key.name))
-        .map((route) => route.id);
-      const removed = current.filter((model) => !nextModels.includes(model));
+      const upstream = url.searchParams.get("model_scope") === "upstream";
+      const modelName = (route: RouteEntry, target: RouteTarget) => upstream ? target.upstream_model || route.id : route.id;
+      const matchesKey = (target: RouteTarget) => target.provider === provider.id && target.key === key.name;
+      const current = new Set(state.routes.flatMap((route) => route.targets.filter(matchesKey).map((target) => modelName(route, target))));
+      if (method === "GET") return response({ models: [...current].sort(), config_revision: state.revision });
+      if (!checkRevision(body)) return conflict();
+      const nextModels = new Set((body?.models as string[] | undefined) || []);
+      const keep = (route: RouteEntry, target: RouteTarget) => !matchesKey(target) || nextModels.has(modelName(route, target));
       if (url.searchParams.get("dry_run") === "1") {
-        return response({ config_revision: state.revision, removed_models: removed });
+        const removed = state.routes.filter((route) => route.targets.length && !route.targets.some((target) => keep(route, target)));
+        return response({ config_revision: state.revision, removed_models: removed.map((route) => route.id) });
       }
-      for (const route of state.routes) {
-        route.targets = route.targets.filter((target) => !(target.provider === provider.id && target.key === key.name));
-      }
-      state.routes = state.routes.filter((route) => route.targets.length > 0);
       for (const model of nextModels) {
+        if (current.has(model)) continue;
         let route = state.routes.find((item) => item.id === model);
         if (!route) {
           route = { id: model, aliases: [], routing_mode: "", targets: [], endpoints: null };
           state.routes.push(route);
         }
-        if (!route.targets.some((target) => target.provider === provider.id && target.key === key.name)) {
-          route.targets.push({ provider: provider.id, key: key.name, upstream_model: model });
-        }
+        route.targets.push({ provider: provider.id, key: key.name, upstream_model: model });
       }
+      for (const route of state.routes) route.targets = route.targets.filter((target) => keep(route, target));
+      state.routes = state.routes.filter((route) => route.targets.length > 0);
       bump();
       return response({ config_revision: state.revision });
     }

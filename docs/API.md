@@ -65,7 +65,7 @@ x-api-key: your-local-api-key
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}` | 仅本地 | 查询、更新或删除 Provider |
 | `GET/POST` | `/api/providers/{provider_id}/keys` | 仅本地 | 查询或创建 Provider Key |
 | `GET/PUT/DELETE` | `/api/providers/{provider_id}/keys/{key_name}` | 仅本地 | 查询、更新或删除 Provider Key |
-| `GET/PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` | 仅本地 | 查询或设定该 Key 对外提供的模型（取消勾选只绑在它上面的最后一个模型会连带删除那个模型；被编辑的这把 Key 本身保留，即使它不再服务任何模型，见「消失：引用被一并清理」） |
+| `GET/PUT` | `/api/providers/{provider_id}/keys/{key_name}/models` | 仅本地 | 默认按本地路由 ID 查询或设定绑定。带 `?model_scope=upstream` 时，`models` 为去重后的上游模型名称，取消绑定只移除该 Key 下对应的目标。最后一个目标移除时才删除路由，被编辑的 Key 保留。 |
 | `POST` | `/api/providers/{provider_id}/probe` | 仅本地 | 同步刷新该 Provider 全部启用 Key 的能力探测（各 Key 的模型列表 + 路由可用性） |
 | `POST` | `/api/providers/{provider_id}/keys/{key_name}/probe` | 仅本地 | 同步刷新指定 Key 的能力探测，可用 `modes` 限定路由检查范围 |
 | `GET/POST` | `/api/routes` | 仅本地 | 查询或创建模型路由 |

@@ -215,6 +215,9 @@ describe("添加 Key 向导", () => {
 describe("Key 服务模型绑定", () => {
   it("摘要按新增/移除计数，保存走预演→确认→真写", async () => {
     const backend = createFakeBackend();
+    // 只有最后一个目标被移除才需要确认删除路由。
+    const model = backend.state.routes.find((route) => route.id === "gpt-4o")!;
+    model.targets = model.targets.filter((target) => target.key === "main");
     installBackend(backend);
     const user = userEvent.setup();
     const onSaved = vi.fn();
@@ -238,6 +241,7 @@ describe("Key 服务模型绑定", () => {
       expect(writes).toHaveLength(1);
     });
     const preview = backend.calls.filter((call) => call.method === "PUT" && call.path === "/api/providers/openai/keys/main/models")[0];
+    expect(new URLSearchParams(preview.search).get("model_scope")).toBe("upstream");
     expect(preview.search).toContain("dry_run=1");
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "保存模型" }));
@@ -250,6 +254,9 @@ describe("Key 服务模型绑定", () => {
 
   it("取消确认时不真写", async () => {
     const backend = createFakeBackend();
+    // 只有最后一个目标被移除才需要确认删除路由。
+    const model = backend.state.routes.find((route) => route.id === "gpt-4o")!;
+    model.targets = model.targets.filter((target) => target.key === "main");
     installBackend(backend);
     const user = userEvent.setup();
     const onSaved = vi.fn();
@@ -336,6 +343,9 @@ describe("模型选择 Sheet 的自动探测", () => {
 
   it("探测失败显示 warn 提示，列表来自缓存且仍可勾选与保存", async () => {
     const backend = createFakeBackend();
+    // 只有最后一个目标被移除才需要确认删除路由。
+    const model = backend.state.routes.find((route) => route.id === "gpt-4o")!;
+    model.targets = model.targets.filter((target) => target.key === "main");
     const handle = backend.fetch;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), "http://localhost");

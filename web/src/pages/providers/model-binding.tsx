@@ -72,6 +72,7 @@ export function useKeyModelBinding({
     queryKey: ["key-models", providerId, keyName],
     queryFn: () => api.keyModels(providerId, keyName),
     enabled: enabled && Boolean(providerId && keyName),
+    gcTime: 0,
     retry: false,
   });
 
@@ -148,6 +149,7 @@ export function useKeyModelBinding({
 
   async function save(): Promise<boolean> {
     // 快照一份选中集合：确认框弹出期间用户仍可能改动卡片，而真写必须与预演送的是同一份清单。
+    if (!ready) return false;
     const models = [...selected];
     setSaving(true);
     setSaveError(null);
@@ -163,6 +165,7 @@ export function useKeyModelBinding({
       });
       if (!confirmed) return false;
       toast(`Key ${keyName} 已保存 ${models.length} 个模型。`);
+      await client.invalidateQueries({ queryKey: ["key-models", providerId, keyName] });
       await client.invalidateQueries({ queryKey: queryKeys.providers() });
       await client.invalidateQueries({ queryKey: queryKeys.routes() });
       onSaved?.();
@@ -256,9 +259,9 @@ export function KeyModelBindingBody({ binding }: { binding: BindingState }) {
   return (
     <div className="space-y-4">
       <p className="text-meta leading-5 text-ink-3">
-        只显示该 Key 对外提供的模型；黄色卡片表示已启用但当前探测未发现。
-        取消勾选一个模型会解除本 Key 与它的绑定；若它因此失去全部绑定，模型会被删除，
-        引用它的访问密钥、工作空间与任务会一并变动（保存前会先列出来）。
+        只显示上游模型名称；黄色卡片表示已启用但当前探测未发现。
+        取消勾选会解除本 Key 对该上游模型的绑定；若某条路由因此失去所有目标，
+        路由会被删除，保存前会列出受影响的引用。
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <Input
@@ -477,7 +480,7 @@ export function ModelBindingSheet({ provider, providerKey, revision, onClose, on
             <Button
               variant="primary"
               loading={binding.saving}
-              disabled={!changed || probing}
+              disabled={!changed || probing || Boolean(binding.loadError)}
               onClick={() => {
                 void binding.save().then((ok) => {
                   if (ok) {

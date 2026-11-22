@@ -14,7 +14,7 @@ import {
 } from "@/lib/quota-freeze";
 import { queryKeys } from "@/lib/query-keys";
 import { ProviderIcon } from "@/lib/brand-icons";
-import type { Provider, ProviderKey, ProvidersResponse, QuotaFreeze } from "@/lib/types";
+import type { Provider, ProviderKey, ProvidersResponse, QuotaFreeze, RouteEntry } from "@/lib/types";
 import { navigate, setParams, useRoute } from "@/app/router";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
@@ -33,17 +33,14 @@ import { ModelBindingSheet } from "./model-binding";
 import { ProbePanel } from "./probe-panel";
 import { ROUTE_MODES } from "./route-modes";
 
-// boundModelsByKey 把路由表反过来索引成 `供应商|Key` → 它服务的模型 ID（升序）。
-//
-// Key 行下方要显示的是「这个 Key 正在服务哪些模型」，而那是模型 targets 里的绑定关系，
-// 只读 providers 看不到。
-function boundModelsByKey(routes: Array<{ id: string; targets?: Array<{ provider: string; key: string }> }>): Map<string, string[]> {
+// 未填写上游名时，运行时会直接把路由 ID 发给上游。
+function boundModelsByKey(routes: RouteEntry[]): Map<string, string[]> {
   const index = new Map<string, Set<string>>();
   for (const route of routes) {
     for (const target of route.targets || []) {
-      const id = `${target.provider}|${target.key}`;
+      const id = `${target.provider.trim()}|${target.key.trim()}`;
       if (!index.has(id)) index.set(id, new Set());
-      index.get(id)?.add(route.id);
+      index.get(id)?.add(target.upstream_model?.trim() || route.id);
     }
   }
   const result = new Map<string, string[]>();
@@ -330,7 +327,7 @@ export default function ProvidersPage() {
               {probeOpen ? <ProbePanel provider={selected} /> : null}
 
               <details className="rounded-panel border border-rule bg-panel px-4 py-3">
-                <summary className="cursor-pointer text-meta text-ink-2">这个供应商会被哪些模型使用</summary>
+                <summary className="cursor-pointer text-meta text-ink-2">这个供应商绑定了哪些上游模型</summary>
                 <div className="mt-2 space-y-1 text-meta text-ink-3">
                   {[...boundModels.entries()].filter(([id]) => id.startsWith(`${selected.id}|`)).length ? (
                     [...boundModels.entries()].filter(([id]) => id.startsWith(`${selected.id}|`)).map(([id, models]) => (

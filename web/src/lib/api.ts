@@ -465,9 +465,9 @@ export const api = {
     }),
 
   keyModels: (providerId: string, keyName: string): Promise<KeyModelsResponse> =>
-    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models`),
+    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models?model_scope=upstream`),
   setKeyModels: (revision: string, providerId: string, keyName: string, models: string[], options?: DryRunOptions): Promise<ConfigRevisionResponse> =>
-    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models${dryRunQuery(options)}`, {
+    request(`/api/providers/${encodeURIComponent(providerId)}/keys/${encodeURIComponent(keyName)}/models?model_scope=upstream${options?.dryRun ? "&dry_run=1" : ""}`, {
       method: "PUT",
       body: { config_revision: revision, models },
     }),

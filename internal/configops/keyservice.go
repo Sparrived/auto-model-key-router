@@ -12,6 +12,15 @@ import (
 // 对齐 config_operations.py:372。Python 返回 set[str]；Go 侧排序后返回，避免
 // 调用方依赖不可复现的集合顺序。
 func KeyServiceModels(data *canonical.Value, providerID, keyName string) ([]string, error) {
+	return keyServiceModels(data, providerID, keyName, false)
+}
+
+// KeyUpstreamModels 汇总该 Key 的目标实际发给上游的模型名称。
+func KeyUpstreamModels(data *canonical.Value, providerID, keyName string) ([]string, error) {
+	return keyServiceModels(data, providerID, keyName, true)
+}
+
+func keyServiceModels(data *canonical.Value, providerID, keyName string, upstream bool) ([]string, error) {
 	provider, err := RequireProvider(data, providerID)
 	if err != nil {
 		return nil, err
@@ -33,13 +42,30 @@ func KeyServiceModels(data *canonical.Value, providerID, keyName string) ([]stri
 			return nil, err
 		}
 		for _, target := range targets.Arr {
-			if pyEqualsString(lookup(target, "provider"), providerID) && pyEqualsString(lookup(target, "key"), keyName) {
-				result[pair.Key] = true
-				break
+			if matchesServiceKey(target, providerID, keyName, upstream) {
+				result[serviceModelName(pair.Key, target, upstream)] = true
 			}
 		}
 	}
 	return sortedSet(result), nil
+}
+
+func matchesServiceKey(target *canonical.Value, providerID, keyName string, upstream bool) bool {
+	if upstream {
+		return strings.TrimSpace(lookup(target, "provider").StringValue()) == providerID &&
+			strings.TrimSpace(lookup(target, "key").StringValue()) == keyName
+	}
+	return pyEqualsString(lookup(target, "provider"), providerID) && pyEqualsString(lookup(target, "key"), keyName)
+}
+
+func serviceModelName(routeID string, target *canonical.Value, upstream bool) string {
+	if upstream {
+		if name := strings.TrimSpace(lookup(target, "upstream_model").StringValue()); name != "" {
+			return name
+		}
+	}
+	// 未填写上游名称时，运行时也会把路由 ID 发给上游。
+	return routeID
 }
 
 // KeyServiceModelsResult 是 SetKeyServiceModels 的结果。
@@ -76,6 +102,16 @@ func (r KeyServiceModelsResult) Value() *canonical.Value {
 // models 的顺序取决于字符串哈希（进程间随机）；Go 侧按调用方给出的顺序去重后
 // 依次创建，由 TestSetKeyServiceModelsCreatesModelsInCallerOrder 钉住。
 func SetKeyServiceModels(data *canonical.Value, providerID, keyName string, modelIDs []string) (KeyServiceModelsResult, error) {
+	return setKeyServiceModels(data, providerID, keyName, modelIDs, false)
+}
+
+// SetKeyUpstreamModels 只解绑未选的目标，以免误删同一路由的其他上游模型。
+func SetKeyUpstreamModels(data *canonical.Value, providerID, keyName string, names []string) error {
+	_, err := setKeyServiceModels(data, providerID, keyName, names, true)
+	return err
+}
+
+func setKeyServiceModels(data *canonical.Value, providerID, keyName string, modelIDs []string, upstream bool) (KeyServiceModelsResult, error) {
 	provider, err := RequireProvider(data, providerID)
 	if err != nil {
 		return KeyServiceModelsResult{}, err
@@ -96,6 +132,7 @@ func SetKeyServiceModels(data *canonical.Value, providerID, keyName string, mode
 		}
 	}
 
+	bound := map[string]bool{}
 	boundOrder := []string{}
 	all, err := Models(data)
 	if err != nil {
@@ -109,11 +146,15 @@ func SetKeyServiceModels(data *canonical.Value, providerID, keyName string, mode
 		if err != nil {
 			return KeyServiceModelsResult{}, err
 		}
+		hasBoundTarget := false
 		for _, target := range targets.Arr {
-			if pyEqualsString(lookup(target, "provider"), providerID) && pyEqualsString(lookup(target, "key"), keyName) {
-				boundOrder = append(boundOrder, pair.Key)
-				break
+			if matchesServiceKey(target, providerID, keyName, upstream) {
+				bound[serviceModelName(pair.Key, target, upstream)] = true
+				hasBoundTarget = true
 			}
+		}
+		if hasBoundTarget {
+			boundOrder = append(boundOrder, pair.Key)
 		}
 	}
 
@@ -121,30 +162,15 @@ func SetKeyServiceModels(data *canonical.Value, providerID, keyName string, mode
 	removed := []string{}
 	removedModels := []string{}
 	for _, modelID := range desiredList {
+		if bound[modelID] {
+			continue
+		}
 		// Python 的 `all_models.get(id)` 对「键缺失」与「值为 null」都返回 None，
 		// 于是两者都会走 create_model——而 create_model 对后者报 409（键已存在）。
 		if !all.Obj.Has(modelID) || lookup(all, modelID).IsNull() {
 			if _, err := CreateModel(data, modelID, CreateModelOptions{}); err != nil {
 				return KeyServiceModelsResult{}, err
 			}
-		}
-		model, err := RequireModel(data, modelID)
-		if err != nil {
-			return KeyServiceModelsResult{}, err
-		}
-		targets, err := ModelTargets(model)
-		if err != nil {
-			return KeyServiceModelsResult{}, err
-		}
-		exists := false
-		for _, target := range targets.Arr {
-			if pyEqualsString(lookup(target, "provider"), providerID) && pyEqualsString(lookup(target, "key"), keyName) {
-				exists = true
-				break
-			}
-		}
-		if exists {
-			continue
 		}
 		if err := AddModelTarget(data, modelID, canonical.NewObjectOf(
 			canonical.ObjectPair{Key: "provider", Value: canonical.NewString(providerID)},
@@ -157,20 +183,17 @@ func SetKeyServiceModels(data *canonical.Value, providerID, keyName string, mode
 	}
 
 	for _, modelID := range boundOrder {
-		if desired[modelID] {
-			continue
-		}
-		model := lookup(all, modelID)
-		if !model.IsObject() {
-			continue
-		}
-		targets, err := ModelTargets(model)
+		targets, err := ModelTargets(lookup(all, modelID))
 		if err != nil {
 			return KeyServiceModelsResult{}, err
 		}
-		targets.Arr = filterTargets(targets.Arr, func(target *canonical.Value) bool {
-			return !(pyEqualsString(lookup(target, "provider"), providerID) && pyEqualsString(lookup(target, "key"), keyName))
+		remaining := filterTargets(targets.Arr, func(target *canonical.Value) bool {
+			return !matchesServiceKey(target, providerID, keyName, upstream) || desired[serviceModelName(modelID, target, upstream)]
 		})
+		if len(remaining) == len(targets.Arr) {
+			continue
+		}
+		targets.Arr = remaining
 		removed = append(removed, modelID)
 		if len(targets.Arr) == 0 {
 			all.DeleteKey(modelID)
