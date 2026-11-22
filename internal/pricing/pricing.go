@@ -235,6 +235,7 @@ func selectCheapest(candidate, current Entry) bool {
 type snapshot struct {
 	index     map[string]Entry
 	kinds     modelkind.Catalog
+	metadata  *MetadataSnapshot
 	updatedAt time.Time
 	payload   []byte
 }
@@ -318,6 +319,21 @@ func (c *Catalog) ModelKinds() (modelkind.Catalog, bool) {
 	return kinds, kinds != nil
 }
 
+// Metadata 返回单次发布的只读目录快照；冷启动或过期时不等待网络。
+func (c *Catalog) Metadata() *MetadataSnapshot {
+	c.mu.Lock()
+	stale := !c.now().Before(c.nextAt)
+	var metadata *MetadataSnapshot
+	if c.snap != nil {
+		metadata = c.snap.metadata
+	}
+	c.mu.Unlock()
+	if stale {
+		go func() { _ = c.refreshOnce(context.Background()) }()
+	}
+	return metadata
+}
+
 // refreshOnce 是**唯一**的取回入口，并保证一次过期只触发一次真实取回。
 //
 // 为什么必须收在一处：取回有两条触发路径——Payload 的过期触发，与 Start 的定期循环。
@@ -376,7 +392,17 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 		// 目录未变：只把保鲜期往后推，不重建载荷（updated_at 含义是"上次真正取到
 		// 新数据的时间"，不该被 304 刷新）。
 		c.mu.Lock()
+		previous := c.snap
+		c.mu.Unlock()
+		payload := render(previous.index, previous.updatedAt, "")
+		c.mu.Lock()
 		c.nextAt = c.now().Add(c.ttl)
+		if c.snap == previous {
+			c.snap = &snapshot{
+				index: previous.index, kinds: previous.kinds, metadata: previous.metadata,
+				updatedAt: previous.updatedAt, payload: payload,
+			}
+		}
 		c.mu.Unlock()
 		return nil
 	}
@@ -395,14 +421,18 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 		return err
 	}
 
+	kinds := modelkind.BuildCatalog(parsed)
+	metadata := buildMetadata(parsed)
 	now := c.now()
+	payload := render(index, now, "")
 	c.mu.Lock()
 	c.etag = result.ETag
 	c.snap = &snapshot{
 		index:     index,
-		kinds:     modelkind.BuildCatalog(parsed),
+		kinds:     kinds,
+		metadata:  metadata,
 		updatedAt: now,
-		payload:   render(index, now, ""),
+		payload:   payload,
 	}
 	c.nextAt = now.Add(c.ttl)
 	c.mu.Unlock()
@@ -422,6 +452,7 @@ func (c *Catalog) recordFailure(err error) {
 	c.snap = &snapshot{
 		index:     c.snap.index,
 		kinds:     c.snap.kinds,
+		metadata:  c.snap.metadata,
 		updatedAt: c.snap.updatedAt,
 		payload:   render(c.snap.index, c.snap.updatedAt, err.Error()),
 	}

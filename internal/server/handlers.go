@@ -13,6 +13,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/health"
 	"github.com/Sparrived/auto-model-key-router/internal/keypool"
 	"github.com/Sparrived/auto-model-key-router/internal/metrics"
+	"github.com/Sparrived/auto-model-key-router/internal/pricing"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 )
 
@@ -83,19 +84,84 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		default:
 			names = pool.AvailableModelIDs(nil)
 		}
+		include := r.URL.Query()["include"]
+		withMetadata := len(include) == 1 && include[0] == "metadata"
+		var eligible map[string]bool
+		var metadata *pricing.MetadataSnapshot
+		if withMetadata {
+			w.Header().Set("Cache-Control", "private, no-store")
+			eligible = metadataEligibleNames(resources.Config, accessKey, scoped)
+			metadata = a.pricing.Metadata()
+		}
 		items := make([]*canonical.Value, 0, len(names))
 		for _, modelID := range names {
-			items = append(items, canonical.NewObjectOf(
+			item := canonical.NewObjectOf(
 				canonical.ObjectPair{Key: "id", Value: canonical.NewString(modelID)},
 				canonical.ObjectPair{Key: "object", Value: canonical.NewString("model")},
 				canonical.ObjectPair{Key: "owned_by", Value: canonical.NewString("auto-model-key-router")},
-			))
+			)
+			if eligible[modelID] {
+				if extra := metadata.Lookup(modelID); extra != nil {
+					for _, field := range extra.Obj.Keys() {
+						item.SetKey(field, extra.Lookup(field))
+					}
+				}
+			}
+			items = append(items, item)
 		}
 		writeJSON(w, http.StatusOK, canonical.NewObjectOf(
 			canonical.ObjectPair{Key: "object", Value: canonical.NewString("list")},
 			canonical.ObjectPair{Key: "data", Value: canonical.NewArray(items...)},
 		))
 	})
+}
+
+// metadataEligibleNames 只对凭据可用且全部同名的直接目标提供目录参考。
+func metadataEligibleNames(cfg *config.RouterConfig, accessKey *config.AccessKeyConfig, scoped string) map[string]bool {
+	eligible := make(map[string]bool)
+	for _, model := range cfg.Models {
+		if len(model.Endpoints) != 0 {
+			continue
+		}
+		upstream := ""
+		consistent := true
+		for _, key := range model.Keys {
+			if !key.Enabled || (accessKey != nil && !accessKey.AllowsProvider(key.Provider)) {
+				continue
+			}
+			if key.UpstreamModel == "" {
+				consistent = false
+				break
+			}
+			if upstream == "" {
+				upstream = key.UpstreamModel
+			} else if upstream != key.UpstreamModel {
+				consistent = false
+				break
+			}
+		}
+		if !consistent || upstream == "" {
+			continue
+		}
+		if model.ID == upstream {
+			eligible[model.ID] = true
+		}
+		for _, alias := range model.Aliases {
+			if alias == upstream {
+				eligible[alias] = true
+			}
+		}
+	}
+	delete(eligible, config.UNIFIED_MODEL_ID)
+	// 访问密钥无权使用任务，绝不能通过字段存在性观察其他空间的任务。
+	if accessKey == nil {
+		for _, task := range cfg.Tasks {
+			if scoped == "" || config.NormalizeWorkspace(task.Workspace) == scoped {
+				delete(eligible, task.Name)
+			}
+		}
+	}
+	return eligible
 }
 
 // accessKeyModelNames 列出某把访问密钥**在它授权清单内**的模型名（升序）。

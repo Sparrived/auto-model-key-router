@@ -3,6 +3,7 @@ package pricing
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -676,4 +677,151 @@ func TestModelKindsKeptStaleOnError(t *testing.T) {
 	if _, present := kinds["gpt-image-1"]; !present {
 		t.Error("刷新失败后类型索引不该丢内容")
 	}
+}
+
+// TestMetadataConsensusValidatesEachField 只用虚构目录验证逐字段共识，不复用价格归一化。
+func TestMetadataConsensusValidatesEachField(t *testing.T) {
+	fixture := `{
+      "p1":{"models":{
+        "Case-ID":{"id":"Case-ID","name":" Example ","reasoning":false,"limit":{"context":128000,"output":2048},"modalities":{"input":["text","image","text"],"output":["text"]}},
+        "missing":{"name":"First","reasoning":false},
+        "conflict":{"name":"First","reasoning":false},
+        "bad-id":{"id":"other","name":"Not trusted","reasoning":true},
+        "bad-object":"malformed",
+        "numbers":{"name":"Valid","limit":{"context":-1,"output":1.5}},
+        "overflow":{"limit":{"context":9007199254740992,"output":null}},
+        "contradict":{"limit":{"context":10,"output":11}},
+        "bad-name":{"name":"bad\nname","reasoning":null},
+        "directions":{"modalities":{"input":["text","image"],"output":["text"]}},
+        "unknown":{"modalities":{"input":["text","hologram"],"output":["text"]}}
+      }},
+      "p2":{"models":{
+        "Case-ID":{"name":"Example","reasoning":false,"limit":{"context":128000,"output":2048},"modalities":{"input":["image","text"],"output":["text"]}},
+        "missing":{"name":"First"},
+        "conflict":{"name":"Second","reasoning":true},
+        "bad-id":{"name":"Valid elsewhere","reasoning":true},
+        "bad-object":{"name":"Valid elsewhere"},
+        "directions":{"modalities":{"input":["image","text"],"output":["audio"]}}
+      }}
+    }`
+	parsed, err := canonical.ParseString(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := buildMetadata(parsed)
+	assert := func(id, want string) {
+		t.Helper()
+		got := metadata.Lookup(id)
+		if got == nil || canonical.DumpsOrdered(got) != want {
+			t.Errorf("%s = %v, want %s", id, got, want)
+		}
+	}
+	assert("Case-ID", `{"display_name":"Example","reasoning":false,"context_window":128000,"max_output_tokens":2048,"modalities":{"input":["image","text"],"output":["text"]}}`)
+	assert("missing", `{"display_name":"First"}`)
+	assert("conflict", `{}`)
+	assert("bad-id", `{}`)
+	assert("bad-object", `{}`)
+	assert("numbers", `{"display_name":"Valid"}`)
+	assert("overflow", `{}`)
+	assert("contradict", `{}`)
+	assert("bad-name", `{}`)
+	assert("directions", `{"modalities":{"input":["image","text"]}}`)
+	assert("unknown", `{"modalities":{"output":["text"]}}`)
+	if metadata.Lookup("case-id") != nil {
+		t.Error("目录 ID 不应忽略大小写")
+	}
+	copy := metadata.Lookup("Case-ID")
+	copy.DeleteKey("reasoning")
+	if metadata.Lookup("Case-ID").Lookup("reasoning") == nil {
+		t.Error("调用方不能修改共享快照")
+	}
+}
+
+// TestMetadataSnapshotSurvivesRefreshFailure 钉住单次发布、冷启动及失败退化。
+func TestMetadataSnapshotSurvivesRefreshFailure(t *testing.T) {
+	const fixture = `{"p":{"models":{"sample":{"name":"Snapshot","cost":{"input":1,"output":2}}}}}`
+	fake := &fakeFetcher{result: []FetchResult{{Body: []byte(fixture)}, {NotModified: true}}, errs: []error{nil, nil, errors.New("offline")}}
+	catalog := newTestCatalog(fake.fetch)
+	// 防止冷启动检查额外触发后台 fetch，避免数据竞争。
+	catalog.nextAt = catalog.now().Add(time.Hour)
+	if catalog.Metadata() != nil {
+		t.Fatal("未取回时不应有元数据")
+	}
+	if err := catalog.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	original := catalog.Metadata()
+	if original == nil || original.Lookup("sample").Lookup("display_name").Str != "Snapshot" {
+		t.Fatal("没有发布元数据")
+	}
+	if err := catalog.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.Metadata() != original {
+		t.Fatal("304 应保留同一快照")
+	}
+	if err := catalog.Refresh(t.Context()); err == nil {
+		t.Fatal("离线应报告错误")
+	}
+	if catalog.Metadata() != original {
+		t.Fatal("失败应保留同一快照")
+	}
+}
+
+// TestMetadataSnapshotConcurrentRefresh 用阻塞假 fetcher 证明读取不等待网络并保持一致版本。
+func TestMetadataSnapshotConcurrentRefresh(t *testing.T) {
+	const oldBody = `{"p":{"models":{"sample":{"name":"Old","reasoning":false,"cost":{"input":1,"output":2}}}}}`
+	const newBody = `{"p":{"models":{"sample":{"name":"New","reasoning":true,"cost":{"input":1,"output":2}}}}}`
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	catalog := New(func(_ string, _ string, _ time.Duration) (FetchResult, error) {
+		if calls.Add(1) == 1 {
+			return FetchResult{Body: []byte(oldBody)}, nil
+		}
+		close(entered)
+		<-release
+		return FetchResult{Body: []byte(newBody)}, nil
+	})
+	if err := catalog.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	catalog.mu.Lock()
+	catalog.nextAt = time.Time{}
+	catalog.mu.Unlock()
+	old := catalog.Metadata()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("假 fetcher 未进入")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snapshot := catalog.Metadata()
+			got := snapshot.Lookup("sample")
+			if got.Lookup("display_name").Str != "Old" || got.Lookup("reasoning").Bool {
+				t.Error("读取到混合快照")
+			}
+		}()
+	}
+	wg.Wait()
+	close(release)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		current := catalog.Metadata()
+		if current != old {
+			got := current.Lookup("sample")
+			if got.Lookup("display_name").Str != "New" || !got.Lookup("reasoning").Bool {
+				t.Fatal("新快照不一致")
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("抓取次数 = %d", calls.Load())
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("新快照未发布")
 }

@@ -2,17 +2,20 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/pricing"
 )
 
 // TestModelsExcludesUnconfiguredModelAndAppendsUnified 断言 /v1/models 的语义。
@@ -482,5 +485,122 @@ func TestMetricsSnapshotSeesKeyStatsWiring(t *testing.T) {
 	}
 	if _, ok := payload["stats"]; !ok {
 		t.Errorf("key stats 缺少 stats 字段: %v", payload)
+	}
+}
+
+// TestModelsMetadataOptInAndAuthorization 以进程内处理器和假目录模拟各类调用方。
+func TestModelsMetadataOptInAndAuthorization(t *testing.T) {
+	const source = `{"p":{"models":{
+      "model-a":{"id":"model-a","name":"Model A","reasoning":false,"limit":{"context":100,"output":10},"modalities":{"input":["text"],"output":["text"]},"cost":{"input":1,"output":2}},
+      "model-b":{"name":"Model B"},"alias-a":{"name":"Alias"}
+    }}}`
+	fetch, _ := stubPricingFetch(t, source)
+	app := newTestAppWith(t, t.TempDir(), appFixture{configText: accessKeyFixture, mutate: func(o *Options) { o.PricingFetch = fetch }})
+	waitForPricing(t, app)
+	legacy := serve(app, http.MethodGet, "/v1/models", fullAuthorization)
+	for _, query := range []string{"?include=other", "?include=metadata&include=metadata", "?include=Metadata"} {
+		got := serve(app, http.MethodGet, "/v1/models"+query, fullAuthorization)
+		if got.Body.String() != legacy.Body.String() || got.Header().Get("Cache-Control") != "" {
+			t.Errorf("非精确参数改变旧响应: %s", query)
+		}
+	}
+	full := serve(app, http.MethodGet, "/v1/models?include=metadata", fullAuthorization)
+	if full.Code != http.StatusOK || full.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("响应 = %d %v", full.Code, full.Header())
+	}
+	oldIDs, newIDs := modelIDs(t, legacy), modelIDs(t, full)
+	if !slices.Equal(oldIDs, newIDs) {
+		t.Fatalf("模型清单被改变: %v %v", oldIDs, newIDs)
+	}
+	parse := func(rec *httptest.ResponseRecorder) map[string]map[string]any {
+		t.Helper()
+		var body struct {
+			Data []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		result := map[string]map[string]any{}
+		for _, item := range body.Data {
+			result[item["id"].(string)] = item
+		}
+		return result
+	}
+	data := parse(full)
+	if data["model-a"]["owned_by"] != "auto-model-key-router" || data["model-a"]["display_name"] != "Model A" || data["model-a"]["reasoning"] != false || data["model-a"]["context_window"] != float64(100) {
+		t.Fatalf("直接模型元数据错误: %v", data["model-a"])
+	}
+	if _, ok := data["alias-a"]["display_name"]; ok {
+		t.Fatal("别名不能继承或推断真实模型信息")
+	}
+	if _, ok := data["model-a"]["kind"]; ok {
+		t.Fatal("没有权威来源时不能推断 kind")
+	}
+	limited := serve(app, http.MethodGet, "/v1/models?include=metadata", "Bearer amkr_ak_scoped")
+	limitedData := parse(limited)
+	if len(limitedData) != 1 || limitedData["model-a"]["display_name"] != "Model A" {
+		t.Fatalf("受限模型泄露或缺失: %v", limitedData)
+	}
+	if got := serve(app, http.MethodGet, "/v1/models?include=metadata", "Bearer amkr_ak_off"); got.Code != http.StatusForbidden {
+		t.Fatalf("停用 key = %d", got.Code)
+	}
+	if got := serve(app, http.MethodGet, "/v1/models?include=metadata", "Bearer fake-invalid"); got.Code != http.StatusUnauthorized {
+		t.Fatalf("无效 key = %d", got.Code)
+	}
+}
+
+// TestMetadataEligibleNamesIsolation 校验凭据可用目标与任务冲突策略。
+func TestMetadataEligibleNamesIsolation(t *testing.T) {
+	cfg := &config.RouterConfig{Models: []config.ModelConfig{
+		{ID: "direct", Aliases: []string{"alias"}, Keys: []config.KeyConfig{{Enabled: true, Provider: "a", UpstreamModel: "direct"}, {Enabled: true, Provider: "b", UpstreamModel: "private-upstream"}}},
+		{ID: "renamed", Keys: []config.KeyConfig{{Enabled: true, Provider: "a", UpstreamModel: "other"}}},
+		{ID: "redirect", Keys: []config.KeyConfig{{Enabled: true, Provider: "a", UpstreamModel: "redirect"}}, Endpoints: map[string]*config.RoutePlan{"image": {}}},
+		{ID: "disabled", Keys: []config.KeyConfig{{Enabled: false, Provider: "a", UpstreamModel: "disabled"}}},
+		{ID: "task-name", Keys: []config.KeyConfig{{Enabled: true, Provider: "a", UpstreamModel: "task-name"}}},
+	}, Tasks: []config.TaskConfig{{Name: "task-name", Workspace: "other"}}}
+	access := &config.AccessKeyConfig{Providers: []string{"a"}}
+	a := metadataEligibleNames(cfg, access, "")
+	if !a["direct"] || !a["task-name"] || a["alias"] || a["renamed"] || a["redirect"] || a["disabled"] {
+		t.Fatalf("受限目标判定错误: %v", a)
+	}
+	cfg.Models[0].Keys[1].UpstreamModel = "changed-secret"
+	if !metadataEligibleNames(cfg, access, "")["direct"] {
+		t.Error("未授权目标改变不得影响可见元数据")
+	}
+	full := metadataEligibleNames(cfg, nil, "")
+	if full["direct"] || full["task-name"] {
+		t.Errorf("完整凭据目标冲突/任务冲突应省略: %v", full)
+	}
+	if !metadataEligibleNames(cfg, nil, "mine")["task-name"] || metadataEligibleNames(cfg, nil, "other")["task-name"] {
+		t.Error("工作空间只考虑自己任务")
+	}
+}
+
+// TestModelsMetadataColdCatalogReturnsImmediately 不启动服务且不等待阻塞的假目录源。
+func TestModelsMetadataColdCatalogReturnsImmediately(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	app := newTestAppWith(t, t.TempDir(), appFixture{configText: accessKeyFixture, mutate: func(o *Options) {
+		o.PricingFetch = func(_ string, _ string, _ time.Duration) (pricing.FetchResult, error) {
+			close(entered)
+			<-release
+			return pricing.FetchResult{}, errors.New("offline")
+		}
+	}})
+	// 测试结束前释放预热；不能先关闭 app，否则会等待假 fetcher。
+	defer close(release)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("假目录源未启动")
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- serve(app, http.MethodGet, "/v1/models?include=metadata", fullAuthorization) }()
+	select {
+	case rec := <-done:
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "display_name") || len(modelIDs(t, rec)) == 0 {
+			t.Fatalf("冷目录响应错误: %s", rec.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("模型列表等待了目录网络")
 	}
 }
