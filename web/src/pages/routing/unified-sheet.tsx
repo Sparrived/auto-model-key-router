@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Plus, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { errorText } from "@/lib/format";
@@ -6,12 +7,13 @@ import { FAMILIES, enabledKeys } from "@/lib/endpoint-plans";
 import type { ModelKindsIndex } from "@/lib/model-kinds";
 import type { ModelSummaryResponse, UnifiedModel } from "@/lib/types";
 import { Banner } from "@/components/ui/Banner";
+import { Button } from "@/components/ui/Button";
 import { Field } from "@/components/ui/Field";
 import { Segmented } from "@/components/ui/Segmented";
 import { Select } from "@/components/ui/Select";
 import { Sheet } from "@/components/ui/Sheet";
 import { ModelSelect, KeySelect } from "./model-select";
-import { EFFORTS, knownModel } from "./shared";
+import { EFFORTS, familyModelAriaLabel, knownModel } from "./shared";
 
 interface UnifiedSheetProps {
   unified: UnifiedModel | null;
@@ -20,49 +22,61 @@ interface UnifiedSheetProps {
   revision: string;
   onClose: () => void;
   onSaved: () => void;
+  onRefresh?: () => Promise<unknown> | void;
+  onAddModel?: () => void;
 }
 
 type Plan = { primary?: { model?: string; key?: string | null } | null; fallback?: { model?: string; key?: string | null } | null };
 
+function buildFamilyDraft(unified: UnifiedModel | null, models: ModelSummaryResponse[]) {
+  const initial: Record<string, { model: string; key: string }> = {};
+  for (const family of FAMILIES) {
+    const plan = unified?.[family.id] as Plan | undefined;
+    const model = knownModel(models, plan?.primary?.model || "");
+    initial[family.id] = { model, key: model ? plan?.primary?.key || "" : "" };
+  }
+  return initial;
+}
+
 // unifiedEditor 的 React 版：默认族是必经项，其余六族按端点分派；七个计划键每次写全，
 // 未配置的族提交 null。推理强度属于模型本身，因此先写模型、拿到新 revision 再写计划。
-export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSaved }: UnifiedSheetProps) {
-  const storedDefault = (unified?.default || null) as Plan | null;
-  const storedPrimary = knownModel(models, storedDefault?.primary?.model || "");
-  const storedFallback = knownModel(models, storedDefault?.fallback?.model || "");
+export function UnifiedSheet({
+  unified, models, kinds, revision, onClose, onSaved, onRefresh, onAddModel,
+}: UnifiedSheetProps) {
+  const [baseUnified, setBaseUnified] = useState<UnifiedModel | null>(unified);
+  const [baseModels, setBaseModels] = useState<ModelSummaryResponse[]>(models);
+  const [activeRevision, setActiveRevision] = useState(revision);
 
-  const [primaryModel, setPrimaryModel] = useState(storedPrimary || models[0]?.id || "");
+  const storedDefault = (baseUnified?.default || null) as Plan | null;
+  const storedPrimary = knownModel(baseModels, storedDefault?.primary?.model || "");
+  const storedFallback = knownModel(baseModels, storedDefault?.fallback?.model || "");
+
+  const [primaryModel, setPrimaryModel] = useState(storedPrimary || baseModels[0]?.id || "");
   const [primaryKey, setPrimaryKey] = useState(storedPrimary ? storedDefault?.primary?.key || "" : "");
   const [routing, setRouting] = useState(storedPrimary && storedDefault?.primary?.key ? "key" : "auto");
   const [fallbackModel, setFallbackModel] = useState(storedFallback);
   const [fallbackKey, setFallbackKey] = useState(storedFallback ? storedDefault?.fallback?.key || "" : "");
-  const [effort, setEffort] = useState(models.find((model) => model.id === (storedPrimary || models[0]?.id))?.reasoning_effort || "");
-  const [families, setFamilies] = useState<Record<string, { model: string; key: string }>>(() => {
-    const initial: Record<string, { model: string; key: string }> = {};
-    for (const family of FAMILIES) {
-      const plan = unified?.[family.id] as Plan | undefined;
-      const model = knownModel(models, plan?.primary?.model || "");
-      initial[family.id] = { model, key: model ? plan?.primary?.key || "" : "" };
-    }
-    return initial;
-  });
+  const [effort, setEffort] = useState(baseModels.find((model) => model.id === (storedPrimary || baseModels[0]?.id))?.reasoning_effort || "");
+  const [families, setFamilies] = useState<Record<string, { model: string; key: string }>>(
+    () => buildFamilyDraft(baseUnified, baseModels),
+  );
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const primaryKeys = enabledKeys(models, primaryModel);
+  const effectiveRevision = activeRevision || revision;
+  const primaryKeys = enabledKeys(baseModels, primaryModel);
+
   const initial = useMemo(() => JSON.stringify({
-    primary: storedPrimary || models[0]?.id || "",
+    primary: storedPrimary || baseModels[0]?.id || "",
     primaryKey: storedPrimary ? storedDefault?.primary?.key || "" : "",
     fallback: storedFallback,
     fallbackKey: storedFallback ? storedDefault?.fallback?.key || "" : "",
-    families: Object.fromEntries(FAMILIES.map((family) => {
-      const plan = unified?.[family.id] as Plan | undefined;
-      const model = knownModel(models, plan?.primary?.model || "");
-      return [family.id, { model, key: model ? plan?.primary?.key || "" : "" }];
-    })),
-    effort: models.find((model) => model.id === (storedPrimary || models[0]?.id))?.reasoning_effort || "",
-  }), [models, storedDefault?.fallback?.key, storedDefault?.primary?.key, storedFallback, storedPrimary, unified]);
+    families: buildFamilyDraft(baseUnified, baseModels),
+    effort: baseModels.find((model) => model.id === (storedPrimary || baseModels[0]?.id))?.reasoning_effort || "",
+  }), [baseModels, baseUnified, storedDefault?.fallback?.key, storedDefault?.primary?.key, storedFallback, storedPrimary]);
+
   const current = JSON.stringify({
     primary: primaryModel,
     primaryKey: routing === "key" ? primaryKey : "",
@@ -78,10 +92,11 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
       // 选中的正好是当前回退 → 两者互换，避免出现主/回退同名这种必然被拒的配置。
       setFallbackModel(primaryModel);
       setFallbackKey(routing === "key" ? primaryKey : "");
+      toast("主模型与回退模型已自动互换。");
     }
     setPrimaryModel(next);
-    setEffort(models.find((model) => model.id === next)?.reasoning_effort || "");
-    const keys = enabledKeys(models, next);
+    setEffort(baseModels.find((model) => model.id === next)?.reasoning_effort || "");
+    const keys = enabledKeys(baseModels, next);
     if (!keys.includes(primaryKey)) setPrimaryKey(keys[0] || "");
     if (routing === "key" && !keys.length) setRouting("auto");
   }
@@ -89,6 +104,43 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
   function changeRouting(next: string) {
     setRouting(next);
     if (next === "key" && !primaryKey) setPrimaryKey(primaryKeys[0] || "");
+  }
+
+  async function reloadLatest() {
+    setReloading(true);
+    try {
+      const [unifiedRes, modelsRes] = await Promise.all([
+        api.unified(),
+        api.models(),
+      ]);
+      const freshUnified = ((unifiedRes as { unified_model?: UnifiedModel | null })?.unified_model ?? null);
+      const freshModels = modelsRes.models || baseModels;
+      const freshRevision = (unifiedRes as { config_revision?: string })?.config_revision || modelsRes.config_revision || effectiveRevision;
+
+      const freshDefault = (freshUnified?.default || null) as Plan | null;
+      const freshPrimary = knownModel(freshModels, freshDefault?.primary?.model || "");
+      const freshFallback = knownModel(freshModels, freshDefault?.fallback?.model || "");
+      const nextPrimary = freshPrimary || freshModels[0]?.id || "";
+
+      setBaseUnified(freshUnified);
+      setBaseModels(freshModels);
+      setActiveRevision(freshRevision);
+      setPrimaryModel(nextPrimary);
+      setPrimaryKey(freshPrimary ? freshDefault?.primary?.key || "" : "");
+      setRouting(freshPrimary && freshDefault?.primary?.key ? "key" : "auto");
+      setFallbackModel(freshFallback);
+      setFallbackKey(freshFallback ? freshDefault?.fallback?.key || "" : "");
+      setEffort(freshModels.find((model) => model.id === nextPrimary)?.reasoning_effort || "");
+      setFamilies(buildFamilyDraft(freshUnified, freshModels));
+      setConflict(false);
+      setError(null);
+      await onRefresh?.();
+      toast("已载入最新统一模型配置。");
+    } catch (failure) {
+      setError(`重新读取失败: ${errorText(failure)}`);
+    } finally {
+      setReloading(false);
+    }
   }
 
   async function save() {
@@ -114,12 +166,15 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
     setSaving(true);
     setError(null);
     setConflict(false);
+    let effortUpdated = false;
     try {
-      let nextRevision = revision;
-      const storedEffort = models.find((model) => model.id === primaryModel)?.reasoning_effort || "";
+      let nextRevision = effectiveRevision;
+      const storedEffort = baseModels.find((model) => model.id === primaryModel)?.reasoning_effort || "";
       if ((effort || "") !== (storedEffort || "")) {
         const updated = await api.updateModelEffort(nextRevision, primaryModel, effort || null) as ModelSummaryResponse & { config_revision?: string };
+        effortUpdated = true;
         nextRevision = updated.config_revision || nextRevision;
+        setActiveRevision(nextRevision);
       }
       const payload: Record<string, unknown> = {
         default: {
@@ -134,12 +189,24 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
           : null;
       }
       await api.updateUnified(nextRevision, payload);
-      toast("统一模型已更新。");
+      toast.success("统一模型已更新。");
       onSaved();
       onClose();
     } catch (failure) {
-      if (failure instanceof ApiError && failure.isConflict) setConflict(true);
-      setError(`统一模型操作失败: ${errorText(failure)}`);
+      if (failure instanceof ApiError && failure.isConflict) {
+        setConflict(true);
+        void api.unified().then((res) => {
+          const rev = (res as { config_revision?: string })?.config_revision;
+          if (rev) setActiveRevision(rev);
+        }).catch(() => undefined);
+        void onRefresh?.();
+      }
+      if (effortUpdated) {
+        void onRefresh?.();
+        setError(`模型 ${primaryModel} 的推理强度已更新，但统一模型计划保存失败：${errorText(failure)}`);
+      } else {
+        setError(`统一模型操作失败: ${errorText(failure)}`);
+      }
     } finally {
       setSaving(false);
     }
@@ -160,21 +227,62 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
       saving={saving}
     >
       <div className="space-y-5">
-        {conflict ? <Banner tone="warn" title="配置已在别处更新">请核对最新配置后再保存。</Banner> : null}
+        {conflict ? (
+          <Banner
+            tone="warn"
+            title="配置已在别处更新"
+            action={(
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={reloading}
+                leadingIcon={<RefreshCw aria-hidden className="size-3.5" />}
+                onClick={() => void reloadLatest()}
+              >
+                重新载入最新配置
+              </Button>
+            )}
+          >
+            你手上的版本已过期。建议先重新载入最新配置核对后再保存。
+          </Banner>
+        ) : null}
+
+        {!baseModels.length ? (
+          <Banner
+            tone="warn"
+            title="还没有可绑定的模型"
+            action={onAddModel ? (
+              <Button
+                size="sm"
+                variant="primary"
+                leadingIcon={<Plus aria-hidden className="size-3.5" />}
+                onClick={() => {
+                  onClose();
+                  onAddModel();
+                }}
+              >
+                去添加模型
+              </Button>
+            ) : undefined}
+          >
+            请先添加至少一个模型路由，再为统一模型指定默认分派目标。
+          </Banner>
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="模型" required hint="文本（对话）族的真实模型，也是所有未配置族的回落项。">
             <ModelSelect
-              models={models}
+              models={baseModels}
               kinds={kinds}
               kind="text"
               value={primaryModel}
               aria-label="默认模型"
+              disabled={!baseModels.length}
               onChange={changePrimary}
             />
           </Field>
-          <Field label="推理强度" hint="写回模型本身；改了这里会先更新模型，再保存统一模型计划。">
-            <Select value={effort} onChange={(event) => setEffort(event.target.value)}>
+          <Field label="推理强度" hint="写回默认模型本身；改了这里会先更新模型，再保存统一模型计划。">
+            <Select aria-label="推理强度" value={effort} disabled={!primaryModel} onChange={(event) => setEffort(event.target.value)}>
               {EFFORTS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </Select>
           </Field>
@@ -189,24 +297,28 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
               ]}
             />
           </Field>
-          {routing === "key" ? (
-            <Field label="Key" hint="固定 Key 必须属于当前模型已启用的 Key。">
-              <KeySelect
-                models={models}
-                modelId={primaryModel}
-                value={primaryKey}
-                aria-label="默认模型 Key"
-                onChange={setPrimaryKey}
-              />
-            </Field>
-          ) : null}
+          <Field
+            label="固定 Key"
+            hint={routing === "key" ? "固定 Key 必须属于当前模型已启用的 Key。" : "切为「固定 Key」后可锁定到单把 Key。"}
+          >
+            <KeySelect
+              models={baseModels}
+              modelId={primaryModel}
+              value={routing === "key" ? primaryKey : ""}
+              disabled={routing !== "key"}
+              placeholder={routing === "key" ? "选择固定 Key" : "自动路由（按模型策略选择）"}
+              aria-label="默认模型 Key"
+              onChange={setPrimaryKey}
+            />
+          </Field>
           <Field label="回退模型" hint="主模型失败时改走它；留空表示不启用回退。">
             <ModelSelect
-              models={models.filter((model) => model.id !== primaryModel)}
+              models={baseModels.filter((model) => model.id !== primaryModel)}
               kinds={kinds}
               kind="text"
               value={fallbackModel}
               emptyLabel="不启用回退"
+              disabled={!baseModels.length}
               aria-label="回退模型"
               onChange={(value) => {
                 setFallbackModel(value);
@@ -216,7 +328,7 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
           </Field>
           <Field label="回退 Key">
             <KeySelect
-              models={models}
+              models={baseModels}
               modelId={fallbackModel}
               value={fallbackKey}
               includeAuto
@@ -245,19 +357,19 @@ export function UnifiedSheet({ unified, models, kinds, revision, onClose, onSave
                     <div className="truncate text-[11px] text-ink-3" title={family.paths}>{family.paths}</div>
                   </div>
                   <ModelSelect
-                    models={models}
+                    models={baseModels}
                     kinds={kinds}
                     kind={family.kind}
                     value={picked.model}
                     emptyLabel="不配置映射"
-                    aria-label={`${family.label}模型`}
+                    aria-label={familyModelAriaLabel(family)}
                     onChange={(value) => setFamilies((currentFamilies) => ({
                       ...currentFamilies,
                       [family.id]: { model: value, key: "" },
                     }))}
                   />
                   <KeySelect
-                    models={models}
+                    models={baseModels}
                     modelId={picked.model}
                     value={picked.key}
                     includeAuto

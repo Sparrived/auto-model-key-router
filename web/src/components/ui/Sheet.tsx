@@ -19,6 +19,7 @@ export interface SheetProps {
   subtitle?: ReactNode;
   children: ReactNode;
   footer?: ReactNode;
+  footerLeft?: ReactNode;
   width?: keyof typeof WIDTHS;
   dirty?: boolean;
   onSave?: () => void | Promise<void>;
@@ -30,7 +31,7 @@ export interface SheetProps {
 // Sheet 用 Radix Dialog 实现「右侧抽屉」：它自带焦点约束与关闭后焦点归还，
 // 视觉上只是把居中的面板改成贴右边缘的整列。
 export function Sheet({
-  open, onOpenChange, title, subtitle, children, footer,
+  open, onOpenChange, title, subtitle, children, footer, footerLeft,
   width = "md", dirty = false, onSave, saveLabel = "保存", saving = false, className,
 }: SheetProps) {
   const confirm = useConfirm();
@@ -123,14 +124,28 @@ export function Sheet({
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
           <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-rule px-5 py-3">
             {footer ?? (
-              <>
-                <Button variant="secondary" onClick={() => void requestClose()}>取消</Button>
-                {onSave ? (
-                  <Button variant="primary" loading={saving} onClick={() => void onSave()}>
-                    {saveLabel}
-                  </Button>
-                ) : null}
-              </>
+              footerLeft ? (
+                <div className="flex w-full items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">{footerLeft}</div>
+                  <div className="flex items-center gap-2">
+                    <Button variant="secondary" onClick={() => void requestClose()}>取消</Button>
+                    {onSave ? (
+                      <Button variant="primary" loading={saving} onClick={() => void onSave()}>
+                        {saveLabel}
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <Button variant="secondary" onClick={() => void requestClose()}>取消</Button>
+                  {onSave ? (
+                    <Button variant="primary" loading={saving} onClick={() => void onSave()}>
+                      {saveLabel}
+                    </Button>
+                  ) : null}
+                </>
+              )
             )}
           </footer>
         </DialogPrimitive.Content>

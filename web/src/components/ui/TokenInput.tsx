@@ -2,6 +2,7 @@ import {
   useState,
   type ChangeEvent,
   type ClipboardEvent,
+  type FocusEvent,
   type InputHTMLAttributes,
   type KeyboardEvent,
 } from "react";
@@ -24,6 +25,7 @@ export function TokenInput({
   disabled = false,
   placeholder,
   className,
+  onBlur,
   ...props
 }: TokenInputProps) {
   const [draft, setDraft] = useState("");
@@ -80,6 +82,11 @@ export function TokenInput({
     }
   }
 
+  function handleBlur(event: FocusEvent<HTMLInputElement>) {
+    if (draft.trim()) commit(draft);
+    onBlur?.(event);
+  }
+
   return (
     <div
       className={cn(
@@ -107,6 +114,7 @@ export function TokenInput({
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
+        onBlur={handleBlur}
         className="h-6 min-w-16 flex-1 border-0 bg-transparent p-0 text-body text-ink placeholder:text-ink-3 focus-visible:outline-none disabled:cursor-not-allowed"
         {...props}
       />
