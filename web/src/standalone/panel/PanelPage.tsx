@@ -121,10 +121,10 @@ function upstreamUsage(usage: PanelUsage | null) {
 
 function Kpi({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
-    <div className="min-w-0 rounded-panel border border-rule bg-panel px-3 py-3">
-      <div className="text-meta text-ink-3">{label}</div>
-      <div className="mt-1 break-words text-[24px] font-semibold leading-none tabular-nums text-ink">{value}</div>
-      <div className="mt-1 break-words text-meta leading-4 text-ink-3">{hint}</div>
+    <div className="min-w-0 rounded-panel border border-rule bg-panel px-3.5 py-3 shadow-[var(--shadow-deck)]">
+      <div className="text-[11px] text-ink-3">{label}</div>
+      <div className="mt-1 break-words font-mono text-[22px] font-semibold leading-none tabular-nums text-ink">{value}</div>
+      <div className="mt-1 break-words text-[11px] leading-4 text-ink-3">{hint}</div>
     </div>
   );
 }
@@ -207,7 +207,7 @@ function TaskForm({
   }
 
   return (
-    <div className="m-3 rounded-control border border-rule bg-sunken/40 p-3">
+    <div className="m-3 rounded-control border border-rule bg-sunken p-3">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Field label="任务名">
           <Input

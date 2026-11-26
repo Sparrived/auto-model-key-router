@@ -163,14 +163,14 @@ export default function CostPage() {
             windowLabel={windowLabel}
           />
 
-          <div className="grid min-w-0 gap-3 xl:grid-cols-12">
-            <div className="min-w-0 xl:col-span-4">
+          <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-12">
+            <div className="flex min-w-0 flex-col xl:col-span-4">
               <CostCompositionPanel
                 summary={summary}
                 busy={breakdownQuery.isFetching && !breakdownQuery.isPending}
               />
             </div>
-            <div className="min-w-0 xl:col-span-8">
+            <div className="flex min-w-0 flex-col xl:col-span-8">
               <CostRankingPanel
                 summary={summary}
                 currentProviders={filters.state.provider}

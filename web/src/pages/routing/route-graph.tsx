@@ -22,10 +22,11 @@ interface RouteGraphProps {
 export function RouteGraph({ route, models, providers, onMoveTarget }: RouteGraphProps) {
   const targets = route.targets || [];
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-stretch">
-        <div className="flex min-w-0 flex-col justify-center gap-2 rounded-panel border border-rule bg-panel p-4 lg:w-56">
-          <span className="text-meta text-ink-3">对外名称</span>
+    <div className="space-y-4 p-3.5">
+      <div className="amkr-dot-matrix flex flex-col gap-3 rounded-control border border-rule p-3.5 lg:flex-row lg:items-stretch">
+        <div className="relative flex min-w-0 flex-col justify-center gap-2 rounded-[5px] border border-rule bg-raised p-3.5 shadow-[var(--shadow-node)] lg:w-56">
+          <span aria-hidden className="pointer-events-none absolute -right-[3px] top-1/2 hidden size-[5px] -translate-y-1/2 rounded-pill border-[1.5px] border-rule-strong bg-panel lg:block" />
+          <span className="font-mono text-[10px] uppercase tracking-wider text-ink-3">01 / 对外名称</span>
           <span className="break-all font-mono text-title font-semibold text-ink">{route.id}</span>
           {route.aliases?.length ? (
             <div className="flex flex-wrap gap-1">
@@ -34,17 +35,19 @@ export function RouteGraph({ route, models, providers, onMoveTarget }: RouteGrap
           ) : (
             <span className="text-meta text-ink-3">无别名</span>
           )}
-          <span className="text-meta text-ink-3">ID 与别名都出现在 /v1/models</span>
+          <span className="text-[11px] text-ink-3">ID 与别名都出现在 /v1/models</span>
         </div>
 
         <div className="hidden items-center justify-center text-ink-3 lg:flex" aria-hidden>
           <ArrowRight className="size-4" />
         </div>
 
-        <div className="flex flex-col justify-center gap-2 rounded-panel border border-rule bg-panel p-4 lg:w-40">
-          <span className="text-meta text-ink-3">路由模式</span>
-          <Badge tone="neutral">{modeLabel(route.routing_mode)}</Badge>
-          <span className="text-meta leading-5 text-ink-3">
+        <div className="relative flex flex-col justify-center gap-2 rounded-[5px] border border-rule bg-raised p-3.5 shadow-[var(--shadow-node)] lg:w-44">
+          <span aria-hidden className="pointer-events-none absolute -left-[3px] top-1/2 hidden size-[5px] -translate-y-1/2 rounded-pill border-[1.5px] border-rule-strong bg-panel lg:block" />
+          <span aria-hidden className="pointer-events-none absolute -right-[3px] top-1/2 hidden size-[5px] -translate-y-1/2 rounded-pill border-[1.5px] border-rule-strong bg-panel lg:block" />
+          <span className="font-mono text-[10px] uppercase tracking-wider text-ink-3">02 / 路由模式</span>
+          <Badge tone="accent">{modeLabel(route.routing_mode)}</Badge>
+          <span className="text-[11px] leading-5 text-ink-3">
             {route.routing_mode === "priority" ? "按上方顺序，前面的 Key 失败再试下一个。" : null}
             {route.routing_mode === "only_first" ? "只使用第一条可用目标。" : null}
             {route.routing_mode === "round_robin" ? "请求在目标之间轮转。" : null}
@@ -57,12 +60,13 @@ export function RouteGraph({ route, models, providers, onMoveTarget }: RouteGrap
         </div>
 
         <div className="min-w-0 flex-1 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-meta text-ink-3">轮询目标（按优先级）</span>
-            <span className="font-mono text-meta text-ink-3">{targets.length} 个</span>
+          <div className="flex items-center justify-between px-0.5">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-ink-3">03 / 轮询目标（按优先级）</span>
+            <span className="font-mono text-[10px] text-ink-3">{targets.length} TARGETS</span>
           </div>
           {targets.length ? targets.map((target, index) => (
-            <div key={`${target.provider}|${target.key}|${target.upstream_model}|${index}`} className="flex items-center gap-2 rounded-control border border-rule bg-panel px-2.5 py-2">
+            <div key={`${target.provider}|${target.key}|${target.upstream_model}|${index}`} className="relative flex items-center gap-2 rounded-[5px] border border-rule bg-raised px-2.5 py-2 shadow-[var(--shadow-node)]">
+              <span aria-hidden className="pointer-events-none absolute -left-[3px] top-1/2 hidden size-[5px] -translate-y-1/2 rounded-pill border-[1.5px] border-rule-strong bg-panel lg:block" />
               <span
                 className={
                   index === 0
