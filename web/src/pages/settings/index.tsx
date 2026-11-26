@@ -189,6 +189,7 @@ export default function SettingsPage() {
   const [errors, setErrors] = useState<RuntimeErrors>({});
   const [saving, setSaving] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
+  const saveRuntimeRef = useRef<() => Promise<void>>(async () => undefined);
   const initialized = useRef(false);
 
   useEffect(() => {
@@ -268,6 +269,38 @@ export default function SettingsPage() {
     }
     await commitRuntime(hostValue);
   }
+  saveRuntimeRef.current = saveRuntime;
+
+  useEffect(() => {
+    if (dirtyCount <= 0) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      if (!saving) void saveRuntimeRef.current();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [dirtyCount, saving]);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const nodes = SECTIONS
+      .map((section) => ({ id: section.id, el: document.getElementById(`settings-${section.id}`) }))
+      .filter((item): item is { id: SectionId; el: HTMLElement } => Boolean(item.el));
+    if (!nodes.length) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((entry) => entry.isIntersecting);
+        if (!visible) return;
+        const match = nodes.find((item) => item.el === visible.target);
+        if (match) setActive(match.id);
+      },
+      { rootMargin: "-80px 0px -65% 0px", threshold: 0 },
+    );
+    for (const item of nodes) observer.observe(item.el);
+    return () => observer.disconnect();
+  }, []);
 
   async function resetLocalKey() {
     const ok = await confirm({
@@ -558,7 +591,7 @@ export default function SettingsPage() {
   const health = healthQuery.data as HealthResponse | undefined;
 
   return (
-    <div className={cn("flex min-w-0 flex-col gap-3", dirtyCount > 0 && "pb-20")}>
+    <div className={cn("flex min-w-0 flex-col gap-3", dirtyCount > 0 && "pb-32 md:pb-20")}>
       <PageHeader
         title="设置"
         description="设置：运行参数、本地鉴权、服务控制与配置迁移。"
@@ -566,15 +599,15 @@ export default function SettingsPage() {
       />
 
       <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-start">
-        <nav aria-label="设置分节" className="flex shrink-0 flex-wrap gap-1 rounded-panel border border-rule bg-panel p-1.5 md:w-40 md:flex-col">
+        <nav aria-label="设置分节" className="flex shrink-0 flex-wrap gap-1 rounded-panel border border-rule bg-panel p-1.5 md:sticky md:top-16 md:w-40 md:flex-col md:self-start">
           {SECTIONS.map((section) => (
             <button
               key={section.id}
               type="button"
               aria-current={active === section.id ? "page" : undefined}
               className={cn(
-                "whitespace-nowrap rounded-control px-3 py-1.5 text-left text-meta transition-colors hover:bg-hover hover:text-ink",
-                active === section.id ? "bg-selected font-medium text-ink" : "text-ink-2",
+                "relative whitespace-nowrap rounded-control px-3 py-1.5 text-left text-meta transition-colors hover:bg-hover hover:text-ink",
+                active === section.id ? "bg-select font-medium text-ink" : "text-ink-2",
               )}
               onClick={() => {
                 setActive(section.id);
@@ -591,7 +624,7 @@ export default function SettingsPage() {
           {settingsQuery.error ? <Banner tone="critical" title="读取设置失败">{errorText(settingsQuery.error)}</Banner> : null}
           {healthQuery.error ? <Banner tone="critical" title="读取健康状态失败">{errorText(healthQuery.error)}</Banner> : null}
 
-          <section id="settings-runtime" className="scroll-mt-4">
+          <section id="settings-runtime" className="scroll-mt-16">
             <Panel
               title="运行设置"
               description={settingsQuery.data?.config_revision ? `配置版本 ${String(settingsQuery.data.config_revision).slice(0, 8)}` : "读取中…"}
@@ -629,12 +662,12 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-auth" className="scroll-mt-4">
+          <section id="settings-auth" className="scroll-mt-16">
             <Panel
               title="本地鉴权"
               description="本实例的入口凭据；重置后现有客户端需要改为新 Key。"
             >
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-rule bg-sunken/40 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-rule bg-sunken p-3">
                 <div className="min-w-0">
                   <div className="text-meta text-ink-3">当前状态</div>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -648,7 +681,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-service" className="scroll-mt-4">
+          <section id="settings-service" className="scroll-mt-16">
             <Panel
               title="服务控制"
               description="这些动作在本机执行，需要服务进程具备相应权限。"
@@ -685,7 +718,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-transfer" className="scroll-mt-4">
+          <section id="settings-transfer" className="scroll-mt-16">
             <Panel
               title="配置迁移"
               description="导出整台实例的供应商、模型与任务；导入会合并配置，访问密钥不随配置迁移。"
@@ -716,7 +749,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-update" className="scroll-mt-4">
+          <section id="settings-update" className="scroll-mt-16">
             <Panel
               title="版本与更新"
               description="检查 GitHub 上的新版本；自更新仅在服务端具备能力且确有更新时出现。"
@@ -754,7 +787,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-appearance" className="scroll-mt-4">
+          <section id="settings-appearance" className="scroll-mt-16">
             <Panel title="外观" description="主题与主色立即预览；选择保存在本浏览器。">
               <div className="space-y-4">
                 <div>
@@ -800,7 +833,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-about" className="scroll-mt-4">
+          <section id="settings-about" className="scroll-mt-16">
             <Panel title="关于" description="运行状态、数据目录与计数口径。">
               {metricsQuery.error ? <Banner tone="critical">读取运行指标失败：{errorText(metricsQuery.error)}</Banner> : null}
               {metricsQuery.isPending ? <Skeleton variant="table" /> : (
@@ -831,7 +864,7 @@ export default function SettingsPage() {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-0 left-0 right-0 z-30 flex flex-wrap items-center gap-2 border-t border-rule bg-panel px-4 py-3 shadow-[0_-4px_16px_rgba(0,0,0,0.08)] md:left-56"
+          className="fixed bottom-[54px] left-0 right-0 z-40 flex flex-wrap items-center gap-2 border-t border-rule bg-panel px-4 py-3 shadow-[0_-4px_16px_rgba(0,0,0,0.08)] md:bottom-0 md:left-56"
         >
           <span className="text-body text-ink">有 {dirtyCount} 项未保存的更改</span>
           <div className="ml-auto flex gap-2">
@@ -855,7 +888,7 @@ export default function SettingsPage() {
         {preview ? (
           <div className="space-y-3 text-body text-ink-2">
             <p>导入将追加/合并供应商与路由配置，并保留本机设置。是否继续？</p>
-            <div className="space-y-1 rounded-control border border-rule bg-sunken/40 p-3 text-meta">
+            <div className="space-y-1 rounded-control border border-rule bg-sunken p-3 text-meta">
               <div>供应商：当前 {preview.currentProviders} 个 → 包内 {preview.providers} 个（预计新增 {Math.max(0, preview.providers - preview.currentProviders)}）</div>
               <div>模型：当前 {preview.currentModels} 个 → 包内 {preview.models} 个（预计新增 {Math.max(0, preview.models - preview.currentModels)}）</div>
               <div>任务：当前 {preview.currentTasks} 个 → 包内 {preview.tasks} 个（预计新增 {Math.max(0, preview.tasks - preview.currentTasks)}）</div>

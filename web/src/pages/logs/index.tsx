@@ -224,14 +224,22 @@ export default function LogsPage() {
             description={readError ? "请检查日志文件权限或路径。" : "服务暂未写入日志。"}
           />
         ) : visible.length === 0 ? (
-          <Empty title="没有匹配的日志行" description="试试放宽级别或关键字。" />
+          <Empty
+            title="没有匹配的日志行"
+            description="试试放宽级别或关键字。"
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => { setLevel("all"); setQueryText(""); }}>
+                清除筛选
+              </Button>
+            )}
+          />
         ) : (
           <div className="relative">
             <div
               ref={scrollRef}
               onScroll={onScroll}
               className={cn(
-                "max-h-[min(62vh,680px)] overflow-auto bg-panel font-mono text-[12px] leading-[1.45]",
+                "max-h-[min(64vh,700px)] overflow-auto border-t border-rule bg-paper py-1 font-mono text-[12px] leading-[1.5]",
                 wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre",
               )}
               tabIndex={0}
@@ -243,18 +251,18 @@ export default function LogsPage() {
                 return (
                   <div
                     key={`${index}-${line.slice(0, 24)}`}
-                    className={cn("group relative flex min-w-0 items-start gap-2 border-l-2 px-3 pr-9 hover:bg-hover", info.tone)}
+                    className={cn("group relative flex min-w-0 items-start gap-2.5 border-l-2 px-3 py-0.5 pr-9 hover:bg-hover", info.tone)}
                   >
-                    <span className="w-8 shrink-0 select-none text-right text-[10px] leading-[1.45] opacity-70">{info.label}</span>
+                    <span className="w-8 shrink-0 select-none text-right font-mono text-[10px] leading-[1.65] opacity-75">{info.label}</span>
                     <code className="min-w-0 flex-1 text-ink-2">{highlight(line, queryText)}</code>
                     <IconButton
                       aria-label="复制日志行"
                       tooltip="复制这一行"
                       size="sm"
-                      className="absolute right-1.5 top-0 h-4 w-4 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                      className="absolute right-1.5 top-0.5 h-5 w-5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
                       onClick={() => void copyLine(line)}
                     >
-                      <Copy aria-hidden className="size-3.5" />
+                      <Copy aria-hidden className="size-3" />
                     </IconButton>
                   </div>
                 );

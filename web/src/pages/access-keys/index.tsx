@@ -3,7 +3,7 @@
 // 明文 key 只在本页的**两个动作**后出现：新建与轮换。之后列表只显示指纹；要看旧 key
 // 只能翻配置文件。凭据随列表一起发出去，等于每次打开这一页都重新泄漏一遍。
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { BarChart3, Info, KeyRound, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -27,7 +27,7 @@ import { Switch } from "@/components/ui/Switch";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useConfirm } from "@/components/ui/ConfirmProvider";
 import { useSecretDialog } from "@/components/ui/SecretDialog";
-import { navigate } from "@/app/router";
+import { navigate, setParams, useRoute } from "@/app/router";
 import { KeyEditor } from "./KeyEditor";
 import {
   buildModelOptions,
@@ -134,9 +134,13 @@ function ScopeCell({ list, kind }: { list: string[] | null | undefined; kind: "p
 }
 
 export default function AccessKeysPage() {
+  const route = useRoute();
   const queryClient = useQueryClient();
   const confirm = useConfirm();
   const showSecret = useSecretDialog();
+
+  const routeNew = route.params.get("new") === "1";
+  const routeId = route.params.get("id") || "";
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | "enabled" | "disabled">("all");
@@ -163,6 +167,26 @@ export default function AccessKeysPage() {
   const models = modelsQuery.data?.models ?? [];
   const routes = routesQuery.data?.routes ?? [];
   const revision = keysQuery.data?.config_revision ?? "";
+
+  useEffect(() => {
+    if (!routeNew || !revision) return;
+    setEditing("__new__");
+    setParams((params) => {
+      params.delete("new");
+      return params;
+    }, { replace: true });
+  }, [routeNew, revision]);
+
+  useEffect(() => {
+    if (!routeId || !keys.length) return;
+    const matched = keys.find((item) => item.id === routeId);
+    if (!matched) return;
+    setEditing(matched);
+    setParams((params) => {
+      params.delete("id");
+      return params;
+    }, { replace: true });
+  }, [routeId, keys]);
 
   const index = useMemo(
     () => buildModelProviderIndex(routes, models, providers),
@@ -378,7 +402,7 @@ export default function AccessKeysPage() {
         )}
         actions={(
           <Button
-            variant="secondary"
+            variant="primary"
             leadingIcon={<Plus aria-hidden className="size-4" />}
             disabled={!revision}
             onClick={() => setEditing("__new__")}
@@ -442,7 +466,11 @@ export default function AccessKeysPage() {
               description={keys.length
                 ? "换一个筛选条件或搜索词试试。"
                 : "新建一把并把它交给使用者，它只能调用你在这把密钥上列出的供应商与模型。"}
-              action={keys.length ? undefined : (
+              action={keys.length ? (
+                <Button variant="secondary" onClick={() => { setSearch(""); setStatus("all"); }}>
+                  重置筛选
+                </Button>
+              ) : (
                 <Button variant="secondary" disabled={!revision} onClick={() => setEditing("__new__")}>
                   新建访问密钥
                 </Button>

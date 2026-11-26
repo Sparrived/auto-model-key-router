@@ -1,13 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plus } from "lucide-react";
+import { Loader2, Play, Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import { errorText, shortRevision } from "@/lib/format";
 import { normalizeModelKinds } from "@/lib/model-kinds";
 import { PLAN_FAMILIES } from "@/lib/endpoint-plans";
 import { queryKeys } from "@/lib/query-keys";
 import type { RoutesResponse, UnifiedModel } from "@/lib/types";
-import { setParams, useRoute } from "@/app/router";
+import { navigate, setParams, useRoute } from "@/app/router";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
 import { Button, IconButton } from "@/components/ui/Button";
@@ -56,8 +56,18 @@ export default function RoutingPage() {
   );
 
   const selectedId = route.params.get("id") || UNIFIED_ID;
+  const routeNew = route.params.get("new") === "1";
   const selectedRoute = routes.find((item) => item.id === selectedId) || null;
   const showUnified = selectedId === UNIFIED_ID || !selectedRoute;
+
+  useEffect(() => {
+    if (!routeNew) return;
+    setAddOpen(true);
+    setParams((params) => {
+      params.delete("new");
+      return params;
+    }, { replace: true });
+  }, [routeNew]);
 
   const configuredFamilies = PLAN_FAMILIES.filter((family) => {
     const plan = (unified?.[family.id] || null) as { primary?: { model?: string } | null } | null;
@@ -99,7 +109,7 @@ export default function RoutingPage() {
   const movingRoute = routes.find((item) => item.id === moving?.routeId) || null;
 
   return (
-    <div className="flex h-[calc(100dvh-7.5rem)] min-h-[520px] flex-col gap-4">
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col gap-3 md:h-[calc(100dvh-5.75rem)] md:min-h-[520px]">
       <PageHeader
         title="模型路由"
         description="决定一个对外模型名按什么顺序、落到哪个供应商的哪把 Key。"
@@ -117,7 +127,7 @@ export default function RoutingPage() {
       {providersQuery.isError ? <Banner tone="warn">供应商读取失败，目标与 Key 下拉可能不完整。</Banner> : null}
       {unifiedQuery.isError ? <Banner tone="warn">统一模型读取失败: {errorText(unifiedQuery.error)}</Banner> : null}
 
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 overflow-hidden rounded-panel border border-rule bg-panel shadow-[var(--shadow-deck)]">
         <SplitView
           selected={!showUnified}
           onBack={() => select(UNIFIED_ID)}
@@ -162,7 +172,7 @@ export default function RoutingPage() {
                 正在读取模型路由…
               </div>
             ) : showUnified ? (
-              <div className="h-full overflow-y-auto p-1">
+              <div className="h-full overflow-y-auto bg-paper/45 p-3.5">
                 <UnifiedDetail
                   unified={unified}
                   models={models}
@@ -172,7 +182,7 @@ export default function RoutingPage() {
                 />
               </div>
             ) : selectedRoute ? (
-              <div className="h-full space-y-4 overflow-y-auto p-1">
+              <div className="h-full space-y-3 overflow-y-auto bg-paper/45 p-3.5">
                 <Panel
                   padding={false}
                   title={selectedRoute.id}
@@ -183,7 +193,17 @@ export default function RoutingPage() {
                     </span>
                   }
                   actions={
-                    <Button size="sm" variant="secondary" onClick={() => setEditingRoute(selectedRoute.id)}>编辑</Button>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        leadingIcon={<Play className="size-3.5" aria-hidden />}
+                        onClick={() => navigate("playground", { model: selectedRoute.id })}
+                      >
+                        试验场试跑
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={() => setEditingRoute(selectedRoute.id)}>编辑</Button>
+                    </div>
                   }
                 >
                   <RouteGraph

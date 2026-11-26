@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, MoreHorizontal, Pencil, Plus, Radar, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -87,7 +87,17 @@ export default function ProvidersPage() {
   const providers = providersQuery.data?.providers || [];
   const revision = providersQuery.data?.config_revision || "";
   const selectedId = route.params.get("id") || "";
+  const routeNew = route.params.get("new") === "1";
   const selected = providers.find((provider) => provider.id === selectedId) || providers[0] || null;
+
+  useEffect(() => {
+    if (!routeNew) return;
+    setCreateOpen(true);
+    setParams((params) => {
+      params.delete("new");
+      return params;
+    }, { replace: true });
+  }, [routeNew]);
   const boundModels = useMemo(() => boundModelsByKey(routesQuery.data?.routes || []), [routesQuery.data]);
   const customizedRouteCount = selected
     ? ROUTE_MODES.filter((mode) => selected.routes?.[mode.id]).length
@@ -173,7 +183,7 @@ export default function ProvidersPage() {
   const bindingKey = bindingProvider?.keys.find((key) => key.name === bindingTarget?.key) || null;
 
   return (
-    <div className="flex h-[calc(100dvh-7.5rem)] min-h-[520px] flex-col gap-4">
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col gap-3 md:h-[calc(100dvh-5.75rem)] md:min-h-[520px]">
       <PageHeader
         title="供应商"
         description="管理上游供应商、Key 与它们的模型能力。"
@@ -205,7 +215,7 @@ export default function ProvidersPage() {
         </Banner>
       ) : null}
 
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 overflow-hidden rounded-panel border border-rule bg-panel shadow-[var(--shadow-deck)]">
         <SplitView
           selected={Boolean(selectedId && selected)}
           onBack={() => setParams((params) => { params.delete("id"); return params; })}
@@ -245,9 +255,9 @@ export default function ProvidersPage() {
               正在读取供应商配置…
             </div>
           ) : selected ? (
-            <div className="h-full space-y-4 overflow-y-auto p-1">
+            <div className="h-full space-y-3 overflow-y-auto bg-paper/45 p-3.5">
               <Panel padding={false}>
-                <div className="flex flex-wrap items-start gap-3 p-4">
+                <div className="flex flex-wrap items-start gap-3 p-3.5">
                   <ProviderIcon id={selected.id} baseUrl={selected.base_url} size={32} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
@@ -313,6 +323,7 @@ export default function ProvidersPage() {
                 }
               >
                 <KeysTable
+                  key={selected.id}
                   provider={selected}
                   revision={revision}
                   boundModels={boundModels}
