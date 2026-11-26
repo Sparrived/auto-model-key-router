@@ -97,7 +97,7 @@ export function CommandPalette({ open, onOpenChange, health }: CommandPalettePro
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" />
         <Dialog.Content
           aria-label="命令面板"
           aria-describedby={undefined}
@@ -105,7 +105,7 @@ export function CommandPalette({ open, onOpenChange, health }: CommandPalettePro
             event.preventDefault();
             returnFocusRef.current?.focus();
           }}
-          className="fixed left-1/2 top-[15vh] z-50 w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-dialog border border-rule bg-raised shadow-[var(--shadow-float)] outline-none"
+          className="fixed left-1/2 top-[15vh] z-50 w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-dialog border border-rule-strong bg-panel shadow-[var(--shadow-float)] outline-none"
         >
           <Dialog.Title className="sr-only">命令面板</Dialog.Title>
           <Command loop className="flex max-h-[70vh] flex-col">

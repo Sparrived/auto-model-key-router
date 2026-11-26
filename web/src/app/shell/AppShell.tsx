@@ -1,6 +1,8 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { FlaskConical, Gauge, LayoutDashboard, Menu, Route } from "lucide-react";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { queryKeys } from "@/lib/query-keys";
 import type { HealthResponse, MetricsSnapshot } from "@/lib/types";
 import { PagePlaceholderFallback } from "../PageFallback";
@@ -24,6 +26,13 @@ const G_PAGES: Record<string, string> = {
   t: "tasks",
   k: "access-keys",
 };
+
+const MOBILE_QUICK_TABS = [
+  { id: "overview", label: "概览", icon: LayoutDashboard },
+  { id: "routing", label: "路由", icon: Route },
+  { id: "status", label: "状态", icon: Gauge },
+  { id: "playground", label: "试验场", icon: FlaskConical },
+] as const;
 
 function isEditable(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -56,6 +65,7 @@ export function AppShell() {
   const metrics = metricsQuery.data as MetricsSnapshot | undefined;
   const compatible = versionCompatible(health?.version);
   const PageComponent = page.component;
+  const isOverview = page.id === "overview";
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -104,7 +114,14 @@ export function AppShell() {
           menuButtonRef={menuButtonRef}
           onOpenPalette={() => setPaletteOpen(true)}
         />
-        <main id="content" tabIndex={-1} className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-4 md:px-6 md:py-6">
+        <main
+          id="content"
+          tabIndex={-1}
+          className={cn(
+            "mx-auto w-full flex-1 pb-20 md:pb-5",
+            isOverview ? "max-w-[1920px] px-3 py-3" : "max-w-[1600px] px-4 py-4 md:px-6 md:py-5",
+          )}
+        >
           {!compatible && page.id !== "settings" ? (
             <div className="space-y-3">
               <Banner tone="warn">
@@ -124,6 +141,41 @@ export function AppShell() {
           )}
         </main>
       </div>
+
+      {/* 手机端底部快捷导航 */}
+      <nav
+        aria-label="移动端快捷导航"
+        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-rule bg-panel pb-[env(safe-area-inset-bottom)] md:hidden"
+      >
+        {MOBILE_QUICK_TABS.map((tab) => {
+          const Icon = tab.icon;
+          const active = page.id === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              aria-current={active ? "page" : undefined}
+              onClick={() => navigate(tab.id)}
+              className={cn(
+                "flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] transition-colors",
+                active ? "font-semibold text-accent" : "text-ink-3 hover:text-ink",
+              )}
+            >
+              <Icon className="size-4" aria-hidden />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          aria-label="打开完整菜单"
+          onClick={() => setMobileOpen(true)}
+          className="flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] text-ink-3 transition-colors hover:text-ink"
+        >
+          <Menu className="size-4" aria-hidden />
+          <span>全部</span>
+        </button>
+      </nav>
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} health={health} />
     </div>

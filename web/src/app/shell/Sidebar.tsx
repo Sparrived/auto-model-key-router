@@ -36,16 +36,16 @@ function NavLink({ page, active, collapsed, onNavigate }: NavLinkProps) {
         onNavigate();
       }}
       className={cn(
-        "relative flex h-9 items-center gap-2.5 rounded-control px-2.5 text-dense transition-colors",
+        "relative flex h-8 items-center gap-2.5 rounded-control px-2.5 text-dense transition-colors",
         "hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2",
         active ? "bg-select font-medium text-ink" : "text-ink-2 hover:text-ink",
         collapsed && "justify-center px-0",
       )}
     >
       {active ? (
-        <span aria-hidden className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-accent" />
+        <span aria-hidden className="absolute inset-y-1.5 left-0 w-0.5 rounded-chip bg-accent" />
       ) : null}
-      <Icon className="size-[18px] shrink-0" aria-hidden />
+      <Icon className="size-4 shrink-0" aria-hidden />
       {!collapsed ? <span className="truncate">{page.title}</span> : null}
     </a>
   );
@@ -71,21 +71,26 @@ function SidebarContent({
 }: SidebarContentProps) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className={cn("flex h-14 shrink-0 items-center border-b border-rule px-3", collapsed && !mobile && "justify-center px-0")}>
-        <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-chip bg-accent text-on-accent">
-          <span className="text-[15px] leading-none">◆</span>
+      <div className={cn("flex h-12 shrink-0 items-center border-b border-rule px-3", collapsed && !mobile && "justify-center px-0")}>
+        <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-control border border-rule-strong bg-raised text-accent">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="3" cy="4" r="1.5" />
+            <circle cx="3" cy="12" r="1.5" />
+            <circle cx="13" cy="8" r="1.5" />
+            <path d="M4.5 4h2.5c1.5 0 2 4 4.5 4M4.5 12h2.5c1.5 0 2-4 4.5-4" />
+          </svg>
         </span>
         {!collapsed || mobile ? (
           <div className="ml-2.5 min-w-0">
-            <div className="text-body font-semibold tracking-tight text-ink">AMKR</div>
-            <div className="truncate text-[10px] text-ink-3">Auto Model Key Router</div>
+            <div className="text-[13px] font-semibold leading-tight tracking-tight text-ink">AMKR</div>
+            <div className="truncate font-mono text-[10px] text-ink-3">调度控制台</div>
           </div>
         ) : null}
         {mobile ? (
           <button
             type="button"
             aria-label="关闭主导航"
-            className="ml-auto grid size-8 place-items-center rounded-control text-ink-2 hover:bg-hover hover:text-ink"
+            className="ml-auto grid size-7 place-items-center rounded-control text-ink-2 hover:bg-hover hover:text-ink"
             onClick={onNavigate}
           >
             <X className="size-4" aria-hidden />
@@ -93,11 +98,11 @@ function SidebarContent({
         ) : null}
       </div>
 
-      <nav aria-label="主导航" className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
+      <nav aria-label="主导航" className="min-h-0 flex-1 overflow-y-auto px-2 py-2.5">
         {PAGE_GROUPS.map((group) => (
           <div key={group.label} className="mb-3 last:mb-0">
             {!collapsed || mobile ? (
-              <div className="px-2.5 pb-1 text-[11px] font-medium tracking-wide text-ink-3">{group.label}</div>
+              <div className="px-2.5 pb-1 font-mono text-[10px] uppercase tracking-wider text-ink-3">{group.label}</div>
             ) : (
               <div aria-hidden className="mx-2 mb-1 h-px bg-rule" />
             )}
