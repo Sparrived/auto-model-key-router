@@ -22,7 +22,8 @@
           root.setAttribute("data-theme-preference", pref);
 
           var accent = localStorage.getItem("amkr.accent");
-          if (accent === "cobalt" || accent === "pine") {
+          if (accent === "cobalt") accent = "mineral";
+          if (accent === "mineral" || accent === "pine" || accent === "ink") {
             root.setAttribute("data-accent", accent);
           } else if (/^#[0-9a-fA-F]{6}$/.test(accent || "")) {
             root.setAttribute("data-accent", "custom");
@@ -47,14 +48,14 @@
         }
       })();
     </script>
-    <script type="module" crossorigin src="./assets/login-Dd9MNF6K.js"></script>
-    <link rel="modulepreload" crossorigin href="./assets/styles-CrX3Y58u.js">
+    <script type="module" crossorigin src="./assets/login-V8qcZVCv.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/styles-Dtk4DZRK.js">
     <link rel="modulepreload" crossorigin href="./assets/storage-JpV9Gi3V.js">
-    <link rel="modulepreload" crossorigin href="./assets/key-round-Bp248yNc.js">
-    <link rel="modulepreload" crossorigin href="./assets/eye-BUeyw9pr.js">
-    <link rel="modulepreload" crossorigin href="./assets/Field-Qq2B7Txq.js">
-    <link rel="modulepreload" crossorigin href="./assets/Input-D8zNsHyI.js">
-    <link rel="stylesheet" crossorigin href="./assets/styles-DEVtOadW.css">
+    <link rel="modulepreload" crossorigin href="./assets/key-round-DCdQSXD-.js">
+    <link rel="modulepreload" crossorigin href="./assets/eye-DC7i150Q.js">
+    <link rel="modulepreload" crossorigin href="./assets/Field-D1PrPmYz.js">
+    <link rel="modulepreload" crossorigin href="./assets/Input-83rbTMo7.js">
+    <link rel="stylesheet" crossorigin href="./assets/styles-I5GkrRPn.css">
   </head>
   <body>
     <div id="root"></div>
