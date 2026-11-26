@@ -40,14 +40,14 @@ export function Switch({
         aria-label={label ? undefined : ariaLabel}
         aria-describedby={descriptionId}
         className={cn(
-          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-pill bg-rule-strong transition-colors duration-[var(--motion-hover)]",
-          "data-[state=checked]:bg-accent disabled:cursor-not-allowed disabled:opacity-50",
+          "relative inline-flex h-4 w-7 shrink-0 items-center rounded-pill border border-rule-strong bg-sunken transition-colors duration-[var(--motion-hover)]",
+          "data-[state=checked]:border-accent data-[state=checked]:bg-accent disabled:cursor-not-allowed disabled:opacity-50",
         )}
       >
         <SwitchPrimitive.Thumb
           className={cn(
-            "block size-4 rounded-pill bg-raised shadow-sm transition-transform duration-[var(--motion-hover)]",
-            "data-[state=checked]:translate-x-[18px] data-[state=unchecked]:translate-x-0.5",
+            "block size-2.5 rounded-pill bg-ink-2 transition-transform duration-[var(--motion-hover)]",
+            "data-[state=checked]:translate-x-[14px] data-[state=checked]:bg-on-accent data-[state=unchecked]:translate-x-0.5",
           )}
         />
       </SwitchPrimitive.Root>

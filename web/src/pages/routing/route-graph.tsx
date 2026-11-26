@@ -59,11 +59,17 @@ export function RouteGraph({ route, models, providers, onMoveTarget }: RouteGrap
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-meta text-ink-3">轮询目标（按优先级）</span>
-            <span className="text-meta text-ink-3">{targets.length} 个</span>
+            <span className="font-mono text-meta text-ink-3">{targets.length} 个</span>
           </div>
           {targets.length ? targets.map((target, index) => (
             <div key={`${target.provider}|${target.key}|${target.upstream_model}|${index}`} className="flex items-center gap-2 rounded-control border border-rule bg-panel px-2.5 py-2">
-              <span className="grid size-6 shrink-0 place-items-center rounded-pill bg-ink text-[11px] font-medium tabular-nums text-panel">
+              <span
+                className={
+                  index === 0
+                    ? "grid size-5 shrink-0 place-items-center rounded-chip bg-accent font-mono text-[11px] font-semibold tabular-nums text-on-accent"
+                    : "grid size-5 shrink-0 place-items-center rounded-chip border border-rule-strong font-mono text-[11px] font-medium tabular-nums text-ink-3"
+                }
+              >
                 {index + 1}
               </span>
               <ProviderIcon

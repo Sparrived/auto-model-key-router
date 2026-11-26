@@ -145,8 +145,8 @@ export function DataTable<T>({
                   style={widthStyle}
                   onClick={column.sortValue ? () => toggleSort(column) : undefined}
                   className={cn(
-                    "sticky top-0 z-10 border-b border-rule bg-sunken px-3 text-[12px] font-medium text-ink-3",
-                    dense ? "h-8" : "h-10",
+                    "sticky top-0 z-10 border-b border-rule bg-sunken px-3 font-mono text-[11px] font-medium text-ink-3",
+                    dense ? "h-8" : "h-9",
                     ALIGN[column.align ?? "left"],
                     column.sortValue && "cursor-pointer",
                     column.headerClassName,

@@ -155,7 +155,7 @@ export function ListPaneItem({
       )}
     >
       {selected ? (
-        <span aria-hidden className="absolute inset-y-1 left-0 w-0.5 rounded-pill bg-accent" />
+        <span aria-hidden className="absolute inset-y-1.5 left-0 w-0.5 rounded-chip bg-accent" />
       ) : null}
       {leading ? <span className="flex shrink-0 items-center">{leading}</span> : null}
       <span className="min-w-0 flex-1 truncate">{children}</span>

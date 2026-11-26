@@ -66,7 +66,7 @@ export function MetricStrip({ children, className }: MetricStripProps) {
   return (
     <div
       className={cn(
-        "metric-strip flex w-full flex-wrap gap-px overflow-hidden rounded-panel border border-rule bg-rule [&>*]:bg-panel",
+        "metric-strip flex w-full flex-wrap gap-px overflow-hidden rounded-panel border border-rule bg-rule shadow-[var(--shadow-deck)] [&>*]:bg-panel",
         className,
       )}
     >
@@ -89,22 +89,22 @@ export function MetricCell({
   const DeltaIcon = delta?.direction === "up" ? ArrowUp : delta?.direction === "down" ? ArrowDown : Minus;
 
   return (
-    <div className={cn("flex min-w-0 flex-[1_1_9.5rem] flex-col px-4 py-3", className)}>
-      <div className="text-[12px] leading-4 text-ink-3">{label}</div>
+    <div className={cn("flex min-w-0 flex-[1_1_9.5rem] flex-col px-3.5 py-2.5", className)}>
+      <div className="text-[11px] leading-4 text-ink-3">{label}</div>
       <div className="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
         <span
           className={cn(
-            "font-semibold tabular-nums leading-tight",
-            hero ? "text-[44px] leading-none" : "text-[28px] leading-none",
+            "font-mono font-semibold tabular-nums leading-none tracking-tight",
+            hero ? "text-[34px]" : "text-[22px]",
             tone ? TONE_TEXT[tone] : "text-ink",
           )}
         >
           {value}
         </span>
-        {unit ? <span className="text-[13px] text-ink-3">{unit}</span> : null}
+        {unit ? <span className="font-mono text-[11px] text-ink-3">{unit}</span> : null}
       </div>
       {delta || hint ? (
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] leading-4 text-ink-3">
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-4 text-ink-3">
           {delta ? (
             <span
               className={cn("inline-flex items-center gap-0.5 tabular-nums", deltaColor(delta))}

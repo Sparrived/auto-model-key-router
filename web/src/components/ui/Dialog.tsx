@@ -43,13 +43,13 @@ export function Dialog({
         <DialogPrimitive.Overlay
           data-amkr-overlay="dialog"
           className={cn(
-            "fixed inset-0 z-50 bg-black/40",
+            "fixed inset-0 z-50 bg-black/50 backdrop-blur-[4px]",
             "data-[state=open]:animate-[amkr-overlay-in_160ms_ease-out] data-[state=closed]:animate-[amkr-overlay-out_120ms_ease-in]",
           )}
         />
         <DialogPrimitive.Content
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-dialog border border-rule bg-raised shadow-[var(--shadow-float)] outline-none",
+            "fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-dialog border border-rule-strong bg-panel shadow-[var(--shadow-float)] outline-none",
             SIZES[size],
             className,
           )}

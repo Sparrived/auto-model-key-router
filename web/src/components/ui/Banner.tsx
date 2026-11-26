@@ -16,12 +16,12 @@ export interface BannerProps {
 }
 
 const toneClasses: Record<BannerTone, string> = {
-  neutral: "bg-sunken text-ink-2",
-  info: "bg-select text-ink-2",
-  good: "bg-good-bg text-good-ink",
-  warn: "bg-warn-bg text-warn-ink",
-  serious: "bg-serious-bg text-serious-ink",
-  critical: "bg-critical-bg text-critical-ink",
+  neutral: "border border-rule bg-sunken text-ink-2",
+  info: "border border-rule-strong bg-select text-ink-2",
+  good: "border border-good/35 bg-good-bg text-good-ink",
+  warn: "border border-warn/40 bg-warn-bg text-warn-ink",
+  serious: "border border-serious/40 bg-serious-bg text-serious-ink",
+  critical: "border border-critical/40 bg-critical-bg text-critical-ink",
 };
 
 const toneIcons: Record<BannerTone, LucideIcon> = {

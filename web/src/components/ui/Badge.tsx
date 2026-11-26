@@ -11,12 +11,12 @@ export interface BadgeProps {
 }
 
 const toneClasses: Record<BadgeTone, string> = {
-  neutral: "bg-neutral-bg text-neutral-ink",
-  good: "bg-good-bg text-good-ink",
-  warn: "bg-warn-bg text-warn-ink",
-  serious: "bg-serious-bg text-serious-ink",
-  critical: "bg-critical-bg text-critical-ink",
-  accent: "bg-select text-ink",
+  neutral: "border-rule-strong bg-transparent text-ink-2",
+  good: "border-good/40 bg-transparent text-good-ink",
+  warn: "border-warn/45 bg-transparent text-warn-ink",
+  serious: "border-serious/45 bg-transparent text-serious-ink",
+  critical: "border-critical/45 bg-transparent text-critical-ink",
+  accent: "border-accent-ring bg-accent-soft text-accent",
 };
 
 const dotClasses: Record<BadgeTone, string> = {
@@ -25,14 +25,14 @@ const dotClasses: Record<BadgeTone, string> = {
   warn: "bg-warn",
   serious: "bg-serious",
   critical: "bg-critical",
-  accent: "bg-ink",
+  accent: "bg-accent",
 };
 
 export function Badge({ children, tone = "neutral", dot = false, className }: BadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-chip px-1.5 text-meta font-medium",
+        "inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-chip border px-1.5 font-mono text-[11px] font-medium",
         toneClasses[tone],
         className,
       )}

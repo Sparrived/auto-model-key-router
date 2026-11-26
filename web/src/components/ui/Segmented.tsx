@@ -86,11 +86,11 @@ export function Segmented({ options, value, onValueChange, "aria-label": ariaLab
             disabled={option.disabled}
             onClick={() => onValueChange(option.value)}
             className={cn(
-              "inline-flex h-6 items-center rounded-[6px] border px-3 text-meta transition-colors duration-[var(--motion-hover)]",
+              "inline-flex h-6 items-center rounded-[3px] border px-2.5 text-meta transition-colors duration-[var(--motion-hover)]",
               "disabled:cursor-not-allowed disabled:opacity-40",
               selected
-                ? "border-rule bg-panel font-medium text-ink"
-                : "border-transparent text-ink-2 hover:text-ink",
+                ? "border-rule-strong bg-panel font-medium text-ink"
+                : "border-transparent text-ink-3 hover:text-ink",
             )}
           >
             {option.label}

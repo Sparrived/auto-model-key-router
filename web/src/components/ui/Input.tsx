@@ -44,8 +44,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         ref={ref}
         aria-invalid={isInvalid || undefined}
         className={cn(
-          "h-full w-full min-w-0 rounded-control border bg-sunken text-ink transition-colors duration-[var(--motion-hover)]",
-          "placeholder:text-ink-3 disabled:cursor-not-allowed disabled:opacity-60",
+          "h-full w-full min-w-0 rounded-control border bg-paper text-ink transition-colors duration-[var(--motion-hover)]",
+          "placeholder:text-ink-3 focus:border-accent focus:outline-none disabled:cursor-not-allowed disabled:opacity-60",
           isInvalid ? "border-critical" : "border-rule-strong",
           textClasses[size],
           leadingIcon && "pl-8",

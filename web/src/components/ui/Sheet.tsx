@@ -84,13 +84,13 @@ export function Sheet({
         <DialogPrimitive.Overlay
           data-amkr-overlay="sheet"
           className={cn(
-            "fixed inset-0 z-50 bg-black/40",
+            "fixed inset-0 z-50 bg-black/50 backdrop-blur-[4px]",
             "data-[state=open]:animate-[amkr-sheet-overlay-in_160ms_ease-out] data-[state=closed]:animate-[amkr-sheet-overlay-out_120ms_ease-in]",
           )}
         />
         <DialogPrimitive.Content
           className={cn(
-            "fixed inset-y-0 right-0 z-50 flex w-full max-w-full flex-col border-l border-rule bg-raised shadow-[var(--shadow-float)] outline-none",
+            "fixed inset-y-0 right-0 z-50 flex w-full max-w-full flex-col border-l border-rule-strong bg-panel shadow-[var(--shadow-float)] outline-none",
             WIDTHS[width],
             "data-[state=open]:animate-[amkr-sheet-in_200ms_ease-out] data-[state=closed]:animate-[amkr-sheet-out_160ms_ease-in]",
             className,

@@ -10,16 +10,16 @@ const base =
   "inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-control font-medium transition-colors duration-[var(--motion-hover)] disabled:pointer-events-none disabled:opacity-50";
 
 const variantClasses: Record<ButtonVariant, string> = {
-  primary: "bg-accent text-on-accent hover:bg-accent-hover",
-  secondary: "border border-rule-strong bg-panel text-ink hover:bg-hover",
-  ghost: "text-ink-2 hover:bg-hover hover:text-ink",
-  danger: "bg-critical text-white hover:opacity-90",
-  "danger-ghost": "text-critical-ink hover:bg-critical-bg",
+  primary: "border border-accent bg-accent text-on-accent hover:border-accent-hover hover:bg-accent-hover",
+  secondary: "border border-rule-strong bg-raised text-ink hover:bg-hover",
+  ghost: "border border-transparent text-ink-2 hover:bg-hover hover:text-ink",
+  danger: "border border-critical bg-critical text-white hover:opacity-90",
+  "danger-ghost": "border border-transparent text-critical-ink hover:border-critical/35 hover:bg-critical-bg",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
   sm: "h-7 px-2.5 text-meta",
-  md: "h-8 px-3 text-body",
+  md: "h-8 px-3 text-dense",
 };
 
 const iconOnlySizeClasses: Record<ButtonSize, string> = {

@@ -40,7 +40,7 @@ export function Panel({
     <section
       aria-busy={busy || undefined}
       className={cn(
-        "relative rounded-panel border border-rule bg-panel",
+        "relative rounded-panel border border-rule bg-panel shadow-[var(--shadow-deck)]",
         fill && "flex min-h-0 flex-col",
         className,
       )}
@@ -60,29 +60,29 @@ export function Panel({
       {hasHeader ? (
         <header
           className={cn(
-            "px-4 pt-4",
-            padding ? "pb-0" : "border-b border-rule pb-3",
+            "px-3.5 py-2.5",
+            !padding || description || toolbar ? "border-b border-rule" : "pb-1 pt-3",
           )}
         >
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               {title ? (
-                <h3 className="text-[16px] font-semibold leading-tight text-ink">{title}</h3>
+                <h3 className="text-[13px] font-semibold leading-tight tracking-tight text-ink">{title}</h3>
               ) : null}
               {description ? (
-                <p className="mt-1 text-[12px] leading-5 text-ink-3">{description}</p>
+                <p className="mt-0.5 text-[11px] leading-4 text-ink-3">{description}</p>
               ) : null}
             </div>
-            {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+            {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
           </div>
-          {toolbar ? <div className="mt-3">{toolbar}</div> : null}
+          {toolbar ? <div className="mt-2.5">{toolbar}</div> : null}
         </header>
       ) : null}
 
       <div
         className={cn(
           "transition-opacity duration-200",
-          padding ? (hasHeader ? "p-4 pt-3" : "p-4") : "p-0",
+          padding ? (hasHeader ? "p-3.5 pt-3" : "p-3.5") : "p-0",
           fill && "flex min-h-0 flex-1 flex-col",
           busy && "opacity-60",
         )}
@@ -93,7 +93,7 @@ export function Panel({
       {footer ? (
         <footer
           className={cn(
-            "border-t border-rule px-4 py-3 transition-opacity duration-200",
+            "border-t border-rule px-3.5 py-2.5 transition-opacity duration-200",
             busy && "opacity-60",
           )}
         >

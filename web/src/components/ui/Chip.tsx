@@ -17,12 +17,12 @@ export interface ChipProps {
 }
 
 const toneClasses: Record<ChipTone, string> = {
-  neutral: "border-rule bg-panel text-ink-2",
-  accent: "border-transparent bg-select text-ink",
-  good: "border-transparent bg-good-bg text-good-ink",
-  warn: "border-transparent bg-warn-bg text-warn-ink",
-  serious: "border-transparent bg-serious-bg text-serious-ink",
-  critical: "border-transparent bg-critical-bg text-critical-ink",
+  neutral: "border-rule-strong bg-raised text-ink-2",
+  accent: "border-accent-ring bg-accent-soft text-accent",
+  good: "border-good/40 bg-transparent text-good-ink",
+  warn: "border-warn/45 bg-transparent text-warn-ink",
+  serious: "border-serious/45 bg-transparent text-serious-ink",
+  critical: "border-critical/45 bg-transparent text-critical-ink",
 };
 
 export function Chip({ children, onRemove, icon, tone = "neutral", label, disabled = false, className }: ChipProps) {
