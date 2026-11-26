@@ -51,6 +51,7 @@ import type {
   RequestListResponse,
   RouteEntry,
   RouteTarget,
+  RouteTraceResponse,
   RoutesResponse,
   SeriesResponse,
   ServiceActionResponse,
@@ -140,9 +141,10 @@ interface RequestOptions {
   body?: unknown;
   auth?: boolean;
   workspace?: string;
+  cache?: RequestCache;
 }
 
-async function request<T>(path: string, { method = "GET", body, auth = true, workspace }: RequestOptions = {}): Promise<T> {
+async function request<T>(path: string, { method = "GET", body, auth = true, workspace, cache }: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = {};
   if (auth) headers.Authorization = `Bearer ${getKey()}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -154,6 +156,7 @@ async function request<T>(path: string, { method = "GET", body, auth = true, wor
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(cache ? { cache } : {}),
     });
   } catch (error) {
     throw new ApiError(`无法连接 AMKR 服务: ${(error as Error).message}`, 0, null);
@@ -331,6 +334,9 @@ export const api = {
     appendFilterParams(params, filters);
     return request(`/ui/status-monitor.json?${params}`);
   },
+
+  routeTrace: (requestId: string): Promise<RouteTraceResponse> =>
+    request(`/api/route-traces/${encodeURIComponent(requestId)}`, { cache: "no-store" }),
 
   // 筛选器选项：窗口内实际出现过的各维度取值与请求数。**不接受筛选条件**——
   // 选项若跟着当前条件收窄，用户选了模型 A 之后模型 B 就会从列表里消失，筛选器

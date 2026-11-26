@@ -49,6 +49,7 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { FilterBar } from "@/components/filters/FilterBar";
 import { HealthMatrix, type HealthMatrixColumn, type HealthMatrixRow } from "@/components/charts/HealthMatrix";
 import { Sparkline, TimeSeriesChart, type ChartSeries, type TimeBucket } from "@/components/charts";
+import { RouteTraceLookup } from "./route-trace";
 
 const MATRIX_HOURS = 12;
 const MATRIX_BUCKET_SECONDS = 15 * 60;
@@ -525,6 +526,7 @@ function StatusPage() {
   return (
     <div className="mx-auto flex w-full max-w-[1560px] flex-col gap-3 pb-6">
       <FilterBar defaultRange="24h" />
+      <RouteTraceLookup />
 
       {pageQuery.isError ? (
         <Banner tone="critical" title="状态数据读取失败">{String((pageQuery.error as Error)?.message || pageQuery.error)}</Banner>
