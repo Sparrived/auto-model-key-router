@@ -1,12 +1,11 @@
-// 概览：现在怎么样？
+// 概览（调度控制台视图）：此刻发生了什么？
 //
-// 这一页只回答“此刻发生了什么”，因此所有面板共用同一组 URL 筛选与时间窗：
-// 仪表带、流向、流量/结果、请求流都从 filtered-metrics 或同参数的 /ui/* 读数取数。
-// 唯一刻意不跟随筛选的是 active_requests（全局在途数），在筛选态会明确加注。
+// 这一页融合「左翼上游状态 + 中央路由拓扑/流向 + 右翼实时检查器与快捷调试 + 底部实时请求流」。
+// 所有监控读数共用同一组 URL 筛选与时间窗（active_requests 除外）。
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
-import { ChevronRight, CircleAlert, RefreshCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleAlert, RefreshCw } from "lucide-react";
 import { navigate } from "@/app/router";
 import { useMetricFilters, useSelectFilter } from "@/lib/hooks/useMetricFilters";
 import {
@@ -41,6 +40,8 @@ import { Sheet } from "@/components/ui/Sheet";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { FilterBar } from "@/components/filters/FilterBar";
 import { FlowMap, Sparkline, StackedColumns, TimeSeriesChart, type ChartSeries, type TimeBucket } from "@/components/charts";
+import { CockpitTopology, type CockpitSelection } from "./CockpitTopology";
+import { CockpitInspector } from "./CockpitInspector";
 
 const CALLER_LABELS: Record<string, string> = {
   local: "本机",
@@ -52,6 +53,8 @@ const API_FORMAT_LABELS: Record<string, string> = {
   "chat/completions": "Chat",
   messages: "Messages",
   responses: "Responses",
+  "gemini/generateContent": "Gemini",
+  "gemini/streamGenerateContent": "Gemini 流式",
   embeddings: "Embeddings",
   "images/generations": "Images",
   "images/edits": "Images 编辑",
@@ -65,6 +68,7 @@ const API_FORMAT_LABELS: Record<string, string> = {
 
 type StreamFilter = "all" | "success" | "failure" | "retry";
 type FlowMetric = "requests" | "tokens";
+type WindshieldView = "topology" | "flow";
 
 function hasFilters(state: MetricFilterState): boolean {
   return Boolean(state.provider.length || state.model.length || state.uk.length || state.ak.length || state.ws.length || state.caller.length || state.outcome);
@@ -114,7 +118,6 @@ function failureCodesOfCells(cells: StatusCell[]): Record<string, number> {
     const codes = cell && typeof cell === "object" ? (cell as { status_codes?: Record<string, number> }).status_codes : null;
     if (!codes) continue;
     for (const [code, raw] of Object.entries(codes)) {
-      // 状态码表混有成功码；这里只挑出非 2xx 的尝试，避免把成功请求算进失败原因。
       if (code === "none" || Number(code) >= 300) output[code] = (output[code] || 0) + Number(raw || 0);
     }
   }
@@ -211,7 +214,6 @@ function sourceTitle(item: RequestItem): string {
 }
 
 function cacheReadTokens(item: RequestItem): number | null | undefined {
-  // OpenAI / CPA 的缓存命中量记在 cached_tokens，显式缓存读为正时仍优先。
   const explicit = item.cache_read_input_tokens as number | null | undefined;
   return explicit != null && explicit > 0 ? explicit : item.cached_tokens ?? explicit;
 }
@@ -240,11 +242,13 @@ function requestCostText(index: PriceIndex | null, item: RequestItem): string {
 function RequestRow({
   item,
   fresh,
+  selected,
   pricingIndex,
   onOpen,
 }: {
   item: RequestItem;
   fresh: boolean;
+  selected: boolean;
   pricingIndex: PriceIndex | null;
   onOpen: (item: RequestItem) => void;
 }) {
@@ -264,22 +268,23 @@ function RequestRow({
       }}
       className={cn(
         "stream-row grid min-w-[980px] cursor-pointer grid-cols-[3px_72px_minmax(180px,1.3fr)_minmax(110px,.8fr)_minmax(120px,.9fr)_minmax(190px,1.2fr)_minmax(160px,1fr)_76px] items-stretch gap-x-3 border-t border-rule px-1 text-[12px] outline-offset-[-2px] first:border-t-0 hover:bg-hover focus-visible:outline-2 focus-visible:outline-focus",
+        selected && "bg-accent-soft",
         fresh && "animate-[amkr-stream-in_150ms_ease-out]",
       )}
     >
       <span
         aria-hidden
         className={cn(
-          "my-1 w-[3px] rounded-pill",
+          "my-1 w-[3px] rounded-chip",
           tone === "critical" ? "bg-critical" : tone === "warn" ? "bg-warn" : "bg-transparent",
         )}
       />
-      <span className="self-center py-1.5 tabular-nums text-ink-3" title={item.created_at}>
+      <span className="self-center py-1.5 font-mono text-[11px] tabular-nums text-ink-3" title={item.created_at}>
         {formatClockSeconds(item.created_at)}
       </span>
       <div className="min-w-0 self-center py-1.5">
-        <div className="truncate font-medium text-ink" title={requestRouteTitle(item)}>{item.model_id || "—"}</div>
-        <div className="mt-0.5 truncate text-[11px] text-ink-3" title={requestRouteTitle(item)}>{requestRouteText(item) || "—"}</div>
+        <div className="truncate font-mono text-[12px] font-medium text-ink" title={requestRouteTitle(item)}>{item.model_id || "—"}</div>
+        <div className="mt-0.5 truncate font-mono text-[11px] text-ink-3" title={requestRouteTitle(item)}>{requestRouteText(item) || "—"}</div>
       </div>
       <div className="min-w-0 self-center py-1.5" title={shapeTitle(item)}>
         <div className="text-ink-2">{item.stream === null || item.stream === undefined ? "—" : item.stream ? "流式" : "非流式"}</div>
@@ -287,7 +292,7 @@ function RequestRow({
       </div>
       <div className="min-w-0 self-center py-1.5" title={sourceTitle(item)}>
         <div className="truncate text-ink-2">{sourceText(item)}</div>
-        <div className="mt-0.5 truncate text-[11px] text-ink-3">{clientAddress(item.client_addr)}</div>
+        <div className="mt-0.5 truncate font-mono text-[11px] text-ink-3">{clientAddress(item.client_addr)}</div>
       </div>
       <div className="min-w-0 self-center py-1.5 text-[11px] leading-[1.45] text-ink-2" title={tokenTitle(item)}>
         {item.total_tokens ? (
@@ -300,9 +305,9 @@ function RequestRow({
       </div>
       <div className="min-w-0 self-center py-1.5">
         <div className={cn("truncate text-[11px]", !item.success ? "text-critical-ink" : item.retried ? "text-warn-ink" : "text-ink-2")}>{requestResultText(item)}</div>
-        <div className="mt-0.5 text-[11px] text-ink-3">{durationText(item.duration_ms)} · 首字 {durationText(item.first_token_ms)}</div>
+        <div className="mt-0.5 font-mono text-[11px] text-ink-3">{durationText(item.duration_ms)} · 首字 {durationText(item.first_token_ms)}</div>
       </div>
-      <span className="self-center text-right text-[11px] tabular-nums text-ink-2" title={requestCostTitle(item, pricingIndex)}>
+      <span className="self-center text-right font-mono text-[11px] tabular-nums text-ink-2" title={requestCostTitle(item, pricingIndex)}>
         {requestCostText(pricingIndex, item)}
       </span>
     </div>
@@ -405,9 +410,14 @@ function OverviewPage() {
   const rangeHours = rangeQuery.hours ?? 8760;
   const bucketSeconds = pickBucketSeconds(rangeHours);
   const filtersActive = hasFilters(state);
+
+  const [windshieldView, setWindshieldView] = useState<WindshieldView>("topology");
   const [flowMetric, setFlowMetric] = useState<FlowMetric>("requests");
   const [streamFilter, setStreamFilter] = useState<StreamFilter>("all");
   const [streamPaused, setStreamPaused] = useState(false);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [showTrends, setShowTrends] = useState(true);
+  const [selection, setSelection] = useState<CockpitSelection | null>(null);
   const [detailItem, setDetailItem] = useState<RequestItem | null>(null);
 
   const mainOptions = { ...rangeQuery, bucketSeconds, limit: 0, ...filters };
@@ -475,12 +485,38 @@ function OverviewPage() {
     retry: false,
   });
 
+  // 驾驶舱交互所需配置接口：无权限或旧测试环境返回 404 时静默降级，不打断监控面板渲染
+  const routesQuery = useQuery({
+    queryKey: queryKeys.routes(),
+    queryFn: () => api.routes(),
+    retry: false,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false,
+  });
+  const providersQuery = useQuery({
+    queryKey: queryKeys.providers(),
+    queryFn: () => api.providers(),
+    retry: false,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false,
+  });
+  const freezesQuery = useQuery({
+    queryKey: queryKeys.quotaFreezes(),
+    queryFn: () => api.quotaFreezes(),
+    retry: false,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false,
+  });
+
   const pricingIndex = pricingQuery.data ?? null;
   const snapshot = mainQuery.data?.snapshot;
   const total = snapshot?.total;
   const successRate = statsSuccessRate(total);
   const avgTtft = statsAvgTtft(total);
   const streamItems = streamQuery.data?.requests?.items ?? [];
+  const routes = routesQuery.data?.routes ?? [];
+  const providers = providersQuery.data?.providers ?? [];
+  const freezes = freezesQuery.data?.freezes ?? [];
 
   const sparkValues = useMemo(
     () => (sparkQuery.data?.series.points ?? []).map((point) => (typeof point.requests === "number" ? point.requests : null)),
@@ -579,6 +615,20 @@ function OverviewPage() {
       .slice(0, 3);
   }, [statusQuery.data]);
 
+  const topUpstreamKeys = useMemo(() => {
+    const rows = [...(keyUsageQuery.data?.upstream_keys ?? [])]
+      .filter((row) => Number(row.stats?.requests || 0) > 0)
+      .sort((a, b) => Number(b.stats?.requests || 0) - Number(a.stats?.requests || 0))
+      .slice(0, 5);
+    const maxReq = rows[0]?.stats?.requests || 1;
+    return rows.map((row) => ({
+      providerId: row.provider_id,
+      keyName: row.key_name,
+      requests: Number(row.stats?.requests || 0),
+      pct: Math.max(4, Math.round((Number(row.stats?.requests || 0) / maxReq) * 100)),
+    }));
+  }, [keyUsageQuery.data]);
+
   const cost = useMemo(() => {
     const groups = costQuery.data?.groups ?? [];
     if (!pricingIndex || !groups.length) {
@@ -617,9 +667,11 @@ function OverviewPage() {
     const providerId = item.row.provider_id;
     const keyName = item.row.key_name;
     if (!providerId) return;
-    const next = keyName
-      ? { ...state, uk: [{ providerId, keyName }] }
-      : { ...state, provider: [providerId], uk: [] };
+    if (keyName) {
+      setSelection({ kind: "key", providerId, keyName });
+      return;
+    }
+    const next = { ...state, provider: [providerId], uk: [] };
     const params = writeFilters(new URLSearchParams(), next);
     navigate("status", params);
   }
@@ -628,17 +680,26 @@ function OverviewPage() {
     if (node.name === "其他") return;
     if (node.layer === 1) {
       selectFilter("model", node.name);
+      setSelection({ kind: "route", id: node.name });
       return;
     }
     if (node.layer === 2) {
       const [providerId, ...rest] = node.name.split(" / ");
       const keyName = rest.join(" / ");
-      if (providerId && keyName) setDimension("uk", [{ providerId, keyName }]);
+      if (providerId && keyName) {
+        setDimension("uk", [{ providerId, keyName }]);
+        setSelection({ kind: "key", providerId, keyName });
+      }
     }
   }
 
+  function handleOpenRequest(item: RequestItem) {
+    setSelection({ kind: "request", id: item.id });
+    setDetailItem(item);
+  }
+
   return (
-    <div className="mx-auto flex w-full max-w-[1560px] flex-col gap-4 pb-8">
+    <div className="flex w-full flex-col gap-3 pb-4">
       <FilterBar defaultRange="6h" />
 
       {mainQuery.isError ? (
@@ -653,7 +714,7 @@ function OverviewPage() {
           unit="次/分"
           hero
           hint={`近 ${snapshot?.rate_window_seconds ?? 60} 秒 · 全实例`}
-          chart={<Sparkline values={sparkValues} height={32} format={(value) => `${formatCompact(value)} 次`} ariaLabel="最近 60 分钟请求数" color="var(--series-1)" />}
+          chart={<Sparkline values={sparkValues} height={28} format={(value) => `${formatCompact(value)} 次`} ariaLabel="最近 60 分钟请求数" color="var(--series-1)" />}
         />
         <MetricCell
           label="Token 速率"
@@ -690,152 +751,294 @@ function OverviewPage() {
         />
       </MetricStrip>
 
-      <div className="grid min-w-0 grid-cols-12 items-stretch gap-4">
+      {/* ===================== 3-WING COCKPIT WORKSPACE ===================== */}
+      <div
+        className={cn(
+          "grid min-w-0 gap-3",
+          leftCollapsed
+            ? "xl:grid-cols-[44px_minmax(0,1fr)_336px]"
+            : "xl:grid-cols-[260px_minmax(0,1fr)_336px]",
+        )}
+      >
+        {/* LEFT WING: 上游状态与关注 (Flattened hairline list, collapsible on xl) */}
+        <div className="min-w-0 xl:flex xl:flex-col">
+          {leftCollapsed ? (
+            <Panel padding={false} className="hidden h-full xl:flex xl:flex-col xl:items-center xl:py-2.5">
+              <button
+                type="button"
+                aria-label="展开左侧状态栏"
+                title="展开左侧状态栏"
+                onClick={() => setLeftCollapsed(false)}
+                className="grid size-7 place-items-center rounded-control border border-rule-strong bg-raised text-ink-2 hover:bg-hover hover:text-ink"
+              >
+                <ChevronRight className="size-3.5" aria-hidden />
+              </button>
+              <span
+                aria-hidden
+                className={cn("mt-3 size-2 rounded-pill", attention.length ? "bg-warn" : "bg-good")}
+              />
+              <span className="mt-auto font-mono text-[10px] tracking-wider text-ink-3 [writing-mode:vertical-rl]">
+                STATUS
+              </span>
+            </Panel>
+          ) : (
+            <Panel
+              fill
+              padding={false}
+              title="需要关注"
+              description={<span title="矩阵检查范围">{`按健康分升序 · ${rangeLabel(state.range)}`}</span>}
+              actions={
+                <>
+                  <Badge tone={attention.length ? "warn" : "good"}>
+                    {attention.length ? `${attention.length} 个渠道` : "健康"}
+                  </Badge>
+                  <button
+                    type="button"
+                    aria-label="收起左侧状态栏"
+                    title="收起左侧状态栏"
+                    onClick={() => setLeftCollapsed(true)}
+                    className="hidden size-6 place-items-center rounded-control text-ink-3 hover:bg-hover hover:text-ink xl:grid"
+                  >
+                    <ChevronLeft className="size-3.5" aria-hidden />
+                  </button>
+                </>
+              }
+              busy={statusQuery.isFetching}
+              footer={
+                <div className="space-y-1.5">
+                  <p className="text-[11px] leading-4 text-ink-3">
+                    健康分综合成功率、首字延迟与缓存命中；点击渠道可在右侧检查。
+                  </p>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-control text-[11px] font-medium text-ink-2 transition-colors hover:text-ink"
+                    onClick={() => navigate("/status")}
+                  >
+                    打开状态监控查看全部渠道
+                    <ChevronRight aria-hidden className="size-3.5" />
+                  </button>
+                </div>
+              }
+            >
+              <div className="min-h-0 flex-1 divide-y divide-rule overflow-y-auto">
+                <div className="p-3">
+                  {statusQuery.isError ? (
+                    <Empty title="渠道健康读数不可用" description="状态监控接口暂时没有返回数据。" />
+                  ) : attention.length ? (
+                    <div className="divide-y divide-rule">
+                      {attention.map((item) => (
+                        <button
+                          key={`${item.row.provider_id}-${item.row.key_name}`}
+                          type="button"
+                          onClick={() => openAttention(item)}
+                          className="flex w-full items-start gap-2 rounded-control px-1.5 py-2 text-left transition-colors hover:bg-hover"
+                          title={`${item.label}\n健康分 ${item.score ?? "—"}\n${item.failure?.label || "失败原因未细分"}`}
+                        >
+                          <StatusDot tone={item.band === "bad" ? "critical" : "warn"} label="" aria-label={`${item.label} ${item.band === "bad" ? "异常" : "波动"}`} />
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="truncate font-mono text-[11px] font-medium text-ink">{item.label}</span>
+                              <span className="shrink-0 font-mono text-[10px] tabular-nums text-ink-3">{item.score === null ? "样本不足" : `健康分 ${item.score}`}</span>
+                            </span>
+                            <span className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-ink-3">
+                              <span className="truncate">{item.failure ? item.failure.label : "暂无失败原因"} · {formatCompact(item.requests)} 次</span>
+                              <span className="shrink-0">{item.band === "bad" ? "异常" : "波动"}</span>
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <Empty
+                      icon={<CircleAlert aria-hidden />}
+                      title="所有渠道健康"
+                      description={`已检查 ${statusQuery.data?.matrix.rows.length ?? 0} 个渠道 · ${rangeLabel(state.range)} 内没有异常或波动。`}
+                    />
+                  )}
+                </div>
+
+                {topReasons.length ? (
+                  <div className="p-3">
+                    <div className="mb-1.5 text-[11px] font-medium text-ink-2">失败原因前三</div>
+                    <div className="divide-y divide-rule">
+                      {topReasons.map((reason) => (
+                        <div key={reason.id} className="flex items-center justify-between gap-2 py-1.5 text-[11px]" title={reason.hint}>
+                          <span className="inline-flex min-w-0 items-center gap-1.5 text-ink-2">
+                            <StatusDot tone={reason.tone === "bad" ? "critical" : reason.tone === "warn" ? "warn" : "neutral"} label="" aria-label={reason.label} />
+                            <span className="truncate">{reason.label}</span>
+                          </span>
+                          <span className="shrink-0 font-mono tabular-nums text-ink-3">{formatCount(reason.count)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {topUpstreamKeys.length ? (
+                  <div className="p-3">
+                    <div className="mb-2 flex items-center justify-between text-[11px]">
+                      <span className="font-medium text-ink-2">上游 Key 负载分布</span>
+                      <span className="font-mono text-[10px] text-ink-3">REQS</span>
+                    </div>
+                    <div className="space-y-2">
+                      {topUpstreamKeys.map((k) => (
+                        <button
+                          key={`${k.providerId}|${k.keyName}`}
+                          type="button"
+                          onClick={() => setSelection({ kind: "key", providerId: k.providerId, keyName: k.keyName })}
+                          className="block w-full text-left group"
+                        >
+                          <div className="mb-1 flex items-center justify-between font-mono text-[10px]">
+                            <span className="truncate text-ink-2 group-hover:text-ink">{k.providerId} / {k.keyName}</span>
+                            <span className="shrink-0 text-ink-3">{formatCompact(k.requests)}</span>
+                          </div>
+                          <div className="h-1 w-full overflow-hidden rounded-pill bg-sunken">
+                            <div className="h-full rounded-pill bg-accent" style={{ width: `${k.pct}%` }} />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </Panel>
+          )}
+        </div>
+
+        {/* CENTER WINDSHIELD: 路由流向 (交互拓扑图 / 桑基流向图) */}
         <Panel
-          className="col-span-12 min-w-0 lg:col-span-8"
+          className="min-w-0"
           fill
+          padding={false}
           title="路由流向"
-          description="调用名 → 路由模型 → 上游 Key；线宽随窗口用量变化"
+          description={windshieldView === "topology" ? "点击入口、模型路由或上游 Key 查看与调优配置" : "调用名 → 路由模型 → 上游 Key；线宽随窗口用量变化"}
           actions={
-            <Segmented
-              options={[{ value: "requests", label: "请求" }, { value: "tokens", label: "Token" }]}
-              value={flowMetric}
-              onValueChange={(value) => setFlowMetric(value as FlowMetric)}
-              aria-label="流向指标"
-            />
+            <div className="flex flex-wrap items-center gap-1.5">
+              {selection ? (
+                <Button size="sm" variant="ghost" onClick={() => setSelection(null)}>
+                  清除选中
+                </Button>
+              ) : null}
+              <Segmented
+                options={[{ value: "topology", label: "拓扑" }, { value: "flow", label: "流向" }]}
+                value={windshieldView}
+                onValueChange={(value) => setWindshieldView(value as WindshieldView)}
+                aria-label="路由视图模式"
+              />
+              {windshieldView === "flow" ? (
+                <Segmented
+                  options={[{ value: "requests", label: "请求" }, { value: "tokens", label: "Token" }]}
+                  value={flowMetric}
+                  onValueChange={(value) => setFlowMetric(value as FlowMetric)}
+                  aria-label="流向指标"
+                />
+              ) : null}
+            </div>
           }
           busy={mainQuery.isFetching || keyUsageQuery.isFetching}
         >
-          <FlowMap
-            links={flow}
-            layerLabels={["调用名", "路由模型", "上游 Key"]}
-            metric={flowMetric}
-            colorLayer={1}
-            colorScope="model"
-            embedded
-            format={(value) => flowMetric === "tokens" ? `${formatCompact(value)} Token` : `${formatCompact(value)} 次`}
-            onNodeClick={handleNodeClick}
-            height={360}
-            ariaLabel="调用名到路由模型到上游 Key 的路由流向"
-            emptyText="当前筛选窗口内没有可归因的路由流量"
-          />
-          <p className="mt-auto pt-2 text-[11px] text-ink-3">点击路由模型可按模型筛选；点击上游 Key 可按上下游 Key 筛选。调用名层只用于定位，不写筛选。</p>
+          {windshieldView === "topology" ? (
+            <CockpitTopology
+              modelRequestedModels={snapshot?.model_requested_models as Record<string, Record<string, MetricStats>> | undefined}
+              keyUsage={keyUsageQuery.data}
+              routes={routes}
+              providers={providers}
+              statusMonitor={statusQuery.data}
+              freezes={freezes}
+              selection={selection}
+              onSelect={setSelection}
+            />
+          ) : (
+            <div className="flex flex-1 flex-col p-3.5">
+              <FlowMap
+                links={flow}
+                layerLabels={["调用名", "路由模型", "上游 Key"]}
+                metric={flowMetric}
+                colorLayer={1}
+                colorScope="model"
+                embedded
+                format={(value) => flowMetric === "tokens" ? `${formatCompact(value)} Token` : `${formatCompact(value)} 次`}
+                onNodeClick={handleNodeClick}
+                height={330}
+                ariaLabel="调用名到路由模型到上游 Key 的路由流向"
+                emptyText="当前筛选窗口内没有可归因的路由流量"
+              />
+              <p className="mt-auto pt-2 text-[11px] text-ink-3">点击路由模型可按模型筛选；点击上游 Key 可按上下游 Key 筛选。</p>
+            </div>
+          )}
         </Panel>
 
-        <Panel
-          className="col-span-12 min-w-0 lg:col-span-4"
-          fill
-          title="需要关注"
-          description={<span title="矩阵检查范围">{`按健康分升序 · ${rangeLabel(state.range)}`}</span>}
-          actions={<Badge tone={attention.length ? "warn" : "good"}>{attention.length ? `${attention.length} 个渠道` : "健康"}</Badge>}
-          busy={statusQuery.isFetching}
-          footer={
-            <div className="space-y-2">
-              <p className="text-[11px] leading-5 text-ink-3">
-                健康分综合成功率、首字延迟与缓存命中；分数越低越需要优先处理。
-              </p>
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 rounded-control text-[12px] text-ink-2 transition-colors hover:text-ink"
-                onClick={() => navigate("/status")}
-              >
-                打开状态监控查看全部渠道
-                <ChevronRight aria-hidden className="size-3.5" />
-              </button>
-            </div>
-          }
-        >
-          {statusQuery.isError ? (
-            <Empty title="渠道健康读数不可用" description="状态监控接口暂时没有返回数据。" />
-          ) : attention.length ? (
-            <div className="space-y-1.5">
-              {attention.map((item) => (
-                <button
-                  key={`${item.row.provider_id}-${item.row.key_name}`}
-                  type="button"
-                  onClick={() => openAttention(item)}
-                  className="flex w-full items-start gap-2 rounded-control px-2 py-2 text-left transition-colors hover:bg-hover"
-                  title={`${item.label}\n健康分 ${item.score ?? "—"}\n${item.failure?.label || "失败原因未细分"}`}
-                >
-                  <StatusDot tone={item.band === "bad" ? "critical" : "warn"} label="" aria-label={`${item.label} ${item.band === "bad" ? "异常" : "波动"}`} />
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="truncate text-[12px] text-ink">{item.label}</span>
-                      <span className="shrink-0 text-[11px] tabular-nums text-ink-3">{item.score === null ? "样本不足" : `健康分 ${item.score}`}</span>
-                    </span>
-                    <span className="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-ink-3">
-                      <span className="truncate">{item.failure ? item.failure.label : "暂无失败原因"} · {formatCompact(item.requests)} 次</span>
-                      <span className="shrink-0">{item.band === "bad" ? "异常" : "波动"}</span>
-                    </span>
-                  </span>
-                  <ChevronRight aria-hidden className="mt-0.5 size-3.5 shrink-0 text-ink-3" />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <Empty
-              icon={<CircleAlert aria-hidden />}
-              title="所有渠道健康"
-              description={`已检查 ${statusQuery.data?.matrix.rows.length ?? 0} 个渠道 · ${rangeLabel(state.range)} 内没有异常或波动。`}
-            />
-          )}
-          {topReasons.length ? (
-            <div className="mt-3 border-t border-rule pt-3">
-              <div className="mb-1.5 text-[11px] text-ink-3">失败原因前三</div>
-              <div className="space-y-1">
-                {topReasons.map((reason) => (
-                  <div key={reason.id} className="flex items-center justify-between gap-2 text-[11px]" title={reason.hint}>
-                    <span className="inline-flex min-w-0 items-center gap-1.5 text-ink-2">
-                      <StatusDot tone={reason.tone === "bad" ? "critical" : reason.tone === "warn" ? "warn" : "neutral"} label="" aria-label={reason.label} />
-                      <span className="truncate">{reason.label}</span>
-                    </span>
-                    <span className="shrink-0 tabular-nums text-ink-3">{formatCount(reason.count)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </Panel>
+        {/* RIGHT WING: 实时检查器与快捷调试 */}
+        <div className="min-w-0 xl:flex xl:flex-col">
+          <CockpitInspector
+            selection={selection}
+            routes={routes}
+            routesRevision={routesQuery.data?.config_revision}
+            providers={providers}
+            providersRevision={providersQuery.data?.config_revision}
+            freezes={freezes}
+            keyUsage={keyUsageQuery.data}
+            streamItems={streamItems}
+            onSelect={setSelection}
+            onFilterModel={(modelId) => selectFilter("model", modelId)}
+            onFilterUpstreamKey={(providerId, keyName) => setDimension("uk", [{ providerId, keyName }])}
+            onOpenRequestDetail={(item) => setDetailItem(item)}
+          />
+        </div>
       </div>
 
+      {/* COMPACT TRENDS BAND */}
       <Panel
         title="流量与结果"
         description={`${rangeLabel(state.range)} · 按时间桶堆叠成功与失败`}
-        actions={<Badge tone="neutral">{`${formatCompactNumber(buckets.length)} 个桶`}</Badge>}
+        actions={
+          <div className="flex items-center gap-1.5">
+            <Badge tone="neutral">{`${formatCompactNumber(buckets.length)} 个桶`}</Badge>
+            <Button size="sm" variant="ghost" onClick={() => setShowTrends((v) => !v)}>
+              {showTrends ? "收起" : "展开"}
+            </Button>
+          </div>
+        }
+        padding={showTrends}
         busy={mainQuery.isFetching}
       >
-        <StackedColumns
-          buckets={buckets}
-          series={outcomeSeries}
-          format={(value) => `${formatCompact(value)} 次`}
-          height={230}
-          embedded
-          ariaLabel="成功与失败请求随时间"
-          tableUnit="次"
-          emptyText="当前窗口内没有请求记录"
-        />
-        <div className="mt-3 border-t border-rule pt-2">
-          <div className="mb-1 flex items-center gap-2 text-[11px] text-ink-3">
-            <span>平均耗时</span>
-            <span className="h-px flex-1 bg-rule" />
+        {showTrends ? (
+          <div className="grid gap-4 lg:grid-cols-2">
+            <StackedColumns
+              buckets={buckets}
+              series={outcomeSeries}
+              format={(value) => `${formatCompact(value)} 次`}
+              height={170}
+              embedded
+              ariaLabel="成功与失败请求随时间"
+              tableUnit="次"
+              emptyText="当前窗口内没有请求记录"
+            />
+            <div className="border-t border-rule pt-3 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+              <div className="mb-1 flex items-center gap-2 text-[11px] text-ink-3">
+                <span>平均耗时</span>
+                <span className="h-px flex-1 bg-rule" />
+              </div>
+              <TimeSeriesChart
+                buckets={buckets}
+                series={latencySeries}
+                format={(value) => formatDurationValue(value)}
+                height={150}
+                showLegend={false}
+                embedded
+                ariaLabel="平均耗时随时间"
+                tableUnit="ms"
+                emptyText="当前窗口内没有耗时读数"
+              />
+            </div>
           </div>
-          <TimeSeriesChart
-            buckets={buckets}
-            series={latencySeries}
-            format={(value) => formatDurationValue(value)}
-            height={105}
-            showLegend={false}
-            embedded
-            ariaLabel="平均耗时随时间"
-            tableUnit="ms"
-            emptyText="当前窗口内没有耗时读数"
-          />
-        </div>
+        ) : null}
       </Panel>
 
+      {/* BOTTOM MODULE: 实时请求流 */}
       <Panel
         title="实时请求流"
-        description="最近 40 条请求；悬停列表暂停自动刷新"
+        description="最近 40 条请求；悬停列表暂停自动刷新，点击任意行查看详情"
         actions={
           <div className="flex items-center gap-2">
             {streamPaused ? <Badge tone="warn">已暂停自动刷新</Badge> : <Badge tone="neutral">每 10 秒</Badge>}
@@ -852,7 +1055,7 @@ function OverviewPage() {
         busy={streamQuery.isFetching && Boolean(streamQuery.data)}
         padding={false}
       >
-        <div className="px-4 pt-3">
+        <div className="border-b border-rule px-3.5 py-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Segmented
               options={[
@@ -865,11 +1068,11 @@ function OverviewPage() {
               onValueChange={(value) => setStreamFilter(value as StreamFilter)}
               aria-label="按结果过滤请求流"
             />
-            <span className="text-[11px] text-ink-3">点击任意行查看请求详情</span>
+            <span className="text-[11px] text-ink-3">点击任意行高亮路径并打开请求详情</span>
           </div>
         </div>
         <div
-          className="mt-2 max-h-[520px] overflow-auto"
+          className="max-h-[420px] overflow-auto"
           onMouseEnter={() => setStreamPaused(true)}
           onMouseLeave={() => setStreamPaused(false)}
         >
@@ -882,8 +1085,9 @@ function OverviewPage() {
                   key={item.id}
                   item={item}
                   fresh={freshIds.has(item.id)}
+                  selected={selection?.kind === "request" && selection.id === item.id}
                   pricingIndex={pricingIndex}
-                  onOpen={setDetailItem}
+                  onOpen={handleOpenRequest}
                 />
               ))}
             </div>

@@ -247,4 +247,66 @@ describe("概览页", () => {
     await user.click(within(dialog).getByRole("button", { name: "关闭" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "请求详情" })).not.toBeInTheDocument());
   });
+
+  it("驾驶舱拓扑可选中路由并在右侧检查器展示目标与策略切换", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/ui/metric-dimensions.json") {
+        return json({
+          window: { from: null, to: "2026-10-24T17:00:00+08:00", hours: 6 },
+          providers: [{ id: "openai", name: "OpenAI", requests: 20 }],
+          models: [{ id: "gpt-4o-mini", requests: 8 }],
+          requested_models: [], upstream_keys: [], workspaces: [], caller_types: [], access_keys: [],
+        });
+      }
+      if (url.pathname === "/ui/filtered-metrics.json") return json(streamResponse(STREAM_ITEMS));
+      if (url.pathname === "/ui/status-monitor.json") return json(statusResponse());
+      if (url.pathname === "/ui/key-usage.json") {
+        return json({
+          window: { from: null, to: "2026-10-24T17:00:00+08:00", hours: 6 },
+          upstream_keys: [{ provider_id: "openai", key_name: "main", stats: stats({ requests: 8 }) }],
+          access_keys: [], unattributed: stats({ requests: 0 }),
+          model_keys: [{ model_id: "gpt-4o-mini", provider_id: "openai", key_name: "main", stats: stats({ requests: 8 }) }],
+        });
+      }
+      if (url.pathname === "/ui/usage-breakdown.json") return json(breakdownResponse());
+      if (url.pathname === "/ui/pricing.json") return json({ detail: "not configured" }, 404);
+      if (url.pathname === "/api/routes") {
+        return json({
+          config_revision: "rev-1",
+          routes: [
+            {
+              id: "gpt-4o-mini",
+              routing_mode: "priority",
+              targets: [{ provider: "openai", key: "main", upstream_model: "gpt-4o-mini" }],
+            },
+          ],
+        });
+      }
+      if (url.pathname === "/api/providers") {
+        return json({
+          config_revision: "rev-1",
+          providers: [
+            {
+              id: "openai",
+              base_url: "https://api.openai.com/v1",
+              keys: [{ name: "main", enabled: true }],
+            },
+          ],
+        });
+      }
+      if (url.pathname === "/api/quota-freezes") return json({ freezes: [] });
+      return json({ detail: "not found" }, 404);
+    }));
+
+    renderPage();
+    expect(await screen.findByText("ROUTE INSPECTOR")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("上游目标优先级")).toBeInTheDocument());
+    expect(screen.getByRole("radiogroup", { name: "gpt-4o-mini 路由策略" })).toBeInTheDocument();
+
+    // 切换为「流向」视图应可正常切换回 FlowMap
+    await user.click(screen.getByRole("radio", { name: "流向" }));
+    expect(screen.getByRole("radiogroup", { name: "流向指标" })).toBeInTheDocument();
+  });
 });
