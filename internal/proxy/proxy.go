@@ -277,7 +277,7 @@ type Options struct {
 	// QuotaObserver 接收每一次上游响应的响应头（额度冻结的 L3 被动信号）；
 	// nil 表示不启用，此时本包行为与改动前完全一致。见 QuotaObserver。
 	QuotaObserver QuotaObserver
-	RouteTraces *routetrace.Store
+	RouteTraces   *routetrace.Store
 }
 
 // AuthorizerResult 是鉴权结果。
@@ -323,7 +323,7 @@ type Handler struct {
 	now          func() time.Time
 	// quotaObserver 见 QuotaObserver；nil 时额度观察点整体短路。
 	quotaObserver QuotaObserver
-	routeTraces *routetrace.Store
+	routeTraces   *routetrace.Store
 }
 
 // New 构造 Handler。metrics 可以为 nil（此时不写指标行，key 健康回写仍然发生）。
@@ -372,7 +372,7 @@ func New(manager *runtime.RuntimeManager, metrics MetricsSink, options Options) 
 		maxJSONBytes:  maxJSON,
 		now:           now,
 		quotaObserver: options.QuotaObserver,
-		routeTraces: options.RouteTraces,
+		routeTraces:   options.RouteTraces,
 	}
 }
 

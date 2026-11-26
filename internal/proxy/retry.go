@@ -107,7 +107,9 @@ func (h *Handler) runAttempt(
 		excluded[key.Name] = true
 	}
 	trace := activeRouteTrace(context.Request)
-	if trace != nil { trace.lastSend = nil }
+	if trace != nil {
+		trace.lastSend = nil
+	}
 	outcome := h.executeAttempt(context, key, attemptIndex)
 	if trace != nil {
 		outcome.response = trace.bind(outcome.response)
@@ -130,7 +132,9 @@ func (h *Handler) runAttempt(
 	}
 	if outcome.stream != nil {
 		// 流式响应：key 由 streamLifecycle.Finish 释放（**唯一**释放路径）。
-		if trace != nil { return trace.bind(outcome.stream), nil }
+		if trace != nil {
+			return trace.bind(outcome.stream), nil
+		}
 		return outcome.stream, nil
 	}
 	if outcome.response == nil {
@@ -326,7 +330,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		}
 		if endpoint.IsGemini(context.Path) {
 			status := http.StatusBadGateway
-			if name == "ReadTimeout" { status = http.StatusGatewayTimeout }
+			if name == "ReadTimeout" {
+				status = http.StatusGatewayTimeout
+			}
 			var notSent *upstreamNotSentError
 			var capped *upstreamCapError
 			if errors.As(sendErr, &notSent) && !errors.As(sendErr, &capped) {
@@ -497,7 +503,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			}
 			firstSend := activeRouteTrace(context.Request)
 			var originalTrace *routetrace.Final
-			if firstSend != nil { originalTrace = firstSend.lastSend }
+			if firstSend != nil {
+				originalTrace = firstSend.lastSend
+			}
 			retryStarted := context.now()
 			retryResponse, retryErr := h.sendUpstream(
 				context, key, false, upstreamURL, upstreamHeaders(context, key.APIKey), filteredBody)
@@ -506,7 +514,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			if retryErr != nil {
 				// 返回原始 400；只有重试真正发起后才记录失败并影响 key。
 				h.recordUpstreamFailure(context, key, retryErr, retryDuration, false)
-				if firstSend != nil { firstSend.lastSend = originalTrace }
+				if firstSend != nil {
+					firstSend.lastSend = originalTrace
+				}
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
@@ -521,13 +531,17 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				_ = retryResponse.Body.Close()
 				if downstreamCanceled(context) {
 					h.recordDownstreamCancellation(context, key, &retryResponse.StatusCode, retryContent, retryDuration)
-					if firstSend != nil { firstSend.lastSend = originalTrace }
+					if firstSend != nil {
+						firstSend.lastSend = originalTrace
+					}
 					return attemptOutcome{response: errorResponseFromContent(
 						response.StatusCode, content, context.Path == "messages")}
 				}
 				h.recordUpstreamResponse(context, key, retryResponse.StatusCode,
 					retryResponse.Header, retryContent, retryDuration, false, false)
-				if firstSend != nil { firstSend.lastSend = originalTrace }
+				if firstSend != nil {
+					firstSend.lastSend = originalTrace
+				}
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
@@ -783,13 +797,21 @@ func (h *Handler) sendUpstream(context *RequestContext, key config.KeyConfig, na
 	}
 	trace := activeRouteTrace(context.Request)
 	if trace == nil {
-		if context.IsStream { return client.DoStream(request) }
+		if context.IsStream {
+			return client.DoStream(request)
+		}
 		return client.Do(request)
 	}
 	trace.beginSend(context, key, native)
 	var response *http.Response
-	if context.IsStream { response, err = client.DoStream(request) } else { response, err = client.Do(request) }
-	if response != nil { trace.received(context, response.StatusCode) }
+	if context.IsStream {
+		response, err = client.DoStream(request)
+	} else {
+		response, err = client.Do(request)
+	}
+	if response != nil {
+		trace.received(context, response.StatusCode)
+	}
 	return response, err
 }
 
@@ -830,7 +852,9 @@ func newUpstreamRequest(context *RequestContext, upstreamURL string, headers map
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
-	if activeRouteTrace(context.Request) != nil { request.Header.Del(traceHeader) }
+	if activeRouteTrace(context.Request) != nil {
+		request.Header.Del(traceHeader)
+	}
 	if err := validateUpstreamRequest(request); err != nil {
 		return nil, err
 	}
@@ -1241,7 +1265,9 @@ func downstreamCanceled(context *RequestContext) bool {
 }
 
 func cancellationResultForPath(path string) *attemptResult {
-	if endpoint.IsGemini(path) { return geminiResult(http.StatusBadGateway) }
+	if endpoint.IsGemini(path) {
+		return geminiResult(http.StatusBadGateway)
+	}
 	return downstreamCancellationResult()
 }
 
@@ -1294,7 +1320,11 @@ func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyC
 func (h *Handler) logUpstreamNotSent(context *RequestContext, key config.KeyConfig, reason string) {
 	if trace := activeRouteTrace(context.Request); trace != nil {
 		code := "local_rejection"
-		if downstreamCanceled(context) { code = "client_canceled" } else if context.upstreamCalls != nil && context.upstreamCalls.blocked { code = "budget_exhausted" }
+		if downstreamCanceled(context) {
+			code = "client_canceled"
+		} else if context.upstreamCalls != nil && context.upstreamCalls.blocked {
+			code = "budget_exhausted"
+		}
 		trace.event(routetrace.Event{Kind: "attempt", Stage: tracePtr(traceStage(context)), Reason: &code, Result: tracePtr("not_sent"), Sent: tracePtr(false), Target: traceKeyTarget(trace, context, key)})
 	}
 	h.logProbeNotSent(context, key, reason)
@@ -1315,7 +1345,9 @@ func (h *Handler) logProbeNotSent(context *RequestContext, key config.KeyConfig,
 // 这样调用点只需要给出真正因分支而异的部分（状态码、usage、duration、retried、
 // failed），其余字段的填充只有一个来源，避免某条分支漏填 provider/upstream_model。
 func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, record MetricRecord) {
-	if trace := activeRouteTrace(context.Request); trace != nil { trace.recordAttempt(context, record) }
+	if trace := activeRouteTrace(context.Request); trace != nil {
+		trace.recordAttempt(context, record)
+	}
 	record.ModelID = context.ModelID
 	record.KeyName = key.Name
 	record.RequestedModelID = context.RequestedModelID

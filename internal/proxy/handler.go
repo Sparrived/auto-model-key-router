@@ -10,9 +10,9 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
-	"github.com/Sparrived/auto-model-key-router/internal/routetrace"
 	"github.com/Sparrived/auto-model-key-router/internal/protocol"
 	"github.com/Sparrived/auto-model-key-router/internal/proxysupport"
+	"github.com/Sparrived/auto-model-key-router/internal/routetrace"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 )
 
@@ -47,12 +47,16 @@ func (h *Handler) handle(w http.ResponseWriter, request *http.Request, path stri
 	}
 
 	h.serveRuntime(w, request, path, lease.Resources)
-	if traceHTTP { markTraceReturned(request) }
+	if traceHTTP {
+		markTraceReturned(request)
+	}
 }
 
 func (h *Handler) serveRuntime(w http.ResponseWriter, request *http.Request, path string, resources *runtime.RuntimeResources) {
 	prepared := h.prepare(w, request, path, resources)
-	if prepared == nil { return }
+	if prepared == nil {
+		return
+	}
 	result := h.handleSingleTarget(prepared)
 	status := result.statusCode()
 	if downstreamCanceled(prepared) || prepared.upstreamCalls.blocked || !IsRetryableStatus(status) {
@@ -157,7 +161,7 @@ func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, r
 	if tr != nil {
 		tr.event(routetrace.Event{Kind: "fallback", Stage: tracePtr("fallback"), Reason: tracePtr("model_fallback"),
 			FromTarget: tr.target(prepared.Config, prepared.ModelID, "", "", ""),
-			ToTarget: tr.target(prepared.Config, target.Model, "", "", "")})
+			ToTarget:   tr.target(prepared.Config, target.Model, "", "", "")})
 	}
 	fallbackResult := h.handleSingleTarget(&fallback)
 	if fallbackResult.statusCode() < 400 {
@@ -339,9 +343,13 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	var taskParams *canonical.Value
 	var taskName *string
 	var traceName, traceKind string
-	if tr != nil { traceName, traceKind = traceRouteName(resources.Config, requestedModelName, false) }
+	if tr != nil {
+		traceName, traceKind = traceRouteName(resources.Config, requestedModelName, false)
+	}
 	if plan, isTask := pool.TaskPlanIn(workspace, requestedModelName); isTask {
-		if tr != nil { traceName, traceKind = traceRouteName(resources.Config, requestedModelName, true) }
+		if tr != nil {
+			traceName, traceKind = traceRouteName(resources.Config, requestedModelName, true)
+		}
 		// 访问密钥一律不能用任务名，且**必须在这里挡**：下面的 ResolveRouteIn 自带
 		// 任务查表，若只靠「参数固定」那一支拦（原先是 `accessKey == nil` 才进入），
 		// 清单不受限的访问密钥就会经由 ResolveRouteIn 拿到任务指向的模型，同时因为
@@ -423,13 +431,17 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	if tr != nil {
 		reason := traceKind
 		resolved := modelID
-		if reason == "" { reason, resolved = "not_found", "" }
+		if reason == "" {
+			reason, resolved = "not_found", ""
+		}
 		tr.resolve(resources.Config, workspace, traceName, resolved, key, traceKind, reason)
 	}
 	var configuredKeyCount int
 	if accessKey == nil && tr != nil {
 		configuredKeyCount = traceCount(tr, pool, resources.Config, modelID, nil, "primary/preflight")
-	} else { configuredKeyCount = pool.KeyCount(modelID) }
+	} else {
+		configuredKeyCount = pool.KeyCount(modelID)
+	}
 	// keyCount 是**本请求作用域内**可用的 key 数。访问密钥的供应商清单在选 key 之前
 	// 就把无关的上游 key 排除了，因此它的可用数可能小于模型的总数——那正是「这把 key
 	// 能用哪些供应商」的落点。完整权限与工作空间凭据不受影响（两者都为总数）。

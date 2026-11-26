@@ -27,9 +27,9 @@ type RequestContext struct {
 	AccessKey  *config.AccessKeyConfig
 	CallerType string
 
-	Payload     *canonical.Value
-	IsStream    bool
-	OriginalRaw []byte
+	Payload        *canonical.Value
+	IsStream       bool
+	OriginalRaw    []byte
 	geminiThoughts bool
 
 	RequestedModelID   string
