@@ -353,6 +353,47 @@ function RequestDetailSheet({
       title="请求详情"
       subtitle={`#${item.id} · ${formatDateTime(item.created_at)}`}
       width="lg"
+      footer={
+        <>
+          {item.provider_id ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                onClose();
+                navigate("providers", { id: String(item.provider_id) });
+              }}
+            >
+              管理供应商
+            </Button>
+          ) : null}
+          {item.model_id ? (
+            <>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  onClose();
+                  navigate("routing", { id: String(item.model_id) });
+                }}
+              >
+                查看模型路由
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => {
+                  onClose();
+                  navigate("playground", { model: String(item.model_id) });
+                }}
+              >
+                试验场试跑
+              </Button>
+            </>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={onClose}>取消</Button>
+        </>
+      }
     >
       <div className="space-y-6">
         <DetailSection title="基本信息">
@@ -763,7 +804,7 @@ function OverviewPage() {
         {/* LEFT WING: 上游状态与关注 (Flattened hairline list, collapsible on xl) */}
         <div className="min-w-0 xl:flex xl:flex-col">
           {leftCollapsed ? (
-            <Panel padding={false} className="hidden h-full xl:flex xl:flex-col xl:items-center xl:py-2.5">
+            <Panel padding={false} className="hidden h-full min-h-0 flex-1 xl:flex xl:flex-col xl:items-center xl:py-2.5">
               <button
                 type="button"
                 aria-label="展开左侧状态栏"
@@ -785,6 +826,7 @@ function OverviewPage() {
             <Panel
               fill
               padding={false}
+              className="h-full min-h-0 flex-1"
               title="需要关注"
               description={<span title="矩阵检查范围">{`按健康分升序 · ${rangeLabel(state.range)}`}</span>}
               actions={

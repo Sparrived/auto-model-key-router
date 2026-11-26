@@ -462,7 +462,7 @@ export function CockpitTopology({
               className={cn(
                 "group relative rounded-[5px] border bg-raised px-2.5 py-2 text-left shadow-[var(--shadow-node)] transition-all",
                 isSelected ? "border-accent ring-1 ring-accent" : "border-rule hover:border-rule-strong hover:bg-hover",
-                isDimmed && "opacity-35",
+                isDimmed && "opacity-45",
               )}
             >
               <span
@@ -504,7 +504,7 @@ export function CockpitTopology({
               className={cn(
                 "group relative rounded-[5px] border bg-raised px-2.5 py-2 text-left shadow-[var(--shadow-node)] transition-all",
                 isSelected ? "border-accent ring-1 ring-accent" : "border-rule hover:border-rule-strong hover:bg-hover",
-                isDimmed && "opacity-35",
+                isDimmed && "opacity-45",
               )}
             >
               <span
@@ -571,7 +571,7 @@ export function CockpitTopology({
                 "group relative rounded-[5px] border bg-raised px-2.5 py-1.5 text-left shadow-[var(--shadow-node)] transition-all",
                 isSelected ? "border-accent ring-1 ring-accent" : isCrit && keyNode.enabled ? "border-critical/45 hover:border-critical" : "border-rule hover:border-rule-strong hover:bg-hover",
                 !keyNode.enabled && "opacity-65",
-                isDimmed && "opacity-35",
+                isDimmed && "opacity-45",
               )}
             >
               <span
