@@ -23,7 +23,8 @@
           root.setAttribute("data-theme-preference", pref);
 
           var accent = localStorage.getItem("amkr.accent");
-          if (accent === "cobalt" || accent === "pine") {
+          if (accent === "cobalt") accent = "mineral";
+          if (accent === "mineral" || accent === "pine" || accent === "ink") {
             root.setAttribute("data-accent", accent);
           } else if (/^#[0-9a-fA-F]{6}$/.test(accent || "")) {
             root.setAttribute("data-accent", "custom");

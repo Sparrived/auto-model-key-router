@@ -14,7 +14,7 @@ import { copyText, errorText, formatCount, formatDateTime } from "@/lib/format";
 import { queryKeys } from "@/lib/query-keys";
 import {
   ACCENT_OPTIONS, THEME_OPTIONS, getAccentPreference, getResolvedTheme, getThemePreference,
-  setAccentPreference, setThemePreference, type ThemePreference,
+  onThemeChange, setAccentPreference, setThemePreference, type AccentPreference, type ThemePreference,
 } from "@/lib/theme";
 import { cn } from "@/lib/cn";
 import type {
@@ -516,13 +516,18 @@ export default function SettingsPage() {
   }
 
   const [theme, setTheme] = useState<ThemePreference>(getThemePreference());
-  const [accent, setAccent] = useState(getAccentPreference());
+  const [accent, setAccent] = useState<AccentPreference>(getAccentPreference());
   const [customHex, setCustomHex] = useState(() => {
     const value = getAccentPreference();
-    return value.startsWith("#") ? value : "#3b6ef5";
+    return value.startsWith("#") ? value : "#e35d35";
   });
+  useEffect(() => onThemeChange((info) => {
+    setTheme(info.preference);
+    setAccent(info.accent);
+  }), []);
   const resolved = getResolvedTheme(theme);
   const customSelected = accent.startsWith("#");
+  const accentHint = ACCENT_OPTIONS.find((option) => option.id === accent)?.hint;
 
   function chooseTheme(next: string) {
     if (next === "system" || next === "light" || next === "dark") {
@@ -788,7 +793,7 @@ export default function SettingsPage() {
                       placeholder="#3b6ef5"
                     />
                     {customSelected ? <Badge tone="good">已应用自定义色</Badge> : null}
-                    {!customSelected ? <span className="text-meta text-ink-3">选择「自定义」后输入 #rrggbb。</span> : null}
+                    {!customSelected ? <span className="text-meta text-ink-3">{accentHint || "选择「自定义」后输入 #rrggbb。"}</span> : null}
                   </div>
                 </div>
               </div>

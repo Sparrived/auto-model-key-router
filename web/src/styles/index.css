@@ -25,6 +25,8 @@
   --color-accent: var(--accent);
   --color-on-accent: var(--on-accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ring: var(--accent-ring);
   --color-select: var(--select);
   --color-hover: var(--hover);
   --color-focus: var(--focus);
@@ -188,6 +190,20 @@
 @keyframes amkr-stream-in {
   from { opacity: 0; transform: translateY(-3px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes amkr-fiber-flow {
+  to { stroke-dashoffset: -22; }
+}
+
+.amkr-dot-matrix {
+  background-image: radial-gradient(var(--dot-color) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.amkr-fiber-ambient {
+  stroke-dasharray: 4 7;
+  animation: amkr-fiber-flow 1.8s linear infinite;
 }
 
 /* 动效是提示而不是装饰：用户要求减少动态时全部关掉，包括抽屉/对话框的进出。 */

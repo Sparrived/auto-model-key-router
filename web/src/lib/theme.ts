@@ -1,9 +1,9 @@
-// 主题管理：跟随系统、浅色、深色三档，外加可换的主色。
+// 主题管理：跟随系统、浅色、深色三档，外加可换的工程配色（工业信号橙 / 矿物蓝灰 / 松烟青 / 墨）。
 //
 // 规范：
 // 1. 默认"跟随系统"（system），自动响应 OS prefers-color-scheme 的深浅色变化。
 // 2. 存储键使用 amkr.theme，与鉴权凭据隔离；旧版的 "custom" 主题已取消，读取时按 light 处理。
-// 3. 主色存 amkr.accent：ink（默认墨色）/ cobalt / pine / #rrggbb。
+// 3. 主色存 amkr.accent：signal（默认工业信号橙）/ mineral / pine / ink / #rrggbb（旧值 cobalt 映射到 mineral）。
 // 4. 隐私模式下 localStorage 异常时安全回退，不阻塞页面。
 //
 // 这里只写 data-theme / data-accent 与自定义主色的 CSS 变量；具体色值在 tokens.css。
@@ -15,7 +15,8 @@ export const ACCENT_STORAGE_KEY = "amkr.accent";
 
 export type ThemePreference = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
-export type AccentPreference = "ink" | "cobalt" | "pine" | (string & {});
+export type AccentPreset = "signal" | "mineral" | "pine" | "ink";
+export type AccentPreference = AccentPreset | "cobalt" | (string & {});
 
 export interface ThemeInfo {
   preference: ThemePreference;
@@ -25,18 +26,28 @@ export interface ThemeInfo {
 
 export const THEME_OPTIONS: Array<{ id: ThemePreference; label: string; hint: string }> = [
   { id: "system", label: "跟随系统", hint: "自动同步系统深色/浅色偏好" },
-  { id: "light", label: "浅色", hint: "明快清爽的调度台配色" },
-  { id: "dark", label: "深色", hint: "低照度深色控制台配色" },
+  { id: "light", label: "浅色", hint: "明快清爽的浅色工程台配色" },
+  { id: "dark", label: "深色", hint: "低照度哑光深色控制台配色" },
 ];
 
-export const ACCENT_OPTIONS: Array<{ id: "ink" | "cobalt" | "pine"; label: string; hint: string }> = [
-  { id: "ink", label: "墨", hint: "默认：骨架保持单色，颜色只留给数据" },
-  { id: "cobalt", label: "钴蓝", hint: "冷色强调，适合长时间监控" },
-  { id: "pine", label: "松绿", hint: "低饱和绿色强调" },
+export const ACCENT_OPTIONS: Array<{ id: AccentPreset; label: string; hint: string; swatch: string }> = [
+  { id: "signal", label: "工业信号橙", hint: "默认：暖灰哑光骨架 + 工业信号橙强调", swatch: "#e35d35" },
+  { id: "mineral", label: "矿物蓝灰", hint: "冷石墨骨架 + 矿物蓝强调，适合长时间监控", swatch: "#4d86bd" },
+  { id: "pine", label: "松烟青", hint: "深林炭骨架 + 松烟青低饱和强调", swatch: "#2c9b74" },
+  { id: "ink", label: "墨", hint: "骨架保持单色，颜色只留给数据", swatch: "#57554e" },
 ];
 
 const listeners = new Set<(info: ThemeInfo) => void>();
 let mediaListenerAttached = false;
+
+export function normalizeAccentPreference(value: string | null | undefined): AccentPreference {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "signal") return "signal";
+  if (raw === "cobalt" || raw === "mineral") return "mineral";
+  if (raw === "pine" || raw === "ink") return raw;
+  if (/^#[0-9a-fA-F]{6}$/.test(raw)) return raw;
+  return "signal";
+}
 
 export function getThemePreference(): ThemePreference {
   const saved = readStorage(THEME_STORAGE_KEY);
@@ -63,10 +74,7 @@ export function getResolvedTheme(preference: ThemePreference = getThemePreferenc
 }
 
 export function getAccentPreference(): AccentPreference {
-  const saved = readStorage(ACCENT_STORAGE_KEY);
-  if (saved === "cobalt" || saved === "pine" || saved === "ink") return saved;
-  if (saved && /^#[0-9a-fA-F]{6}$/.test(saved)) return saved;
-  return "ink";
+  return normalizeAccentPreference(readStorage(ACCENT_STORAGE_KEY));
 }
 
 export function setThemePreference(preference: ThemePreference): void {
@@ -87,12 +95,14 @@ export function cycleTheme(): ThemePreference {
 
 export function setAccentPreference(accent: AccentPreference): void {
   const value = String(accent || "").trim();
-  if (value === "ink") {
-    removeStorage(ACCENT_STORAGE_KEY);
-  } else if (value === "cobalt" || value === "pine" || /^#[0-9a-fA-F]{6}$/.test(value)) {
-    writeStorage(ACCENT_STORAGE_KEY, value);
-  } else {
+  const normalized = normalizeAccentPreference(value);
+  if (value !== "signal" && normalized === "signal" && !/^#[0-9a-fA-F]{6}$/.test(value)) {
     return;
+  }
+  if (normalized === "signal") {
+    removeStorage(ACCENT_STORAGE_KEY);
+  } else {
+    writeStorage(ACCENT_STORAGE_KEY, normalized);
   }
   applyTheme();
   notifyThemeListeners();
@@ -120,33 +130,36 @@ export function applyTheme(): void {
   updateThemeColorMeta(resolved);
 }
 
-// applyAccent 只负责主色：命名预设交给 tokens.css 的 [data-accent] 选择器，
+// applyAccent 只负责主色：signal 走 :root 默认，mineral/pine/ink 交给 tokens.css 的 [data-accent] 选择器，
 // 自定义 hex 则写内联变量。切回命名预设时必须清掉内联变量，否则旧的 hex 会继续覆盖。
 function applyAccent(doc: HTMLElement, accent: AccentPreference): void {
   doc.style.removeProperty("--accent");
   doc.style.removeProperty("--accent-hover");
   doc.style.removeProperty("--on-accent");
+  doc.style.removeProperty("--accent-soft");
+  doc.style.removeProperty("--accent-ring");
 
-  if (accent === "ink") {
+  const normalized = normalizeAccentPreference(accent);
+  if (normalized === "signal") {
     doc.removeAttribute("data-accent");
     return;
   }
-  if (accent === "cobalt" || accent === "pine") {
-    doc.setAttribute("data-accent", accent);
+  if (normalized === "mineral" || normalized === "pine" || normalized === "ink") {
+    doc.setAttribute("data-accent", normalized);
     return;
   }
-  if (!/^#[0-9a-fA-F]{6}$/.test(accent)) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(normalized)) {
     doc.removeAttribute("data-accent");
     return;
   }
 
   const resolved = getResolvedTheme();
   doc.setAttribute("data-accent", "custom");
-  doc.style.setProperty("--accent", accent);
-  doc.style.setProperty("--accent-hover", adjust(accent, resolved === "dark" ? 0.14 : -0.12));
-  // on-accent 取与自定义色对比度更高的黑或白。两者中较大的对比度对任意颜色都 ≥ 4.5，
-  // 因此不需要再兜底一个中性色。
-  doc.style.setProperty("--on-accent", bestOnColor(accent));
+  doc.style.setProperty("--accent", normalized);
+  doc.style.setProperty("--accent-hover", adjust(normalized, resolved === "dark" ? 0.14 : -0.12));
+  doc.style.setProperty("--accent-soft", hexWithAlpha(normalized, resolved === "dark" ? 0.14 : 0.10));
+  doc.style.setProperty("--accent-ring", hexWithAlpha(normalized, 0.32));
+  doc.style.setProperty("--on-accent", bestOnColor(normalized));
 }
 
 function updateThemeColorMeta(resolved: ResolvedTheme): void {
@@ -158,7 +171,7 @@ function updateThemeColorMeta(resolved: ResolvedTheme): void {
       meta.setAttribute("name", "theme-color");
       document.head?.appendChild(meta);
     }
-    meta.setAttribute("content", resolved === "dark" ? "#121518" : "#f2f3f1");
+    meta.setAttribute("content", resolved === "dark" ? "#10100f" : "#eae9e3");
   } catch {
     // 纯装饰：失败不影响主题本身。
   }
@@ -223,6 +236,12 @@ function parseHex(hex: string): [number, number, number] | null {
   const match = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
   if (!match) return null;
   return [parseInt(match[1], 16), parseInt(match[2], 16), parseInt(match[3], 16)];
+}
+
+function hexWithAlpha(hex: string, alpha: number): string {
+  const rgb = parseHex(hex);
+  if (!rgb) return hex;
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
 }
 
 function toHex(rgb: [number, number, number]): string {
