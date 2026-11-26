@@ -62,12 +62,12 @@ export function UnifiedDetail({ unified, models, revision, onEdit, onChanged }: 
         }
       >
         {unified ? (
-          <div className="space-y-5">
-            <div className="grid gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-4">
-              <Summary label="默认模型" value={primary?.model || "未配置"} mono />
-              <Summary label="路由方式" value={primary?.key ? `固定 Key · ${primary.key}` : "自动路由"} />
-              <Summary label="回退模型" value={fallback?.model ? `${fallback.model}${fallback.key ? ` · ${fallback.key}` : ""}` : "未配置"} mono />
-              <Summary label="推理强度" value={effort || "默认"} />
+          <div className="space-y-4">
+            <div className="grid divide-y divide-rule overflow-hidden rounded-control border border-rule bg-sunken sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-4">
+              <div className="p-2.5"><Summary label="默认模型" value={primary?.model || "未配置"} mono /></div>
+              <div className="p-2.5"><Summary label="路由方式" value={primary?.key ? `固定 Key · ${primary.key}` : "自动路由"} /></div>
+              <div className="p-2.5"><Summary label="回退模型" value={fallback?.model ? `${fallback.model}${fallback.key ? ` · ${fallback.key}` : ""}` : "未配置"} mono /></div>
+              <div className="p-2.5"><Summary label="推理强度" value={effort || "默认"} /></div>
             </div>
 
             <div className="overflow-x-auto">

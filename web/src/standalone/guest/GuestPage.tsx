@@ -96,10 +96,10 @@ function KeyForm({ onSubmit }: { onSubmit: (key: string) => void }) {
 
 function Kpi({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
-    <div className="min-w-0 rounded-panel border border-rule bg-panel px-3 py-3">
-      <div className="text-meta text-ink-3">{label}</div>
-      <div className="mt-1 text-[24px] font-semibold leading-none tabular-nums text-ink">{value}</div>
-      <div className="mt-1 break-words text-meta leading-4 text-ink-3">{hint}</div>
+    <div className="min-w-0 rounded-panel border border-rule bg-panel px-3.5 py-3 shadow-[var(--shadow-deck)]">
+      <div className="text-[11px] text-ink-3">{label}</div>
+      <div className="mt-1 font-mono text-[22px] font-semibold leading-none tabular-nums text-ink">{value}</div>
+      <div className="mt-1 break-words text-[11px] leading-4 text-ink-3">{hint}</div>
     </div>
   );
 }

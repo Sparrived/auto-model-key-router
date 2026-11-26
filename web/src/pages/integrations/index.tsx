@@ -253,13 +253,16 @@ export default function IntegrationsPage() {
             <div className="flex flex-wrap gap-2">
               <CopyChip text={`${baseUrl}/v1`} label="OpenAI Base URL" />
               <CopyChip text={baseUrl} label="Anthropic Base URL" />
+              <CopyChip text={baseUrl} label="Gemini 入站 Base URL" />
             </div>
           ) : <p>无法确定入口地址，请检查运行设置。</p>}
           <p>API Key 使用创建时显示的下游访问密钥，示例占位符为 <code>YOUR_ACCESS_KEY</code>。Anthropic 请求使用 <code>x-api-key</code> 和 <code>anthropic-version</code> 头，并在请求体中填写已授权的模型名。不要在共享场所粘贴真实密钥。</p>
+          <p>Gemini 入站使用 <code>x-goog-api-key</code>，把已授权的模型名放进请求路径。它转发到 Chat Completions 兼容上游，不支持模型发现或原生思考签名；如需重放历史，先移除返回的思考块。</p>
           <div className="flex flex-wrap items-center gap-2">
             <a href="#/access-keys" className="text-ink underline underline-offset-2">管理访问密钥</a>
             {baseUrl ? <CopyChip label="OpenAI 模型列表" text={`curl ${baseUrl}/v1/models -H "Authorization: Bearer YOUR_ACCESS_KEY"`} /> : null}
             {baseUrl ? <CopyChip label="Anthropic 请求地址" text={`${baseUrl}/v1/messages`} /> : null}
+            {baseUrl ? <CopyChip label="Gemini 文本请求示例" text={`curl -X POST "${baseUrl}/v1beta/models/YOUR_MODEL:generateContent" -H "x-goog-api-key: YOUR_ACCESS_KEY" -H "Content-Type: application/json" --data '{"contents":[{"parts":[{"text":"Hello"}]}]}'`} /> : null}
           </div>
         </div>
       </Panel>
@@ -271,121 +274,125 @@ export default function IntegrationsPage() {
       ) : null}
 
       {loading ? (
-        <div className="space-y-3">
+        <div className="grid gap-3 xl:grid-cols-3">
           {AGENTS.map((agent) => <Skeleton key={agent.id} variant="block" className="h-52" />)}
         </div>
       ) : (
-        AGENTS.map((agent) => {
-          const item = itemByAgent.get(agent.id) ?? null;
-          const status = statusBadge(item);
-          const disabled = unavailable || !authEnabled || Boolean(busy);
-          return (
-            <Panel
-              key={agent.id}
-              title={item?.display_name || agent.name}
-              description={item?.target_path ? "配置检测结果与接管操作" : "尚未检测到客户端配置路径。"}
-              actions={(
-                <div className="flex items-center gap-2">
-                  <Badge tone={status.tone}>{status.text}</Badge>
-                  {busy === agent.id ? <Spinner className="size-4" /> : null}
-                </div>
-              )}
-              busy={busy === agent.id}
-            >
-              <div className="space-y-4">
-                <div className="grid gap-3 rounded-control border border-rule bg-sunken/40 p-3 md:grid-cols-2">
-                  <div className="min-w-0">
-                    <div className="text-meta text-ink-3">AMKR 入口地址</div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                      {baseUrl ? <CopyChip text={baseUrl} label="复制入口地址" /> : <span className="text-meta text-ink-3">运行设置未提供监听地址</span>}
-                      <Badge tone={authEnabled ? "good" : "warn"}>{authEnabled ? "本地鉴权已启用" : "本地鉴权未启用"}</Badge>
-                    </div>
+        <div className="grid min-w-0 items-stretch gap-3 xl:grid-cols-3">
+          {AGENTS.map((agent) => {
+            const item = itemByAgent.get(agent.id) ?? null;
+            const status = statusBadge(item);
+            const disabled = unavailable || !authEnabled || Boolean(busy);
+            return (
+              <Panel
+                key={agent.id}
+                fill
+                title={item?.display_name || agent.name}
+                description={item?.target_path ? "配置检测结果与接管操作" : "尚未检测到客户端配置路径。"}
+                actions={(
+                  <div className="flex items-center gap-2">
+                    <Badge tone={status.tone}>{status.text}</Badge>
+                    {busy === agent.id ? <Spinner className="size-4" /> : null}
                   </div>
-                  <div className="min-w-0">
-                    <div className="text-meta text-ink-3">配置路径</div>
-                    <div className="mt-1 flex flex-wrap items-center gap-2">
-                      {item?.target_path ? <CopyChip text={item.target_path} /> : <span className="text-meta text-ink-3">未检测到配置文件</span>}
-                    </div>
-                  </div>
-                </div>
-
-                {errorByAgent[agent.id] ? <Banner tone="critical">{errorByAgent[agent.id]}</Banner> : null}
-                {item?.error ? <Banner tone="critical">{item.error}</Banner> : null}
-
-                <p className="text-meta text-ink-3">
-                  自动接入将完整管理 Key 写入客户端配置；请勿把该配置文件分享给其他人。模型与推理强度选择仅影响新会话，客户端命令行或项目设置可能覆盖它们。
-                </p>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="space-y-1">
-                    <span className="text-meta text-ink-2">默认模型</span>
-                    <Combobox
-                      aria-label={`${agent.name} 默认模型`}
-                      options={modelOptions}
-                      value={modelByAgent[agent.id] || ""}
-                      placeholder="沿用现有默认模型"
-                      disabled={disabled || modelsQuery.isPending || Boolean(modelsQuery.error) || !modelNames.length}
-                      onValueChange={(value) => setModelByAgent((current) => ({ ...current, [agent.id]: typeof value === "string" ? value : value[0] || "" }))}
-                    />
-                    {modelByAgent[agent.id] ? (
-                      <Button size="sm" variant="ghost" onClick={() => setModelByAgent((current) => ({ ...current, [agent.id]: "" }))}>
-                        清除所选模型
-                      </Button>
+                )}
+                busy={busy === agent.id}
+                footer={(
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      loading={busy === agent.id}
+                      disabled={disabled}
+                      onClick={() => void apply(agent.id, item?.display_name || agent.name)}
+                    >
+                      应用
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={disabled || !item?.backup_available}
+                      onClick={() => void rollback(agent.id, item?.display_name || agent.name)}
+                    >
+                      回退
+                    </Button>
+                    {!item?.target_exists && !item?.current_is_applied ? (
+                      <span className="text-[11px] text-ink-3">未找到原配置，应用后将创建。</span>
                     ) : null}
                   </div>
-                  {agent.id !== "claude-code" ? (
-                    <label className="space-y-1">
-                      <span className="text-meta text-ink-2">推理强度</span>
-                      <Select
-                        aria-label={`${agent.name} 推理强度`}
-                        value={effortByAgent[agent.id] || ""}
-                        onChange={(event) => setEffortByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
-                        disabled={disabled}
-                        placeholder="沿用现有设置"
-                        options={reasoningOptions(agent.id)}
-                      />
-                    </label>
-                  ) : null}
-                </div>
-                <p className="text-meta text-ink-3">可选强度取决于客户端版本和上游模型，AMKR 不保证每个模型都支持。</p>
-
-                <details className="rounded-control border border-rule bg-panel">
-                  <p className="px-3 pt-2 text-meta text-ink-3">以下为可能变更的字段清单，不是逐字差异预览。</p>
-                  <summary className="cursor-pointer px-3 py-2 text-meta text-ink-2">
-                    变更字段 · {PREVIEW[agent.id]?.length ?? 0} 项
-                  </summary>
-                  <div className="space-y-1 border-t border-rule px-3 py-2">
-                    {(PREVIEW[agent.id] ?? []).map((name) => (
-                      <div key={name} className="font-mono text-[11px] text-ink-3">{name}</div>
-                    ))}
+                )}
+              >
+                <div className="space-y-3">
+                  <div className="divide-y divide-rule overflow-hidden rounded-control border border-rule bg-sunken">
+                    <div className="min-w-0 p-2.5">
+                      <div className="text-[11px] text-ink-3">AMKR 入口地址</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {baseUrl ? <CopyChip text={baseUrl} label="复制入口地址" /> : <span className="text-meta text-ink-3">运行设置未提供监听地址</span>}
+                        <Badge tone={authEnabled ? "good" : "warn"}>{authEnabled ? "本地鉴权已启用" : "本地鉴权未启用"}</Badge>
+                      </div>
+                    </div>
+                    <div className="min-w-0 p-2.5">
+                      <div className="text-[11px] text-ink-3">配置路径</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {item?.target_path ? <CopyChip text={item.target_path} /> : <span className="text-meta text-ink-3">未检测到配置文件</span>}
+                      </div>
+                    </div>
                   </div>
-                </details>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    loading={busy === agent.id}
-                    disabled={disabled}
-                    onClick={() => void apply(agent.id, item?.display_name || agent.name)}
-                  >
-                    应用
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={disabled || !item?.backup_available}
-                    onClick={() => void rollback(agent.id, item?.display_name || agent.name)}
-                  >
-                    回退
-                  </Button>
-                  {!item?.target_exists && !item?.current_is_applied ? (
-                    <span className="text-meta text-ink-3">目标配置尚未找到，应用后会创建。</span>
-                  ) : null}
+                  {errorByAgent[agent.id] ? <Banner tone="critical">{errorByAgent[agent.id]}</Banner> : null}
+                  {item?.error ? <Banner tone="critical">{item.error}</Banner> : null}
+
+                  <p className="text-[11px] leading-4 text-ink-3">
+                    自动接入将完整管理 Key 写入客户端配置；请勿把该配置文件分享给其他人。模型与推理强度选择仅影响新会话，客户端命令行或项目设置可能覆盖它们。
+                  </p>
+                  <div className="grid gap-2.5">
+                    <div className="space-y-1">
+                      <span className="text-meta text-ink-2">默认模型</span>
+                      <Combobox
+                        aria-label={`${agent.name} 默认模型`}
+                        options={modelOptions}
+                        value={modelByAgent[agent.id] || ""}
+                        placeholder="沿用现有默认模型"
+                        disabled={disabled || modelsQuery.isPending || Boolean(modelsQuery.error) || !modelNames.length}
+                        onValueChange={(value) => setModelByAgent((current) => ({ ...current, [agent.id]: typeof value === "string" ? value : value[0] || "" }))}
+                      />
+                      {modelByAgent[agent.id] ? (
+                        <Button size="sm" variant="ghost" onClick={() => setModelByAgent((current) => ({ ...current, [agent.id]: "" }))}>
+                          清除所选模型
+                        </Button>
+                      ) : null}
+                    </div>
+                    {agent.id !== "claude-code" ? (
+                      <label className="space-y-1">
+                        <span className="text-meta text-ink-2">推理强度</span>
+                        <Select
+                          aria-label={`${agent.name} 推理强度`}
+                          value={effortByAgent[agent.id] || ""}
+                          onChange={(event) => setEffortByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
+                          disabled={disabled}
+                          placeholder="沿用现有设置"
+                          options={reasoningOptions(agent.id)}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                  <p className="text-[11px] text-ink-3">可选强度取决于客户端版本和上游模型，AMKR 不保证每个模型都支持。</p>
+
+                  <details className="rounded-control border border-rule bg-panel">
+                    <p className="px-3 pt-2 text-[11px] text-ink-3">以下为可能变更的字段清单，不是逐字差异预览。</p>
+                    <summary className="cursor-pointer px-3 py-2 text-meta text-ink-2">
+                      变更字段 · {PREVIEW[agent.id]?.length ?? 0} 项
+                    </summary>
+                    <div className="space-y-1 border-t border-rule px-3 py-2">
+                      {(PREVIEW[agent.id] ?? []).map((name) => (
+                        <div key={name} className="font-mono text-[11px] text-ink-3">{name}</div>
+                      ))}
+                    </div>
+                  </details>
                 </div>
-              </div>
-            </Panel>
-          );
-        })
+              </Panel>
+            );
+          })}
+        </div>
       )}
     </div>
   );

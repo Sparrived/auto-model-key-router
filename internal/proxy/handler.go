@@ -9,6 +9,8 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/auth"
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
+	"github.com/Sparrived/auto-model-key-router/internal/routetrace"
 	"github.com/Sparrived/auto-model-key-router/internal/protocol"
 	"github.com/Sparrived/auto-model-key-router/internal/proxysupport"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
@@ -20,27 +22,37 @@ import (
 // 入参一致。函数是同步的：调用方在自己的 goroutine 里等它返回，流式响应也在这里
 // 写完后才返回——这正是「租约覆盖整条流」的落点（见 HandleResource 的 defer）。
 func (h *Handler) Handle(w http.ResponseWriter, request *http.Request, path string) {
-	h.handle(w, request, path)
+	h.handle(w, request, path, false)
 }
 
 // handle 是 Handle 的实现。
-func (h *Handler) handle(w http.ResponseWriter, request *http.Request, path string) {
+func (h *Handler) handle(w http.ResponseWriter, request *http.Request, path string, traceHTTP bool) {
 	lease, err := h.manager.Acquire()
 	if err != nil {
 		// runtime.ErrManagerClosed：关停中不再接受新请求。参照实现在关停时靠
 		// lifespan 取消，没有对应状态码，503 是最接近的语义。
-		writeJSON(w, http.StatusServiceUnavailable,
+		writePrepareJSON(w, path, http.StatusServiceUnavailable,
 			jsonErrorResponse("服务正在关停，不接受新请求"))
 		return
 	}
 	// defer 覆盖全部退出路径：流式响应也必须留到写完再释放，否则
 	// RuntimeManager.Close() 会在租约归零后关掉仍在使用的连接池。
 	defer lease.Release()
-
-	prepared := h.prepare(w, request, path, lease.Resources)
-	if prepared == nil {
-		return
+	if traceHTTP && h.routeTraces != nil && lease.Resources.Config.RouteTrace.Enabled {
+		var trace *routeTraceWriter
+		trace, request = wrapRouteTrace(w, request)
+		w = trace
+		// panic 只记录失败，不拦截 net/http 的恢复流程。
+		defer trace.finish(request)
 	}
+
+	h.serveRuntime(w, request, path, lease.Resources)
+	if traceHTTP { markTraceReturned(request) }
+}
+
+func (h *Handler) serveRuntime(w http.ResponseWriter, request *http.Request, path string, resources *runtime.RuntimeResources) {
+	prepared := h.prepare(w, request, path, resources)
+	if prepared == nil { return }
 	result := h.handleSingleTarget(prepared)
 	status := result.statusCode()
 	if downstreamCanceled(prepared) || prepared.upstreamCalls.blocked || !IsRetryableStatus(status) {
@@ -110,8 +122,15 @@ func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, r
 		result.writeTo(w)
 		return
 	}
+	if endpoint.IsGemini(prepared.Path) && prepared.CallerType == "workspace" && prepared.TaskName == nil {
+		if allowed, restricted := prepared.Config.WorkspaceAllowedModels(prepared.Workspace); restricted && !allowed[target.Model] {
+			result.writeTo(w)
+			return
+		}
+	}
 	pool := prepared.pool()
-	fallbackKeyCount := pool.KeyCountFor(target.Model, prepared.AccessKey)
+	tr := activeRouteTrace(prepared.Request)
+	fallbackKeyCount := traceCount(tr, pool, prepared.Config, target.Model, prepared.AccessKey, "fallback/preflight")
 	if fallbackKeyCount == 0 {
 		result.writeTo(w)
 		return
@@ -135,6 +154,11 @@ func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, r
 	// 计数器，而不是重新计数——重置会让放大倍数被低估。
 	fallback.upstreamCalls = prepared.upstreamCalls
 
+	if tr != nil {
+		tr.event(routetrace.Event{Kind: "fallback", Stage: tracePtr("fallback"), Reason: tracePtr("model_fallback"),
+			FromTarget: tr.target(prepared.Config, prepared.ModelID, "", "", ""),
+			ToTarget: tr.target(prepared.Config, target.Model, "", "", "")})
+	}
 	fallbackResult := h.handleSingleTarget(&fallback)
 	if fallbackResult.statusCode() < 400 {
 		fallbackResult.markFallback()
@@ -191,18 +215,32 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		// 也不能带着一个 nil 接口继续跑（那会在选 key 时 panic）。
 		h.logger.Error("装配错误：runtime 的 KeyPool 不满足 proxy.KeyPool 接缝",
 			"path", path)
-		writeJSON(w, http.StatusServiceUnavailable,
+		writePrepareJSON(w, path, http.StatusServiceUnavailable,
 			jsonErrorResponse("服务装配错误：key pool 不可用"))
 		return nil
 	}
 
-	authorization := h.authorize(request, resources.Config)
+	authRequest := request
+	gemini := endpoint.IsGemini(path)
+	if gemini {
+		if !validGeminiQuery(request.URL, path == endpoint.GeminiStream) {
+			protocol.WriteGeminiError(w, http.StatusBadRequest, "不支持的查询参数")
+			return nil
+		}
+		var ok bool
+		authRequest, ok = geminiAuthRequest(request)
+		if !ok {
+			protocol.WriteGeminiError(w, http.StatusBadRequest, "凭据头冲突、重复或格式无效")
+			return nil
+		}
+	}
+	authorization := h.authorize(authRequest, resources.Config)
 	if authorization == nil {
-		writeJSON(w, http.StatusUnauthorized, jsonErrorResponse("本地 API key 验证失败"))
+		writePrepareJSON(w, path, http.StatusUnauthorized, jsonErrorResponse("本地 API key 验证失败"))
 		return nil
 	}
 	if authorization.Denied != "" {
-		writeJSON(w, http.StatusForbidden, jsonErrorResponse(authorization.Denied))
+		writePrepareJSON(w, path, http.StatusForbidden, jsonErrorResponse(authorization.Denied))
 		return nil
 	}
 	// accessKey 非 nil 表示本次请求由一把访问密钥发起：它的两份清单分别在下面
@@ -217,23 +255,45 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	case scopedWorkspace != "":
 		callerType = "workspace"
 	}
+	tr := h.beginRouteTrace(request, authRequest.Header, resources.Config, authorization, endpoint.APIFormat(path))
 
-	payload, body, flat, bodyErr := h.readRequestBody(request, request.Header.Get("Content-Type"), path)
+	var payload *canonical.Value
+	var body []byte
+	var flat, thoughts bool
+	var bodyErr error
+	if gemini {
+		payload, thoughts, bodyErr = h.readGeminiRequest(request, path)
+		if bodyErr != nil {
+			switch e := bodyErr.(type) {
+			case *bodyError:
+				protocol.WriteGeminiError(w, e.statusCode, e.message)
+			case *protocol.GeminiInputError:
+				protocol.WriteGeminiError(w, e.Code, e.Error())
+			default:
+				protocol.WriteGeminiError(w, http.StatusBadRequest, "无法读取请求体")
+			}
+			return nil
+		}
+	} else {
+		payload, body, flat, bodyErr = h.readRequestBody(request, request.Header.Get("Content-Type"), path)
+	}
 	if bodyErr != nil {
 		if coded, ok := bodyErr.(*bodyError); ok {
 			writeJSON(w, coded.statusCode, jsonErrorResponse(coded.message))
 			return nil
 		}
-		writeJSON(w, http.StatusBadRequest, jsonErrorResponse(bodyErr.Error()))
+		writePrepareJSON(w, path, http.StatusBadRequest, jsonErrorResponse(bodyErr.Error()))
 		return nil
 	}
 	isStream := false
 	if !flat {
 		isStream = proxysupport.IsStreamRequest(payload)
 	}
+	tr.setStream(isStream)
 	requestedModelID, found := proxysupport.ResolveModelID(path, payload)
 	if !found {
-		writeJSON(w, http.StatusBadRequest,
+		tr.preflight("missing_model")
+		writePrepareJSON(w, path, http.StatusBadRequest,
 			jsonErrorResponse("请求体中缺少 model 字段"))
 		return nil
 	}
@@ -244,7 +304,8 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		requestedKey = &requestedKeyName
 	}
 	if accessKey != nil && requestedModelName == config.UNIFIED_MODEL_ID {
-		writeJSON(w, http.StatusForbidden,
+		tr.preflight("model_not_allowed")
+		writePrepareJSON(w, path, http.StatusForbidden,
 			jsonErrorResponse("访问密钥 "+accessKey.Name+" 无权访问模型: "+config.UNIFIED_MODEL_ID))
 		return nil
 	}
@@ -252,7 +313,8 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	// 默认首选/备选），不属于任何工作空间，因此绕过按空间收窄的模型白名单。要让它
 	// 可用，运维就把具体模型名写进该空间的 models 清单——那是显式的授权。
 	if scopedWorkspace != "" && requestedModelName == config.UNIFIED_MODEL_ID {
-		writeJSON(w, http.StatusForbidden,
+		tr.preflight("model_not_allowed")
+		writePrepareJSON(w, path, http.StatusForbidden,
 			jsonErrorResponse("工作空间 "+scopedWorkspace+" 无权访问模型: "+config.UNIFIED_MODEL_ID))
 		return nil
 	}
@@ -276,20 +338,24 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	}
 	var taskParams *canonical.Value
 	var taskName *string
+	var traceName, traceKind string
+	if tr != nil { traceName, traceKind = traceRouteName(resources.Config, requestedModelName, false) }
 	if plan, isTask := pool.TaskPlanIn(workspace, requestedModelName); isTask {
+		if tr != nil { traceName, traceKind = traceRouteName(resources.Config, requestedModelName, true) }
 		// 访问密钥一律不能用任务名，且**必须在这里挡**：下面的 ResolveRouteIn 自带
 		// 任务查表，若只靠「参数固定」那一支拦（原先是 `accessKey == nil` 才进入），
 		// 清单不受限的访问密钥就会经由 ResolveRouteIn 拿到任务指向的模型，同时因为
 		// taskParams 仍为 nil 而**绕过任务的固定参数**——既不施加也不报冲突。那是
 		// 一条静默的越权路径，不是清单收窄。
 		if accessKey != nil {
+			tr.resolve(resources.Config, workspace, traceName, "", "", traceKind, "model_not_allowed")
 			h.logModelNotConfigured(path, requestedModelID, "", workspace, "access_key_task_not_allowed")
-			writeJSON(w, http.StatusForbidden, jsonErrorResponse(
+			writePrepareJSON(w, path, http.StatusForbidden, jsonErrorResponse(
 				"访问密钥 "+accessKey.Name+" 无权使用任务: "+requestedModelName))
 			return nil
 		}
 		if requestedKey != nil {
-			writeJSON(w, http.StatusBadRequest, jsonErrorResponse(
+			writePrepareJSON(w, path, http.StatusBadRequest, jsonErrorResponse(
 				"任务 "+requestedModelName+" 的参数由 AMKR 固定，不能指定 Key"))
 			return nil
 		}
@@ -297,8 +363,9 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		// 拿到一个空模型名，最终报出「模型  未配置」这种既看不出是任务、也指不
 		// 出哪个任务的错。明确说清是哪个任务没选模型，用户才知道去哪里修。
 		if plan.Primary.Model == "" {
+			tr.resolve(resources.Config, workspace, traceName, "", "", traceKind, "not_found")
 			h.logModelNotConfigured(path, requestedModelName, "", workspace, "task_model_unset")
-			writeJSON(w, http.StatusNotFound, jsonErrorResponse(
+			writePrepareJSON(w, path, http.StatusNotFound, jsonErrorResponse(
 				"任务 "+requestedModelName+" 尚未指定模型；请先在 AMKR 的任务路由中为该任务选择模型"))
 			return nil
 		}
@@ -308,7 +375,11 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		if conflicts := proxysupport.TaskParamConflicts(payload, taskParams); len(conflicts) > 0 {
 			message := "任务 " + requestedModelName + " 已固定参数 " +
 				joinChineseEnumeration(conflicts) + "，调用方不能再传这些参数"
-			writeJSON(w, http.StatusBadRequest, jsonErrorResponse(message))
+			if gemini {
+				protocol.WriteGeminiError(w, http.StatusBadRequest, "调用方不能覆盖任务固定参数")
+			} else {
+				writeJSON(w, http.StatusBadRequest, jsonErrorResponse(message))
+			}
 			return nil
 		}
 	}
@@ -317,14 +388,16 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	// 名字就按什么名字授权（清单里可以写别名），而只要清单限制了模型，未列出的写法
 	// 一律拒绝。任务名不走这条路——任务由访问密钥禁用，见上面的分支。
 	if accessKey != nil && !accessKey.AllowsModel(requestedModelName) {
+		tr.resolve(resources.Config, workspace, traceName, "", "", traceKind, "model_not_allowed")
 		h.logModelNotConfigured(path, requestedModelID, "", workspace, "access_key_model_not_allowed")
-		writeJSON(w, http.StatusForbidden, jsonErrorResponse(
+		writePrepareJSON(w, path, http.StatusForbidden, jsonErrorResponse(
 			"访问密钥 "+accessKey.Name+" 无权访问模型: "+requestedModelName))
 		return nil
 	}
 
 	modelID, key, err := pool.ResolveRouteIn(workspace, requestedModelName, requestedKey, path)
 	if err != nil {
+		tr.resolve(resources.Config, workspace, traceName, "", "", traceKind, "not_found")
 		h.writeRouteError(w, path, requestedModelID, workspace, err)
 		return nil
 	}
@@ -333,8 +406,9 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 	// 而不是拿别名去比对清单——否则同一个模型写成别名就绕过了。
 	if scopedWorkspace != "" && taskName == nil {
 		if allowed, restricted := resources.Config.WorkspaceAllowedModels(scopedWorkspace); restricted && !allowed[modelID] {
+			tr.resolve(resources.Config, workspace, traceName, "", "", traceKind, "model_not_allowed")
 			h.logModelNotConfigured(path, requestedModelID, modelID, workspace, "workspace_model_not_allowed")
-			writeJSON(w, http.StatusForbidden, jsonErrorResponse(
+			writePrepareJSON(w, path, http.StatusForbidden, jsonErrorResponse(
 				"工作空间 "+scopedWorkspace+" 无权访问模型: "+requestedModelName))
 			return nil
 		}
@@ -346,13 +420,22 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		requestedKey = nil
 	}
 
-	configuredKeyCount := pool.KeyCount(modelID)
+	if tr != nil {
+		reason := traceKind
+		resolved := modelID
+		if reason == "" { reason, resolved = "not_found", "" }
+		tr.resolve(resources.Config, workspace, traceName, resolved, key, traceKind, reason)
+	}
+	var configuredKeyCount int
+	if accessKey == nil && tr != nil {
+		configuredKeyCount = traceCount(tr, pool, resources.Config, modelID, nil, "primary/preflight")
+	} else { configuredKeyCount = pool.KeyCount(modelID) }
 	// keyCount 是**本请求作用域内**可用的 key 数。访问密钥的供应商清单在选 key 之前
 	// 就把无关的上游 key 排除了，因此它的可用数可能小于模型的总数——那正是「这把 key
 	// 能用哪些供应商」的落点。完整权限与工作空间凭据不受影响（两者都为总数）。
 	keyCount := configuredKeyCount
 	if accessKey != nil {
-		keyCount = pool.KeyCountFor(modelID, accessKey)
+		keyCount = traceCount(tr, pool, resources.Config, modelID, accessKey, "primary/preflight")
 	}
 	if configuredKeyCount == 0 {
 		// 全部候选被额度冻结时 KeyCount 也是 0（它与选路走同一份候选过滤），但这不是
@@ -361,17 +444,17 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		// （docs/design/quota-freeze.md §1）。
 		if frozenErr := pool.QuotaFrozenError(modelID, accessKey); frozenErr != nil {
 			h.logQuotaFrozen(path, requestedModelID, modelID, workspace, frozenErr)
-			writeJSON(w, http.StatusServiceUnavailable, jsonErrorResponse(frozenErr.Error()))
+			writePrepareJSON(w, path, http.StatusServiceUnavailable, jsonErrorResponse(frozenErr.Error()))
 			return nil
 		}
 		h.logModelNotConfigured(path, requestedModelID, modelID, workspace, "no_configured_keys")
 		if taskParams != nil {
-			writeJSON(w, http.StatusNotFound, jsonErrorResponse(
+			writePrepareJSON(w, path, http.StatusNotFound, jsonErrorResponse(
 				"任务 "+requestedModelName+" 指向的模型 "+modelID+
 					" 未配置；请先在 AMKR 的任务路由中修正该任务"))
 			return nil
 		}
-		writeJSON(w, http.StatusNotFound, jsonErrorResponse(
+		writePrepareJSON(w, path, http.StatusNotFound, jsonErrorResponse(
 			"模型 "+requestedModelID+" 未配置；请先在 AMKR 的模型设置中配置该模型"))
 		return nil
 	}
@@ -380,7 +463,7 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		// 是额度而不是权限，403「无权访问」会让人去查凭据清单。
 		if frozenErr := pool.QuotaFrozenError(modelID, accessKey); frozenErr != nil {
 			h.logQuotaFrozen(path, requestedModelID, modelID, workspace, frozenErr)
-			writeJSON(w, http.StatusServiceUnavailable, jsonErrorResponse(frozenErr.Error()))
+			writePrepareJSON(w, path, http.StatusServiceUnavailable, jsonErrorResponse(frozenErr.Error()))
 			return nil
 		}
 		// 走到这里只可能是访问密钥：它的供应商清单与这个模型的上游全都不相交。
@@ -391,11 +474,11 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		// 在一条 403 上 panic。
 		h.logModelNotConfigured(path, requestedModelID, modelID, workspace, "access_key_provider_not_allowed")
 		if accessKey != nil {
-			writeJSON(w, http.StatusForbidden, jsonErrorResponse(
+			writePrepareJSON(w, path, http.StatusForbidden, jsonErrorResponse(
 				"访问密钥 "+accessKey.Name+" 无权访问模型: "+requestedModelName))
 			return nil
 		}
-		writeJSON(w, http.StatusForbidden, jsonErrorResponse(
+		writePrepareJSON(w, path, http.StatusForbidden, jsonErrorResponse(
 			"无权访问模型: "+requestedModelName))
 		return nil
 	}
@@ -436,6 +519,7 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		TaskParams:         taskParams,
 		ReasoningEffort:    effectiveReasoningEffort(payload, modelID, resources.Config),
 		FlatPayload:        flat,
+		geminiThoughts:     thoughts,
 		now:                h.now,
 		upstreamCalls:      &upstreamCallCounter{max: h.maxCalls, logger: h.logger},
 	}
@@ -481,7 +565,7 @@ func (h *Handler) authorize(request *http.Request, cfg *config.RouterConfig) *Au
 // 未配置」时生效，其余路径的响应一字未变。
 func (h *Handler) writeRouteError(w http.ResponseWriter, path, requestedModelID, workspace string, _ error) {
 	h.logModelNotConfigured(path, requestedModelID, "", workspace, "key_selection_failed")
-	writeJSON(w, http.StatusNotFound, jsonErrorResponse(
+	writePrepareJSON(w, path, http.StatusNotFound, jsonErrorResponse(
 		"模型 "+requestedModelID+" 未配置；请先在 AMKR 的模型设置中配置该模型"))
 }
 

@@ -11,9 +11,11 @@ import (
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
 	"github.com/Sparrived/auto-model-key-router/internal/formatting"
 	"github.com/Sparrived/auto-model-key-router/internal/keypool"
 	"github.com/Sparrived/auto-model-key-router/internal/proxysupport"
+	"github.com/Sparrived/auto-model-key-router/internal/routetrace"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 )
 
@@ -51,7 +53,7 @@ func (h *Handler) handleSingleTarget(context *RequestContext) attempt {
 			if lastError != nil {
 				return lastError
 			}
-			return downstreamCancellationResult()
+			return cancellationResultForPath(context.Path)
 		}
 		selected, selectionError := h.selectKey(context, excluded)
 		if selectionError != nil {
@@ -65,7 +67,7 @@ func (h *Handler) handleSingleTarget(context *RequestContext) attempt {
 			//
 			// 只在「候选全是欠费限流」时走这条路：候选因 excluded/冷却而空是既有语义
 			// （重试预算用完时回 503），不在本次改动范围内。
-			if lastError != nil && h.allCandidatesBalanceLimited(context) {
+			if lastError != nil && (endpoint.IsGemini(context.Path) || h.allCandidatesBalanceLimited(context)) {
 				return lastError
 			}
 			return selectionError
@@ -85,6 +87,9 @@ func (h *Handler) handleSingleTarget(context *RequestContext) attempt {
 	if lastError != nil {
 		return lastError
 	}
+	if endpoint.IsGemini(context.Path) {
+		return geminiResult(http.StatusServiceUnavailable)
+	}
 	return jsonResult(http.StatusServiceUnavailable, jsonErrorResponse("没有可用 key"))
 }
 
@@ -101,7 +106,13 @@ func (h *Handler) runAttempt(
 	if rotatesKeys(context) {
 		excluded[key.Name] = true
 	}
+	trace := activeRouteTrace(context.Request)
+	if trace != nil { trace.lastSend = nil }
 	outcome := h.executeAttempt(context, key, attemptIndex)
+	if trace != nil {
+		outcome.response = trace.bind(outcome.response)
+		outcome.retryErr = trace.bind(outcome.retryErr)
+	}
 
 	// 流式响应在写完后由 streamLifecycle.Finish 释放 key；其余路径在这里释放。
 	// 判定必须用 outcome.stream，而不是 outcome.response——流式尝试的 response
@@ -119,6 +130,7 @@ func (h *Handler) runAttempt(
 	}
 	if outcome.stream != nil {
 		// 流式响应：key 由 streamLifecycle.Finish 释放（**唯一**释放路径）。
+		if trace != nil { return trace.bind(outcome.stream), nil }
 		return outcome.stream, nil
 	}
 	if outcome.response == nil {
@@ -204,7 +216,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	if downstreamCanceled(context) {
 		h.logger.Debug("请求取消，上游调用未发起", "model_id", context.ModelID,
 			"key_name", key.Name, "provider", key.Provider, "path", "/v1/"+context.Path)
-		return attemptOutcome{response: downstreamCancellationResult()}
+		return attemptOutcome{response: cancellationResultForPath(context.Path)}
 	}
 	upstreamRoutes := context.Config.UpstreamRoutesForBaseURL(key.BaseURL)
 	upstreamModelID := upstreamModelOr(context.ModelID, key.UpstreamModel)
@@ -223,7 +235,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			// 1~2 次（计费的）上游调用。正结果永久缓存，负结果 600s/60s 过期。
 			supported, reason := h.probeNativeMessages(context, key, upstreamModelID, nativeRoutePath)
 			if downstreamCanceled(context) {
-				return attemptOutcome{response: downstreamCancellationResult()}
+				return attemptOutcome{response: cancellationResultForPath(context.Path)}
 			}
 			if reason != "not_sent" {
 				_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
@@ -236,7 +248,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		if nativeSupport == nil {
 			supported, reason := h.probeNativeResponses(context, key, upstreamModelID, nativeRoutePath)
 			if downstreamCanceled(context) {
-				return attemptOutcome{response: downstreamCancellationResult()}
+				return attemptOutcome{response: cancellationResultForPath(context.Path)}
 			}
 			if reason != "not_sent" {
 				_ = context.pool().UpdateNativeEndpoint(key.BaseURL, supported, nativeRoutePath, reason)
@@ -271,6 +283,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			context.IsStream, false, context.ModelID, context.TaskParams, context.Path)
 	}
 	if bodyErr != nil {
+		if endpoint.IsGemini(context.Path) {
+			return attemptOutcome{response: geminiResult(http.StatusInternalServerError)}
+		}
 		h.logUpstreamNotSent(context, key, "构造上游请求体失败: "+bodyErr.Error())
 		return attemptOutcome{
 			retryErr:     internalErrorResult("构造上游请求体失败: " + bodyErr.Error()),
@@ -294,7 +309,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	}
 
 	started := context.now()
-	response, sendErr := h.sendUpstream(context, upstreamURL, headers, upstreamBody)
+	response, sendErr := h.sendUpstream(context, key, useNative, upstreamURL, headers, upstreamBody)
 	finished := context.now()
 	if sendErr != nil {
 		durationMS := elapsedMS(started, finished)
@@ -307,7 +322,17 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		// 先区分本地拒绝，才能避免取消竞态产生虚假的上游指标。
 		h.recordUpstreamFailure(context, key, sendErr, durationMS, retried)
 		if downstreamCanceled(context) {
-			return attemptOutcome{response: downstreamCancellationResult()}
+			return attemptOutcome{response: cancellationResultForPath(context.Path)}
+		}
+		if endpoint.IsGemini(context.Path) {
+			status := http.StatusBadGateway
+			if name == "ReadTimeout" { status = http.StatusGatewayTimeout }
+			var notSent *upstreamNotSentError
+			var capped *upstreamCapError
+			if errors.As(sendErr, &notSent) && !errors.As(sendErr, &capped) {
+				return attemptOutcome{response: geminiResult(http.StatusInternalServerError)}
+			}
+			return attemptOutcome{retryErr: geminiResult(status), retrySameKey: retrySameKey}
 		}
 		return attemptOutcome{
 			retryErr:     jsonResult(http.StatusBadGateway, jsonErrorResponse("上游请求失败: "+name)),
@@ -317,6 +342,9 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 	// 额度信号：非流式 buffered、流式响应头、>=400 与可重试分支都从这里之后分流，
 	// 因此在这一处投递即可覆盖本轮的全部下游分支。
 	h.observeUpstreamQuota(key, response)
+	if endpoint.IsGemini(context.Path) {
+		return h.geminiAttempt(context, key, response, started, attemptIndex)
+	}
 	durationMS := elapsedMS(started, finished)
 
 	if useNative && isUnsupportedEndpointStatus(response.StatusCode) {
@@ -337,6 +365,10 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			context.upstreamCalls.take()
 			return attemptOutcome{response: errorResponseFromContent(
 				response.StatusCode, content, context.Path == "messages")}
+		}
+		if tr := activeRouteTrace(context.Request); tr != nil {
+			target := traceKeyTarget(tr, context, key)
+			tr.event(routetrace.Event{Kind: "fallback", Stage: tracePtr(traceStage(context)), Reason: tracePtr("native_to_compatible"), FromTarget: target, ToTarget: target, UpstreamStatus: tracePtr(response.StatusCode)})
 		}
 		h.logNativeFallback(key, response.StatusCode, upstreamURL, upstreamPath)
 		fallbackPath := upstreamPathFor(context.Path, context.Payload, false, upstreamRoutes)
@@ -359,7 +391,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 		}
 		fallbackStarted := context.now()
 		fallbackResponse, fallbackErr := h.sendUpstream(
-			context, fallbackURL, upstreamHeaders(context, key.APIKey), fallbackBody)
+			context, key, false, fallbackURL, upstreamHeaders(context, key.APIKey), fallbackBody)
 		fallbackFinished := context.now()
 		if fallbackErr != nil {
 			fallbackDuration := elapsedMS(fallbackStarted, fallbackFinished)
@@ -371,7 +403,7 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 			}
 			h.recordUpstreamFailure(context, key, fallbackErr, fallbackDuration, retried)
 			if downstreamCanceled(context) {
-				return attemptOutcome{response: downstreamCancellationResult()}
+				return attemptOutcome{response: cancellationResultForPath(context.Path)}
 			}
 			return attemptOutcome{
 				retryErr:     jsonResult(http.StatusBadGateway, jsonErrorResponse("上游请求失败: "+name)),
@@ -463,14 +495,18 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
+			firstSend := activeRouteTrace(context.Request)
+			var originalTrace *routetrace.Final
+			if firstSend != nil { originalTrace = firstSend.lastSend }
 			retryStarted := context.now()
 			retryResponse, retryErr := h.sendUpstream(
-				context, upstreamURL, upstreamHeaders(context, key.APIKey), filteredBody)
+				context, key, false, upstreamURL, upstreamHeaders(context, key.APIKey), filteredBody)
 			retryFinished := context.now()
 			retryDuration := elapsedMS(retryStarted, retryFinished)
 			if retryErr != nil {
 				// 返回原始 400；只有重试真正发起后才记录失败并影响 key。
 				h.recordUpstreamFailure(context, key, retryErr, retryDuration, false)
+				if firstSend != nil { firstSend.lastSend = originalTrace }
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
@@ -485,11 +521,13 @@ func (h *Handler) executeAttempt(context *RequestContext, key config.KeyConfig, 
 				_ = retryResponse.Body.Close()
 				if downstreamCanceled(context) {
 					h.recordDownstreamCancellation(context, key, &retryResponse.StatusCode, retryContent, retryDuration)
+					if firstSend != nil { firstSend.lastSend = originalTrace }
 					return attemptOutcome{response: errorResponseFromContent(
 						response.StatusCode, content, context.Path == "messages")}
 				}
 				h.recordUpstreamResponse(context, key, retryResponse.StatusCode,
 					retryResponse.Header, retryContent, retryDuration, false, false)
+				if firstSend != nil { firstSend.lastSend = originalTrace }
 				return attemptOutcome{response: errorResponseFromContent(
 					response.StatusCode, content, context.Path == "messages")}
 			}
@@ -549,14 +587,17 @@ type attemptOutcome struct {
 //     （key_pool.py 的文案如「模型 X 没有可用 key」是对外契约）。
 func (h *Handler) selectKey(context *RequestContext, excluded map[string]bool) (*config.KeyConfig, attempt) {
 	pool := context.pool()
+	trace := activeRouteTrace(context.Request)
 	if context.RequestedKeyName != nil && *context.RequestedKeyName != "" {
-		key, err := pool.KeyByName(context.ModelID, *context.RequestedKeyName, context.AccessKey)
+		key, err := traceNamedKey(trace, context, pool, *context.RequestedKeyName)
 		if err != nil {
 			return nil, h.keySelectionFailure(context, err)
 		}
 		if err := pool.AcquireKey(context.ModelID, key.Name); err != nil {
+			traceSpecified(trace, context, key, err)
 			return nil, h.keySelectionFailure(context, err)
 		}
+		traceSpecified(trace, context, key, nil)
 		return &key, nil
 	}
 	excludedNames := make([]string, 0, len(excluded))
@@ -567,7 +608,7 @@ func (h *Handler) selectKey(context *RequestContext, excluded map[string]bool) (
 	if context.CacheAffinityKey != nil {
 		affinity = *context.CacheAffinityKey
 	}
-	key, err := pool.NextKey(context.ModelID, excludedNames, context.AccessKey, affinity)
+	key, err := traceNextKey(trace, context, pool, excludedNames, affinity)
 	if err != nil {
 		return nil, h.keySelectionFailure(context, err)
 	}
@@ -588,6 +629,20 @@ func (h *Handler) selectKey(context *RequestContext, excluded map[string]bool) (
 // 对外文案是既定契约，不能为了塞进原因就改它。计数取自 keypool 的同一份判定，因此
 // 日志里的数字与真正被排除的候选恒等。
 func (h *Handler) keySelectionFailure(context *RequestContext, err error) attempt {
+	if endpoint.IsGemini(context.Path) {
+		switch {
+		case errors.Is(err, keypool.ErrUnknownModel) || errors.Is(err, keypool.ErrNoUnifiedModel):
+			return geminiResult(http.StatusNotFound)
+		case errors.Is(err, keypool.ErrConcurrencyLimited):
+			return geminiResult(http.StatusTooManyRequests)
+		case errors.Is(err, keypool.ErrQuotaFrozen):
+			return geminiResult(http.StatusServiceUnavailable)
+		case context.AccessKey != nil && context.RequestedKeyName != nil && *context.RequestedKeyName != "":
+			return geminiResult(http.StatusForbidden)
+		default:
+			return geminiResult(http.StatusServiceUnavailable)
+		}
+	}
 	if errors.Is(err, keypool.ErrUnknownModel) || errors.Is(err, keypool.ErrNoUnifiedModel) {
 		h.logModelNotConfigured(context.Path, context.RequestedModelID, context.ModelID,
 			context.Workspace, "key_selection_failed")
@@ -708,7 +763,7 @@ func (h *Handler) logNativeFallback(key config.KeyConfig, statusCode int, url, u
 //   - 之后每块各自重置 idle timeout，且没有总时长上限。
 //
 // 本函数只负责第一层；第二、三层在 pumpUpstream 里。
-func (h *Handler) sendUpstream(context *RequestContext, upstreamURL string, headers map[string]string, body []byte) (*http.Response, error) {
+func (h *Handler) sendUpstream(context *RequestContext, key config.KeyConfig, native bool, upstreamURL string, headers map[string]string, body []byte) (*http.Response, error) {
 	if err := contextOf(context.Request).Err(); err != nil {
 		return nil, &upstreamNotSentError{err: err}
 	}
@@ -726,10 +781,16 @@ func (h *Handler) sendUpstream(context *RequestContext, upstreamURL string, head
 	if !context.upstreamCalls.take() {
 		return nil, &upstreamNotSentError{err: &upstreamCapError{message: context.upstreamCalls.exhaustedMessage()}}
 	}
-	if context.IsStream {
-		return client.DoStream(request)
+	trace := activeRouteTrace(context.Request)
+	if trace == nil {
+		if context.IsStream { return client.DoStream(request) }
+		return client.Do(request)
 	}
-	return client.Do(request)
+	trace.beginSend(context, key, native)
+	var response *http.Response
+	if context.IsStream { response, err = client.DoStream(request) } else { response, err = client.Do(request) }
+	if response != nil { trace.received(context, response.StatusCode) }
+	return response, err
 }
 
 // observeUpstreamQuota 把一次上游响应的响应头投递给额度观察点（失败安全）。
@@ -757,7 +818,7 @@ func (h *Handler) observeUpstreamQuota(key config.KeyConfig, response *http.Resp
 // 「query string 原样转发」表述不符的一处，以参照实现为准。
 func newUpstreamRequest(context *RequestContext, upstreamURL string, headers map[string]string, body []byte) (*http.Request, error) {
 	target := upstreamURL
-	if rawQuery := context.Request.URL.RawQuery; rawQuery != "" {
+	if rawQuery := context.Request.URL.RawQuery; rawQuery != "" && !endpoint.IsGemini(context.Path) {
 		target += "?" + reencodeQuery(rawQuery)
 	}
 	request, err := http.NewRequestWithContext(
@@ -769,6 +830,7 @@ func newUpstreamRequest(context *RequestContext, upstreamURL string, headers map
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
+	if activeRouteTrace(context.Request) != nil { request.Header.Del(traceHeader) }
 	if err := validateUpstreamRequest(request); err != nil {
 		return nil, err
 	}
@@ -797,6 +859,9 @@ func validateUpstreamRequest(request *http.Request) error {
 // "X-Multi" 与 "x-multi" 两个键，Go 侧已被 http.Header 合并为一个——只影响「调用
 // 方故意用两种大小写发同一个头」的畸形请求。
 func upstreamHeaders(context *RequestContext, apiKey string) map[string]string {
+	if endpoint.IsGemini(context.Path) {
+		return proxysupport.GeminiUpstreamHeaders(context.Request.Header, apiKey, context.IsStream)
+	}
 	return proxysupport.UpstreamHeaders(map[string][]string(context.Request.Header), apiKey)
 }
 
@@ -1175,6 +1240,11 @@ func downstreamCanceled(context *RequestContext) bool {
 	return contextOf(context.Request).Err() != nil
 }
 
+func cancellationResultForPath(path string) *attemptResult {
+	if endpoint.IsGemini(path) { return geminiResult(http.StatusBadGateway) }
+	return downstreamCancellationResult()
+}
+
 func downstreamCancellationResult() *attemptResult {
 	return jsonResult(http.StatusBadGateway, jsonErrorResponse("下游请求已取消"))
 }
@@ -1222,6 +1292,15 @@ func (h *Handler) recordUpstreamFailure(context *RequestContext, key config.KeyC
 }
 
 func (h *Handler) logUpstreamNotSent(context *RequestContext, key config.KeyConfig, reason string) {
+	if trace := activeRouteTrace(context.Request); trace != nil {
+		code := "local_rejection"
+		if downstreamCanceled(context) { code = "client_canceled" } else if context.upstreamCalls != nil && context.upstreamCalls.blocked { code = "budget_exhausted" }
+		trace.event(routetrace.Event{Kind: "attempt", Stage: tracePtr(traceStage(context)), Reason: &code, Result: tracePtr("not_sent"), Sent: tracePtr(false), Target: traceKeyTarget(trace, context, key)})
+	}
+	h.logProbeNotSent(context, key, reason)
+}
+
+func (h *Handler) logProbeNotSent(context *RequestContext, key config.KeyConfig, reason string) {
 	h.logger.Warn("请求未发往上游",
 		"model_id", context.ModelID,
 		"key_name", key.Name,
@@ -1236,6 +1315,7 @@ func (h *Handler) logUpstreamNotSent(context *RequestContext, key config.KeyConf
 // 这样调用点只需要给出真正因分支而异的部分（状态码、usage、duration、retried、
 // failed），其余字段的填充只有一个来源，避免某条分支漏填 provider/upstream_model。
 func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, record MetricRecord) {
+	if trace := activeRouteTrace(context.Request); trace != nil { trace.recordAttempt(context, record) }
 	record.ModelID = context.ModelID
 	record.KeyName = key.Name
 	record.RequestedModelID = context.RequestedModelID
@@ -1263,7 +1343,7 @@ func (h *Handler) recordMetric(context *RequestContext, key config.KeyConfig, re
 	// 请求形态（流式与否、API 格式、推理强度）同理：三个字段在 prepare 时就定了，
 	// 每次尝试写下的都是同一份读数，重试不会让它们漂移。
 	record.Stream = context.IsStream
-	record.APIFormat = context.Path
+	record.APIFormat = endpoint.APIFormat(context.Path)
 	record.ReasoningEffort = context.ReasoningEffort
 	// 调用日志刻意排在 h.metrics == nil 短路**之前**：指标库是可选装配
 	// （Options.Metrics 可为 nil），而「这次请求真的打了哪个上游、结果如何」是

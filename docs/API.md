@@ -41,6 +41,18 @@ x-api-key: your-local-api-key
 
 推理 key 是「AMKR 作为多个项目共用网关」的凭据：一把 key 对应一个工作空间，被配进各个项目的环境变量。它不能用 `unified-model`（那是运维为整台实例挑的全局计划，不属于任何空间），也不能用别的空间的模型或任务名。
 
+## Gemini 入站
+
+两个 POST 入口均使用 JSON。路径中的模型是经授权的 AMKR 模型名、别名或按原权限允许的任务；不接受请求体内的 `model` 或 `stream`。凭据头三选一：`x-goog-api-key`、`Authorization: Bearer …` 或 `x-api-key`。普通请求不接受 query，流式只接受无 query 或 `?alt=sse`，不支持 URL 中的 `key`。
+
+流输出为 `data: <GenerateContentResponse JSON>`，不发送 `[DONE]`。未提交响应前的错误使用 `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"…"}}`。提交后的失败以 SSE 的 `error` 项结束，不重放。详见[接入示例](USAGE.md#gemini-入站兼容)。
+
+## 单请求选路解释
+
+完整权限通过 `GET /api/settings` 的 `settings.route_trace` 读取开关与保留期；`PUT /api/settings` 传顶层 `route_trace: {"enabled":true,"retention_hours":24}` 及当前 `config_revision`。可只更新一个子字段；默认关闭，保留期为整数 1–168 小时。关闭只停止接纳新追踪；已接纳的请求仍可收尾，历史到期仍按入站时所选保留期计算。
+
+准入的 HTTP 代理请求以 `X-AMKR-Request-ID` 返回追踪 ID。查询 `GET /api/route-traces/{request_id}` 时使用 Bearer 或 `x-api-key`，不接受 URL 凭据。完整权限可读实际选路详情，有效访问密钥或工作空间推理 Key 只能读该凭据自己的精简投影。错误或停用凭据、面板 Key、未认证请求返回 401；格式无效 422；记录不存在、已过期或非本人统一 404；存储暂不可用返回 503。响应不缓存。没有 ID 或查不到记录不表示推理失败；本功能不覆盖 WebSocket 或旧指标记录。
+
 ## 接口总览
 
 | 方法 | 路径 | 鉴权 | 用途 |
@@ -49,6 +61,8 @@ x-api-key: your-local-api-key
 | `GET` | `/health` | 无 | 服务、配置和端点能力状态 |
 | `GET` | `/v1/models` | 本地或访问密钥 | 查询当前调用方可见的模型清单（额度冻结不改变清单） |
 | `POST` | `/v1/chat/completions` | 本地或访问密钥 | OpenAI Chat Completions 兼容接口 |
+| `POST` | `/v1beta/models/{model}:generateContent` 或 `:streamGenerateContent` | 本地、访问密钥或工作空间推理 Key | Gemini 入站，转发到 Chat Completions 兼容上游 |
+| `GET` | `/api/route-traces/{request_id}` | 完整权限或有效推理凭据本人 | 按 ID 查看 HTTP 单请求选路解释 |
 | `POST` | `/v1/messages` | 本地或访问密钥 | Anthropic Messages 兼容接口 |
 | `POST` | `/v1/messages/count_tokens` | 本地或访问密钥 | 本地估算 Anthropic 输入 token |
 | `POST` | `/v1/responses` | 本地或访问密钥 | OpenAI Responses 兼容接口 |

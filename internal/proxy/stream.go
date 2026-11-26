@@ -522,6 +522,7 @@ func (h *Handler) pumpUpstream(
 			"status_code", payload["status_code"], "content_type", payload["content_type"],
 			"chunks", payload["chunks"], "bytes", payload["bytes"], "duration_ms", payload["duration_ms"])
 	}
+	traceStreamEnd(context, err, downstreamEnded && err != nil)
 	lifecycle.Finish(err != nil, response.Body, downstreamEnded || (outcome != nil && outcome.neutralHealth) || jsonTooLarge)
 }
 

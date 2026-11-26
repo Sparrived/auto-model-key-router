@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/config"
 )
 
 // KeyServiceModels 返回「当前绑定了该 provider key」的模型 ID（升序）。
@@ -282,8 +283,33 @@ func UpdateSettings(data *canonical.Value, updates *canonical.Value) error {
 			return opErr(422, "max_retries 不能小于 0")
 		}
 	}
+	if patch, present := updates.LookupOK("route_trace"); present {
+		if _, err := config.ParseRouteTraceConfig(patch); err != nil {
+			return opErr(422, err.Error())
+		}
+		if patch.Obj.Len() != 0 {
+			current := data.Lookup("route_trace")
+			raw := canonical.NewObject()
+			if current != nil {
+				if !current.IsObject() {
+					return opErr(422, "route_trace 必须是对象")
+				}
+				raw = current.Clone()
+			}
+			for _, pair := range objectItems(patch) {
+				raw.SetKey(pair.Key, pair.Value)
+			}
+			cfg, err := config.ParseRouteTraceConfig(raw)
+			if err != nil {
+				return opErr(422, err.Error())
+			}
+			data.SetKey("route_trace", cfg.Value())
+		}
+	}
 	for _, pair := range objectItems(updates) {
-		data.SetKey(pair.Key, pair.Value)
+		if pair.Key != "route_trace" {
+			data.SetKey(pair.Key, pair.Value)
+		}
 	}
 	return nil
 }

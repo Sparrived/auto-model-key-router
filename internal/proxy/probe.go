@@ -82,10 +82,18 @@ func (h *Handler) runProbe(
 	path string,
 	body *canonical.Value,
 	headers map[string]string,
-) (bool, string) {
+) (ok bool, outcome string) {
+	var status *int
+	defer func() {
+		reason := outcome
+		if ok {
+			reason = "supported"
+		}
+		traceProbe(source, key, reason, status)
+	}()
 	client := upstreamClientOf(source.Runtime)
 	if client == nil {
-		h.logUpstreamNotSent(source, key, "原生端点探测失败：上游客户端未装配")
+		h.logProbeNotSent(source, key, "原生端点探测失败：上游客户端未装配")
 		return false, "not_sent"
 	}
 	target := proxysupport.JoinURL(key.BaseURL, path)
@@ -95,18 +103,18 @@ func (h *Handler) runProbe(
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target,
 		bytes.NewReader([]byte(canonical.DumpsOrdered(body))))
 	if err != nil {
-		h.logUpstreamNotSent(source, key, "原生端点探测失败：上游地址无效")
+		h.logProbeNotSent(source, key, "原生端点探测失败：上游地址无效")
 		return false, "not_sent"
 	}
 	for header, value := range headers {
 		request.Header.Set(header, value)
 	}
 	if validateUpstreamRequest(request) != nil {
-		h.logUpstreamNotSent(source, key, "原生端点探测失败：上游地址或请求头无效")
+		h.logProbeNotSent(source, key, "原生端点探测失败：上游地址或请求头无效")
 		return false, "not_sent"
 	}
 	if ctx.Err() != nil {
-		h.logUpstreamNotSent(source, key, "原生端点探测前请求已取消")
+		h.logProbeNotSent(source, key, "原生端点探测前请求已取消")
 		return false, "not_sent"
 	}
 	// 探测走 Do（非流式）：参照实现用 client.post，响应体被整体读走。
@@ -121,6 +129,7 @@ func (h *Handler) runProbe(
 	// 请求即额度耗尽」这种情形完全没有 L3 信号。
 	h.observeUpstreamQuota(key, response)
 	statusCode := response.StatusCode
+	status = &statusCode
 	drainAndClose(response)
 
 	supported, reason := proxysupport.NativeEndpointSupported(statusCode)

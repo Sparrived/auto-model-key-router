@@ -7,7 +7,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 )
 
-// TransferableConfig 抽出可迁移的配置（providers + models + tasks）。
+// TransferableConfig 抽出可迁移的路由配置与显式设置的追踪策略。
 //
 // 对齐 config_operations.py:927。刻意**不**导出 local_api_key、监听地址、超时
 // 等机器相关设置；同时清掉两类本地信息：
@@ -78,6 +78,13 @@ func TransferableConfig(data *canonical.Value) (*canonical.Value, error) {
 		}
 		result.SetKey("workspaces", exported)
 	}
+	if raw, present := data.LookupOK("route_trace"); present {
+		cfg, err := config.ParseRouteTraceConfig(raw)
+		if err != nil {
+			return nil, err
+		}
+		result.SetKey("route_trace", cfg.Value())
+	}
 	return result, nil
 }
 
@@ -105,6 +112,14 @@ type MergeResult struct {
 func MergeTransferableConfig(currentData, transferData *canonical.Value) (MergeResult, error) {
 	merged := currentData.Clone()
 	merged.SetKey("config_version", canonical.NewInt(strconv.Itoa(config.CONFIG_VERSION)))
+	// 旧迁移包没有该设置，不应覆盖目标实例当前的追踪策略。
+	if raw, present := transferData.LookupOK("route_trace"); present {
+		cfg, err := config.ParseRouteTraceConfig(raw)
+		if err != nil {
+			return MergeResult{}, opErr(422, err.Error())
+		}
+		merged.SetKey("route_trace", cfg.Value())
+	}
 	currentProviders, err := Providers(merged)
 	if err != nil {
 		return MergeResult{}, err

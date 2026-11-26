@@ -19,7 +19,7 @@ import {
 import { cn } from "@/lib/cn";
 import type {
   HealthResponse, MetricsSnapshot, ServiceActionResponse, SettingsData,
-  SettingsResponse, ToolResponse, UpdateStatusResponse,
+  RouteTraceSettings, SettingsResponse, ToolResponse, UpdateStatusResponse,
 } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
 import { Banner } from "@/components/ui/Banner";
@@ -58,8 +58,8 @@ const RUNTIME_FIELDS = [
 ] as const;
 
 type RuntimeKey = (typeof RUNTIME_FIELDS)[number]["key"];
-type RuntimeDraft = Record<RuntimeKey, string>;
-type RuntimeErrors = Partial<Record<RuntimeKey, string>>;
+type RuntimeDraft = Record<RuntimeKey, string> & { traceEnabled: boolean; traceRetention: string };
+type RuntimeErrors = Partial<Record<RuntimeKey | "traceRetention", string>>;
 
 const EMPTY_DRAFT: RuntimeDraft = {
   host: "",
@@ -68,6 +68,8 @@ const EMPTY_DRAFT: RuntimeDraft = {
   stream_first_byte_timeout: "",
   stream_idle_timeout: "",
   max_retries: "",
+  traceEnabled: false,
+  traceRetention: "24",
 };
 
 const SERVICE_GROUPS = [
@@ -107,6 +109,8 @@ function toDraft(settings: SettingsData | undefined): RuntimeDraft {
     stream_first_byte_timeout: String(settings?.stream_first_byte_timeout ?? ""),
     stream_idle_timeout: String(settings?.stream_idle_timeout ?? ""),
     max_retries: String(settings?.max_retries ?? ""),
+    traceEnabled: settings?.route_trace?.enabled ?? false,
+    traceRetention: String(settings?.route_trace?.retention_hours ?? 24),
   };
 }
 
@@ -125,6 +129,10 @@ function validateRuntime(draft: RuntimeDraft): RuntimeErrors {
     const value = Number(raw);
     if (!raw || !Number.isFinite(value) || value < (field.min ?? 0)) errors[field.key] = "必须填写大于等于下限的数字。";
     if (field.key === "max_retries" && raw && !Number.isInteger(value)) errors[field.key] = "最大重试必须是整数。";
+  }
+  const retention = Number(draft.traceRetention);
+  if (!Number.isInteger(retention) || retention < 1 || retention > 168) {
+    errors.traceRetention = "保留时长必须是 1–168 小时的整数。";
   }
   return errors;
 }
@@ -189,20 +197,25 @@ export default function SettingsPage() {
   const [errors, setErrors] = useState<RuntimeErrors>({});
   const [saving, setSaving] = useState(false);
   const [runtimeError, setRuntimeError] = useState("");
-  const initialized = useRef(false);
-
-  useEffect(() => {
-    if (initialized.current || !settings) return;
-    initialized.current = true;
-    const next = toDraft(settings);
-    setDraft(next);
-    setBaseline(next);
-  }, [settings]);
+  const [runtimeConflict, setRuntimeConflict] = useState(false);
+  const baselineRevision = useRef<string | undefined | null>(null);
+  const saveRuntimeRef = useRef<() => Promise<void>>(async () => undefined);
 
   const changedKeys = useMemo(() => RUNTIME_FIELDS
     .map((field) => field.key)
     .filter((key) => normalizeDraft(key, draft[key]) !== normalizeDraft(key, baseline[key])), [draft, baseline]);
-  const dirtyCount = changedKeys.length;
+  const traceEnabledChanged = draft.traceEnabled !== baseline.traceEnabled;
+  const traceRetentionChanged = draft.traceRetention.trim() !== baseline.traceRetention.trim();
+  const dirtyCount = changedKeys.length + Number(traceEnabledChanged) + Number(traceRetentionChanged);
+  const configRevision = settingsQuery.data?.config_revision;
+
+  useEffect(() => {
+    if (dirtyCount || !settings || configRevision === baselineRevision.current) return;
+    baselineRevision.current = configRevision;
+    const next = toDraft(settings);
+    setDraft(next);
+    setBaseline(next);
+  }, [configRevision, dirtyCount, settings]);
 
   function updateDraft(key: RuntimeKey, value: string) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -213,6 +226,7 @@ export default function SettingsPage() {
     setDraft(baseline);
     setErrors({});
     setRuntimeError("");
+    setRuntimeConflict(false);
     toast.success("已放弃未保存的更改。");
   }
 
@@ -224,14 +238,20 @@ export default function SettingsPage() {
     }
     setSaving(true);
     setRuntimeError("");
+    setRuntimeConflict(false);
     try {
       const payload: Record<string, unknown> = {};
       for (const key of changedKeys) {
         const value = normalizeDraft(key, draft[key]);
         payload[key] = key === "host" ? value : Number(value);
       }
-      if (!changedKeys.length) return;
-      const result = await api.updateSettings(settingsQuery.data?.config_revision ?? "", payload);
+      const tracePatch: Partial<RouteTraceSettings> = {};
+      if (traceEnabledChanged) tracePatch.enabled = draft.traceEnabled;
+      if (traceRetentionChanged) tracePatch.retention_hours = Number(draft.traceRetention);
+      if (Object.keys(tracePatch).length) payload.route_trace = tracePatch;
+      if (!dirtyCount) return;
+      const result = await api.updateSettings(baselineRevision.current ?? "", payload);
+      baselineRevision.current = result.config_revision;
       const next = result.settings ? toDraft(result.settings) : { ...draft, host: hostValue };
       setDraft(next);
       setBaseline(next);
@@ -240,12 +260,30 @@ export default function SettingsPage() {
         ...result,
         settings: result.settings ?? current?.settings,
       }));
-      toast.success("运行设置已保存。监听地址变更将在服务重启后生效。");
+      toast.success(changedKeys.includes("host") ? "运行设置已保存。监听地址变更将在服务重启后生效。" : "运行设置已保存。");
     } catch (error) {
-      setRuntimeError(errorText(error));
+      const conflict = error instanceof ApiError && error.isConflict;
+      setRuntimeConflict(conflict);
+      setRuntimeError(conflict ? "配置已被其他操作修改，未保存的更改已保留。请读取最新设置后再保存。" : errorText(error));
     } finally {
       setSaving(false);
     }
+  }
+
+  async function reloadRuntime() {
+    const result = await settingsQuery.refetch();
+    if (result.isError || !result.data?.settings || !result.data.config_revision) return;
+    const next = toDraft(result.data.settings);
+    baselineRevision.current = result.data.config_revision;
+    setBaseline(next);
+    setDraft((current) => ({
+      ...next,
+      ...Object.fromEntries(RUNTIME_FIELDS.filter(({ key }) => current[key].trim() !== baseline[key].trim()).map(({ key }) => [key, current[key]])),
+      traceEnabled: current.traceEnabled !== baseline.traceEnabled ? current.traceEnabled : next.traceEnabled,
+      traceRetention: current.traceRetention.trim() !== baseline.traceRetention.trim() ? current.traceRetention : next.traceRetention,
+    }));
+    setRuntimeConflict(false);
+    setRuntimeError("");
   }
 
   async function saveRuntime() {
@@ -268,6 +306,38 @@ export default function SettingsPage() {
     }
     await commitRuntime(hostValue);
   }
+  saveRuntimeRef.current = saveRuntime;
+
+  useEffect(() => {
+    if (dirtyCount <= 0) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      if (!saving) void saveRuntimeRef.current();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [dirtyCount, saving]);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const nodes = SECTIONS
+      .map((section) => ({ id: section.id, el: document.getElementById(`settings-${section.id}`) }))
+      .filter((item): item is { id: SectionId; el: HTMLElement } => Boolean(item.el));
+    if (!nodes.length) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((entry) => entry.isIntersecting);
+        if (!visible) return;
+        const match = nodes.find((item) => item.el === visible.target);
+        if (match) setActive(match.id);
+      },
+      { rootMargin: "-80px 0px -65% 0px", threshold: 0 },
+    );
+    for (const item of nodes) observer.observe(item.el);
+    return () => observer.disconnect();
+  }, []);
 
   async function resetLocalKey() {
     const ok = await confirm({
@@ -558,7 +628,7 @@ export default function SettingsPage() {
   const health = healthQuery.data as HealthResponse | undefined;
 
   return (
-    <div className={cn("flex min-w-0 flex-col gap-3", dirtyCount > 0 && "pb-20")}>
+    <div className={cn("flex min-w-0 flex-col gap-3", dirtyCount > 0 && "pb-32 md:pb-20")}>
       <PageHeader
         title="设置"
         description="设置：运行参数、本地鉴权、服务控制与配置迁移。"
@@ -566,15 +636,15 @@ export default function SettingsPage() {
       />
 
       <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-start">
-        <nav aria-label="设置分节" className="flex shrink-0 flex-wrap gap-1 rounded-panel border border-rule bg-panel p-1.5 md:w-40 md:flex-col">
+        <nav aria-label="设置分节" className="flex shrink-0 flex-wrap gap-1 rounded-panel border border-rule bg-panel p-1.5 md:sticky md:top-16 md:w-40 md:flex-col md:self-start">
           {SECTIONS.map((section) => (
             <button
               key={section.id}
               type="button"
               aria-current={active === section.id ? "page" : undefined}
               className={cn(
-                "whitespace-nowrap rounded-control px-3 py-1.5 text-left text-meta transition-colors hover:bg-hover hover:text-ink",
-                active === section.id ? "bg-selected font-medium text-ink" : "text-ink-2",
+                "relative whitespace-nowrap rounded-control px-3 py-1.5 text-left text-meta transition-colors hover:bg-hover hover:text-ink",
+                active === section.id ? "bg-select font-medium text-ink" : "text-ink-2",
               )}
               onClick={() => {
                 setActive(section.id);
@@ -591,7 +661,7 @@ export default function SettingsPage() {
           {settingsQuery.error ? <Banner tone="critical" title="读取设置失败">{errorText(settingsQuery.error)}</Banner> : null}
           {healthQuery.error ? <Banner tone="critical" title="读取健康状态失败">{errorText(healthQuery.error)}</Banner> : null}
 
-          <section id="settings-runtime" className="scroll-mt-4">
+          <section id="settings-runtime" className="scroll-mt-16">
             <Panel
               title="运行设置"
               description={settingsQuery.data?.config_revision ? `配置版本 ${String(settingsQuery.data.config_revision).slice(0, 8)}` : "读取中…"}
@@ -622,19 +692,51 @@ export default function SettingsPage() {
                       </Field>
                     ))}
                   </div>
-                  {runtimeError ? <Banner tone="critical">{runtimeError}</Banner> : null}
+                  <div className="grid gap-3 border-t border-rule pt-4 sm:grid-cols-2">
+                    <Switch
+                      label="记录单请求选路解释"
+                      description="默认关闭。开启后仅记录路由元数据，不保存请求或响应正文。追踪尽力而为。关闭只影响新请求，已有记录仍可查询。"
+                      checked={draft.traceEnabled}
+                      disabled={saving}
+                      onCheckedChange={(traceEnabled) => setDraft((current) => ({ ...current, traceEnabled }))}
+                    />
+                    <Field
+                      label="追踪保留时长（小时）"
+                      hint="仅影响新接纳的追踪；最多保留所设时长，达到容量上限时可能提前淘汰。"
+                      error={errors.traceRetention}
+                    >
+                      <Input
+                        type="number" min={1} max={168} step={1} disabled={saving}
+                        value={draft.traceRetention}
+                        onChange={(event) => {
+                          setDraft((current) => ({ ...current, traceRetention: event.target.value }));
+                          setErrors((current) => ({ ...current, traceRetention: undefined }));
+                        }}
+                      />
+                    </Field>
+                  </div>
+                  {runtimeError ? (
+                    <Banner tone="critical">
+                      {runtimeError}
+                      {runtimeConflict ? (
+                        <Button className="ml-2" size="sm" loading={settingsQuery.isFetching} onClick={() => void reloadRuntime()}>
+                          读取最新设置
+                        </Button>
+                      ) : null}
+                    </Banner>
+                  ) : null}
                   <p className="text-meta text-ink-3">监听地址变更将在服务重启后生效。只有发生变化的字段会提交；未保存时页面底部会出现保存条。</p>
                 </div>
               )}
             </Panel>
           </section>
 
-          <section id="settings-auth" className="scroll-mt-4">
+          <section id="settings-auth" className="scroll-mt-16">
             <Panel
               title="本地鉴权"
               description="本实例的入口凭据；重置后现有客户端需要改为新 Key。"
             >
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-rule bg-sunken/40 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-rule bg-sunken p-3">
                 <div className="min-w-0">
                   <div className="text-meta text-ink-3">当前状态</div>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -648,7 +750,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-service" className="scroll-mt-4">
+          <section id="settings-service" className="scroll-mt-16">
             <Panel
               title="服务控制"
               description="这些动作在本机执行，需要服务进程具备相应权限。"
@@ -685,10 +787,10 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-transfer" className="scroll-mt-4">
+          <section id="settings-transfer" className="scroll-mt-16">
             <Panel
               title="配置迁移"
-              description="导出整台实例的供应商、模型与任务；导入会合并配置，访问密钥不随配置迁移。"
+              description="导出供应商、模型、任务及显式设置的选路追踪策略；不迁移访问密钥或追踪记录。"
               actions={transferBusy ? <Badge tone="neutral">{transferBusy === "export" ? "正在导出" : "正在导入"}</Badge> : null}
             >
               <div className="space-y-3">
@@ -716,7 +818,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-update" className="scroll-mt-4">
+          <section id="settings-update" className="scroll-mt-16">
             <Panel
               title="版本与更新"
               description="检查 GitHub 上的新版本；自更新仅在服务端具备能力且确有更新时出现。"
@@ -754,7 +856,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-appearance" className="scroll-mt-4">
+          <section id="settings-appearance" className="scroll-mt-16">
             <Panel title="外观" description="主题与主色立即预览；选择保存在本浏览器。">
               <div className="space-y-4">
                 <div>
@@ -800,7 +902,7 @@ export default function SettingsPage() {
             </Panel>
           </section>
 
-          <section id="settings-about" className="scroll-mt-4">
+          <section id="settings-about" className="scroll-mt-16">
             <Panel title="关于" description="运行状态、数据目录与计数口径。">
               {metricsQuery.error ? <Banner tone="critical">读取运行指标失败：{errorText(metricsQuery.error)}</Banner> : null}
               {metricsQuery.isPending ? <Skeleton variant="table" /> : (
@@ -831,7 +933,7 @@ export default function SettingsPage() {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-0 left-0 right-0 z-30 flex flex-wrap items-center gap-2 border-t border-rule bg-panel px-4 py-3 shadow-[0_-4px_16px_rgba(0,0,0,0.08)] md:left-56"
+          className="fixed bottom-[54px] left-0 right-0 z-40 flex flex-wrap items-center gap-2 border-t border-rule bg-panel px-4 py-3 shadow-[0_-4px_16px_rgba(0,0,0,0.08)] md:bottom-0 md:left-56"
         >
           <span className="text-body text-ink">有 {dirtyCount} 项未保存的更改</span>
           <div className="ml-auto flex gap-2">
@@ -854,8 +956,9 @@ export default function SettingsPage() {
       >
         {preview ? (
           <div className="space-y-3 text-body text-ink-2">
-            <p>导入将追加/合并供应商与路由配置，并保留本机设置。是否继续？</p>
-            <div className="space-y-1 rounded-control border border-rule bg-sunken/40 p-3 text-meta">
+            <p>导入将合并供应商与路由配置。包内未包含的本机设置保持不变。是否继续？</p>
+            {Object.hasOwn(preview.config, "route_trace") ? <p>包内包含选路追踪策略，将替换本机的开关与保留时长；不会导入追踪记录。</p> : null}
+            <div className="space-y-1 rounded-control border border-rule bg-sunken p-3 text-meta">
               <div>供应商：当前 {preview.currentProviders} 个 → 包内 {preview.providers} 个（预计新增 {Math.max(0, preview.providers - preview.currentProviders)}）</div>
               <div>模型：当前 {preview.currentModels} 个 → 包内 {preview.models} 个（预计新增 {Math.max(0, preview.models - preview.currentModels)}）</div>
               <div>任务：当前 {preview.currentTasks} 个 → 包内 {preview.tasks} 个（预计新增 {Math.max(0, preview.tasks - preview.currentTasks)}）</div>

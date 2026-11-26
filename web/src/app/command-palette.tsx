@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { Command } from "cmdk";
 import { Dialog } from "radix-ui";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, CornerDownLeft, Search, Server, Settings, Sparkles, Waypoints } from "lucide-react";
+import { CornerDownLeft, KeyRound, ListChecks, Palette, Search, Server, Settings, Waypoints } from "lucide-react";
 import { toast } from "sonner";
 import { navigate } from "@/app/router";
 import { PAGE_GROUPS } from "@/app/pages/registry";
@@ -153,6 +153,10 @@ export function CommandPalette({ open, onOpenChange, health }: CommandPalettePro
                         <Server className="size-4 text-ink-3" aria-hidden />
                       ) : object.page === "routing" ? (
                         <Waypoints className="size-4 text-ink-3" aria-hidden />
+                      ) : object.page === "tasks" ? (
+                        <ListChecks className="size-4 text-ink-3" aria-hidden />
+                      ) : object.page === "access-keys" ? (
+                        <KeyRound className="size-4 text-ink-3" aria-hidden />
                       ) : (
                         <Settings className="size-4 text-ink-3" aria-hidden />
                       )}
@@ -173,11 +177,19 @@ export function CommandPalette({ open, onOpenChange, health }: CommandPalettePro
                   添加供应商
                 </Command.Item>
                 <Command.Item
+                  value="添加模型路由"
+                  onSelect={() => run(() => navigate("routing", { new: "1" }))}
+                  className="flex cursor-pointer items-center gap-2.5 rounded-control px-2 py-2 text-dense text-ink data-[selected=true]:bg-select"
+                >
+                  <Waypoints className="size-4 text-ink-3" aria-hidden />
+                  添加模型路由
+                </Command.Item>
+                <Command.Item
                   value="新建访问密钥"
                   onSelect={() => run(() => navigate("access-keys", { new: "1" }))}
                   className="flex cursor-pointer items-center gap-2.5 rounded-control px-2 py-2 text-dense text-ink data-[selected=true]:bg-select"
                 >
-                  <Sparkles className="size-4 text-ink-3" aria-hidden />
+                  <KeyRound className="size-4 text-ink-3" aria-hidden />
                   新建访问密钥
                 </Command.Item>
                 <Command.Item
@@ -185,7 +197,7 @@ export function CommandPalette({ open, onOpenChange, health }: CommandPalettePro
                   onSelect={() => run(() => navigate("tasks", { new: "1" }))}
                   className="flex cursor-pointer items-center gap-2.5 rounded-control px-2 py-2 text-dense text-ink data-[selected=true]:bg-select"
                 >
-                  <Check className="size-4 text-ink-3" aria-hidden />
+                  <ListChecks className="size-4 text-ink-3" aria-hidden />
                   新建任务
                 </Command.Item>
                 <Command.Item
@@ -199,7 +211,7 @@ export function CommandPalette({ open, onOpenChange, health }: CommandPalettePro
                   }
                   className="flex cursor-pointer items-center gap-2.5 rounded-control px-2 py-2 text-dense text-ink data-[selected=true]:bg-select"
                 >
-                  <Sparkles className="size-4 text-ink-3" aria-hidden />
+                  <Palette className="size-4 text-ink-3" aria-hidden />
                   切换主题
                 </Command.Item>
                 <Command.Item

@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { navigate } from "@/app/router";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { errorText, formatCompact, formatCount, formatDuration } from "@/lib/format";
+import { errorText, formatClockSeconds, formatCompact, formatCount, formatDuration } from "@/lib/format";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   KeyUsageResponse,
@@ -86,6 +86,22 @@ export function CockpitInspector({
 
   const selectedRequest =
     selection?.kind === "request" ? streamItems.find((item) => item.id === selection.id) ?? null : null;
+
+  const matchedEntryRoute =
+    selection?.kind === "entry"
+      ? routes.find((r) => r.id === selection.id || (r.aliases || []).includes(selection.id)) ?? null
+      : null;
+
+  const quickTestModel =
+    selection?.kind === "route"
+      ? selection.id
+      : selection?.kind === "request" && selectedRequest?.model_id
+        ? selectedRequest.model_id
+        : selection?.kind === "key" && selectedKeyInfo?.boundRoutes[0]
+          ? selectedKeyInfo.boundRoutes[0].id
+          : selection?.kind === "entry"
+            ? (matchedEntryRoute?.id || selection.id)
+            : routes[0]?.id || "";
 
   async function invalidateConfigAndOverview() {
     await Promise.all([
@@ -217,14 +233,8 @@ export function CockpitInspector({
 
   function handleFormSubmit(event: FormEvent) {
     event.preventDefault();
-    const targetModel =
-      selection?.kind === "route"
-        ? selection.id
-        : selection?.kind === "request" && selectedRequest?.model_id
-          ? selectedRequest.model_id
-          : routes[0]?.id || "";
     const content = prompt.trim() || "ping";
-    void handleQuickTest(targetModel, content);
+    void handleQuickTest(quickTestModel, content);
     setPrompt("");
   }
 
@@ -254,6 +264,30 @@ export function CockpitInspector({
 
   const presetRoutes = routes.slice(0, 3);
 
+  const routeTelemetry = selectedRoute
+    ? (() => {
+        const reqs = (keyUsage?.model_keys ?? [])
+          .filter((row) => row.model_id === selectedRoute.id)
+          .reduce((sum, row) => sum + Number(row.stats?.requests || 0), 0);
+        const recent = streamItems.filter((item) => item.model_id === selectedRoute.id).slice(0, 4);
+        const withDur = recent.filter((item) => item.duration_ms != null && Number(item.duration_ms) > 0);
+        const avgDur = withDur.length
+          ? withDur.reduce((sum, item) => sum + Number(item.duration_ms || 0), 0) / withDur.length
+          : null;
+        return { reqs, avgDur, recent };
+      })()
+    : null;
+
+  const keyRecentHits =
+    selection?.kind === "key"
+      ? streamItems
+          .filter(
+            (item) =>
+              item.provider_id === selection.providerId && item.key_name === selection.keyName,
+          )
+          .slice(0, 4)
+      : [];
+
   return (
     <Panel
       fill
@@ -265,7 +299,7 @@ export function CockpitInspector({
         </span>
       }
       actions={<Badge tone={badgeTone}>{badgeLabel}</Badge>}
-      className="min-h-0"
+      className="h-full min-h-0 flex-1"
     >
       <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-rule">
         {selection?.kind === "request" && selectedRequest ? (
@@ -419,13 +453,75 @@ export function CockpitInspector({
                 </div>
               </div>
             ) : null}
+
+            {keyRecentHits.length ? (
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-ink-2">最近命中记录</span>
+                  <span className="font-mono text-[10px] text-ink-3">RECENT</span>
+                </div>
+                <div className="divide-y divide-rule overflow-hidden rounded-control border border-rule">
+                  {keyRecentHits.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => onOpenRequestDetail(item)}
+                      className="flex w-full items-center justify-between gap-2 bg-raised px-2.5 py-1.5 text-left hover:bg-hover"
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          aria-hidden
+                          className="size-1.5 shrink-0 rounded-pill"
+                          style={{
+                            backgroundColor: !item.success ? "var(--critical)" : item.retried ? "var(--warn)" : "var(--good)",
+                          }}
+                        />
+                        <span className="font-mono text-[10px] text-ink-3">{formatClockSeconds(item.created_at)}</span>
+                        <span className="truncate font-mono text-[11px] text-ink">{item.model_id || "—"}</span>
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-ink-3">
+                        {item.duration_ms != null ? formatDuration(Number(item.duration_ms)) : "—"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <Button
+                size="sm"
+                variant="secondary"
+                className="w-full"
+                onClick={() => navigate("providers", { id: selection.providerId })}
+              >
+                管理供应商
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="w-full"
+                onClick={() =>
+                  navigate("status", {
+                    provider: selection.providerId,
+                    uk: `${selection.providerId}/${selection.keyName}`,
+                  })
+                }
+              >
+                状态监控
+              </Button>
+            </div>
           </div>
         ) : selection?.kind === "entry" ? (
           <div className="space-y-3 p-3.5">
             <p className="text-[11px] leading-5 text-ink-3">
               这是调用方在请求体中传入的原始模型名称（<span className="font-mono text-ink-2">requested_model_id</span>）。点击模型路由组或上游 Key 节点可原地调整调度优先级。
             </p>
-            {routes[0] ? (
+            {matchedEntryRoute ? (
+              <Button size="sm" variant="secondary" onClick={() => onSelect({ kind: "route", id: matchedEntryRoute.id })}>
+                检查对应路由 {matchedEntryRoute.id} →
+              </Button>
+            ) : routes[0] ? (
               <Button size="sm" variant="secondary" onClick={() => onSelect({ kind: "route", id: routes[0].id })}>
                 检查默认路由 {routes[0].id} →
               </Button>
@@ -433,6 +529,32 @@ export function CockpitInspector({
           </div>
         ) : selectedRoute ? (
           <div className="space-y-3 p-3.5">
+            {routeTelemetry ? (
+              <div className="grid grid-cols-2 divide-x divide-rule rounded-control border border-rule bg-sunken">
+                <div className="p-2">
+                  <div className="text-[10px] text-ink-3">窗口请求数</div>
+                  <div className="mt-0.5 font-mono text-[12px] font-semibold tabular-nums text-ink">
+                    {formatCount(routeTelemetry.reqs)}
+                  </div>
+                </div>
+                <div className="p-2">
+                  <div className="text-[10px] text-ink-3">最近平均耗时</div>
+                  <div className="mt-0.5 font-mono text-[12px] font-semibold tabular-nums text-ink">
+                    {routeTelemetry.avgDur !== null ? formatDuration(routeTelemetry.avgDur) : "—"}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {selectedRoute.aliases?.length ? (
+              <div className="flex flex-wrap items-center gap-1 border-b border-rule pb-2 text-[10px]">
+                <span className="text-ink-3">别名</span>
+                {selectedRoute.aliases.map((alias) => (
+                  <Badge key={alias} tone="neutral">{alias}</Badge>
+                ))}
+              </div>
+            ) : null}
+
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-medium text-ink-2">路由分发策略</span>
@@ -529,15 +651,62 @@ export function CockpitInspector({
               </div>
             </div>
 
-            <Button
-              size="sm"
-              variant="secondary"
-              className="w-full"
-              trailingIcon={<ArrowRight className="size-3.5" aria-hidden />}
-              onClick={() => navigate("routing", { id: selectedRoute.id })}
-            >
-              在模型路由页打开完整配置
-            </Button>
+            {routeTelemetry?.recent.length ? (
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-ink-2">最近命中记录</span>
+                  <span className="font-mono text-[10px] text-ink-3">RECENT</span>
+                </div>
+                <div className="divide-y divide-rule overflow-hidden rounded-control border border-rule">
+                  {routeTelemetry.recent.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => onOpenRequestDetail(item)}
+                      className="flex w-full items-center justify-between gap-2 bg-raised px-2.5 py-1.5 text-left hover:bg-hover"
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          aria-hidden
+                          className="size-1.5 shrink-0 rounded-pill"
+                          style={{
+                            backgroundColor: !item.success ? "var(--critical)" : item.retried ? "var(--warn)" : "var(--good)",
+                          }}
+                        />
+                        <span className="font-mono text-[10px] text-ink-3">{formatClockSeconds(item.created_at)}</span>
+                        <span className="truncate font-mono text-[11px] text-ink">
+                          {item.provider_id && item.key_name ? `${item.provider_id} / ${item.key_name}` : item.provider_id || "—"}
+                        </span>
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-ink-3">
+                        {item.duration_ms != null ? formatDuration(Number(item.duration_ms)) : "—"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <Button
+                size="sm"
+                variant="secondary"
+                className="w-full"
+                trailingIcon={<ArrowRight className="size-3.5" aria-hidden />}
+                onClick={() => navigate("routing", { id: selectedRoute.id })}
+              >
+                完整路由配置
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                className="w-full"
+                leadingIcon={<Play className="size-3" aria-hidden />}
+                onClick={() => navigate("playground", { model: selectedRoute.id })}
+              >
+                试验场试跑
+              </Button>
+            </div>
           </div>
         ) : (
           <div className="p-4 text-center text-meta text-ink-3">
@@ -599,7 +768,7 @@ export function CockpitInspector({
                 type="text"
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder={selectedRoute ? `向 ${selectedRoute.id} 发送测试 Prompt…` : "输入测试 Prompt…"}
+                placeholder={quickTestModel ? `向 ${quickTestModel} 发送测试 Prompt…` : "输入测试 Prompt…"}
                 aria-label="快捷调试输入"
                 className="h-7 min-w-0 flex-1 rounded-control border border-rule-strong bg-paper px-2 text-[11px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
               />

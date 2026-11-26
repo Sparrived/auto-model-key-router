@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Eye, EyeOff, KeyRound, RefreshCw } from "lucide-react";
+import { Eye, EyeOff, RefreshCw } from "lucide-react";
 import { ApiError, api, apiBase, setKey } from "@/lib/api";
 import { errorText } from "@/lib/format";
 import { Banner } from "@/components/ui/Banner";
@@ -112,19 +112,24 @@ export function LoginPage({
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-paper px-4 py-10">
+    <main className="amkr-dot-matrix flex min-h-screen items-center justify-center bg-paper px-4 py-10">
       <div className="w-full max-w-[420px]">
-        <div className="mb-6 flex items-center gap-3">
-          <span aria-hidden className="grid size-10 place-items-center rounded-panel bg-accent text-on-accent">
-            <KeyRound className="size-5" />
+        <div className="mb-5 flex items-center gap-3">
+          <span aria-hidden className="grid size-9 place-items-center rounded-control border border-rule-strong bg-raised text-accent shadow-[var(--shadow-node)]">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="3" cy="4" r="1.5" />
+              <circle cx="3" cy="12" r="1.5" />
+              <circle cx="13" cy="8" r="1.5" />
+              <path d="M4.5 4h2.5c1.5 0 2 4 4.5 4M4.5 12h2.5c1.5 0 2-4 4.5-4" />
+            </svg>
           </span>
           <div>
             <div className="text-page font-semibold tracking-tight text-ink">AMKR</div>
-            <div className="text-meta text-ink-3">Auto Model Key Router</div>
+            <div className="font-mono text-[11px] text-ink-3">Auto Model Key Router · 调度控制台</div>
           </div>
         </div>
 
-        <section className="rounded-panel border border-rule bg-panel p-5" aria-labelledby="login-title">
+        <section className="rounded-panel border border-rule bg-panel p-5 shadow-[var(--shadow-deck)]" aria-labelledby="login-title">
           <h1 id="login-title" className="text-page font-semibold text-ink">连接到 AMKR</h1>
           <p className="mt-1 text-dense text-ink-3">管理接口需要本地鉴权 Key。验证通过后进入控制台。</p>
 
@@ -173,7 +178,7 @@ export function LoginPage({
           </form>
         </section>
 
-        <p className="mt-4 text-center text-meta text-ink-3">
+        <p className="mt-4 text-center font-mono text-[11px] text-ink-3">
           {[health?.version ? `版本 v${health.version}` : null, health?.base_url || null].filter(Boolean).join(" · ") || "AMKR WebUI"}
         </p>
       </div>

@@ -820,7 +820,7 @@ export default function AccountsPage() {
         />
       </MetricStrip>
 
-      <div className="flex flex-wrap items-center gap-2 rounded-panel border border-rule bg-panel px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2 rounded-panel border border-rule bg-panel px-3.5 py-2.5 shadow-[var(--shadow-deck)]">
         <Input
           ref={searchRef}
           type="search"
@@ -842,7 +842,7 @@ export default function AccountsPage() {
               : option.value === "usable" ? `${option.label} (${usableAccounts.length})` : `${option.label} (${attentionAccountCount})`,
           }))}
         />
-        <span className="ml-auto text-meta text-ink-3">显示 {shownAccounts} / {accounts.length} 个账号</span>
+        <span className="ml-auto font-mono text-[11px] text-ink-3">显示 {shownAccounts} / {accounts.length} 个账号</span>
       </div>
 
       {!instances.length && !subscriptions.length ? (
@@ -953,7 +953,7 @@ export default function AccountsPage() {
                         </Banner>
                       </div>
                     ) : null}
-                    <details className="border-b border-rule bg-sunken/30 px-4 py-2.5 text-meta">
+                    <details className="border-b border-rule bg-sunken px-4 py-2.5 text-meta">
                       <summary className="w-fit cursor-pointer text-ink-3">实例详情</summary>
                       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                         <div className="min-w-0"><div className="text-ink-3">实例端点</div><div className="mt-1"><CopyChip text={instance.base_url || "-"} label="点击复制 CPA 实例地址" /></div></div>
@@ -967,7 +967,16 @@ export default function AccountsPage() {
                     {(instance.originalAccountCount ?? instance.accounts?.length ?? 0) === 0 ? (
                       <div className="p-4"><Empty title="这个实例上还没有账号。" /></div>
                     ) : (instance.accounts ?? []).length === 0 ? (
-                      <div className="p-4"><Empty title="没有找到匹配的账号。" /></div>
+                      <div className="p-4">
+                        <Empty
+                          title="没有找到匹配的账号。"
+                          action={(
+                            <Button size="sm" variant="secondary" onClick={() => { setKeyword(""); setStatusFilter("all"); }}>
+                              重置筛选
+                            </Button>
+                          )}
+                        />
+                      </div>
                     ) : (
                       <div className="account-cards-grid grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
                         {(instance.accounts ?? []).map((account, index) => {

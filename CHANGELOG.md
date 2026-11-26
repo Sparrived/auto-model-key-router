@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 可在状态监控按 `X-AMKR-Request-ID` 查看单次 HTTP 请求的真实选路、上游尝试和流终态。追踪默认关闭，只记录有限元数据；受限推理凭据仅可查本人记录。
+- 新增 Gemini `generateContent` / `streamGenerateContent` 入站兼容，通过现有路由调用 Chat Completions 上游，不要求配置 Gemini 原生上游。
+
 ## [7.3.0] - 2026-11-26
 
 ### 新增

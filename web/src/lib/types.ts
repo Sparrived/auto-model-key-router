@@ -214,6 +214,59 @@ export interface StatusMonitorResponse {
   };
 }
 
+export interface RouteTraceTarget {
+  model_id: string | null;
+  provider_id: string | null;
+  key_name: string | null;
+  upstream_model_id: string | null;
+}
+
+export interface RouteTraceEvent {
+  seq: number;
+  offset_ms: number;
+  kind: string;
+  stage?: string | null;
+  reason?: string | null;
+  mode?: string | null;
+  target?: RouteTraceTarget | null;
+  from?: RouteTraceTarget | null;
+  to?: RouteTraceTarget | null;
+  protocol?: string | null;
+  result?: string | null;
+  attempt_no?: number | null;
+  sent?: boolean | null;
+  upstream_status?: number | null;
+  http_status?: number | null;
+  stream_end?: string | null;
+  duration_ms?: number | null;
+}
+
+export interface RouteTraceResponse {
+  schema_version: 1;
+  request_id: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  status: "running" | "completed";
+  outcome: "success" | "failed" | "canceled" | null;
+  request: {
+    model: string | null;
+    route_kind: string | null;
+    stream: boolean | null;
+    caller_type: string | null;
+    workspace: string | null;
+  };
+  events: RouteTraceEvent[];
+  final: {
+    http_status: number | null;
+    upstream_status: number | null;
+    target: RouteTraceTarget | null;
+    stream_end: string | null;
+  };
+  truncated: boolean;
+  omitted_events: number;
+}
+
 export interface PricingModelEntry {
   input: number;
   output: number;
@@ -844,7 +897,13 @@ export interface QuotaFreezePolicy {
   whitelist?: string[] | null;
 }
 
+export interface RouteTraceSettings {
+  enabled: boolean;
+  retention_hours: number;
+}
+
 export interface SettingsData {
+  route_trace?: RouteTraceSettings;
   host?: string;
   port?: number;
   max_retries?: number;

@@ -127,6 +127,8 @@ export default function TasksPage() {
   const showSecret = useSecretDialog();
 
   const routeWorkspace = route.params.get("ws");
+  const routeNew = route.params.get("new") === "1";
+  const routeTaskId = route.params.get("id") || "";
   const [workspace, setWorkspace] = useState(() => routeWorkspace || storedWorkspace());
   // workspacePinned 表示当前空间是用户自己选的，不是从 localStorage 恢复的。只有恢复
   // 来的名字才需要「它还在不在」的校验：用户输入的新名字天然不在目录里。
@@ -205,6 +207,28 @@ export default function TasksPage() {
         .some((value) => String(value).toLowerCase().includes(keyword)),
     );
   }, [tasks, search]);
+
+  useEffect(() => {
+    if (!routeNew) return;
+    setDetailOpen(true);
+    setEditing("__new__");
+    setParams((params) => {
+      params.delete("new");
+      return params;
+    }, { replace: true });
+  }, [routeNew]);
+
+  useEffect(() => {
+    if (!routeTaskId || !tasksQuery.isSuccess) return;
+    if (routeWorkspace && effectiveWorkspace !== routeWorkspace) return;
+    const matched = tasks.find((task) => task.name === routeTaskId);
+    setDetailOpen(true);
+    if (matched) setEditing(matched.name);
+    setParams((params) => {
+      params.delete("id");
+      return params;
+    }, { replace: true });
+  }, [routeTaskId, routeWorkspace, effectiveWorkspace, tasksQuery.isSuccess, tasks]);
 
   function switchWorkspace(next: string) {
     setDetailOpen(true);
@@ -430,7 +454,7 @@ export default function TasksPage() {
         title="任务路由"
         description="把任务名当作模型名调用，自动使用该任务固定的模型与采样参数。"
         actions={(
-          <Button variant="secondary" leadingIcon={<Plus aria-hidden className="size-4" />} onClick={() => setEditing("__new__")}>
+          <Button variant="primary" leadingIcon={<Plus aria-hidden className="size-4" />} onClick={() => setEditing("__new__")}>
             新建任务
           </Button>
         )}
@@ -442,7 +466,7 @@ export default function TasksPage() {
         </Banner>
       ) : null}
 
-      <div className="h-[calc(100vh-13rem)] min-h-[520px] overflow-hidden rounded-panel border border-rule bg-panel">
+      <div className="min-h-[420px] h-[calc(100dvh-14.5rem)] overflow-hidden rounded-panel border border-rule bg-panel shadow-[var(--shadow-deck)] md:h-[calc(100dvh-11.2rem)] md:min-h-[520px]">
         <SplitView
           listWidth={248}
           selected={detailOpen || Boolean(editing) || modelsOpen || renameOpen}
@@ -492,7 +516,7 @@ export default function TasksPage() {
           )}
           detail={(
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-rule px-4 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-rule bg-sunken px-4 py-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <h2 className="truncate text-[20px] font-semibold leading-tight text-ink">{effectiveWorkspace}</h2>
@@ -546,7 +570,7 @@ export default function TasksPage() {
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <div className="min-h-0 flex-1 overflow-y-auto bg-paper/45 p-3.5">
                 {tasksQuery.error ? (
                   <Banner tone="critical" className="mb-3">
                     无法读取或写入任务路由：{errorText(tasksQuery.error)}

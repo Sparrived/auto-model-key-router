@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Braces,
-  ChevronDown,
   ChevronRight,
+  Copy,
   Eye,
   Image as ImageIcon,
   Loader2,
@@ -12,10 +12,13 @@ import {
   Square,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { navigate, useRoute } from "@/app/router";
 import { api } from "@/lib/api";
 import { copyText, errorText, formatDateTime } from "@/lib/format";
+import { cn } from "@/lib/cn";
 import { kindLabel, kindOf, normalizeModelKinds, type ModelKindsIndex } from "@/lib/model-kinds";
 import type { ImageGenerationRequest } from "@/lib/types";
 import { Badge } from "@/components/ui/Badge";
@@ -109,15 +112,21 @@ function downloadImage(url: string) {
 }
 
 export default function PlaygroundPage() {
+  const route = useRoute();
+  const routeModel = route.params.get("model") || "";
+  const routeWs = route.params.get("ws") || "";
+
   const [tab, setTab] = useState<"chat" | "image">("chat");
   const [models, setModels] = useState<string[]>([]);
   const [kinds, setKinds] = useState<ModelKindsIndex | null>(null);
   const [workspaces, setWorkspaces] = useState<string[]>([]);
-  const [workspace, setWorkspace] = useState("");
+  const [workspace, setWorkspace] = useState(() => routeWs);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [chatModel, setChatModel] = useState("");
   const [imageModel, setImageModel] = useState("");
+  const appliedRouteWs = useRef(routeWs);
+  const appliedRouteModel = useRef("");
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
   const [leftDrawer, setLeftDrawer] = useState(false);
@@ -171,6 +180,13 @@ export default function PlaygroundPage() {
   useEffect(() => () => imageController.current?.abort(), []);
 
   useEffect(() => {
+    if (routeWs && routeWs !== appliedRouteWs.current) {
+      appliedRouteWs.current = routeWs;
+      setWorkspace(routeWs);
+    }
+  }, [routeWs]);
+
+  useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
@@ -186,12 +202,28 @@ export default function PlaygroundPage() {
       api.workspaces().catch(() => ({ workspaces: [] })),
     ]).then(([modelResponse, kindResponse, workspaceResponse]) => {
       if (cancelled) return;
-      setKinds(normalizeModelKinds(kindResponse));
+      const normalizedKinds = normalizeModelKinds(kindResponse);
+      setKinds(normalizedKinds);
       setWorkspaces((workspaceResponse.workspaces || []).map((item) => item.name).filter(Boolean));
       const list = [...new Set((modelResponse.data || []).map((item) => String(item.id || "")).filter(Boolean))];
       setModels(list);
-      setChatModel((current) => current && list.includes(current) ? current : (list.find((id) => id === "unified-model") || list.find((id) => kindOf(normalizeModelKinds(kindResponse), id) === "text") || list[0] || ""));
-      setImageModel((current) => current && list.includes(current) ? current : (list.find((id) => kindOf(normalizeModelKinds(kindResponse), id) === "image") || list.find((id) => /image|dall|flux/i.test(id)) || list.find((id) => id === "unified-model") || list[0] || ""));
+      const targetModel = routeModel && list.includes(routeModel) ? routeModel : "";
+      const targetKind = targetModel ? kindOf(normalizedKinds, targetModel) : "unknown";
+      const targetIsImage = targetModel
+        ? (targetKind === "image" || (targetKind === "unknown" && /image|dall|flux/i.test(targetModel)))
+        : false;
+      if (targetModel) {
+        appliedRouteModel.current = targetModel;
+        setTab(targetIsImage ? "image" : "chat");
+      }
+      setChatModel((current) => {
+        if (targetModel && !targetIsImage) return targetModel;
+        return current && list.includes(current) ? current : (list.find((id) => id === "unified-model") || list.find((id) => kindOf(normalizedKinds, id) === "text") || list[0] || "");
+      });
+      setImageModel((current) => {
+        if (targetModel && targetIsImage) return targetModel;
+        return current && list.includes(current) ? current : (list.find((id) => kindOf(normalizedKinds, id) === "image") || list.find((id) => /image|dall|flux/i.test(id)) || list.find((id) => id === "unified-model") || list[0] || "");
+      });
     }).catch((failure) => {
       if (!cancelled) setLoadError(errorText(failure));
     }).finally(() => {
@@ -199,6 +231,20 @@ export default function PlaygroundPage() {
     });
     return () => { cancelled = true; };
   }, [workspace]);
+
+  useEffect(() => {
+    if (!routeModel || appliedRouteModel.current === routeModel || !models.includes(routeModel)) return;
+    appliedRouteModel.current = routeModel;
+    const modelKind = kindOf(kinds, routeModel);
+    const isImage = modelKind === "image" || (modelKind === "unknown" && /image|dall|flux/i.test(routeModel));
+    if (isImage) {
+      setTab("image");
+      setImageModel(routeModel);
+    } else {
+      setTab("chat");
+      setChatModel(routeModel);
+    }
+  }, [routeModel, models, kinds]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -389,20 +435,20 @@ export default function PlaygroundPage() {
   );
 
   const leftPanel = (
-    <Panel title={tab === "chat" ? "推理参数配置" : "图像生成参数"} padding>
-      <div className="max-h-[calc(100dvh-16rem)] overflow-y-auto pr-0.5">{parameters}</div>
+    <Panel fill className="h-full min-h-0 flex-1" title={tab === "chat" ? "推理参数配置" : "图像生成参数"} padding>
+      <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">{parameters}</div>
     </Panel>
   );
 
   const rightPanel = (
-    <Panel title="请求与响应载荷" actions={<IconButton aria-label="关闭载荷" tooltip={null} size="sm" onClick={() => (narrow ? setRightDrawer(false) : setShowRight(false))}><ChevronRight aria-hidden className="size-4" /></IconButton>}>
-      <div className="max-h-[calc(100dvh-16rem)] overflow-y-auto pr-0.5"><PayloadPanel inspect={inspect} /></div>
+    <Panel fill className="h-full min-h-0 flex-1" title="请求与响应载荷" actions={<IconButton aria-label="关闭载荷" tooltip={null} size="sm" onClick={() => (narrow ? setRightDrawer(false) : setShowRight(false))}><ChevronRight aria-hidden className="size-4" /></IconButton>}>
+      <div className="min-h-0 flex-1 overflow-y-auto pr-0.5"><PayloadPanel inspect={inspect} /></div>
     </Panel>
   );
 
   const chatCenter = (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-panel border border-rule bg-panel">
-      <div className="flex flex-wrap items-center gap-2 border-b border-rule px-3 py-2.5">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-panel border border-rule bg-panel shadow-[var(--shadow-deck)]">
+      <div className="flex flex-wrap items-center gap-2 border-b border-rule px-3.5 py-2.5">
         <span className="text-meta text-ink-3">测试模型</span>
         <Select className="w-auto min-w-48 flex-1 sm:flex-none" aria-label="测试模型" value={chatModel} onChange={(event) => setChatModel(event.target.value)} options={modelSelectOptions} placeholder="选择模型" />
         {chatModel ? <Badge tone="neutral">{chatModel === "unified-model" ? "统一模型" : kindLabel(kindOf(kinds, chatModel))}</Badge> : null}
@@ -412,7 +458,7 @@ export default function PlaygroundPage() {
           <Button size="sm" variant="ghost" leadingIcon={<Trash2 aria-hidden className="size-3.5" />} disabled={chat.streaming || !chatMessages.length} onClick={clearChat}>清空对话</Button>
         </div>
       </div>
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-4">
+      <div ref={scrollRef} className={cn("min-h-0 flex-1 overflow-y-auto px-3.5 py-4 sm:px-4", !chatMessages.length && "amkr-dot-matrix")}>
         {chatMessages.length ? (
           <div className="space-y-4">
             {chatMessages.map((message) => (
@@ -428,25 +474,27 @@ export default function PlaygroundPage() {
           </div>
         ) : (
           <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
-            <Sparkles aria-hidden className="mb-2 size-9 text-ink-3" />
-            <h3 className="text-[16px] font-semibold leading-tight text-ink">开始试用文本模型</h3>
+            <span className="mb-2.5 grid size-9 place-items-center rounded-control border border-rule-strong bg-raised text-accent">
+              <Sparkles aria-hidden className="size-4" />
+            </span>
+            <h3 className="text-[14px] font-semibold leading-tight text-ink">开始试用文本模型</h3>
             <p className="mt-1 max-w-md text-meta text-ink-3">选择模型并在下方输入消息，或点击快捷预设提示词快速测试：</p>
             <div className="mt-3 flex flex-wrap justify-center gap-1.5">
               {CHAT_PRESETS.map((preset) => (
-                <button key={preset.label} type="button" className="rounded-chip border border-rule bg-sunken px-2 py-1 text-meta text-ink-2 hover:bg-hover hover:text-ink" onClick={() => { setInput(preset.prompt); textareaRef.current?.focus(); }}>{preset.label}</button>
+                <button key={preset.label} type="button" className="rounded-control border border-rule-strong bg-raised px-2.5 py-1 text-meta text-ink-2 hover:bg-hover hover:text-ink" onClick={() => { setInput(preset.prompt); textareaRef.current?.focus(); }}>{preset.label}</button>
               ))}
             </div>
           </div>
         )}
       </div>
-      <div className="border-t border-rule p-3">
+      <div className="border-t border-rule bg-sunken/50 p-3">
         {attached.length ? (
           <div className="mb-2 flex flex-wrap gap-2">
             {attached.map((src, index) => (
               <div key={index} className="relative">
                 <img src={src} alt="附件图片" className="size-14 rounded-control border border-rule object-cover" />
                 <IconButton aria-label="移除附件图片" tooltip={null} size="sm" className="absolute -right-2 -top-2 size-5 bg-panel" onClick={() => setAttached((current) => current.filter((_, item) => item !== index))}>
-                  <ChevronDown aria-hidden className="size-3 rotate-45" />
+                  <X aria-hidden className="size-3" />
                 </IconButton>
               </div>
             ))}
@@ -567,7 +615,7 @@ export default function PlaygroundPage() {
   );
 
   return (
-    <div className="flex h-[calc(100dvh-7.5rem)] min-h-[560px] flex-col gap-3">
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[440px] flex-col gap-3 md:h-[calc(100dvh-5.75rem)] md:min-h-[560px]">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <p className="max-w-2xl text-[13px] leading-5 text-ink-3">试用并测试已配置的上游模型路由与统一模型，实时检验对话流式响应与图片生成效果。</p>
         <div className="flex flex-wrap items-center gap-2">
@@ -583,16 +631,16 @@ export default function PlaygroundPage() {
         <div className="flex flex-1 items-center justify-center rounded-panel border border-rule bg-panel text-meta text-ink-3"><Loader2 aria-hidden className="mr-2 size-4 animate-spin" />正在读取模型与空间配置…</div>
       ) : !models.length ? (
         <Panel title="尚未发现可用模型">
-          <Empty title="当前 AMKR 尚未配置可调用的模型路由或供应商 Key。" description="请先前往「供应商」或「模型路由」添加模型并绑定 Key，之后即可在试验场进行测试。" action={<Button variant="primary" onClick={() => { window.location.hash = "#/providers"; }}>前往供应商配置</Button>} />
+          <Empty title="当前 AMKR 尚未配置可调用的模型路由或供应商 Key。" description="请先前往「供应商」或「模型路由」添加模型并绑定 Key，之后即可在试验场进行测试。" action={<Button variant="primary" onClick={() => navigate("providers")}>前往供应商配置</Button>} />
         </Panel>
       ) : (
         <div className={[
-          "grid min-h-0 flex-1 gap-3",
+          "grid min-h-0 flex-1 items-stretch gap-3",
           showLeft && showRight ? "lg:grid-cols-[260px_minmax(0,1fr)_320px]" : showLeft ? "lg:grid-cols-[260px_minmax(0,1fr)]" : showRight ? "lg:grid-cols-[minmax(0,1fr)_320px]" : "lg:grid-cols-1",
         ].join(" ")}>
-          {showLeft && !narrow ? <aside className="hidden min-h-0 lg:block">{leftPanel}</aside> : null}
+          {showLeft && !narrow ? <aside className="hidden min-h-0 lg:flex lg:flex-col">{leftPanel}</aside> : null}
           {tab === "chat" ? chatCenter : imageCenter}
-          {showRight && !narrow ? <aside className="hidden min-h-0 lg:block">{rightPanel}</aside> : null}
+          {showRight && !narrow ? <aside className="hidden min-h-0 lg:flex lg:flex-col">{rightPanel}</aside> : null}
         </div>
       )}
 
@@ -628,7 +676,7 @@ function MessageRow({
         {!isUser && message.usage?.total_tokens ? <span className="text-ink-3">· {message.usage.total_tokens} tokens</span> : null}
         <span className="ml-auto flex items-center gap-0.5">
           {message.rawPayload ? <IconButton aria-label="查看载荷" tooltip="查看载荷" size="sm" onClick={onInspect}><Eye aria-hidden className="size-3.5" /></IconButton> : null}
-          <IconButton aria-label="复制消息" tooltip="复制消息" size="sm" onClick={() => void copyText(message.content).then(() => toast.success("已复制消息内容")).catch(() => toast.error("复制失败"))}><ChevronDown aria-hidden className="size-3.5 rotate-45" /></IconButton>
+          <IconButton aria-label="复制消息" tooltip="复制消息" size="sm" onClick={() => void copyText(message.content).then(() => toast.success("已复制消息内容")).catch(() => toast.error("复制失败"))}><Copy aria-hidden className="size-3.5" /></IconButton>
         </span>
       </div>
       {isUser && message.images?.length ? <div className="mb-2 flex flex-wrap gap-1.5">{message.images.map((src, index) => <button key={index} type="button" onClick={() => onPreview(src)}><img src={src} alt="附带图片" className="size-16 rounded-control border border-rule object-cover" /></button>)}</div> : null}

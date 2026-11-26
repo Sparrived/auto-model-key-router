@@ -7,6 +7,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Activity, CircleAlert, RefreshCw } from "lucide-react";
+import { navigate } from "@/app/router";
 import { useMetricFilters } from "@/lib/hooks/useMetricFilters";
 import { rangeLabel, rangeToQuery, toApiFilters, type UpstreamKeyFilter } from "@/lib/filters";
 import { api } from "@/lib/api";
@@ -30,6 +31,7 @@ import {
   type HealthMode,
 } from "@/lib/status-math";
 import { formatCompactNumber, formatDurationValue, formatPercentValue, pickBucketSeconds } from "@/lib/chart-math";
+import { cn } from "@/lib/cn";
 import { formatClockSeconds, formatCompact, formatCount, formatDuration } from "@/lib/format";
 import { useSeriesColors } from "@/lib/series-colors";
 import { ProviderIcon } from "@/lib/brand-icons";
@@ -47,6 +49,7 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { FilterBar } from "@/components/filters/FilterBar";
 import { HealthMatrix, type HealthMatrixColumn, type HealthMatrixRow } from "@/components/charts/HealthMatrix";
 import { Sparkline, TimeSeriesChart, type ChartSeries, type TimeBucket } from "@/components/charts";
+import { RouteTraceLookup } from "./route-trace";
 
 const MATRIX_HOURS = 12;
 const MATRIX_BUCKET_SECONDS = 15 * 60;
@@ -147,23 +150,23 @@ function ErrorReasonList({
     );
   }
   return (
-    <div className={compact ? "space-y-2.5" : "space-y-3"}>
+    <div className="divide-y divide-rule">
       {reasons.rows.map((row) => {
         const tone = row.tone === "bad" ? "critical" : row.tone === "warn" ? "warn" : "neutral";
         return (
-          <div key={row.id} title={row.hint} className="min-w-0">
+          <div key={row.id} title={row.hint} className={cn("min-w-0 first:pt-0 last:pb-0", compact ? "py-2" : "py-2.5")}>
             <div className="flex items-center justify-between gap-2 text-[12px]">
               <span className="inline-flex min-w-0 items-center gap-1.5">
                 <StatusDot tone={tone} label="" aria-label={`${row.label} ${row.count} 次`} />
                 <span className="truncate text-ink-2">{row.label}</span>
               </span>
-              <span className="shrink-0 tabular-nums text-ink-3">
-                <strong className="font-medium text-ink-2">{formatCount(row.count)}</strong>
+              <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-3">
+                <strong className="font-medium text-ink">{formatCount(row.count)}</strong>
                 <span className="ml-1">· {row.ratio === null ? "—" : formatPercentValue(row.ratio)}</span>
               </span>
             </div>
             <ProgressBar
-              className="mt-1"
+              className="mt-1.5"
               value={row.ratio === null ? 0 : row.ratio * 100}
               tone={tone === "critical" ? "critical" : tone === "warn" ? "warn" : "neutral"}
               aria-label={`${row.label} 占失败请求比例`}
@@ -350,7 +353,20 @@ function ChannelDetailSheet({
               ? "“仅看此供应商”会写入供应商筛选；上游模型维度暂不写入 URL。"
               : "把当前渠道写入全局筛选，返回矩阵后继续查看其它面板。"}
           </p>
-          <Button variant="primary" onClick={() => onOnly(selection)}>{onlyLabel}</Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {selection.providerId ? (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  onClose();
+                  navigate("providers", { id: selection.providerId! });
+                }}
+              >
+                前往供应商配置
+              </Button>
+            ) : null}
+            <Button variant="primary" onClick={() => onOnly(selection)}>{onlyLabel}</Button>
+          </div>
         </div>
       </div>
     </Sheet>
@@ -508,8 +524,9 @@ function StatusPage() {
   const healthOptions = HEALTH_MODES.map((mode) => ({ value: mode.id, label: mode.label }));
 
   return (
-    <div className="mx-auto flex w-full max-w-[1560px] flex-col gap-4 pb-8">
+    <div className="mx-auto flex w-full max-w-[1560px] flex-col gap-3 pb-6">
       <FilterBar defaultRange="24h" />
+      <RouteTraceLookup />
 
       {pageQuery.isError ? (
         <Banner tone="critical" title="状态数据读取失败">{String((pageQuery.error as Error)?.message || pageQuery.error)}</Banner>
@@ -565,8 +582,9 @@ function StatusPage() {
         onRowClick={openRow}
       />
 
-      <div className="grid min-w-0 grid-cols-12 gap-4">
+      <div className="grid min-w-0 grid-cols-12 items-stretch gap-3">
         <Panel
+          fill
           className="col-span-12 min-w-0 lg:col-span-7"
           title="健康趋势"
           description={`${rangeLabel(state.range)} · 尾桶未闭合时会用虚线标出`}
@@ -599,17 +617,20 @@ function StatusPage() {
         </Panel>
 
         <Panel
+          fill
           className="col-span-12 min-w-0 lg:col-span-5"
           title="失败原因"
           description={`${rangeLabel(state.range)} · 固定七档，不按次数重排`}
           actions={<Badge tone={reasons.failures ? "critical" : "good"}>{reasons.failures ? `${formatCount(reasons.failures)} 次失败` : "无失败"}</Badge>}
           busy={pageQuery.isFetching}
+          footer={
+            <div className="space-y-1 text-[11px] leading-5 text-ink-3">
+              <StatusCodesFooter codes={pageQuery.data?.failure_status_codes} />
+              <div>失败合计 {formatCount(reasons.failures)} 次；其中 {formatCount(reasons.coded)} 次收到上游状态码，{formatCount(reasons.noStatus)} 次未收到。HTTP 状态与实际结果分别统计。</div>
+            </div>
+          }
         >
           <ErrorReasonList reasons={reasons} />
-          <div className="mt-3 border-t border-rule pt-2 text-[11px] leading-5 text-ink-3">
-            <StatusCodesFooter codes={pageQuery.data?.failure_status_codes} />
-            <div className="mt-1">失败合计 {formatCount(reasons.failures)} 次；其中 {formatCount(reasons.coded)} 次收到上游状态码，{formatCount(reasons.noStatus)} 次未收到。HTTP 状态与实际结果分别统计。</div>
-          </div>
         </Panel>
       </div>
 

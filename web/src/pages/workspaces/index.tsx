@@ -143,10 +143,10 @@ export default function WorkspacesPage() {
         const share = totals.requests > 0 ? stats.requests / totals.requests : 0;
         return (
           <div className="flex min-w-[120px] items-center gap-2">
-            <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-pill bg-sunken" aria-hidden>
+            <div className="h-1 min-w-0 flex-1 overflow-hidden rounded-pill bg-sunken" aria-hidden>
               <div className="h-full rounded-pill bg-accent" style={{ width: `${share * 100}%` }} />
             </div>
-            <span className="w-10 shrink-0 text-right text-meta tabular-nums text-ink-3">
+            <span className="w-10 shrink-0 text-right font-mono text-meta tabular-nums text-ink-3">
               {Math.round(share * 100)}%
             </span>
             <span className="sr-only">{formatPercent(stats.requests, totals.requests)}</span>

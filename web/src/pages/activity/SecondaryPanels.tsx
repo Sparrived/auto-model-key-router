@@ -67,6 +67,8 @@ export function CumulativePanel({
 
   return (
     <Panel
+      fill
+      className="flex-1"
       title="累计用量"
       description={`从${windowLabel}起点累加，回答总量是怎么堆起来的。`}
       busy={busy}
@@ -143,6 +145,8 @@ export function RhythmPanel({
 
   return (
     <Panel
+      fill
+      className="flex-1"
       title="用量节律"
       description={mode === "week"
         ? `按星期 × 小时看${windowLabel}的使用习惯。`

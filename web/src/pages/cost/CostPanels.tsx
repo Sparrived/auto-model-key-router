@@ -133,6 +133,8 @@ export function CostCompositionPanel({
   }));
   return (
     <Panel
+      fill
+      className="flex-1"
       title="成本构成"
       description="四项成本相加就是窗口的估算总额。"
       busy={busy}
@@ -148,18 +150,18 @@ export function CostCompositionPanel({
         emptyText="当前窗口没有可估算的已计价成本"
         embedded
       />
-      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+      <div className="mt-3 grid grid-cols-2 divide-x divide-y divide-rule overflow-hidden rounded-control border border-rule bg-sunken">
         {items.map((item) => (
-          <div key={item.id} className="min-w-0">
+          <div key={item.id} className="min-w-0 bg-panel p-2.5">
             <div className="flex items-center gap-1.5 text-[11px] text-ink-3">
               <span aria-hidden className="size-2 shrink-0 rounded-[2px]" style={{ backgroundColor: item.color }} />
               <span className="truncate">{item.label}</span>
             </div>
             <div className="mt-0.5 flex items-baseline justify-between gap-2">
-              <span className="truncate text-title font-medium tabular-nums text-ink" title={money(item.value)}>
+              <span className="truncate font-mono text-[15px] font-semibold tabular-nums text-ink" title={money(item.value)}>
                 {money(item.value)}
               </span>
-              <span className="shrink-0 text-[11px] tabular-nums text-ink-3">
+              <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-3">
                 {summary.totalCost > 0 ? formatPercentValue(item.value / summary.totalCost) : "—"}
               </span>
             </div>
@@ -293,11 +295,12 @@ export function CostRankingPanel({
 
   return (
     <Panel
+      fill
       title="模型成本排行"
       description="按成本排序；未计价模型保留在表里，金额显示为「—」。"
       busy={busy}
       padding={false}
-      className="min-w-0 overflow-hidden"
+      className="min-w-0 flex-1 overflow-hidden"
       footer="上游模型不是全局筛选维度；「仅看此供应商」按供应商收窄，表格仍保留模型粒度。"
     >
       <DataTable

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
 )
 
 // 本文件补上参照实现里由 uvicorn 负责、迁移时漏掉的那一半日志：**HTTP 访问日志**。
@@ -112,7 +114,12 @@ func accessLine(r *http.Request, status int) string {
 // r.URL.RequestURI() 正是 EscapedPath + "?" + RawQuery，语义相同。唯一差别是
 // Python 对**已经解码**的 path 再 quote 一次，而 Go 用原始转义形式；两者只在
 // 路径本身含 %XX 时不同（那种路径本仓库没有）。
-func pathWithQuery(r *http.Request) string { return r.URL.RequestURI() }
+func pathWithQuery(r *http.Request) string {
+	if endpoint.InGeminiNamespace(r.URL) || strings.HasPrefix(r.URL.Path, "/api/route-traces/") {
+		return r.URL.EscapedPath()
+	}
+	return r.URL.RequestURI()
+}
 
 // 注意：客户端的 host:port 直接取 r.RemoteAddr，对应 get_client_addr 的
 // `"%s:%d" % client`。net/http 的 RemoteAddr 本来就是 host:port 形态（IPv6 是

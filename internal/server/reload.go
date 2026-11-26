@@ -104,6 +104,7 @@ func (a *App) reload() {
 		runtime.NewRuntimeResources(runtimeConfig, pool, store, client)); err != nil {
 		return
 	}
+	a.routeTraces.Start(runtimeConfig.RouteTrace.Enabled)
 	// 用重新读到的 mtime 而不是上面那次 stat 的结果（app.py:472）：读盘期间文件可能
 	// 又被改了一次，用旧 mtime 会让那次改动被漏掉。
 	if refreshed := configMtime(a.configPath); !refreshed.IsZero() {
