@@ -1,0 +1,1 @@
+import{H as e,K as t,Y as n}from"./styles-Bm_DhxKn.js";var r=n();function i({size:n=`sm`,className:i}){return(0,r.jsx)(t,{role:`status`,"aria-label":`加载中`,className:e(`animate-spin text-ink-3 motion-reduce:animate-none`,n===`sm`?`size-3.5`:`size-4`,i)})}export{i as t};
