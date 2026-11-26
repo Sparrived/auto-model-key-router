@@ -457,6 +457,22 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 AMKR 会在转发给上游前把请求体里的模型名改写为选中 target 的 `upstream_model`（留空时即模型 ID），并把 `Authorization` 替换成选中的上游 `api_key`。
 
+### Gemini 入站兼容
+
+Gemini 客户端的服务 Base URL 使用 AMKR 实例根地址。将下例的 `YOUR_MODEL` 换成已授权的 AMKR 模型名（如有斜杠，按单个路径段编码），凭据使用下游访问密钥或工作空间推理 Key，不使用上游 Key：
+
+```bash
+curl -i 'http://127.0.0.1:8000/v1beta/models/YOUR_MODEL:generateContent' \
+  -H 'x-goog-api-key: YOUR_ACCESS_KEY' -H 'Content-Type: application/json' \
+  --data '{"contents":[{"parts":[{"text":"你好"}]}],"generationConfig":{"maxOutputTokens":128}}'
+```
+
+流式改用 `:streamGenerateContent?alt=sse` 和 `curl -N`。支持首版单候选文本、受限采样、函数声明和回填、PNG/JPEG 内联图片。此入口使用现有 **Chat Completions 兼容上游**，不等同于原生 Gemini 上游，不支持 Gemini 模型列表、URL Key、Files、内置工具、媒体生成或思考签名。返回的思考块仅用于展示，重放历史前请移除。
+
+### 查看单请求选路
+
+在「设置」启用单请求选路解释，默认保留 24 小时。用已认证的凭据发送 HTTP 请求，复制响应头 `X-AMKR-Request-ID`，在「状态监控」按 ID 查阅。进行中的流可以刷新；HTTP 200 和流最终失败可以同时出现。没有 ID、记录未保存、提前淘汰、过期或无权都可能查不到；记录只保存有限路由元数据，不保存请求正文、函数参数或密钥。
+
 ### 对外名称与上游名称
 
 一个模型有两层名字，AMKR 把它们分开：

@@ -22,6 +22,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/pricing"
 	"github.com/Sparrived/auto-model-key-router/internal/proxy"
 	"github.com/Sparrived/auto-model-key-router/internal/quota"
+	"github.com/Sparrived/auto-model-key-router/internal/routetrace"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 	"github.com/Sparrived/auto-model-key-router/internal/selfupdate"
 	"github.com/Sparrived/auto-model-key-router/internal/upstream"
@@ -39,6 +40,8 @@ type Options struct {
 	ConfigPath string
 	// Config 是启动时载入的配置快照，对应 create_app 的 config 参数。
 	Config *config.RouterConfig
+	// RouteTraceCacheDir 供隔离宿主指定追踪存放目录；空时用默认缓存目录。
+	RouteTraceCacheDir string
 	// Version 是进程版本号，对应 `from . import __version__`（app.py:15）。
 	// 进入 /health 与版本检查。
 	Version string
@@ -129,10 +132,11 @@ type Options struct {
 type App struct {
 	options Options
 
-	proxy   *proxy.Handler
-	manager *runtime.RuntimeManager
-	api     *api.Server
-	handler http.Handler
+	proxy       *proxy.Handler
+	manager     *runtime.RuntimeManager
+	api         *api.Server
+	routeTraces *routetrace.Store
+	handler     http.Handler
 	// wsProxy 处理升级到 /v1/{path} 的连接（app.py:374）。它是**无状态**的转发器，
 	// 每条连接的生命周期都在它内部，因此整个 App 共用一个实例。
 	wsProxy *wsproxy.Handler
@@ -310,8 +314,16 @@ func New(options Options) (*App, error) {
 	})
 	app.api.QuotaGuard = app.guard
 
+	traceDir := options.RouteTraceCacheDir
+	if traceDir == "" {
+		traceDir, _ = config.DefaultCacheDir()
+	}
+	app.routeTraces = routetrace.New(traceDir)
+	app.routeTraces.Start(options.Config.RouteTrace.Enabled)
+
 	proxyOptions := proxy.Options{
-		Logger: options.Logger,
+		RouteTraces: app.routeTraces,
+		Logger:      options.Logger,
 		// L3 被动信号：每次上游响应都把响应头投给评估器。观察点只做前缀判断 + 非阻塞
 		// 投递，落盘与整轮评估都在后台循环里（见 api.QuotaGuard.ObserveUpstreamQuota）。
 		QuotaObserver: app.guard,
@@ -330,10 +342,11 @@ func New(options Options) (*App, error) {
 		// 在旁边再开两条它管不到的通道。
 		authorizer := options.Authorizer
 		proxyOptions.Authorizer = func(r *http.Request, localAPIKey string) *proxy.AuthorizerResult {
-			if authorizer(r, localAPIKey) == nil {
+			identity := authorizer(r, localAPIKey)
+			if identity == nil {
 				return nil
 			}
-			return &proxy.AuthorizerResult{}
+			return &proxy.AuthorizerResult{TraceFull: identity.IsFull()}
 		}
 	}
 	app.proxy = proxy.New(app.manager, &switchableSink{app: app}, proxyOptions)
@@ -398,6 +411,9 @@ func (a *App) Close() error {
 			a.pricingStop()
 		}
 		err = a.manager.Close()
+		if closeErr := a.routeTraces.Close(); closeErr != nil && a.options.Logger != nil {
+			a.options.Logger.Warn("关闭选路追踪存储失败")
+		}
 	})
 	return err
 }

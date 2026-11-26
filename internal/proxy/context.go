@@ -30,6 +30,7 @@ type RequestContext struct {
 	Payload     *canonical.Value
 	IsStream    bool
 	OriginalRaw []byte
+	geminiThoughts bool
 
 	RequestedModelID   string
 	RequestedModelName string

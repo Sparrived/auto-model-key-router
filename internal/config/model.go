@@ -356,6 +356,7 @@ type RouterConfig struct {
 	QuotaFreezePolicies      []QuotaFreezePolicy
 	EndpointCapabilitiesPath string
 	MetricsDBPath            string
+	RouteTrace               RouteTraceConfig
 	LogFilePath              string
 	// LogLevel 是日志级别，取值只可能是 debug / info / warning / error（缺省 info）。
 	//
@@ -570,6 +571,9 @@ func fromMigrated(raw *canonical.Value) (*RouterConfig, error) {
 	config.LocalAPIKey = stringOr(raw.Lookup("local_api_key"), "")
 	config.WebUIEnabled = boolOr(raw.Lookup("webui_enabled"), false)
 	config.OpsEnabled = boolOr(raw.Lookup("ops_enabled"), true)
+	if config.RouteTrace, err = ParseRouteTraceConfig(raw.Lookup("route_trace")); err != nil {
+		return nil, err
+	}
 
 	providers, providerKeys, err := parseProviders(raw)
 	if err != nil {

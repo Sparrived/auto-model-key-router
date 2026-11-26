@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
+	"github.com/Sparrived/auto-model-key-router/internal/config"
 )
 
 // 本文件复刻 Pydantic v2 的请求体校验：字段声明顺序、错误类型名、错误消息、
@@ -45,6 +46,7 @@ type fieldSpec struct {
 	kind     fieldKind
 	required bool
 	nullable bool
+	strict   bool
 	minLen   int
 	ge, gt   *canonical.Value
 	le, lt   *canonical.Value
@@ -459,6 +461,12 @@ var specQuotaFreezePolicy = newModelSpec("QuotaFreezePolicy",
 	nul("whitelist", kindStrList),
 )
 
+var specRouteTraceSettings = newModelSpec("RouteTraceSettings",
+	fieldSpec{name: "enabled", kind: kindBool, strict: true},
+	fieldSpec{name: "retention_hours", kind: kindInt, strict: true}.
+		geV(canonical.NewIntValue(config.MinRouteTraceRetentionHours)).leV(canonical.NewIntValue(config.MaxRouteTraceRetentionHours)),
+)
+
 // specSettingsUpdate 对应 SettingsUpdate。
 var specSettingsUpdate = newModelSpec("SettingsUpdate",
 	req("config_revision", kindStr).minLenOf(1),
@@ -472,6 +480,7 @@ var specSettingsUpdate = newModelSpec("SettingsUpdate",
 	nul("quota_freeze_threshold_7d", kindFloat).geV(floatGe0).leV(floatLe1),
 	nul("quota_freeze_threshold_whitelist", kindStrList),
 	nul("quota_freeze_policies", kindNestedList).withNested(specQuotaFreezePolicy),
+	def("route_trace", kindNested).withNested(specRouteTraceSettings),
 )
 
 // validationError 是一条 Pydantic 校验错误，渲染顺序固定为
@@ -684,6 +693,9 @@ func validateField(field *fieldSpec, value *canonical.Value, loc []any) (*canoni
 		}
 		return value, nil
 	case kindBool:
+		if field.strict && value.Kind != canonical.KindBool {
+			return nil, []validationError{typeError(kindBool, loc, value)}
+		}
 		converted, ok := pyBool(value)
 		if !ok {
 			return nil, []validationError{{
@@ -695,6 +707,9 @@ func validateField(field *fieldSpec, value *canonical.Value, loc []any) (*canoni
 		}
 		return canonical.NewBool(converted), nil
 	case kindInt:
+		if field.strict && canonical.PyTypeName(value) != "int" {
+			return nil, []validationError{typeError(kindInt, loc, value)}
+		}
 		converted, err := pyInt(value)
 		if err != nil {
 			return nil, []validationError{err.withLoc(loc)}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -523,9 +524,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		return withRevision(data, objectOf(
-			canonical.ObjectPair{Key: "settings", Value: settingsResponse(cfg)},
-		))
+		return settingsWithRevision(data, cfg)
 	})
 }
 
@@ -555,10 +554,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		return withRevision(data, objectOf(
-			canonical.ObjectPair{Key: "settings", Value: settingsResponse(cfg)},
-		))
+		return settingsWithRevision(data, cfg)
 	})
+}
+
+func settingsWithRevision(data *canonical.Value, cfg *config.RouterConfig) (*canonical.Value, error) {
+	settings := settingsResponse(cfg)
+	settings.SetKey("route_trace", cfg.RouteTrace.Value())
+	return withRevision(data, objectOf(canonical.ObjectPair{Key: "settings", Value: settings}))
 }
 
 // updatesWithout 返回去掉某些键后的浅拷贝，对应 `updates.pop("config_revision")`。
@@ -685,6 +688,10 @@ func (s *Server) handleImportConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		imported, err := configops.TransferableConfig(migrated)
 		if err != nil {
+			var validation *config.ConfigError
+			if errors.As(err, &validation) {
+				return nil, httpErrorf(http.StatusUnprocessableEntity, "%s", validation.Error())
+			}
 			return nil, err
 		}
 

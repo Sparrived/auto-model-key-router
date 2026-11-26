@@ -43,6 +43,7 @@ import (
 	"github.com/Sparrived/auto-model-key-router/internal/canonical"
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 	"github.com/Sparrived/auto-model-key-router/internal/keypool"
+	"github.com/Sparrived/auto-model-key-router/internal/routetrace"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 	"github.com/Sparrived/auto-model-key-router/internal/upstream"
 )
@@ -276,6 +277,7 @@ type Options struct {
 	// QuotaObserver 接收每一次上游响应的响应头（额度冻结的 L3 被动信号）；
 	// nil 表示不启用，此时本包行为与改动前完全一致。见 QuotaObserver。
 	QuotaObserver QuotaObserver
+	RouteTraces *routetrace.Store
 }
 
 // AuthorizerResult 是鉴权结果。
@@ -299,6 +301,8 @@ type AuthorizerResult struct {
 	// 与「未通过鉴权」分开：停用的 key 是已知身份被管理员关掉，回 403 并说清原因，
 	// 而错误凭据回 401。合并两者会让「我明明配对了 key」这种排查无从下手。
 	Denied string
+	// TraceFull 仅由宿主显式确认完整权限；不改变现有代理授权语义。
+	TraceFull bool
 }
 
 // Handler 是代理请求的编排器。
@@ -319,6 +323,7 @@ type Handler struct {
 	now          func() time.Time
 	// quotaObserver 见 QuotaObserver；nil 时额度观察点整体短路。
 	quotaObserver QuotaObserver
+	routeTraces *routetrace.Store
 }
 
 // New 构造 Handler。metrics 可以为 nil（此时不写指标行，key 健康回写仍然发生）。
@@ -367,6 +372,7 @@ func New(manager *runtime.RuntimeManager, metrics MetricsSink, options Options) 
 		maxJSONBytes:  maxJSON,
 		now:           now,
 		quotaObserver: options.QuotaObserver,
+		routeTraces: options.RouteTraces,
 	}
 }
 

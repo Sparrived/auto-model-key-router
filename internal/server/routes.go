@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Sparrived/auto-model-key-router/internal/endpoint"
+	"github.com/Sparrived/auto-model-key-router/internal/protocol"
 	"github.com/Sparrived/auto-model-key-router/internal/webui"
 )
 
@@ -49,6 +51,7 @@ func (a *App) buildHandler() http.Handler {
 	// FastAPI 兜底一致。
 	apiHandler := a.api.Handler()
 	mux.Handle("/api/", apiHandler)
+	mux.HandleFunc("/api/route-traces/{request_id}", a.api.RouteTraceHandler(a.routeTraces))
 	// "/api"（无尾斜杠）：FastAPI 里这是 404（路由是逐个注册的，没有挂载前缀），而
 	// ServeMux 会把子树模式的 "/api" 请求 301 重定向到 "/api/"。显式注册精确模式
 	// 挡掉重定向，让内层兜底给出同样的 404。
@@ -126,7 +129,23 @@ func (a *App) buildHandler() http.Handler {
 	mux.HandleFunc("/ws/events", a.handleWSEvents)
 
 	mux.HandleFunc("/", a.handleRoot)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if endpoint.InGeminiNamespace(r.URL) {
+			path, _ := endpoint.ParseGeminiPath(r.URL)
+			if path == "" {
+				protocol.WriteGeminiError(w, http.StatusNotFound, "")
+				return
+			}
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				protocol.WriteGeminiError(w, http.StatusMethodNotAllowed, "")
+				return
+			}
+			a.handleProxyPath(w, r, path)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // proxyMethods 是参照实现给 /v1/{path:path} 注册的方法集合（app.py:371-373）。
@@ -228,7 +247,10 @@ func (a *App) handleRoot(w http.ResponseWriter, r *http.Request) {
 // handleProxy 把 /v1/{path} 交给 internal/proxy，path 不含 "/v1/" 前缀
 // （对应 app.py:371-373 的 `"/v1/{path:path}"` 与 handle_proxy_request(path, ...)）。
 func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/v1/")
+	a.handleProxyPath(w, r, strings.TrimPrefix(r.URL.Path, "/v1/"))
+}
+
+func (a *App) handleProxyPath(w http.ResponseWriter, r *http.Request, path string) {
 	// app.py:351-369 的包装层：进入时记一次活跃请求，退出时释放。
 	//
 	// Go 侧比 Python 简单：proxy.Handle **同步**写完整个响应（流式也写完才返回），
@@ -243,5 +265,5 @@ func (a *App) handleProxy(w http.ResponseWriter, r *http.Request) {
 		a.markMetricsDirty()
 		defer adapter.ReleaseActive()
 	}
-	a.proxy.Handle(w, r, path)
+	a.proxy.HandleHTTP(w, r, path)
 }

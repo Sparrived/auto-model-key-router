@@ -76,6 +76,9 @@ func IsPassthroughEndpoint(path string) bool {
 //
 // 移植 proxy_support.py:265，并按端点族表扩展。
 func UpstreamMode(path string) string {
+	if endpoint.IsGemini(path) {
+		return string(endpoint.FamilyOpenAI)
+	}
 	return string(endpoint.FamilyOf(path))
 }
 
@@ -105,8 +108,8 @@ func UpstreamMode(path string) string {
 // native 形态不受影响：它走上面的 `native && mode != ""` 分支，本来就是查配置的
 // （这也是参照实现里 edits 唯一会查配置的情形）。
 func UpstreamPath(path string, payload *canonical.Value, native bool, upstreamRoutes map[string]string) (string, error) {
-	family, remainder, known := endpoint.Lookup(path)
-	mode := string(family)
+	_, remainder, known := endpoint.Lookup(path)
+	mode := UpstreamMode(path)
 	if path == "images/generations" {
 		return config.UpstreamRoutePath(upstreamRoutes, "images")
 	}
@@ -520,7 +523,12 @@ func UpstreamBody(
 	}
 	upstreamPayload = ApplyReasoningEffort(upstreamPayload, reasoningTarget, cfg)
 	upstreamPayload = ApplyTaskParams(upstreamPayload, taskParams)
-	upstreamPayload = protocol.AdaptMessagePayload(upstreamPayload)
+	if endpoint.IsGemini(path) {
+		// The inbound converter already built a validated Chat payload.
+		upstreamPayload.Obj.Set("stream", canonical.NewBool(stream))
+	} else {
+		upstreamPayload = protocol.AdaptMessagePayload(upstreamPayload)
+	}
 
 	if stream {
 		// include_usage 让上游在流末尾补一个 usage 块。non-dict 的 stream_options

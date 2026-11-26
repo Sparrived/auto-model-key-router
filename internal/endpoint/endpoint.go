@@ -37,6 +37,8 @@ const (
 	FamilyAnthropic Family = "anthropic"
 	// FamilyResponses 是 OpenAI Responses。
 	FamilyResponses Family = "responses"
+	// FamilyGemini 是转往 Chat Completions 的 Gemini 入站方言。
+	FamilyGemini Family = "gemini"
 	// FamilyImages 是图像生成 / 编辑 / 变体。
 	FamilyImages Family = "images"
 	// FamilyEmbeddings 是文本嵌入。
@@ -114,7 +116,7 @@ func Routes() []Route {
 // IsChatFamily 报告该族是否为对话方言（请求体会被方言转换）。
 func IsChatFamily(family Family) bool {
 	switch family {
-	case FamilyOpenAI, FamilyAnthropic, FamilyResponses:
+	case FamilyOpenAI, FamilyAnthropic, FamilyResponses, FamilyGemini:
 		return true
 	}
 	return false
@@ -125,6 +127,9 @@ func IsChatFamily(family Family) bool {
 // 返回的子路径带前导 `/`（族根本身返回空串），供调用方拼在配置基址之后：
 // 基址 `v1/videos` + 子路径 `/abc/content` = `v1/videos/abc/content`。
 func Lookup(path string) (Family, string, bool) {
+	if IsGemini(path) {
+		return FamilyGemini, "", true
+	}
 	trimmed := strings.Trim(path, "/")
 	for _, route := range routes {
 		if trimmed == route.Root {

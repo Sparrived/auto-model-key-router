@@ -612,9 +612,13 @@ func (p *KeyPool) KeyCount(modelID string) int {
 // 能用几把」都要，混成一个函数会让「模型未配置」与「供应商不在清单里」两种情况
 // 分不开——而它们该回 404 还是 403 是不同的。
 func (p *KeyPool) KeyCountFor(modelID string, accessKey *config.AccessKeyConfig) int {
+	return p.CountWithDecisions(modelID, accessKey, nil)
+}
+
+func (p *KeyPool) CountWithDecisions(modelID string, accessKey *config.AccessKeyConfig, decisions *Decisions) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.keysForModelLocked(p.resolveModelID(modelID), accessKey))
+	return len(p.keysForModelDecisions(p.resolveModelID(modelID), accessKey, decisions))
 }
 
 // RoutingMode 返回模型的路由模式（缺省 round_robin）。
@@ -654,13 +658,18 @@ func (p *KeyPool) KeysForModel(modelID string, accessKey *config.AccessKeyConfig
 // 模型从 /v1/models 里摘掉。这一层过滤对冷却的软回退同样生效——软回退是在剩下的
 // 候选里放宽冷却，不是把冻结恢复成可用。
 func (p *KeyPool) keysForModelLocked(modelID string, accessKey *config.AccessKeyConfig) []config.KeyConfig {
-	keys := p.enabledKeysForModelLocked(modelID, accessKey)
+	return p.keysForModelDecisions(modelID, accessKey, nil)
+}
+
+func (p *KeyPool) keysForModelDecisions(modelID string, accessKey *config.AccessKeyConfig, decisions *Decisions) []config.KeyConfig {
+	keys := p.enabledKeyDecisions(modelID, accessKey, decisions)
 	if p.quotaFreezes == nil {
 		return keys
 	}
 	result := make([]config.KeyConfig, 0, len(keys))
 	for _, key := range keys {
 		if p.frozenForModelLocked(modelID, key) {
+			decisions.candidate(key, "quota_frozen", "")
 			continue
 		}
 		result = append(result, key)
@@ -675,14 +684,20 @@ func (p *KeyPool) keysForModelLocked(modelID string, accessKey *config.AccessKey
 // 完全不同（配置错误 vs 额度耗尽），失败时要说清是哪一种。冻结过滤后的集合为空时，
 // 正是靠这里的集合才能回答「是没配 key 还是 key 都被冻结了」。
 func (p *KeyPool) enabledKeysForModelLocked(modelID string, accessKey *config.AccessKeyConfig) []config.KeyConfig {
+	return p.enabledKeyDecisions(modelID, accessKey, nil)
+}
+
+func (p *KeyPool) enabledKeyDecisions(modelID string, accessKey *config.AccessKeyConfig, decisions *Decisions) []config.KeyConfig {
 	allowed := accessKeyProviders(accessKey)
 	all := p.keys[modelID]
 	result := make([]config.KeyConfig, 0, len(all))
 	for _, key := range all {
 		if !key.Enabled {
+			decisions.candidate(key, "disabled", "")
 			continue
 		}
 		if allowed != nil && !allowed[key.Provider] {
+			decisions.candidate(key, "provider_not_allowed", "")
 			continue
 		}
 		result = append(result, key)
@@ -692,6 +707,10 @@ func (p *KeyPool) enabledKeysForModelLocked(modelID string, accessKey *config.Ac
 
 // KeyByName 按名字取启用中的 key；点名一把被额度冻结的 Key 会失败（见 freeze.go）。
 func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKeyConfig) (config.KeyConfig, error) {
+	return p.NamedWithDecisions(modelID, keyName, accessKey, nil)
+}
+
+func (p *KeyPool) NamedWithDecisions(modelID, keyName string, accessKey *config.AccessKeyConfig, decisions *Decisions) (config.KeyConfig, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	modelID = p.resolveModelID(modelID)
@@ -701,15 +720,21 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 	}
 	allowed := accessKeyProviders(accessKey)
 	for _, key := range keys {
-		if key.Name != keyName || !key.Enabled {
+		if key.Name != keyName {
+			continue
+		}
+		if !key.Enabled {
+			decisions.candidate(key, "disabled", "")
 			continue
 		}
 		if allowed != nil && !allowed[key.Provider] {
+			decisions.candidate(key, "provider_not_allowed", "")
 			continue
 		}
 		// 点名路径同样受冻结约束；但提前冻结对白名单模型不生效，此时点名也应放行，
 		// 否则白名单在 `model[key]` 语法下等于不存在。硬性耗尽仍直接失败。
 		if p.frozenForModelLocked(modelID, key) {
+			decisions.candidate(key, "quota_frozen", "")
 			return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{key})
 		}
 		return key, nil
@@ -745,6 +770,10 @@ func (p *KeyPool) KeyByName(modelID, keyName string, accessKey *config.AccessKey
 // 让调用方等」而不是「宁可把上游打满」。候选全被并发挡下时返回 concurrencyLimitedError
 // （429），与「没有可用 key」区分开。
 func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.AccessKeyConfig, affinityKey string) (config.KeyConfig, error) {
+	return p.NextWithDecisions(modelID, excluded, accessKey, affinityKey, nil)
+}
+
+func (p *KeyPool) NextWithDecisions(modelID string, excluded []string, accessKey *config.AccessKeyConfig, affinityKey string, decisions *Decisions) (config.KeyConfig, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -753,7 +782,8 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 	for _, name := range excluded {
 		excludedSet[name] = true
 	}
-	keys := p.keysForModelLocked(modelID, accessKey)
+	mode := p.routingModeLocked(modelID)
+	keys := p.keysForModelDecisions(modelID, accessKey, decisions)
 	if len(keys) == 0 {
 		// 冻结集合已经被 keysForModelLocked 过滤掉了，这里单独再扫一遍才能分辨
 		// 「候选全被冻结」与「候选因配置/作用域为空」——两者的错误必须不同。
@@ -766,7 +796,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		return config.KeyConfig{}, &unknownModelError{modelID: modelID}
 	}
 
-	if p.routingModeLocked(modelID) == "only_first" {
+	if mode == "only_first" {
 		first := keys[0]
 		if p.quotaFreezes != nil {
 			// only_first 钉死的是**配置顺序里的第一把**（含被冻结的那把）：它一旦被
@@ -774,42 +804,61 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 			// 配置意图偷偷改成「用第一把能用的」，冻结也就从硬约束变成一次静默改道。
 			first = p.enabledKeysForModelLocked(modelID, accessKey)[0]
 			if p.frozenForModelLocked(modelID, first) {
+				decisions.selection(first, mode, "quota_frozen", "", nil)
 				return config.KeyConfig{}, p.quotaFrozenErrorLocked(modelID, []config.KeyConfig{first})
 			}
 		}
 		if !excludedSet[first.Name] {
 			if !p.hasCapacityLocked(modelID, first) {
+				decisions.selection(first, mode, "concurrency_limited", "", nil)
 				return config.KeyConfig{}, p.concurrencyLimitedErrorLocked(modelID, []config.KeyConfig{first})
 			}
 			p.acquireLocked(modelID, first.Name)
+			decisions.selection(first, mode, "selected", "", nil)
 			return first, nil
 		}
+		decisions.selection(first, mode, "excluded_after_attempt", "", nil)
 		return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
 	}
 
 	// blocked 只收「仅因并发上限被挡下」的候选，用来在最终失败时说清是谁满了。
 	blocked := make([]config.KeyConfig, 0, len(keys))
 	available := make([]config.KeyConfig, 0, len(keys))
+	phase := "regular"
 	for _, key := range keys {
-		if excludedSet[key.Name] || p.health.IsCoolingDown(modelID, key.Name) {
+		if excludedSet[key.Name] {
+			decisions.candidate(key, "excluded_after_attempt", phase)
+			continue
+		}
+		if p.health.IsCoolingDown(modelID, key.Name) {
+			decisions.candidate(key, "cooldown", phase)
 			continue
 		}
 		if p.balanceExhaustedLocked(modelID, key) {
+			decisions.candidate(key, "balance_limited", phase)
 			continue
 		}
 		if !p.hasCapacityLocked(modelID, key) {
+			decisions.candidate(key, "concurrency_limited", phase)
 			blocked = append(blocked, key)
 			continue
 		}
 		available = append(available, key)
 	}
 	if len(available) == 0 {
+		phase = "cooldown_soft_fallback"
 		// 软回退：冷却中的 key 可以放行（既定降级），欠费的账号与并发满的 key 不行。
 		for _, key := range keys {
-			if excludedSet[key.Name] || p.balanceExhaustedLocked(modelID, key) {
+			if excludedSet[key.Name] {
+				decisions.candidate(key, "excluded_after_attempt", phase)
+				continue
+			}
+			if p.balanceExhaustedLocked(modelID, key) {
+				decisions.candidate(key, "balance_limited", phase)
 				continue
 			}
 			if !p.hasCapacityLocked(modelID, key) {
+				decisions.candidate(key, "concurrency_limited", phase)
 				// 与第一轮一样记进 blocked：一个既在冷却、又已满的候选，说「并发满了」
 				// 比说「没有可用 key」更接近事实，也更能指出该等什么。
 				blocked = append(blocked, key)
@@ -825,7 +874,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
 	}
 
-	if p.routingModeLocked(modelID) == "priority" {
+	if mode == "priority" {
 		// 按 keys 的配置顺序（不是 available 的顺序）取第一个可用项。
 		availableSet := map[string]bool{}
 		for _, key := range available {
@@ -834,6 +883,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 		for _, candidate := range keys {
 			if availableSet[candidate.Name] {
 				p.acquireLocked(modelID, candidate.Name)
+				decisions.selection(candidate, mode, "selected", phase, available)
 				return candidate, nil
 			}
 		}
@@ -842,7 +892,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 
 	var sticky stickyKey
 	hasSticky := false
-	if affinityKey != "" && p.routingModeLocked(modelID) == "round_robin" {
+	if affinityKey != "" && mode == "round_robin" {
 		sticky = stickyKey{modelID, accessKeyStickyID(accessKey), affinityKey}
 		hasSticky = true
 
@@ -850,6 +900,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 			for _, candidate := range available {
 				if candidate.Name == stickyName {
 					p.acquireLocked(modelID, candidate.Name)
+					decisions.selection(candidate, mode, "sticky", phase, available)
 					return candidate, nil
 				}
 			}
@@ -875,6 +926,7 @@ func (p *KeyPool) NextKey(modelID string, excluded []string, accessKey *config.A
 			if hasSticky {
 				p.stickyKeys[sticky] = candidate.Name
 			}
+			decisions.selection(candidate, mode, "lowest_active_round_robin", phase, available)
 			return candidate, nil
 		}
 	}
