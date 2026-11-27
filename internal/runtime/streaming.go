@@ -76,6 +76,10 @@ func (r *BodyStreamReader) Next(ctx context.Context) ([]byte, error) {
 // deadline 一致），只有首块受它约束；之后每块各自获得 idleTimeout。首块读取
 // 完成后不再检查总时长——这与「无总时长上限」的既定行为一致。
 //
+// 整条流只启动**一个**后台读协程并复用同一个 time.Timer，通过 results/ack 握手确保
+// 调用方在 yield 消费完当前切片之前，BodyStreamReader 不会覆盖底层缓冲，避免按块启协程
+// 带来的调度与 GC 开销。
+//
 // yield 返回错误时立即停止并返回该错误（下游写失败）。
 func IterStreamBytes(
 	ctx context.Context,
@@ -84,77 +88,98 @@ func IterStreamBytes(
 	idleTimeout time.Duration,
 	yield func(chunk []byte) error,
 ) error {
-	// 首块：剩余时间取 max(0, deadline - now)。
-	remaining := time.Until(firstByteDeadline)
-	if remaining < 0 {
-		remaining = 0
-	}
-	first, err := nextWithTimeout(ctx, source, remaining)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			// 上游一个字节都没发就结束了——参照实现直接 return，不报错。
-			return nil
-		}
-		if errors.Is(err, ErrStreamTimeout) {
-			return &streamTimeoutError{message: "timed out waiting for first stream byte"}
-		}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := yield(first); err != nil {
-		return err
-	}
-
-	for {
-		chunk, err := nextWithTimeout(ctx, source, idleTimeout)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			if errors.Is(err, ErrStreamTimeout) {
-				return &streamTimeoutError{message: "timed out waiting for next stream byte"}
-			}
-			return err
-		}
-		if err := yield(chunk); err != nil {
-			return err
-		}
-	}
-}
-
-// nextWithTimeout 在超时限制内读取下一块。
-//
-// 子 context 到期只中止这一次等待；父 context 的错误优先返回，这样下游断开能
-// 立刻反映出来，而不会被当成「空闲超时」。
-func nextWithTimeout(ctx context.Context, source StreamReader, timeout time.Duration) ([]byte, error) {
-	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	type outcome struct {
 		chunk []byte
 		err   error
 	}
-	// 用带缓冲的通道，保证即使超时先返回，读取协程也能写入并退出，不泄漏。
-	done := make(chan outcome, 1)
+
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+
+	// results 缓冲为 1：即使主协程因超时或下游失败提前退出，读协程完成最后一次
+	// Next 后也能无阻塞写入并退出，不发生协程泄漏。
+	results := make(chan outcome, 1)
+	ack := make(chan struct{})
 	go func() {
-		chunk, err := source.Next(attemptCtx)
-		done <- outcome{chunk: chunk, err: err}
+		for {
+			chunk, err := source.Next(readCtx)
+			results <- outcome{chunk: chunk, err: err}
+			if err != nil {
+				return
+			}
+			select {
+			case <-ack:
+			case <-readCtx.Done():
+				return
+			}
+		}
 	}()
 
-	select {
-	case result := <-done:
-		// 父 context 被取消时，底层可能返回 context.Canceled/DeadlineExceeded；
-		// 统一成父 context 的错误，避免把「下游断开」误报成「空闲超时」。
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	// 首块：剩余时间取 max(0, deadline - now)。
+	remaining := time.Until(firstByteDeadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+
+	firstChunk := true
+	for {
+		var result outcome
+		select {
+		case result = <-results:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if firstChunk {
+				return &streamTimeoutError{message: "timed out waiting for first stream byte"}
+			}
+			return &streamTimeoutError{message: "timed out waiting for next stream byte"}
 		}
-		return result.chunk, result.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-attemptCtx.Done():
-		if err := ctx.Err(); err != nil {
-			return nil, err
+
+		if result.err != nil {
+			if errors.Is(result.err, io.EOF) {
+				// 上游一个字节都没发就结束了——参照实现直接 return，不报错。
+				return nil
+			}
+			if errors.Is(result.err, ErrStreamTimeout) {
+				if firstChunk {
+					return &streamTimeoutError{message: "timed out waiting for first stream byte"}
+				}
+				return &streamTimeoutError{message: "timed out waiting for next stream byte"}
+			}
+			return result.err
 		}
-		return nil, ErrStreamTimeout
+
+		if err := yield(result.chunk); err != nil {
+			return err
+		}
+		firstChunk = false
+
+		// yield 已消费完当前块：放行读协程读取下一块，并把定时器重置为空闲超时窗口。
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(idleTimeout)
+
+		select {
+		case ack <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
 

@@ -2,12 +2,41 @@ package server
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/Sparrived/auto-model-key-router/internal/config"
 	"github.com/Sparrived/auto-model-key-router/internal/keypool"
 	"github.com/Sparrived/auto-model-key-router/internal/metrics"
 	"github.com/Sparrived/auto-model-key-router/internal/runtime"
 )
+
+// reloadCheckInterval 是请求热路径上检查配置文件 mtime 的最小间隔。
+//
+// 20ms 足以把高并发（数百/数千 QPS）下的 os.Stat 与 reloadMu 争用压低一到两个数量级，
+// 同时仍低于外部手工编辑及现有热重载测试（30ms 写入间隔）的观测窗口；管理 API 写盘后
+// 直接调用 reload()，不受此节流限制、立即生效。
+const reloadCheckInterval = 20 * time.Millisecond
+
+// reloadIfChanged 是请求热路径的轻量入口：窗口内直接无锁跳过；到期后在锁外 stat，
+// 仅当 mtime 确实变化时才进入 reload() 持锁换代。
+func (a *App) reloadIfChanged() {
+	if a.configPath == "" {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := a.lastReloadCheck.Load()
+	if last != 0 && now-last < int64(reloadCheckInterval) {
+		return
+	}
+	if !a.lastReloadCheck.CompareAndSwap(last, now) {
+		return
+	}
+	mtime := configMtime(a.configPath)
+	if mtime.IsZero() || mtime.UnixNano() == a.configMtimeNano.Load() {
+		return
+	}
+	a.reload()
+}
 
 // reload 是 _reload_config_if_changed 的移植（app.py:443-475）。
 //
@@ -112,6 +141,8 @@ func (a *App) reload() {
 	} else {
 		a.configMtime = mtime
 	}
+	a.configMtimeNano.Store(a.configMtime.UnixNano())
+	a.lastReloadCheck.Store(time.Now().UnixNano())
 	// app.py:473-475：换完之后（且**只有真的换了**）向订阅者广播一次 config_change。
 	// 参照实现在调用点自己判了 `if event_bus.client_count > 0`，Go 侧把这个门禁收进
 	// eventbus.Bus.BroadcastConfigChange 里——没人订阅时不广播，也**不构建帧**。

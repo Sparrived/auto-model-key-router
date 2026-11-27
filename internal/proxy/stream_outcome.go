@@ -178,9 +178,13 @@ func hasStreamContent(value *canonical.Value) bool {
 	}
 }
 
-// 转换器按 data 行读取：把标准多行 data JSON 合并成一行，并适配两个常见增量方言。
+// normalizeConversionPayload 在转换流消费之前就地补齐常见增量方言差异
+// （content_filter 补提示文本、refusal 折回 content、旧版 function_call 折成 tool_calls）。
 // raw 路径不调用它，保留上游原始事件字节。
-func normalizedConversionEvent(payload *canonical.Value) []byte {
+func normalizeConversionPayload(payload *canonical.Value) {
+	if payload == nil {
+		return
+	}
 	for _, choice := range protocol.OpenaiChoices(payload) {
 		delta := choice.Lookup("delta")
 		if choice.Lookup("finish_reason").PyStr() == "content_filter" && !delta.IsObject() {
@@ -202,7 +206,6 @@ func normalizedConversionEvent(payload *canonical.Value) []byte {
 			delta.DeleteKey("function_call")
 		}
 	}
-	return []byte("data: " + canonical.DumpsOrdered(payload) + "\n\n")
 }
 
 // 新增错误只使用本地固定文案，不把上游可能含密钥/URL 的错误详情写给客户端。

@@ -19,10 +19,12 @@ import (
 // pragmaDSN 是连接参数里的 PRAGMA 设置，对应 _configure_connection。
 //
 // modernc.org/sqlite 在每个新连接上执行 _pragma 里的语句，因此连接池扩容后的
-// 新连接也带着同样的设置（实测 4 条连接全部生效）。synchronous 与 busy_timeout
-// 是**连接级**的，必须走这里；journal_mode=WAL 是**持久化**在库文件上的，但
-// 一并写上可以让只读打开旧库时也能切到 WAL。
-const pragmaDSN = "_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
+// 新连接也带着同样的设置（实测 4 条连接全部生效）。synchronous、busy_timeout、
+// temp_store 与 cache_size 都是**连接级**的，必须走这里；journal_mode=WAL 是
+// **持久化**在库文件上的，但一并写上可以让只读打开旧库时也能切到 WAL。
+// temp_store=MEMORY 与 16 MiB cache_size 让大窗口 GROUP BY / 排序临时表驻留内存，
+// 避免聚合扫描时频繁落盘。
+const pragmaDSN = "_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16384)"
 
 // readerConns 是读连接池上限。
 //
@@ -61,6 +63,13 @@ type Store struct {
 
 	writeMu sync.Mutex
 	stateMu sync.Mutex
+
+	// 写入热路径的预编译语句，仅在 writeMu 保护的单连接 writeDB 上使用。
+	stmtInsertMetric    *sql.Stmt
+	stmtInsertWorkspace *sql.Stmt
+	stmtInsertAccessKey *sql.Stmt
+	stmtInsertSource    *sql.Stmt
+	stmtInsertShape     *sql.Stmt
 
 	startedAt time.Time
 	active    int
@@ -212,8 +221,26 @@ func (s *Store) Close() error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	var firstErr error
+	for _, stmt := range []*sql.Stmt{
+		s.stmtInsertMetric,
+		s.stmtInsertWorkspace,
+		s.stmtInsertAccessKey,
+		s.stmtInsertSource,
+		s.stmtInsertShape,
+	} {
+		if stmt != nil {
+			if err := stmt.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	s.stmtInsertMetric = nil
+	s.stmtInsertWorkspace = nil
+	s.stmtInsertAccessKey = nil
+	s.stmtInsertSource = nil
+	s.stmtInsertShape = nil
 	if s.writeDB != nil {
-		if err := s.writeDB.Close(); err != nil {
+		if err := s.writeDB.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -287,6 +314,29 @@ func (s *Store) initSchema() error {
 	// 请求形态旁挂表（理由见 schema.go）。同样按 request_id 一对一 JOIN，不需要索引。
 	if _, err := s.writeDB.Exec(createRequestShapeTableSQL); err != nil {
 		return err
+	}
+	return s.prepareWriteStatements()
+}
+
+// prepareWriteStatements 预编译单次 Record 热路径用到的五条 INSERT 语句，避免每条请求
+// 重复解析 SQL。必须在 initSchema 建表完成后、writeMu 锁内调用。
+func (s *Store) prepareWriteStatements() error {
+	specs := []struct {
+		target **sql.Stmt
+		query  string
+	}{
+		{&s.stmtInsertMetric, insertSQL},
+		{&s.stmtInsertWorkspace, insertWorkspaceSQL},
+		{&s.stmtInsertAccessKey, insertAccessKeySQL},
+		{&s.stmtInsertSource, insertRequestSourceSQL},
+		{&s.stmtInsertShape, insertRequestShapeSQL},
+	}
+	for _, spec := range specs {
+		stmt, err := s.writeDB.Prepare(spec.query)
+		if err != nil {
+			return err
+		}
+		*spec.target = stmt
 	}
 	return nil
 }
@@ -367,6 +417,9 @@ func (s *Store) recordSync(
 	requestModelID, callerType string,
 	failure bool,
 ) error {
+	if s.stmtInsertMetric == nil {
+		return sql.ErrConnDone
+	}
 	success := int64(1)
 	if failure {
 		success = 0
@@ -384,8 +437,10 @@ func (s *Store) recordSync(
 	if durationMS < 0 {
 		durationMS = 0
 	}
-	result, err := s.writeDB.Exec(
-		insertSQL,
+	hasSideTables := params.Workspace != "" || params.AccessKeyID != "" ||
+		params.ClientAddr != "" || params.APIFormat != ""
+
+	metricArgs := []any{
 		// 必须走 formatISO：直接 .Format("2006-01-02T15:04:05") 会**丢掉微秒**，
 		// 而 Python 的 isoformat() 在有微秒时保留 6 位。丢微秒不只是精度问题：
 		// 同一秒内的多条记录会变成同一个 created_at 字符串，使字典序窗口边界
@@ -409,60 +464,72 @@ func (s *Store) recordSync(
 		usage.CacheReadInputTokens,
 		firstTokenMS,
 		durationMS,
-	)
+	}
+
+	// 不涉及旁挂表时只需一次单语句写入（本身即单 WAL 事务），省去显式 BEGIN/COMMIT 往返。
+	if !hasSideTables {
+		_, err := s.stmtInsertMetric.Exec(metricArgs...)
+		return err
+	}
+
+	// 主表与四张旁挂表放进**同一个事务**提交：
+	//   1. 把最多 5 次 WAL 提交压成 1 次，显著降低高并发下的 writeMu 持有时间；
+	//   2. 保证主行与归属/来源/形态旁挂行原子落盘，异常退出不会留下半残记录。
+	tx, err := s.writeDB.Begin()
 	if err != nil {
 		return err
 	}
-	// 四张旁挂表都写在这里，**必须在 writeMu 内**（调用方已持锁）：LastInsertId
-	// 是连接级状态，writeDB 恰好只有一条连接（SetMaxOpenConns(1)），因此这里读到
-	// 的就是刚插入的那一行——换连接池就会读到别的连接的上一次插入。
-	//
-	// 用 INSERT OR REPLACE 而非 INSERT：request_id 是主键，重放同一行（测试里的
-	// 重复写入）不应炸掉，且替换语义与"归属只有一份"一致。
-	//
-	// 各表独立判空：访问密钥的请求**同时**有工作空间归属（它照常带
-	// X-AMKR-Workspace），因此不能用 `if params.Workspace == ""` 提前 return，
-	// 那会把访问密钥那一行整个丢掉。
-	if params.Workspace != "" || params.AccessKeyID != "" ||
-		params.ClientAddr != "" || params.APIFormat != "" {
-		requestID, err := result.LastInsertId()
-		if err != nil {
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	result, err := tx.Stmt(s.stmtInsertMetric).Exec(metricArgs...)
+	if err != nil {
+		return err
+	}
+	requestID, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	// 没有归属就不写：历史行与不走 proxy 的写入路径都不会凭空获得一个工作空间。
+	if params.Workspace != "" {
+		if _, err := tx.Stmt(s.stmtInsertWorkspace).Exec(requestID, params.Workspace); err != nil {
 			return err
 		}
-		// 没有归属就不写：历史行与不走 proxy 的写入路径都不会凭空获得一个工作空间。
-		if params.Workspace != "" {
-			if _, err := s.writeDB.Exec(insertWorkspaceSQL, requestID, params.Workspace); err != nil {
-				return err
-			}
-		}
-		// 同理：非访问密钥的请求不会凭空获得一个访问密钥归属。
-		if params.AccessKeyID != "" {
-			if _, err := s.writeDB.Exec(insertAccessKeySQL, requestID, params.AccessKeyID); err != nil {
-				return err
-			}
-		}
-		// 同理：没有来源地址的行不写来源旁挂表。user_agent 为空时写 NULL 而不是
-		// 空串，让「没带这个头」在库里只有一种表示。
-		if params.ClientAddr != "" {
-			if _, err := s.writeDB.Exec(insertRequestSourceSQL,
-				requestID, params.ClientAddr, nullableText(params.UserAgent)); err != nil {
-				return err
-			}
-		}
-		// 同理：没有 API 格式的行不写形态旁挂表（无从判断它是流式还是别的）。
-		// 流式与否存 0/1 整数：SQLite 没有布尔类型，与 success / retried 同一约定。
-		if params.APIFormat != "" {
-			stream := int64(0)
-			if params.Stream {
-				stream = 1
-			}
-			if _, err := s.writeDB.Exec(insertRequestShapeSQL,
-				requestID, stream, params.APIFormat,
-				nullableText(params.ReasoningEffort)); err != nil {
-				return err
-			}
+	}
+	// 同理：非访问密钥的请求不会凭空获得一个访问密钥归属。
+	if params.AccessKeyID != "" {
+		if _, err := tx.Stmt(s.stmtInsertAccessKey).Exec(requestID, params.AccessKeyID); err != nil {
+			return err
 		}
 	}
+	// 同理：没有来源地址的行不写来源旁挂表。user_agent 为空时写 NULL 而不是
+	// 空串，让「没带这个头」在库里只有一种表示。
+	if params.ClientAddr != "" {
+		if _, err := tx.Stmt(s.stmtInsertSource).Exec(
+			requestID, params.ClientAddr, nullableText(params.UserAgent)); err != nil {
+			return err
+		}
+	}
+	// 同理：没有 API 格式的行不写形态旁挂表（无从判断它是流式还是别的）。
+	// 流式与否存 0/1 整数：SQLite 没有布尔类型，与 success / retried 同一约定。
+	if params.APIFormat != "" {
+		stream := int64(0)
+		if params.Stream {
+			stream = 1
+		}
+		if _, err := tx.Stmt(s.stmtInsertShape).Exec(
+			requestID, stream, params.APIFormat,
+			nullableText(params.ReasoningEffort)); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
 	return nil
 }
 

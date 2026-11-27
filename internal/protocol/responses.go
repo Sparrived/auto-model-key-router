@@ -321,71 +321,86 @@ func (s *ResponsesStreamState) Push(chunk []byte) ([][]byte, *canonical.Value, e
 	var events [][]byte
 	var usage *canonical.Value
 	for _, line := range s.splitter.Push(chunk) {
-		payload := line.Payload
-		if chunkUsage := ExtractUsage(payload); chunkUsage != nil {
+		lineEvents, chunkUsage, err := s.PushPayload(line.Payload)
+		if err != nil {
+			return nil, nil, err
+		}
+		if chunkUsage != nil {
 			usage = chunkUsage
 		}
-		for _, choice := range OpenaiChoices(payload) {
-			delta := choice.Lookup("delta")
-			if !delta.IsObject() {
-				delta = nil
+		events = append(events, lineEvents...)
+	}
+	return events, usage, nil
+}
+
+// PushPayload 直接消费已解析好的单个上游 SSE 载荷，避免外层已做完 JSON 解析后再次
+// 序列化并二次解析。
+func (s *ResponsesStreamState) PushPayload(payload *canonical.Value) ([][]byte, *canonical.Value, error) {
+	if payload == nil {
+		return nil, nil, nil
+	}
+	var events [][]byte
+	usage := ExtractUsage(payload)
+	for _, choice := range OpenaiChoices(payload) {
+		delta := choice.Lookup("delta")
+		if !delta.IsObject() {
+			delta = nil
+		}
+		if text := DeltaText(delta); text != "" {
+			if !s.textStarted {
+				events = append(events,
+					EncodeSSE("response.output_item.added", responsesOutputItemAddedPayload()),
+					EncodeSSE("response.content_part.added", responsesContentPartAddedPayload()),
+				)
+				s.textStarted = true
 			}
-			if text := DeltaText(delta); text != "" {
-				if !s.textStarted {
-					events = append(events,
-						EncodeSSE("response.output_item.added", responsesOutputItemAddedPayload()),
-						EncodeSSE("response.content_part.added", responsesContentPartAddedPayload()),
-					)
-					s.textStarted = true
-				}
-				s.text.WriteString(text)
-				events = append(events, EncodeSSE("response.output_text.delta", canonical.NewObjectOf(
-					canonical.ObjectPair{Key: "type", Value: canonical.NewString("response.output_text.delta")},
-					canonical.ObjectPair{Key: "item_id", Value: canonical.NewString("msg_amkr")},
-					canonical.ObjectPair{Key: "output_index", Value: canonical.NewIntValue(0)},
-					canonical.ObjectPair{Key: "content_index", Value: canonical.NewIntValue(0)},
-					canonical.ObjectPair{Key: "delta", Value: canonical.NewString(text)},
-				)))
-			}
-			toolCalls := delta.Lookup("tool_calls")
-			if !toolCalls.IsArray() {
+			s.text.WriteString(text)
+			events = append(events, EncodeSSE("response.output_text.delta", canonical.NewObjectOf(
+				canonical.ObjectPair{Key: "type", Value: canonical.NewString("response.output_text.delta")},
+				canonical.ObjectPair{Key: "item_id", Value: canonical.NewString("msg_amkr")},
+				canonical.ObjectPair{Key: "output_index", Value: canonical.NewIntValue(0)},
+				canonical.ObjectPair{Key: "content_index", Value: canonical.NewIntValue(0)},
+				canonical.ObjectPair{Key: "delta", Value: canonical.NewString(text)},
+			)))
+		}
+		toolCalls := delta.Lookup("tool_calls")
+		if !toolCalls.IsArray() {
+			continue
+		}
+		for fallbackIndex, toolCall := range toolCalls.Items() {
+			if !toolCall.IsObject() {
 				continue
 			}
-			for fallbackIndex, toolCall := range toolCalls.Items() {
-				if !toolCall.IsObject() {
-					continue
+			index := fallbackIndex
+			if raw, ok := toolCall.LookupOK("index"); ok {
+				parsed, err := canonical.ToInt(raw)
+				if err != nil {
+					return nil, nil, err
 				}
-				index := fallbackIndex
-				if raw, ok := toolCall.LookupOK("index"); ok {
-					parsed, err := canonical.ToInt(raw)
-					if err != nil {
-						return nil, nil, err
-					}
-					index = int(parsed)
-				}
-				stored := s.toolCalls[index]
-				if stored == nil {
-					stored = &ResponsesToolCall{}
-					s.toolCalls[index] = stored
-				}
-				if id := toolCall.Lookup("id"); id.Truthy() {
-					stored.ID = id.PyStr()
-				}
-				function := toolCall.Lookup("function")
-				if !function.IsObject() {
-					continue
-				}
-				// 名字是**累加**（与 anthropic.py 的「只取首个非空」不同），
-				// 上游把名字拆成多块时这里必须续接。
-				if name := function.Lookup("name"); name.Truthy() {
-					stored.Name += name.PyStr()
-				}
-				if arguments := function.Lookup("arguments"); !arguments.IsNull() {
-					if arguments.IsString() {
-						stored.Arguments += arguments.Str
-					} else {
-						stored.Arguments += canonical.DumpsOrdered(arguments)
-					}
+				index = int(parsed)
+			}
+			stored := s.toolCalls[index]
+			if stored == nil {
+				stored = &ResponsesToolCall{}
+				s.toolCalls[index] = stored
+			}
+			if id := toolCall.Lookup("id"); id.Truthy() {
+				stored.ID = id.PyStr()
+			}
+			function := toolCall.Lookup("function")
+			if !function.IsObject() {
+				continue
+			}
+			// 名字是**累加**（与 anthropic.py 的「只取首个非空」不同），
+			// 上游把名字拆成多块时这里必须续接。
+			if name := function.Lookup("name"); name.Truthy() {
+				stored.Name += name.PyStr()
+			}
+			if arguments := function.Lookup("arguments"); !arguments.IsNull() {
+				if arguments.IsString() {
+					stored.Arguments += arguments.Str
+				} else {
+					stored.Arguments += canonical.DumpsOrdered(arguments)
 				}
 			}
 		}

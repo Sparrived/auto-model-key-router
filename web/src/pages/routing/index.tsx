@@ -58,7 +58,7 @@ export default function RoutingPage() {
 
   const freezes = useMemo(() => freezesQuery.data?.freezes ?? [], [freezesQuery.data]);
   const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
-  const now = useNow();
+  const now = useNow(15000, freezes.length > 0);
   const freezeDeadlines = useMemo(() => freezes.map((freeze) => freeze.expires_at), [freezes]);
   useDeadlineRefresh(freezeDeadlines, () => {
     void freezesQuery.refetch();

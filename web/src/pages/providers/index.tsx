@@ -66,7 +66,7 @@ export default function ProvidersPage() {
   const freezeIndex = useMemo(() => indexQuotaFreezes(freezes), [freezes]);
   // 页面不轮询：倒计时本地重算，只有最近一条 expires_at 到点才拉一次冻结列表，
   // 让 Key 行徽标与顶部提示自己消失。
-  const now = useNow();
+  const now = useNow(15000, freezes.length > 0);
   const freezeDeadlines = useMemo(
     () => freezes.map((freeze) => freeze.expires_at),
     [freezes],

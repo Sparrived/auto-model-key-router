@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Sparrived/auto-model-key-router/internal/api"
@@ -195,6 +196,10 @@ type App struct {
 	// configMtime 对应 app.state.config_mtime；零值等价 Python 的 0.0（「拿不到
 	// mtime」），此时不做热重载（app.py:446）。
 	configMtime time.Time
+	// configMtimeNano 与 lastReloadCheck 供热路径 reloadIfChanged 做无锁快速判定，
+	// 避免高并发下所有请求都在 reloadMu 上串行执行 os.Stat。
+	configMtimeNano atomic.Int64
+	lastReloadCheck atomic.Int64
 
 	closeOnce sync.Once
 }
@@ -213,6 +218,9 @@ func New(options Options) (*App, error) {
 	app := &App{options: options}
 	app.configPath = absoluteConfigPath(options.ConfigPath)
 	app.configMtime = configMtime(app.configPath)
+	if !app.configMtime.IsZero() {
+		app.configMtimeNano.Store(app.configMtime.UnixNano())
+	}
 	// 额度冻结状态文件固定在配置同目录：它是**运行时状态**而不是配置（不进配置、
 	// 不新增配置键），但跟着配置走——换一份配置就换一套冻结，不会串味。
 	//

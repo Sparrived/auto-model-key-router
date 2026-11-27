@@ -139,7 +139,8 @@ func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, r
 		result.writeTo(w)
 		return
 	}
-	fallbackOnlyFirst := pool.RoutingMode(target.Model) == "only_first"
+	fallbackMode := pool.RoutingMode(target.Model)
+	fallbackOnlyFirst := fallbackMode == "only_first"
 	fallbackKey := target.Key
 	attempts := runtime.RetryPolicy{MaxRetries: prepared.Config.MaxRetries}.Attempts(
 		fallbackKeyCount, &fallbackKey, fallbackOnlyFirst)
@@ -150,7 +151,11 @@ func (h *Handler) runFallback(w http.ResponseWriter, prepared *RequestContext, r
 	fallback.KeyCount = fallbackKeyCount
 	fallback.OnlyFirst = fallbackOnlyFirst
 	fallback.Attempts = attempts
-	fallback.CacheAffinityKey = cacheAffinityKey(prepared.Path, prepared.Payload, target.Model)
+	if fallbackMode == "round_robin" && fallbackKeyCount > 1 && fallbackKey == "" {
+		fallback.CacheAffinityKey = cacheAffinityKey(prepared.Path, prepared.Payload, target.Model)
+	} else {
+		fallback.CacheAffinityKey = nil
+	}
 	fallback.UseNative = prepared.Path == "messages" &&
 		prepared.Config.NativeFirstForModel(target.Model)
 	fallback.FallbackTarget = target.Model
@@ -199,14 +204,7 @@ func rotatesKeys(context *RequestContext) bool {
 //   - 备选模型路径沿用首选 context 的这份读数：备选的强度由同一份配置与同一份载荷决定，
 //     重算一遍只会在两次克隆之间引入不一致。
 func effectiveReasoningEffort(payload *canonical.Value, modelID string, cfg *config.RouterConfig) string {
-	if !payload.IsObject() {
-		return ""
-	}
-	effort := proxysupport.ApplyReasoningEffort(payload, modelID, cfg).Lookup("reasoning_effort")
-	if !effort.IsString() {
-		return ""
-	}
-	return effort.Str
+	return proxysupport.ResolveReasoningEffort(payload, modelID, cfg)
 }
 
 // prepare 完成鉴权、body 解析、路由解析与预算计算。
@@ -501,11 +499,17 @@ func (h *Handler) prepare(w http.ResponseWriter, request *http.Request, path str
 		return nil
 	}
 
-	onlyFirst := pool.RoutingMode(modelID) == "only_first"
+	routingMode := pool.RoutingMode(modelID)
+	onlyFirst := routingMode == "only_first"
 	attempts := runtime.RetryPolicy{MaxRetries: resources.Config.MaxRetries}.Attempts(
 		keyCount, requestedKey, onlyFirst)
 	useNative := path == "messages" && resources.Config.NativeFirstForModel(modelID)
-	affinity := cacheAffinityKey(path, payload, modelID)
+	// 仅在 round_robin 多 Key 且未显式指定 Key 时粘滞映射才生效，避免对单 Key 或
+	// priority/only_first 请求做整包对话 JSON 序列化与 SHA-256。
+	var affinity *string
+	if routingMode == "round_robin" && keyCount > 1 && (requestedKey == nil || *requestedKey == "") {
+		affinity = cacheAffinityKey(path, payload, modelID)
+	}
 
 	return &RequestContext{
 		Path:               path,

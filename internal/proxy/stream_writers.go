@@ -100,6 +100,14 @@ func (s *rawStream) abort(_ http.ResponseWriter) {
 	}
 }
 
+// pushEvent 直接写出外层已经按 SSE 边界切分且完成 usage 抽取的事件，避免重复切分与二次 JSON 解析。
+func (s *rawStream) pushEvent(w http.ResponseWriter, event []byte) error {
+	if !writeBytes(w, event) {
+		return errDownstreamWrite
+	}
+	return nil
+}
+
 // push 转发一块：SSE 路径按事件切分，其余原样吐出。
 //
 // usage 抽取排在转发**之前**，与参照实现的 `_stream_usage` 调用位置一致
@@ -167,6 +175,18 @@ func (s *anthropicStream) abort(_ http.ResponseWriter) {}
 func (s *anthropicStream) begin(w http.ResponseWriter) error {
 	if !writeSSE(w, "message_start", anthropicMessageStart(s.lifecycle.requestedModelID)) {
 		return errDownstreamWrite
+	}
+	return nil
+}
+
+// pushPayload 直接消费外层已解析好的 SSE 载荷，省去二次序列化与解析。
+func (s *anthropicStream) pushPayload(w http.ResponseWriter, payload *canonical.Value) error {
+	events, usage := s.state.PushPayload(payload)
+	s.absorbUsage(usage)
+	for _, event := range events {
+		if !writeBytes(w, event) {
+			return errDownstreamWrite
+		}
 	}
 	return nil
 }
@@ -260,6 +280,21 @@ func newResponsesStream(lifecycle *streamLifecycle, _ func() time.Time) *respons
 func (s *responsesStream) abort(_ http.ResponseWriter) {}
 
 func (s *responsesStream) begin(_ http.ResponseWriter) error { return nil }
+
+// pushPayload 直接消费外层已解析好的 SSE 载荷，省去二次序列化与解析。
+func (s *responsesStream) pushPayload(w http.ResponseWriter, payload *canonical.Value) error {
+	events, usage, err := s.state.PushPayload(payload)
+	if err != nil {
+		return errStreamConversion
+	}
+	s.absorbUsage(usage)
+	for _, event := range events {
+		if !writeBytes(w, event) {
+			return errDownstreamWrite
+		}
+	}
+	return nil
+}
 
 // push 处理一块上游数据。
 func (s *responsesStream) push(w http.ResponseWriter, chunk []byte) error {

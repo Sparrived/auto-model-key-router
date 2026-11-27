@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"compress/gzip"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -245,5 +247,75 @@ func TestHandlerSetsContentType(t *testing.T) {
 		if got := recorder.Header().Get("Content-Type"); got != want {
 			t.Errorf("%s Content-Type = %q，期望 %q", urlPath, got, want)
 		}
+	}
+}
+
+func TestHandlerCacheHeadersETagAndGzip(t *testing.T) {
+	largeJS := strings.Repeat("export const value = 'auto-model-key-router';\n", 80)
+	assets := fstest.MapFS{
+		"index.html":              {Data: []byte("<html>amkr</html>")},
+		"assets/Routing-abc12.js": {Data: []byte(largeJS)},
+	}
+	handler, mounted := Handler(assets, true)
+	if !mounted {
+		t.Fatal("应挂载")
+	}
+
+	// HTML 入口用 no-cache + ETag，二次带 If-None-Match 应回 304。
+	htmlRec := httptest.NewRecorder()
+	handler.ServeHTTP(htmlRec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if htmlRec.Code != http.StatusOK {
+		t.Fatalf("首页状态码 = %d，期望 200", htmlRec.Code)
+	}
+	if got := htmlRec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("首页 Cache-Control = %q，期望 no-cache", got)
+	}
+	htmlETag := htmlRec.Header().Get("ETag")
+	if htmlETag == "" {
+		t.Fatal("首页应返回 ETag")
+	}
+	html304Req := httptest.NewRequest(http.MethodGet, "/", nil)
+	html304Req.Header.Set("If-None-Match", htmlETag)
+	html304Rec := httptest.NewRecorder()
+	handler.ServeHTTP(html304Rec, html304Req)
+	if html304Rec.Code != http.StatusNotModified || html304Rec.Body.Len() != 0 {
+		t.Fatalf("首页 304 校验失败: code=%d len=%d", html304Rec.Code, html304Rec.Body.Len())
+	}
+
+	// assets/* 走 immutable 强缓存，且在 Accept-Encoding: gzip 下返回压缩体。
+	gzReq := httptest.NewRequest(http.MethodGet, "/assets/Routing-abc12.js", nil)
+	gzReq.Header.Set("Accept-Encoding", "gzip, deflate")
+	gzRec := httptest.NewRecorder()
+	handler.ServeHTTP(gzRec, gzReq)
+	if gzRec.Code != http.StatusOK {
+		t.Fatalf("assets 状态码 = %d，期望 200", gzRec.Code)
+	}
+	if got := gzRec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Errorf("assets Cache-Control = %q，期望 immutable", got)
+	}
+	if got := gzRec.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q，期望 gzip", got)
+	}
+	if gzRec.Body.Len() >= len(largeJS) {
+		t.Errorf("gzip 体积 (%d) 应小于原文 (%d)", gzRec.Body.Len(), len(largeJS))
+	}
+	reader, err := gzip.NewReader(gzRec.Body)
+	if err != nil {
+		t.Fatalf("解压 gzip 失败: %v", err)
+	}
+	decoded, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(decoded) != largeJS {
+		t.Fatalf("解压内容不一致: err=%v len=%d", err, len(decoded))
+	}
+
+	// 带 gzip + If-None-Match 命中 ETag 也应直接回 304。
+	gz304Req := httptest.NewRequest(http.MethodGet, "/assets/Routing-abc12.js", nil)
+	gz304Req.Header.Set("Accept-Encoding", "gzip")
+	gz304Req.Header.Set("If-None-Match", gzRec.Header().Get("ETag"))
+	gz304Rec := httptest.NewRecorder()
+	handler.ServeHTTP(gz304Rec, gz304Req)
+	if gz304Rec.Code != http.StatusNotModified || gz304Rec.Body.Len() != 0 {
+		t.Fatalf("assets gzip 304 校验失败: code=%d len=%d", gz304Rec.Code, gz304Rec.Body.Len())
 	}
 }

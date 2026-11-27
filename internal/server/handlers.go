@@ -341,7 +341,7 @@ func (a *App) handleMetricsSeries(w http.ResponseWriter, r *http.Request) {
 // 唯一的错误路径是「管理器已关闭」（关停中）；参照实现在那种情况下由 uvicorn 停止
 // 接受连接，没有对应状态码，这里用 503。
 func (a *App) withLease(w http.ResponseWriter, next func(*runtime.RuntimeResources)) {
-	a.reload()
+	a.reloadIfChanged()
 	lease, err := a.manager.Acquire()
 	if err != nil {
 		writeErrorEnvelope(w, http.StatusServiceUnavailable, "服务正在关停，不接受新请求")

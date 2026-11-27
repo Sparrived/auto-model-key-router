@@ -26,15 +26,16 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 // 一秒的延迟不可感知，却能把这类竞态挡掉。
 const DEADLINE_GRACE_MS = 1000;
 
-/** 以固定节奏返回当前时间戳（毫秒）。默认 15 秒一次，足够让分钟级倒计时前进。 */
-export function useNow(intervalMs = 15000): number {
+/** 以固定节奏返回当前时间戳（毫秒）。默认 15 秒一次；enabled 为 false 时不启动定时器，避免无倒计时页面空转重绘。 */
+export function useNow(intervalMs = 15000, enabled = true): number {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
+    if (!enabled) return;
     const interval = Math.max(1, Math.floor(intervalMs));
     const timer = window.setInterval(() => setNow(Date.now()), interval);
     return () => window.clearInterval(timer);
-  }, [intervalMs]);
+  }, [enabled, intervalMs]);
 
   return now;
 }

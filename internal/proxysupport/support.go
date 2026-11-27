@@ -591,6 +591,33 @@ func UpstreamBodyWithFilteredTools(
 //  3. 载荷里的 reasoning.effort——提升为顶层 reasoning_effort（仅当顶层没有时）。
 //
 // 返回新对象，不修改入参。
+// ResolveReasoningEffort 只读推算本次请求最终生效的推理强度，不克隆整棵 payload 树。
+// 优先级与 ApplyReasoningEffort 保持一致：模型级配置 → 载荷顶层 reasoning_effort → 载荷 reasoning.effort。
+func ResolveReasoningEffort(payload *canonical.Value, modelID string, cfg *config.RouterConfig) string {
+	if !payload.IsObject() {
+		return ""
+	}
+	if cfg != nil {
+		if effort, ok := cfg.ReasoningEffortByModel[modelID]; ok && effort != "" {
+			return effort
+		}
+	}
+	if value, exists := payload.Obj.Get("reasoning_effort"); exists {
+		if value.IsString() {
+			return value.Str
+		}
+		return ""
+	}
+	reasoning := payload.Lookup("reasoning")
+	if reasoning.IsObject() {
+		effort := reasoning.Lookup("effort")
+		if effort.IsString() && effort.Str != "" {
+			return effort.Str
+		}
+	}
+	return ""
+}
+
 func ApplyReasoningEffort(payload *canonical.Value, modelID string, cfg *config.RouterConfig) *canonical.Value {
 	adapted := payload.Clone()
 	if cfg != nil {

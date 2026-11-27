@@ -1,6 +1,7 @@
 package keypool
 
 import (
+	"container/list"
 	"errors"
 	"slices"
 	"strconv"
@@ -167,7 +168,13 @@ type KeyPool struct {
 
 	cursors        map[string]int
 	activeRequests map[[2]string]int
-	stickyKeys     map[[3]string]string
+
+	// stickyKeys 用 LRU + TTL 限制容量，防止多轮对话每次生成新哈希导致长跑内存无限增长。
+	clock         func() float64
+	maxStickyKeys int
+	stickyTTL     float64
+	stickyKeys    map[stickyKey]*list.Element
+	stickyOrder   *list.List
 
 	// activeByKey / activeByProvider 是并发上限的**在途计数**，与 activeRequests
 	// 一样跨热重载保留（在途请求不会因为一次配置改动而消失）。
@@ -196,6 +203,17 @@ type KeyPool struct {
 // 第二元是 accessKeyStickyID：同一模型下，不同访问密钥各有各的粘滞序列（互不干扰），
 // 全权凭据用空串。见 accessKeyStickyID 的说明。
 type stickyKey = [3]string
+
+const (
+	defaultMaxStickyKeys = 8192
+	defaultStickyKeyTTL  = 3600.0
+)
+
+type stickyEntry struct {
+	key       stickyKey
+	name      string
+	expiresAt float64
+}
 
 // applyConfig 装载配置。
 //
@@ -342,7 +360,11 @@ func New(cfg *config.RouterConfig, capabilityStore *CapabilityStore, clock func(
 		activeRequests:   map[[2]string]int{},
 		activeByKey:      map[string]int{},
 		activeByProvider: map[string]int{},
-		stickyKeys:       map[stickyKey]string{},
+		clock:            clock,
+		maxStickyKeys:    defaultMaxStickyKeys,
+		stickyTTL:        defaultStickyKeyTTL,
+		stickyKeys:       map[stickyKey]*list.Element{},
+		stickyOrder:      list.New(),
 		health:           NewKeyHealthStore(clock),
 		capabilityStore:  capabilityStore,
 	}
@@ -896,7 +918,7 @@ func (p *KeyPool) NextWithDecisions(modelID string, excluded []string, accessKey
 		sticky = stickyKey{modelID, accessKeyStickyID(accessKey), affinityKey}
 		hasSticky = true
 
-		if stickyName, found := p.stickyKeys[sticky]; found {
+		if stickyName, found := p.lookupStickyLocked(sticky); found {
 			for _, candidate := range available {
 				if candidate.Name == stickyName {
 					p.acquireLocked(modelID, candidate.Name)
@@ -904,7 +926,7 @@ func (p *KeyPool) NextWithDecisions(modelID string, excluded []string, accessKey
 					return candidate, nil
 				}
 			}
-			delete(p.stickyKeys, sticky)
+			p.deleteStickyLocked(sticky)
 		}
 	}
 
@@ -924,13 +946,96 @@ func (p *KeyPool) NextWithDecisions(modelID string, excluded []string, accessKey
 			p.activeRequests[[2]string{modelID, candidate.Name}] == lowestActive {
 			p.acquireLocked(modelID, candidate.Name)
 			if hasSticky {
-				p.stickyKeys[sticky] = candidate.Name
+				p.storeStickyLocked(sticky, candidate.Name)
 			}
 			decisions.selection(candidate, mode, "lowest_active_round_robin", phase, available)
 			return candidate, nil
 		}
 	}
 	return config.KeyConfig{}, &noUsableKeyError{modelID: modelID}
+}
+
+func (p *KeyPool) stickyNowLocked() float64 {
+	if p.clock != nil {
+		return p.clock()
+	}
+	return RealClock()
+}
+
+func (p *KeyPool) lookupStickyLocked(key stickyKey) (string, bool) {
+	if p.stickyKeys == nil || p.stickyOrder == nil {
+		return "", false
+	}
+	elem, found := p.stickyKeys[key]
+	if !found {
+		return "", false
+	}
+	entry := elem.Value.(*stickyEntry)
+	now := p.stickyNowLocked()
+	if p.stickyTTL > 0 && now >= entry.expiresAt {
+		p.stickyOrder.Remove(elem)
+		delete(p.stickyKeys, key)
+		return "", false
+	}
+	if p.stickyTTL > 0 {
+		entry.expiresAt = now + p.stickyTTL
+	}
+	p.stickyOrder.MoveToFront(elem)
+	return entry.name, true
+}
+
+func (p *KeyPool) storeStickyLocked(key stickyKey, name string) {
+	if p.stickyKeys == nil {
+		p.stickyKeys = map[stickyKey]*list.Element{}
+	}
+	if p.stickyOrder == nil {
+		p.stickyOrder = list.New()
+	}
+	now := p.stickyNowLocked()
+	expiresAt := now + p.stickyTTL
+	if elem, found := p.stickyKeys[key]; found {
+		entry := elem.Value.(*stickyEntry)
+		entry.name = name
+		entry.expiresAt = expiresAt
+		p.stickyOrder.MoveToFront(elem)
+		return
+	}
+	elem := p.stickyOrder.PushFront(&stickyEntry{key: key, name: name, expiresAt: expiresAt})
+	p.stickyKeys[key] = elem
+
+	// 顺手清理队尾已过期项，并把总条数控制在上限以内。
+	limit := p.maxStickyKeys
+	if limit <= 0 {
+		limit = defaultMaxStickyKeys
+	}
+	for tail := p.stickyOrder.Back(); tail != nil; {
+		entry := tail.Value.(*stickyEntry)
+		expired := p.stickyTTL > 0 && now >= entry.expiresAt
+		overLimit := len(p.stickyKeys) > limit
+		if !expired && !overLimit {
+			break
+		}
+		prev := tail.Prev()
+		p.stickyOrder.Remove(tail)
+		delete(p.stickyKeys, entry.key)
+		tail = prev
+	}
+}
+
+func (p *KeyPool) deleteStickyLocked(key stickyKey) {
+	if elem, found := p.stickyKeys[key]; found {
+		if p.stickyOrder != nil {
+			p.stickyOrder.Remove(elem)
+		}
+		delete(p.stickyKeys, key)
+	}
+}
+
+// StickyKeyCount 返回当前缓存的粘滞映射条数（供测试与诊断观测）。
+func (p *KeyPool) StickyKeyCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.stickyKeys)
 }
 
 // hasCapacityLocked 报告该候选此刻还有并发余量（供应商层与账号层都要有余量）。

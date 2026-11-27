@@ -14,10 +14,18 @@
 package webui
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
+	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // MountPath 是 WebUI 的固定挂载前缀（webui.py:19）。
@@ -44,6 +52,9 @@ const IndexFile = "index.html"
 // 这里明确排除，而不是指望 embed 模式能表达排除。
 const probesDir = "probes"
 
+// minGzipBytes 低于该阈值的小文件不值得压缩（压缩头反而增加体积与 CPU）。
+const minGzipBytes = 512
+
 // Available 报告静态资产是否随当前安装一起发布。
 //
 // 对应 webui.py:25 的 webui_available()：只看 index.html 是否存在。
@@ -63,6 +74,16 @@ func Path(mountPrefix string) string {
 	return strings.TrimRight(mountPrefix, "/") + MountPath
 }
 
+type cachedAsset struct {
+	modTime      time.Time
+	size         int64
+	contentType  string
+	etag         string
+	cacheControl string
+	raw          []byte
+	gzip         []byte
+}
+
 // Handler 按需返回静态资源处理器；未启用或资产缺失时返回 nil, false。
 //
 // 调用方拿到 handler 后应把它挂到 Path 返回的路径下（通常再加一个尾斜杠模式）。
@@ -72,17 +93,22 @@ func Path(mountPrefix string) string {
 // Starlette 在 html=True 时遇到目录只找 index.html，找不到就 404；而 Go 的
 // http.FileServer 会把目录内容列出来。资源目录里只有前端文件，列出不算漏洞，但那是
 // 与参照实现不同的对外行为，因此这里自己实现，不给目录列表留口子。
+//
+// 性能优化：embed.FS 的文件 ModTime 恒为零值，直接 ServeFileFS 既没有 Last-Modified
+// 也无压缩，浏览器每次刷新都会全量重下；这里补充内容哈希 ETag、assets/* 强缓存与
+// 按需缓存的 gzip 响应。
 func Handler(assets fs.FS, enabled bool) (http.Handler, bool) {
 	if !enabled || !Available(assets) {
 		return nil, false
 	}
+	var cache sync.Map
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serve(w, r, assets)
+		serve(w, r, assets, &cache)
 	}), true
 }
 
 // serve 发送一个静态文件；目录请求落到该目录下的 index.html。
-func serve(w http.ResponseWriter, r *http.Request, assets fs.FS) {
+func serve(w http.ResponseWriter, r *http.Request, assets fs.FS, cache *sync.Map) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		// 静态资源只读：Starlette 的 StaticFiles 同样不接受写方法。
 		w.Header().Set("Allow", "GET, HEAD")
@@ -110,9 +136,141 @@ func serve(w http.ResponseWriter, r *http.Request, assets fs.FS) {
 			return
 		}
 		name = candidate
+		info = candidateInfo
 	}
-	// http.ServeFileFS 会处理 Range/If-Modified-Since 等条件请求与 Content-Type。
-	http.ServeFileFS(w, r, assets, name)
+
+	asset, err := loadAsset(assets, name, info, cache)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	header := w.Header()
+	header.Set("ETag", asset.etag)
+	header.Set("Cache-Control", asset.cacheControl)
+	if asset.contentType != "" {
+		header.Set("Content-Type", asset.contentType)
+	}
+	if len(asset.gzip) > 0 {
+		header.Add("Vary", "Accept-Encoding")
+	}
+
+	// Range 请求保持未压缩路径，交给标准 ServeContent 精确切片。
+	if len(asset.gzip) > 0 && r.Header.Get("Range") == "" && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+		if etagMatches(r.Header.Get("If-None-Match"), asset.etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		header.Set("Content-Encoding", "gzip")
+		header.Set("Content-Length", strconv.Itoa(len(asset.gzip)))
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(asset.gzip)
+		}
+		return
+	}
+
+	// http.ServeContent 自动处理 If-None-Match（读取上面设好的 ETag）、Range 与 HEAD。
+	http.ServeContent(w, r, name, asset.modTime, bytes.NewReader(asset.raw))
+}
+
+func loadAsset(assets fs.FS, name string, info fs.FileInfo, cache *sync.Map) (*cachedAsset, error) {
+	modTime := info.ModTime()
+	size := info.Size()
+	if cached, ok := cache.Load(name); ok {
+		entry := cached.(*cachedAsset)
+		if (modTime.IsZero() && entry.modTime.IsZero()) ||
+			(entry.modTime.Equal(modTime) && entry.size == size) {
+			return entry, nil
+		}
+	}
+
+	raw, err := fs.ReadFile(assets, name)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(raw)
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if contentType == "" {
+		contentType = http.DetectContentType(raw)
+	}
+	cacheControl := "no-cache"
+	if strings.HasPrefix(name, "assets/") {
+		// Vite 构建的 assets/* 全部带内容哈希，浏览器可长期强缓存。
+		cacheControl = "public, max-age=31536000, immutable"
+	}
+
+	var compressed []byte
+	if shouldCompress(name, len(raw)) {
+		var buf bytes.Buffer
+		writer, gzErr := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+		if gzErr == nil {
+			if _, wErr := writer.Write(raw); wErr == nil && writer.Close() == nil && buf.Len() < len(raw) {
+				compressed = buf.Bytes()
+			}
+		}
+	}
+
+	entry := &cachedAsset{
+		modTime:      modTime,
+		size:         int64(len(raw)),
+		contentType:  contentType,
+		etag:         `"` + hex.EncodeToString(sum[:12]) + `"`,
+		cacheControl: cacheControl,
+		raw:          raw,
+		gzip:         compressed,
+	}
+	cache.Store(name, entry)
+	return entry, nil
+}
+
+func shouldCompress(name string, size int) bool {
+	if size < minGzipBytes {
+		return false
+	}
+	switch strings.ToLower(path.Ext(name)) {
+	case ".js", ".mjs", ".css", ".html", ".svg", ".json", ".txt", ".map":
+		return true
+	default:
+		return false
+	}
+}
+
+func acceptsGzip(header string) bool {
+	if header == "" {
+		return false
+	}
+	for _, part := range strings.Split(header, ",") {
+		item := strings.TrimSpace(part)
+		encoding, params, _ := strings.Cut(item, ";")
+		if !strings.EqualFold(strings.TrimSpace(encoding), "gzip") {
+			continue
+		}
+		if strings.Contains(strings.ReplaceAll(strings.ToLower(params), " ", ""), "q=0") &&
+			!strings.Contains(strings.ReplaceAll(strings.ToLower(params), " ", ""), "q=0.") {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func etagMatches(ifNoneMatch, etag string) bool {
+	if ifNoneMatch == "" || etag == "" {
+		return false
+	}
+	trimmed := strings.TrimSpace(ifNoneMatch)
+	if trimmed == "*" {
+		return true
+	}
+	for _, token := range strings.Split(trimmed, ",") {
+		candidate := strings.TrimSpace(token)
+		candidate = strings.TrimPrefix(candidate, "W/")
+		if candidate == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveName 把请求路径转成资产根内的相对名；非法、越界或落在不对外服务的目录里时

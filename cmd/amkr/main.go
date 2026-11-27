@@ -615,7 +615,11 @@ func serveForeground(configPath string, loaded *config.RouterConfig) int {
 		Handler: app.Handler(),
 		// 不设 ReadTimeout/WriteTimeout：流式响应可能长时间只推少量字节
 		// （参照实现的流式语义是「没有总时长上限」，见 internal/runtime/streaming.go）。
-		// 各阶段的超时由 proxy/upstream 自己的窗口负责。
+		// 各阶段的超时由 proxy/upstream 自己的窗口负责；但仍需补上请求头与空闲连接超时，
+		// 防止慢速建连或大量半开 keep-alive 连接长期占用 FD 与协程。
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// 信号处理：Ctrl+C（os.Interrupt）与 SIGTERM 都走同一条优雅关停路径。

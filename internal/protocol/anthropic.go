@@ -102,6 +102,15 @@ func (s *AnthropicStreamState) Push(chunk []byte) ([][]byte, *canonical.Value) {
 	return events, usage
 }
 
+// PushPayload 直接消费已解析好的单个上游 SSE 载荷，避免外层已做完 JSON 解析后再次
+// 序列化并二次解析。
+func (s *AnthropicStreamState) PushPayload(payload *canonical.Value) ([][]byte, *canonical.Value) {
+	if payload == nil {
+		return nil, nil
+	}
+	return s.consume(payload), ExtractUsage(payload)
+}
+
 // Finish 处理流结束时残留在缓冲里、没有换行结尾的那半行。
 //
 // 参照实现把这一步放在 proxy_handler.py:1247（`if buffer.strip():` 后再喂一个

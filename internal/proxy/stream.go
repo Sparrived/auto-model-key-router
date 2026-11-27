@@ -381,7 +381,10 @@ func (h *Handler) pumpUpstream(
 	if checkStreamOutcome(context.Path, mediaType) {
 		outcome = &streamOutcome{}
 	}
-	_, rawStreamWriter := stream.(*rawStream)
+	rawWriter, rawStreamWriter := stream.(*rawStream)
+	payloadWriter, supportsPayloadPush := stream.(interface {
+		pushPayload(w http.ResponseWriter, payload *canonical.Value) error
+	})
 	baseType := strings.ToLower(strings.TrimSpace(strings.Split(mediaType, ";")[0]))
 	inspectJSON := rawStreamWriter && (baseType == "application/json" || strings.HasSuffix(baseType, "+json")) &&
 		(context.Path == "chat/completions" || context.Path == "messages" || context.Path == "responses")
@@ -394,8 +397,8 @@ func (h *Handler) pumpUpstream(
 		lifecycle.SetUsage(mergeUsage(lifecycle.Usage(), protocol.ExtractUsage(outcome.payload)))
 		if outcome.failure != nil {
 			// 原生错误事件只透传一次；转换流则由下面按入站协议发安全错误。
-			if _, raw := stream.(*rawStream); raw {
-				if err := stream.push(w, event); err != nil {
+			if rawStreamWriter {
+				if err := rawWriter.pushEvent(w, event); err != nil {
 					return err
 				}
 				outcome.forwardedError = true
@@ -405,10 +408,18 @@ func (h *Handler) pumpUpstream(
 		if outcome.terminal && !outcome.content {
 			return errEmptyStream
 		}
-		if !rawStreamWriter && outcome.payload != nil {
-			event = normalizedConversionEvent(outcome.payload)
-		}
-		if err := stream.push(w, event); err != nil {
+		if rawStreamWriter {
+			// outcome.splitter 已按完整事件切分，outcome.observe 也已完成 usage 抽取；
+			// 直接写出事件字节，避免 rawStream.push 再切分与二次 JSON 解析。
+			if err := rawWriter.pushEvent(w, event); err != nil {
+				return err
+			}
+		} else if supportsPayloadPush && outcome.payload != nil {
+			normalizeConversionPayload(outcome.payload)
+			if err := payloadWriter.pushPayload(w, outcome.payload); err != nil {
+				return err
+			}
+		} else if err := stream.push(w, event); err != nil {
 			return err
 		}
 		if rawStreamWriter && outcome.complete() {
